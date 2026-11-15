@@ -738,8 +738,7 @@ mod tests {
 
         remove_stale_cache(&cache);
         let left: Vec<std::ffi::OsString> = std::fs::read_dir(&cache)
-            .map(|entries| entries.flatten().map(|entry| entry.file_name()).collect())
-            .unwrap_or_default();
+            .map_or_default(|entries| entries.flatten().map(|entry| entry.file_name()).collect());
         assert!(left.iter().all(|name| name == "0-held"), "{left:?}");
 
         #[cfg(unix)]

@@ -600,11 +600,8 @@ pub(crate) fn expression_to_string(expr: &LogicalExpression) -> String {
             format!("{}.{key}", expression_to_string(base))
         }
         LogicalExpression::SliceAccess { base, start, end } => {
-            let start = start
-                .as_deref()
-                .map(expression_to_string)
-                .unwrap_or_default();
-            let end = end.as_deref().map(expression_to_string).unwrap_or_default();
+            let start = start.as_deref().map_or_default(expression_to_string);
+            let end = end.as_deref().map_or_default(expression_to_string);
             format!("{}[{start}..{end}]", expression_to_string(base))
         }
         LogicalExpression::Binary { left, op, right } => format!(

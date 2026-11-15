@@ -1,3 +1,10 @@
+# Dependency cooldown: resolution skips crate versions published in the last
+# 3 days, so a release that is pulled soon after it ships never reaches the
+# lockfile. Versions already in Cargo.lock stay. A security fix inside the
+# window: `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p <crate>`.
+[registry]
+global-min-publish-age = "3 days"
+
 # Configuration for wasm32 builds.
 #
 # `+simd128` enables the hand-written simd128 distance kernels in

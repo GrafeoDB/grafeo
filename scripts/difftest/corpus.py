@@ -460,6 +460,10 @@ WRITE_FIXTURES = {
     "label_writes": {"DX"},
     # MERGEs with a null entry, run again
     "merge_nulls": {"EN"},
+    # CLEAR statements on a missing graph, and a count of what is left
+    "rdf_clear": {"EP"},
+    # Writes that break a listed standalone type, and a read of what went in
+    "listed_type": {"EP"},
 }
 
 
@@ -581,6 +585,111 @@ def unlabeled(grafeo):
     return db
 
 
+def with_setting(grafeo, **setting):
+    """A database opened with `setting`, or a plain one in a build without that setting (a
+    release before it), so the cases on it show what the setting changes."""
+    try:
+        return grafeo.GrafeoDB(**setting)
+    except TypeError as error:
+        # Only the refusal of an unknown keyword that names the setting; any other TypeError
+        # is a fault of the build under test.
+        if not any(name in str(error) for name in setting):
+            raise
+        return grafeo.GrafeoDB()
+
+
+def rdf_minus(grafeo):
+    """Five people for the MINUS shapes of section EP: Alix flagged, Gus banned, Vincent left,
+    Mia and Jules neither."""
+    db = grafeo.GrafeoDB()
+    db.execute_sparql(
+        RDF_PREFIXES
+        + """INSERT DATA {
+        ex:alix ex:name "Alix" ; ex:flag "yes" .
+        ex:gus ex:name "Gus" ; ex:banned "yes" .
+        ex:vincent ex:name "Vincent" ; ex:left "yes" .
+        ex:mia ex:name "Mia" .
+        ex:jules ex:name "Jules" .
+        }"""
+    )
+    return db
+
+
+def rdf_clear(grafeo):
+    """A triple in the default graph and one in `urn:g1`, for the CLEAR statements of section EP."""
+    db = grafeo.GrafeoDB()
+    db.execute_sparql(
+        "INSERT DATA { <urn:d> <urn:p> 0 . GRAPH <urn:g1> { <urn:a> <urn:p> 1 } }"
+    )
+    return db
+
+
+def path_budget(grafeo):
+    """A star of five leaves, opened with a path search budget of one byte, so every path
+    search on it is over its budget (a build without the setting opens a plain database)."""
+    db = with_setting(grafeo, path_search_budget=1)
+    db.execute(
+        "INSERT (c:Star {n: 0}), (c)-[:E]->(:Leaf {n: 1}), (c)-[:E]->(:Leaf {n: 2}), "
+        "(c)-[:E]->(:Leaf {n: 3}), (c)-[:E]->(:Leaf {n: 4}), (c)-[:E]->(:Leaf {n: 5})"
+    )
+    return db
+
+
+def rdf_path_budget(grafeo):
+    """A chain of three `urn:q` steps, opened as `path_budget` is."""
+    db = with_setting(grafeo, path_search_budget=1)
+    db.execute_sparql(
+        "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:c> <urn:q> <urn:d> }"
+    )
+    return db
+
+
+def rdf_sort_limit(grafeo):
+    """20,000 subjects with one integer each, in descending order, under a per-query memory
+    limit of 1 MiB: the pattern fits, a full sort of it does not. Loaded in statements of
+    1,000 triples, each well under the limit."""
+    db = grafeo.GrafeoDB(query_memory_limit=1 << 20)
+    for start in range(0, 20_000, 1_000):
+        triples = " ".join(
+            f"<urn:s{i}> <urn:v> {20_000 - i} ." for i in range(start, start + 1_000)
+        )
+        db.execute_sparql(f"INSERT DATA {{ {triples} }}")
+    return db
+
+
+def index_graphs(grafeo):
+    """An index `by_name` on `Person.name` in the default graph; in graph `floria` an index of
+    the same name, then dropped, and `city_name` on `City.name` (a build that refuses the same
+    name in a second graph goes on without it)."""
+    db = grafeo.GrafeoDB()
+    db.execute("INSERT (:Person {name: 'Alix'})")
+    db.execute("CREATE INDEX by_name FOR (p:Person) ON (p.name)")
+    db.execute("CREATE GRAPH floria")
+    db.execute("USE GRAPH floria")
+    db.execute("INSERT (:Person {name: 'Gus'}), (:City {name: 'Amsterdam'})")
+    for statement in [
+        "CREATE INDEX by_name FOR (p:Person) ON (p.name)",
+        "DROP INDEX by_name",
+    ]:
+        try:
+            db.execute(statement)
+        except Exception:  # noqa: BLE001 (an older build's refusal is part of what EP22 shows)
+            pass
+    db.execute("CREATE INDEX city_name FOR (c:City) ON (c.name)")
+    db.execute("USE GRAPH default")
+    return db
+
+
+def listed_type(grafeo):
+    """#764's steps up to the graph type: a standalone node type `A` with a FLOAT64 `h`, a row
+    of it, and a graph type that lists it."""
+    db = grafeo.GrafeoDB()
+    db.execute("CREATE NODE TYPE A (h FLOAT64)")
+    db.execute("INSERT (:A {k: 1, h: 1.5e0})")
+    db.execute("CREATE GRAPH TYPE t (NODE TYPE A)")
+    return db
+
+
 FIXTURES = {
     "rdf": rdf,
     "rdf_writes": rdf_writes,
@@ -625,6 +734,13 @@ FIXTURES = {
     "range_keys": range_keys,
     "empty_with_null_keys": empty_with_null_keys,
     "per_call": empty,
+    "rdf_minus": rdf_minus,
+    "rdf_clear": rdf_clear,
+    "path_budget": path_budget,
+    "rdf_path_budget": rdf_path_budget,
+    "rdf_sort_limit": rdf_sort_limit,
+    "index_graphs": index_graphs,
+    "listed_type": listed_type,
 }
 
 CASES: list[Case] = []
@@ -3513,5 +3629,52 @@ for case_id, query in [
     ("EO5", "RETURN DATETIME '2024-01-01T10:00:00Z' = datetime('2024-01-01T10:00:00') AS same"),
 ]:
     case(case_id, query, GQL)
+
+# EP: the 0.6.3 fixes. A SPARQL MINUS after another MINUS, after VALUES or after a sub-SELECT
+#     with DISTINCT, ORDER BY (with LIMIT, OFFSET or alone), GROUP BY, a renamed variable or an
+#     aggregate's alias removes its solutions (EP1 to EP10; 0.6.2 skipped it). CLEAR GRAPH of a
+#     missing graph fails unless SILENT, as DROP GRAPH does (EP11 to EP14; 0.6.2 accepted it).
+#     A path search over its budget fails with GRAFEO-S001 naming the budget, in GQL, Cypher and
+#     SPARQL (EP15 to EP18; the shortest paths are ALL SHORTEST, which keeps the paths it finds;
+#     0.6.2 has no budget setting and answers). A SPARQL full sort over the per-query memory
+#     limit fails with GRAFEO-S001, a top-k under it answers (EP19 to EP21; 0.6.2 sorted past
+#     the limit). SHOW INDEXES lists the current graph's indexes, and a DROP INDEX in another
+#     graph keeps this graph's index of that name (EP22). A standalone type a graph type lists
+#     stays in force in the default graph (EP23 to EP25; 0.6.2 let writes of the wrong type in,
+#     #764).
+for case_id, query in [
+    ("EP1", 'SELECT ?n WHERE { ?s ex:name ?n MINUS { ?s ex:flag "yes" } MINUS { ?s ex:banned "yes" } }'),
+    ("EP2", 'SELECT ?n WHERE { ?s ex:name ?n MINUS { ?s ex:flag "yes" } MINUS { ?s ex:banned "yes" } MINUS { ?s ex:left "yes" } }'),
+    ("EP3", 'SELECT ?s WHERE { VALUES ?s { ex:alix ex:mia } MINUS { ?s ex:flag "yes" } }'),
+    ("EP4", 'SELECT ?s WHERE { { SELECT DISTINCT ?s WHERE { ?s ex:name ?n } } MINUS { ?s ex:flag "yes" } }'),
+    ("EP5", 'SELECT ?s WHERE { { SELECT ?s WHERE { ?s ex:name ?n } ORDER BY ?s LIMIT 3 } MINUS { ?s ex:flag "yes" } }'),
+    ("EP6", 'SELECT ?s WHERE { { SELECT ?s WHERE { ?s ex:name ?n } ORDER BY ?s OFFSET 1 } MINUS { ?s ex:banned "yes" } }'),
+    ("EP7", 'SELECT ?s WHERE { { SELECT ?s WHERE { ?s ex:name ?n } ORDER BY ?s } MINUS { ?s ex:flag "yes" } }'),
+    ("EP8", 'SELECT ?s ?c WHERE { { SELECT ?s (COUNT(?n) AS ?c) WHERE { ?s ex:name ?n } GROUP BY ?s } MINUS { ?s ex:flag "yes" } }'),
+    ("EP9", 'SELECT ?s WHERE { { SELECT (?x AS ?s) WHERE { ?x ex:name ?n } } MINUS { ?s ex:flag "yes" } }'),
+    ("EP10", "SELECT ?c WHERE { { SELECT (COUNT(*) AS ?c) WHERE { ?s ex:name ?n } } MINUS { VALUES ?c { 5 } } }"),
+]:
+    case(case_id, RDF_PREFIXES + query, SPARQL, "rdf_minus")
+for case_id, query in [
+    ("EP11", "CLEAR GRAPH <urn:missing>"),
+    ("EP12", "CLEAR SILENT GRAPH <urn:missing>"),
+    ("EP13", "DROP GRAPH <urn:missing>"),
+    ("EP14", "SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }"),
+]:
+    case(case_id, query, SPARQL, "rdf_clear")
+case("EP15", "MATCH (s:Star)-[:E*1..2]->(t) RETURN t.n AS n", BOTH, "path_budget")
+case("EP16", "MATCH p = ALL SHORTEST (s:Star)-[:E]->+(t:Leaf {n: 3}) RETURN length(p) AS l", GQL, "path_budget")
+case("EP17", "MATCH p = allShortestPaths((s:Star)-[:E*]->(t:Leaf {n: 3})) RETURN length(p) AS l", CYPHER, "path_budget")
+case("EP18", "SELECT ?o WHERE { <urn:a> <urn:q>+ ?o }", SPARQL, "rdf_path_budget")
+ordered("EP19", "SELECT ?v WHERE { ?s <urn:v> ?v } ORDER BY ?v OFFSET 19995", SPARQL, "rdf_sort_limit")
+ordered("EP20", "SELECT ?v WHERE { ?s <urn:v> ?v } ORDER BY ?v LIMIT 5", SPARQL, "rdf_sort_limit")
+case("EP21", "SELECT (COUNT(*) AS ?c) WHERE { ?s <urn:v> ?v }", SPARQL, "rdf_sort_limit")
+case("EP22", "SHOW INDEXES", GQL, "index_graphs")
+for case_id, query in [
+    ("EP23", "MATCH (n:A {k: 1}) SET n.h = 'y'"),
+    ("EP24", "INSERT (:A {k: 3, h: 'z'})"),
+    ("EP25", "MATCH (n:A) RETURN n.k AS k, n.h AS h"),
+]:
+    case(case_id, query, GQL, "listed_type")
 
 # fmt: on

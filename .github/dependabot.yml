@@ -23,7 +23,8 @@ updates:
       prefix: "deps(actions)"
     ignore:
       # The ref is the compiler version, not an action version. Bump it by hand
-      # together with rust-toolchain.toml (and the MSRV job with rust-version).
+      # together with rust-toolchain.toml, pypi.yml's rust-toolchain, and the MSRV
+      # job's `cargo +<version>` and the Miri job's nightly with rust-version.
       - dependency-name: "dtolnay/rust-toolchain"
 
   # Python dependencies

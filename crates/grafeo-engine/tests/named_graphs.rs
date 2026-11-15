@@ -136,7 +136,7 @@ mod tests {
         // Create a named graph and populate it via store API
         let rdf = db.rdf_store();
         rdf.graph_or_create("http://ex.org/g1");
-        if let Some(g) = rdf.graph("http://ex.org/g1") {
+        if let Some(g) = rdf.graph_latest("http://ex.org/g1") {
             use grafeo_core::graph::rdf::{Literal, Term, Triple};
             g.insert(Triple::new(
                 Term::iri("http://ex.org/b"),

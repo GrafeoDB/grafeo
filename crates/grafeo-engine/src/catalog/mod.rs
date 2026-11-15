@@ -412,8 +412,7 @@ impl Catalog {
     pub fn all_node_type_names(&self) -> Vec<String> {
         self.schema
             .as_ref()
-            .map(SchemaCatalog::all_node_types)
-            .unwrap_or_default()
+            .map_or_default(SchemaCatalog::all_node_types)
     }
 
     /// Returns all registered edge type definition names.
@@ -421,8 +420,7 @@ impl Catalog {
     pub fn all_edge_type_names(&self) -> Vec<String> {
         self.schema
             .as_ref()
-            .map(SchemaCatalog::all_edge_types)
-            .unwrap_or_default()
+            .map_or_default(SchemaCatalog::all_edge_types)
     }
 
     /// Registers an edge type definition.
@@ -502,8 +500,7 @@ impl Catalog {
     pub fn all_graph_type_names(&self) -> Vec<String> {
         self.schema
             .as_ref()
-            .map(SchemaCatalog::all_graph_types)
-            .unwrap_or_default()
+            .map_or_default(SchemaCatalog::all_graph_types)
     }
 
     /// Gets a graph type definition by name.
@@ -547,10 +544,7 @@ impl Catalog {
     /// Returns all registered schema namespace names.
     #[must_use]
     pub fn schema_names(&self) -> Vec<String> {
-        self.schema
-            .as_ref()
-            .map(|s| s.schema_names())
-            .unwrap_or_default()
+        self.schema.as_ref().map_or_default(|s| s.schema_names())
     }
 
     /// Adds a constraint to an existing node type, creating a minimal type if needed.
@@ -630,8 +624,7 @@ impl Catalog {
     pub fn constraints(&self) -> Vec<ConstraintDefinition> {
         self.schema
             .as_ref()
-            .map(SchemaCatalog::all_constraints)
-            .unwrap_or_default()
+            .map_or_default(SchemaCatalog::all_constraints)
     }
 
     /// Registers the names of constraints whose type constraints the loaded
@@ -908,8 +901,7 @@ impl Catalog {
     pub fn all_node_type_defs(&self) -> Vec<NodeTypeDefinition> {
         self.schema
             .as_ref()
-            .map(SchemaCatalog::all_node_type_defs)
-            .unwrap_or_default()
+            .map_or_default(SchemaCatalog::all_node_type_defs)
     }
 
     /// Returns all registered edge type definitions.
@@ -917,8 +909,7 @@ impl Catalog {
     pub fn all_edge_type_defs(&self) -> Vec<EdgeTypeDefinition> {
         self.schema
             .as_ref()
-            .map(SchemaCatalog::all_edge_type_defs)
-            .unwrap_or_default()
+            .map_or_default(SchemaCatalog::all_edge_type_defs)
     }
 
     /// Returns all registered graph type definitions.
@@ -926,8 +917,7 @@ impl Catalog {
     pub fn all_graph_type_defs(&self) -> Vec<GraphTypeDefinition> {
         self.schema
             .as_ref()
-            .map(SchemaCatalog::all_graph_type_defs)
-            .unwrap_or_default()
+            .map_or_default(SchemaCatalog::all_graph_type_defs)
     }
 
     /// Returns all registered procedure definitions.
@@ -935,8 +925,7 @@ impl Catalog {
     pub fn all_procedure_defs(&self) -> Vec<ProcedureDefinition> {
         self.schema
             .as_ref()
-            .map(SchemaCatalog::all_procedure_defs)
-            .unwrap_or_default()
+            .map_or_default(SchemaCatalog::all_procedure_defs)
     }
 
     /// Returns all graph type bindings (graph_name, type_name).
@@ -944,8 +933,7 @@ impl Catalog {
     pub fn all_graph_type_bindings(&self) -> Vec<(String, String)> {
         self.schema
             .as_ref()
-            .map(SchemaCatalog::all_graph_type_bindings)
-            .unwrap_or_default()
+            .map_or_default(SchemaCatalog::all_graph_type_bindings)
     }
 }
 
@@ -1322,6 +1310,28 @@ impl IndexCatalog {
 
 pub use grafeo_common::types::{PropertyDataType, PropertyTypeTooDeep};
 
+/// Whether a node whose properties `property` looks up breaks the node type `def` (resolved,
+/// with what it inherits), as a write of it would: a value of another type than its property's,
+/// a null where the type forbids one, or a required property missing. Uniqueness, which reads
+/// other nodes, is not checked. For `validate()` (#764).
+pub(crate) fn breaks_node_type<'a>(
+    def: &NodeTypeDefinition,
+    property: impl Fn(&str) -> Option<&'a Value>,
+) -> bool {
+    let breaks_property = |typed: &TypedProperty| match property(&typed.name) {
+        None => !typed.nullable && typed.default_value.is_none(),
+        Some(value) if value.is_null() => !typed.nullable,
+        Some(value) => !typed.data_type.matches(value),
+    };
+    let missing = |name: &String| property(name).is_none_or(Value::is_null);
+    def.properties.iter().any(breaks_property)
+        || def.constraints.iter().any(|constraint| match constraint {
+            TypeConstraint::NotNull(name) => missing(name),
+            TypeConstraint::PrimaryKey(names) => names.iter().any(missing),
+            TypeConstraint::Unique(_) => false,
+        })
+}
+
 /// The error for a property value that is not of the property's type.
 fn type_mismatch(
     key: &str,
@@ -1560,6 +1570,16 @@ pub struct NodeTypeDefinition {
     /// catalog records of version 2 hold it.
     #[serde(skip)]
     pub key_labels: Vec<String>,
+    /// Whether it is a type made on its own (`CREATE NODE TYPE`) that a graph
+    /// type lists (#764): it stays a rule by its label in every graph, and
+    /// also governs the graphs bound to the graph types that list it. Set when
+    /// a graph type first lists it; a type a graph type declares, or took over
+    /// before 0.6.3, has it unset and applies only in its graph types' graphs.
+    ///
+    /// Not serialized, as `key_labels`: the catalog records hold it as their
+    /// kind (12).
+    #[serde(skip)]
+    pub standalone: bool,
 }
 
 /// Definition of an edge type (relationship type schema).
@@ -1582,6 +1602,10 @@ pub struct EdgeTypeDefinition {
     /// catalog records of version 2 hold it.
     #[serde(skip)]
     pub key_labels: Vec<String>,
+    /// Whether it is a type made on its own (`CREATE EDGE TYPE`) that a graph
+    /// type lists, as [`NodeTypeDefinition::standalone`] (kind 13).
+    #[serde(skip)]
+    pub standalone: bool,
 }
 
 /// Definition of a graph type (constrains which node/edge types a graph allows).
@@ -1817,6 +1841,7 @@ impl SchemaCatalog {
             constraints: all_constraints,
             parent_types: base.parent_types.clone(),
             key_labels: base.key_labels.clone(),
+            standalone: base.standalone,
         })
     }
 
@@ -1960,7 +1985,7 @@ impl SchemaCatalog {
     /// Whether a graph type lists the node type stored as `name`. Cypher's
     /// `ALTER CURRENT GRAPH TYPE` keeps its types in `__current__`, which no graph is
     /// bound to: they are rules by label, as it declares them for the graph in use.
-    fn lists_node_type(&self, name: &str) -> bool {
+    pub(crate) fn lists_node_type(&self, name: &str) -> bool {
         self.graph_types.read().values().any(|def| {
             !is_current_graph_type(&def.name)
                 && def.allowed_node_types.iter().any(|listed| listed == name)
@@ -1969,7 +1994,7 @@ impl SchemaCatalog {
 
     /// Whether a graph type lists the edge type stored as `name`, as
     /// [`lists_node_type`](Self::lists_node_type) counts it.
-    fn lists_edge_type(&self, name: &str) -> bool {
+    pub(crate) fn lists_edge_type(&self, name: &str) -> bool {
         self.graph_types.read().values().any(|def| {
             !is_current_graph_type(&def.name)
                 && def.allowed_edge_types.iter().any(|listed| listed == name)
@@ -2058,6 +2083,7 @@ impl SchemaCatalog {
                     constraints: vec![constraint],
                     parent_types: Vec::new(),
                     key_labels: Vec::new(),
+                    standalone: false,
                 },
             );
         }
@@ -2461,6 +2487,7 @@ impl std::error::Error for CatalogError {}
 
 use grafeo_core::execution::operators::ConstraintValidator;
 use grafeo_core::execution::operators::OperatorError;
+use grafeo_core::execution::operators::merge_claim::PatternKey;
 
 /// Validates schema constraints during mutation operations using the Catalog.
 ///
@@ -2564,21 +2591,24 @@ impl CatalogConstraintValidator {
                 })
                 .collect(),
         };
-        manager
-            .record_key(transaction, key)
-            .map_err(|error| match error {
-                // Not a conflict: nothing commits until a reopen, which the
-                // caller must learn (a conflict reads as retryable).
-                error @ grafeo_common::utils::error::Error::Transaction(
-                    grafeo_common::utils::error::TransactionError::IncompleteCommit,
-                ) => OperatorError::Wrapped(Box::new(error)),
-                // Already the conflict: passed on as it is, not wrapped in a
-                // second one.
-                error @ grafeo_common::utils::error::Error::Transaction(
-                    grafeo_common::utils::error::TransactionError::WriteConflict(_),
-                ) => OperatorError::Wrapped(Box::new(error)),
-                error => OperatorError::WriteConflict(error.to_string()),
-            })
+        manager.record_key(transaction, key).map_err(claim_error)
+    }
+
+    /// Claims each fingerprint of the MERGE pattern `key` in the graph written
+    /// to for the writing transaction (see
+    /// [`TransactionManager::record_pattern`](crate::transaction::TransactionManager::record_pattern)),
+    /// with the errors of [`claim_key`](Self::claim_key).
+    fn claim_merge_pattern(&self, key: &PatternKey<'_>) -> Result<(), OperatorError> {
+        let (Some((manager, graph)), Some((_, transaction))) = (&self.key_claims, self.transaction)
+        else {
+            return Ok(());
+        };
+        for fingerprint in key.fingerprints(graph.as_deref()) {
+            manager
+                .record_pattern(transaction, fingerprint, key)
+                .map_err(claim_error)?;
+        }
+        Ok(())
     }
 
     /// Checks the writes with the node and edge types of `schema`, the schema
@@ -2614,11 +2644,13 @@ impl CatalogConstraintValidator {
         }
         let name = self.type_key(label);
         let def = self.catalog.resolved_node_type(&name)?;
-        // A type a graph type lists is that graph type's, not a rule by label.
-        let listed = self
-            .catalog
-            .schema()
-            .is_some_and(|schema| schema.lists_node_type(&name));
+        // A type a graph type lists is that graph type's, not a rule by label,
+        // unless it was made on its own (#764).
+        let listed = !def.standalone
+            && self
+                .catalog
+                .schema()
+                .is_some_and(|schema| schema.lists_node_type(&name));
         (!listed).then_some(def)
     }
 
@@ -2633,10 +2665,11 @@ impl CatalogConstraintValidator {
         }
         let name = self.type_key(edge_type);
         let def = self.catalog.get_edge_type_def(&name)?;
-        let listed = self
-            .catalog
-            .schema()
-            .is_some_and(|schema| schema.lists_edge_type(&name));
+        let listed = !def.standalone
+            && self
+                .catalog
+                .schema()
+                .is_some_and(|schema| schema.lists_edge_type(&name));
         (!listed).then_some(def)
     }
 
@@ -3053,6 +3086,24 @@ fn key_identity(value: &Value) -> grafeo_core::execution::operators::HashableVal
     grafeo_core::execution::operators::HashableValue::from(value)
 }
 
+/// The error of a key or MERGE pattern claim that failed, for the writing
+/// operator.
+fn claim_error(error: grafeo_common::utils::error::Error) -> OperatorError {
+    match error {
+        // Not a conflict: nothing commits until a reopen, which the caller
+        // must learn (a conflict reads as retryable).
+        error @ grafeo_common::utils::error::Error::Transaction(
+            grafeo_common::utils::error::TransactionError::IncompleteCommit,
+        ) => OperatorError::Wrapped(Box::new(error)),
+        // Already the conflict: passed on as it is, not wrapped in a second
+        // one.
+        error @ grafeo_common::utils::error::Error::Transaction(
+            grafeo_common::utils::error::TransactionError::WriteConflict(_),
+        ) => OperatorError::Wrapped(Box::new(error)),
+        error => OperatorError::WriteConflict(error.to_string()),
+    }
+}
+
 /// Whether two key values are one value to a UNIQUE rule (see [`key_identity`]).
 fn same_key_value(held: &Value, value: &Value) -> bool {
     key_identity(held) == key_identity(value)
@@ -3110,6 +3161,10 @@ pub(crate) fn check_rule_over_nodes(
 }
 
 impl ConstraintValidator for CatalogConstraintValidator {
+    fn claim_pattern(&self, key: &PatternKey<'_>) -> Result<(), OperatorError> {
+        self.claim_merge_pattern(key)
+    }
+
     fn validate_node_property(
         &self,
         labels: &[String],
@@ -3786,6 +3841,7 @@ mod tests {
                     constraints: Vec::new(),
                     parent_types: Vec::new(),
                     key_labels: Vec::new(),
+                    standalone: false,
                 })
                 .unwrap();
         }

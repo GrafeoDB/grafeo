@@ -314,6 +314,17 @@ const DATATYPE_NAMES: [&str; 5] = ["integer", "decimal", "boolean", "date", "dat
 /// Their IRIs, made once and shared by every term an id gives back.
 static DATATYPES: [OnceLock<Arc<str>>; 5] = [const { OnceLock::new() }; 5];
 
+/// Whether `datatype` is one of the shared datatype IRIs (the same
+/// allocation, not equal text): a term that holds it holds no text of its
+/// own for it.
+pub(crate) fn is_shared_datatype(datatype: &Arc<str>) -> bool {
+    DATATYPES.iter().any(|shared| {
+        shared
+            .get()
+            .is_some_and(|shared| Arc::ptr_eq(shared, datatype))
+    })
+}
+
 /// The shared IRI of datatype `index` of [`DATATYPE_NAMES`].
 fn shared_datatype(index: usize) -> Arc<str> {
     Arc::clone(

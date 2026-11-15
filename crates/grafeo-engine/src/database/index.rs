@@ -9,7 +9,6 @@
 #[cfg(feature = "vector-index")]
 use grafeo_common::grafeo_info;
 use grafeo_common::types::ReadView;
-#[cfg(any(feature = "vector-index", feature = "text-index"))]
 use std::sync::Arc;
 
 use grafeo_common::change::StandaloneOp;
@@ -21,7 +20,7 @@ use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
-use crate::catalog::{Catalog, IndexType};
+use crate::catalog::{Catalog, IndexDefinition, IndexType};
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
 use crate::transaction::BuiltIndex;
 use crate::transaction::StandaloneChange;
@@ -37,34 +36,167 @@ pub(crate) struct ListedIndex {
     pub(crate) property: String,
 }
 
-/// The indexes `CREATE INDEX` made, by their catalog definitions, and the
-/// indexes of `store` (the current graph's) that no definition covers: the
-/// ones made through the API (`create_property_index`, `create_vector_index`,
-/// `create_text_index`), which have no name: the named ones first, by name
-/// as the catalog lists them, then the unnamed ones by label and property.
-pub(crate) fn listed_indexes(catalog: &Catalog, store: Option<&RowGroupStore>) -> Vec<ListedIndex> {
-    let defined = catalog.all_indexes();
-    let mut listed: Vec<ListedIndex> = defined
-        .iter()
-        .map(|def| ListedIndex {
-            name: Some(def.name.clone()),
+/// What a definition of an index name stands for in a graph, by the catalog's names: index
+/// names belong to the database, and each graph has its own indexes (#723).
+#[derive(Clone, Debug)]
+pub(crate) struct IndexTarget {
+    pub(crate) kind: IndexType,
+    pub(crate) label: Arc<str>,
+    pub(crate) property: Arc<str>,
+}
+
+impl IndexTarget {
+    /// The target of `def`; `None` when the catalog does not know its label or property
+    /// (damage: such a definition stands for no index, and is listed nowhere).
+    pub(crate) fn of(catalog: &Catalog, def: &IndexDefinition) -> Option<Self> {
+        Some(Self {
             kind: def.index_type,
-            label: Some(
-                catalog
-                    .get_label_name(def.label)
-                    .map_or_else(|| "?".to_string(), |name| name.to_string()),
-            ),
-            property: catalog
-                .get_property_key_name(def.property_key)
-                .map_or_else(|| "?".to_string(), |name| name.to_string()),
+            label: catalog.get_label_name(def.label)?,
+            property: catalog.get_property_key_name(def.property_key)?,
+        })
+    }
+
+    /// The key of the text or vector index it stands for; `None` for a hash or B-tree name,
+    /// which a property index stands for.
+    pub(crate) fn search_key(&self) -> Option<IndexKeyRecord> {
+        let (label, property) = (self.label.to_string(), self.property.to_string());
+        match self.kind {
+            IndexType::Hash | IndexType::BTree => None,
+            IndexType::FullText => Some(IndexKeyRecord::Text { label, property }),
+            IndexType::Vector => Some(IndexKeyRecord::Vector { label, property }),
+        }
+    }
+}
+
+/// The targets of every definition of each index name of `catalog`, by name.
+fn targets_by_name(catalog: &Catalog) -> Vec<(String, Vec<IndexTarget>)> {
+    let mut names: Vec<(String, Vec<IndexTarget>)> = Vec::new();
+    for def in catalog.all_indexes() {
+        let target = IndexTarget::of(catalog, &def);
+        match names.iter_mut().find(|(name, _)| *name == def.name) {
+            Some((_, targets)) => targets.extend(target),
+            None => names.push((def.name, target.into_iter().collect())),
+        }
+    }
+    names
+}
+
+/// Whether `store` has the index `target` stands for, as committed: for a hash or B-tree name
+/// an index that serves its label and property (the label's own, or the property's on every
+/// label), for a text or vector name the index of its label and property.
+pub(crate) fn store_has(store: &RowGroupStore, target: &IndexTarget) -> bool {
+    match target.kind {
+        IndexType::Hash | IndexType::BTree => {
+            store.index_serves(&[&target.label], &target.property)
+        }
+        IndexType::FullText => {
+            #[cfg(feature = "text-index")]
+            {
+                store
+                    .get_text_index(&target.label, &target.property)
+                    .is_some()
+            }
+            #[cfg(not(feature = "text-index"))]
+            {
+                false
+            }
+        }
+        IndexType::Vector => {
+            #[cfg(feature = "vector-index")]
+            {
+                store
+                    .get_vector_index(&target.label, &target.property)
+                    .is_some()
+            }
+            #[cfg(not(feature = "vector-index"))]
+            {
+                false
+            }
+        }
+    }
+}
+
+/// Whether some graph of `graphs` has the index of one of `targets`, by `has`: the one rule
+/// `DROP INDEX`, the direct drops and a dropped graph decide whether a name stays by.
+pub(crate) fn any_graph_has<G>(
+    graphs: &[G],
+    targets: &[IndexTarget],
+    has: impl Fn(&G, &IndexTarget) -> bool,
+) -> bool {
+    graphs
+        .iter()
+        .any(|graph| targets.iter().any(|target| has(graph, target)))
+}
+
+/// Adds to `change` what dropping the indexes `dropped` matches in the graph with storage key
+/// `graph` does to the index names: the drop of each name that no graph of `graphs` (every
+/// graph, by storage key, as before the drop) has an index of once those are gone, and the
+/// claim on each name `dropped` matches, also one that stays, so an open transaction that
+/// decides about the same name meets this change. `has` reads a graph's indexes (by its entry
+/// of `graphs`) as before the drop.
+pub(crate) fn drop_names_left_without_index<G>(
+    change: &mut StandaloneChange,
+    catalog: &Catalog,
+    graphs: &[(Option<String>, G)],
+    graph: Option<&str>,
+    dropped: impl Fn(&IndexTarget) -> bool,
+    has: impl Fn(&(Option<String>, G), &IndexTarget) -> bool,
+) {
+    for (name, targets) in targets_by_name(catalog) {
+        if !targets.iter().any(&dropped) {
+            continue;
+        }
+        change.claim(super::standalone::name_claim("index name", &name));
+        let still_had = any_graph_has(graphs, &targets, |entry, target| {
+            !(entry.0.as_deref() == graph && dropped(target)) && has(entry, target)
+        });
+        if !still_had {
+            change.push(StandaloneOp::DropCatalog(CatalogKey::IndexName(name)));
+        }
+    }
+}
+
+/// Every graph of the built-in store `root`, by storage key: the default graph (`None`) and
+/// each named graph.
+pub(crate) fn lpg_graphs(root: &Arc<RowGroupStore>) -> Vec<(Option<String>, Arc<RowGroupStore>)> {
+    std::iter::once((None, Arc::clone(root)))
+        .chain(
+            root.graph_names()
+                .into_iter()
+                .filter_map(|name| root.graph(&name).map(|graph| (Some(name), graph))),
+        )
+        .collect()
+}
+
+/// The indexes `CREATE INDEX` made, by their catalog definitions, that the current graph has
+/// (`has`, see [`IndexTarget`]), and the indexes of `store` (the current graph's) that no
+/// listed definition covers: the ones made through the API (`create_property_index`,
+/// `create_vector_index`, `create_text_index`), which have no name. The named ones first, by
+/// name as the catalog lists them, then the unnamed ones by label and property. A name whose
+/// index only another graph has is not listed: its definition must not hide an unnamed index
+/// of this graph either.
+pub(crate) fn listed_indexes(
+    catalog: &Catalog,
+    store: Option<&RowGroupStore>,
+    has: impl Fn(&IndexTarget) -> bool,
+) -> Vec<ListedIndex> {
+    let mut listed: Vec<ListedIndex> = catalog
+        .all_indexes()
+        .iter()
+        .filter_map(|def| {
+            let target = IndexTarget::of(catalog, def).filter(|target| has(target))?;
+            Some(ListedIndex {
+                name: Some(def.name.clone()),
+                kind: def.index_type,
+                label: Some(target.label.to_string()),
+                property: target.property.to_string(),
+            })
         })
         .collect();
     // Whether a definition of one of `kinds` covers `property` (on `label`, when given). An
     // index on every label has a definition on any label, one a file made before indexes went
     // per label, unless an index of its own stands for that definition.
-    let on_label = store
-        .map(RowGroupStore::label_index_entries)
-        .unwrap_or_default();
+    let on_label = store.map_or_default(RowGroupStore::label_index_entries);
     let covers_every_label = |property: &str| {
         listed.iter().any(|index| {
             matches!(index.kind, IndexType::Hash | IndexType::BTree)
@@ -664,6 +796,19 @@ pub(crate) fn drop_label_index(graph: Option<&str>, label: &str, key: &str) -> S
     })
 }
 
+/// Whether `target` is a hash or B-tree name on `property`, which the drops of every property
+/// index on `property` take, on any label.
+pub(crate) fn is_property_index_on(target: &IndexTarget, property: &str) -> bool {
+    matches!(target.kind, IndexType::Hash | IndexType::BTree) && *target.property == *property
+}
+
+/// Whether `target` is a name of `kind` on `label` and `property`: what the drop of that text or
+/// vector index takes.
+#[cfg(any(feature = "vector-index", feature = "text-index"))]
+fn is_index_of(target: &IndexTarget, kind: IndexType, label: &str, property: &str) -> bool {
+    target.kind == kind && *target.label == *label && *target.property == *property
+}
+
 /// The drops of every property index on `key` in `store`, the graph with storage key `graph`:
 /// the one on every label and each one on a label.
 pub(crate) fn drops_of_property_indexes(
@@ -770,8 +915,36 @@ impl super::GrafeoDB {
         for drop in drops {
             change.push(drop);
         }
+        self.drop_names_left_without_index(&mut change, graph.as_deref(), |target| {
+            is_property_index_on(target, property)
+        })?;
         self.commit_standalone(change, &held)?;
         Ok(true)
+    }
+
+    /// Adds to `change` what dropping the indexes `dropped` matches in the graph `graph` does
+    /// to the index names, by every graph's indexes as committed (see
+    /// [`drop_names_left_without_index`]): a name no graph has an index of any more goes in
+    /// the same change, one WAL group with the index drop.
+    ///
+    /// # Errors
+    ///
+    /// On a database on a backend of its own, which has no built-in store.
+    pub(super) fn drop_names_left_without_index(
+        &self,
+        change: &mut StandaloneChange,
+        graph: Option<&str>,
+        dropped: impl Fn(&IndexTarget) -> bool,
+    ) -> Result<()> {
+        drop_names_left_without_index(
+            change,
+            &self.catalog,
+            &lpg_graphs(&self.lpg_store()?),
+            graph,
+            dropped,
+            |(_, store), target| store_has(store, target),
+        );
+        Ok(())
     }
 
     /// Fails before an index is built when it could not be installed: after
@@ -1064,14 +1237,18 @@ impl super::GrafeoDB {
         {
             return Ok(false);
         }
+        let graph = self.current_graph_key();
         let mut change = StandaloneChange::new();
         change.push(drop_index(
-            self.current_graph_key().as_deref(),
+            graph.as_deref(),
             IndexKeyRecord::Vector {
                 label: label.to_string(),
                 property: property.to_string(),
             },
         ));
+        self.drop_names_left_without_index(&mut change, graph.as_deref(), |target| {
+            is_index_of(target, IndexType::Vector, label, property)
+        })?;
         self.commit_standalone(change, &held)?;
         grafeo_info!("Vector index dropped: :{label}({property})");
         // A spilled column no index reads any more comes back from its
@@ -1305,14 +1482,18 @@ impl super::GrafeoDB {
         {
             return Ok(false);
         }
+        let graph = self.current_graph_key();
         let mut change = StandaloneChange::new();
         change.push(drop_index(
-            self.current_graph_key().as_deref(),
+            graph.as_deref(),
             IndexKeyRecord::Text {
                 label: label.to_string(),
                 property: property.to_string(),
             },
         ));
+        self.drop_names_left_without_index(&mut change, graph.as_deref(), |target| {
+            is_index_of(target, IndexType::FullText, label, property)
+        })?;
         self.commit_standalone(change, &held)?;
         Ok(true)
     }

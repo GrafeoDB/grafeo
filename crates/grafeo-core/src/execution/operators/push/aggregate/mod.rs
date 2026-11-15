@@ -3,6 +3,7 @@
 use crate::execution::chunk::{ColumnTypes, DataChunk};
 use crate::execution::operators::OperatorError;
 use crate::execution::operators::accumulator::{AggregateExpr, AggregateState, RowKey};
+use crate::execution::operators::aggregate::GrowingStates;
 use crate::execution::pipeline::{ChunkSizeHint, PushOperator, Sink};
 #[cfg(feature = "spill")]
 use crate::execution::spill::{PartitionedState, SpillManager};
@@ -93,6 +94,15 @@ pub struct AggregatePushOperator {
     /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
     /// as itself.
     temporal: TemporalComparison,
+    /// What its groups hold under the statement's memory, captured at
+    /// construction (see [`capture`](crate::execution::memory::capture)); it
+    /// counts nothing outside a budgeted statement. It cannot spill: past the
+    /// query memory limit or the memory limit it fails with `GRAFEO-S001`.
+    memory: crate::execution::memory::OperatorMemory,
+    /// What the groups' DISTINCT sets and collected values hold.
+    growing: GrowingStates,
+    /// What the groups' key values hold on the heap, counted as groups come.
+    keys_heap: usize,
 }
 
 impl AggregatePushOperator {
@@ -115,6 +125,7 @@ impl AggregatePushOperator {
             None
         };
 
+        let growing = GrowingStates::of(&aggregates);
         Self {
             group_by,
             aggregates,
@@ -122,6 +133,9 @@ impl AggregatePushOperator {
             global_state,
             input_types: ColumnTypes::default(),
             temporal: TemporalComparison::TypesApart,
+            memory: crate::execution::memory::capture(),
+            growing,
+            keys_heap: 0,
         }
     }
 
@@ -137,6 +151,13 @@ impl PushOperator for AggregatePushOperator {
             return Ok(true);
         }
         self.input_types.add(&chunk);
+        // The key columns that hold heap memory, picked once per chunk.
+        let heap = crate::execution::memory::HeapColumns::counted(
+            &self.memory,
+            &chunk,
+            Some(self.group_by.as_slice()),
+        );
+        let mut new_keys_heap: usize = 0;
 
         for row in chunk.selected_indices() {
             if self.group_by.is_empty() {
@@ -154,9 +175,14 @@ impl PushOperator for AggregatePushOperator {
                 let state = self
                     .groups
                     .entry(RowKey::from_row(&chunk, row, group_by, self.temporal))
-                    .or_insert_with(|| GroupState {
-                        key_values: RowKey::values_of(&chunk, row, group_by),
-                        accumulators: aggregates.iter().map(AggregateState::for_expr).collect(),
+                    .or_insert_with(|| {
+                        if !heap.is_empty() {
+                            new_keys_heap = new_keys_heap.saturating_add(heap.row_bytes(row));
+                        }
+                        GroupState {
+                            key_values: RowKey::values_of(&chunk, row, group_by),
+                            accumulators: aggregates.iter().map(AggregateState::for_expr).collect(),
+                        }
                     });
 
                 for (acc, expr) in state.accumulators.iter_mut().zip(&self.aggregates) {
@@ -164,6 +190,33 @@ impl PushOperator for AggregatePushOperator {
                 }
             }
         }
+
+        // The groups' table, their keys' heap and their growing states,
+        // against the statement's memory: a chunk at a time, a compare within
+        // the grant.
+        self.keys_heap = self.keys_heap.saturating_add(new_keys_heap);
+        let groups = &self.groups;
+        let global = self.global_state.as_deref().unwrap_or_default();
+        let growing = self
+            .growing
+            .after(chunk.row_count(), groups.len().max(1), || {
+                Box::new(
+                    groups
+                        .values()
+                        .flat_map(|group| group.accumulators.iter())
+                        .chain(global.iter()),
+                )
+            });
+        let per_group = std::mem::size_of::<(RowKey, GroupState)>()
+            + self.group_by.len() * std::mem::size_of::<Value>()
+            + self.aggregates.len() * 64;
+        self.memory.set(
+            self.groups
+                .capacity()
+                .saturating_mul(per_group)
+                .saturating_add(growing)
+                .saturating_add(self.keys_heap),
+        )?;
 
         Ok(true)
     }
@@ -262,8 +315,16 @@ pub struct SpillableAggregatePushOperator {
     /// Running total of estimated group memory in bytes (incremental tracking).
     estimated_bytes: usize,
     /// The grant of the groups' bytes, grown per chunk against the statement's
-    /// query memory limit (patch 9, #751).
-    grant: Option<grafeo_common::memory::buffer::MemoryGrant>,
+    /// memory (its query memory limit and the memory limit).
+    grant: crate::execution::memory::OperatorGrant,
+    /// Its memory consumer's registration, unregistered when it drops (the
+    /// aggregate ended or failed): only its own consumer.
+    registration: Option<crate::execution::memory::ConsumerRegistration>,
+    /// What the in-memory groups' DISTINCT sets and collected values hold.
+    growing: GrowingStates,
+    /// What the groups' key values hold on the heap, counted as groups come
+    /// (spilled ones too, see `groups_counted`).
+    keys_heap: usize,
     /// The column types of the input chunks.
     input_types: ColumnTypes,
     /// How the keys read a local datetime against a zoned one (see
@@ -295,6 +356,8 @@ impl SpillableAggregatePushOperator {
 
         Self {
             group_by,
+            // Evaluated before `aggregates` moves into the operator.
+            growing: GrowingStates::of(&aggregates),
             aggregates,
             spill_manager: None,
             partitioned_groups: None,
@@ -303,9 +366,11 @@ impl SpillableAggregatePushOperator {
             spill_threshold: DEFAULT_AGGREGATE_SPILL_THRESHOLD,
             using_partitioned: false,
             memory_ctx: None,
-            grant: None,
+            grant: crate::execution::memory::OperatorGrant::default(),
+            registration: None,
             spill_state: None,
             estimated_bytes: 0,
+            keys_heap: 0,
             input_types: ColumnTypes::default(),
             temporal: TemporalComparison::TypesApart,
         }
@@ -333,6 +398,8 @@ impl SpillableAggregatePushOperator {
 
         Self {
             group_by,
+            // Evaluated before `aggregates` moves into the operator.
+            growing: GrowingStates::of(&aggregates),
             aggregates,
             spill_manager: Some(manager),
             partitioned_groups: Some(partitioned),
@@ -341,9 +408,11 @@ impl SpillableAggregatePushOperator {
             spill_threshold: threshold,
             using_partitioned: true,
             memory_ctx: None,
-            grant: None,
+            grant: crate::execution::memory::OperatorGrant::default(),
+            registration: None,
             spill_state: None,
             estimated_bytes: 0,
+            keys_heap: 0,
             input_types: ColumnTypes::default(),
             temporal: TemporalComparison::TypesApart,
         }
@@ -366,12 +435,16 @@ impl SpillableAggregatePushOperator {
             None
         };
 
+        // A name of its own: one aggregate's end unregisters only its own
+        // consumer.
         let state = std::sync::Arc::new(OperatorSpillState::new(
-            "SpillableAggregatePush".to_string(),
+            crate::execution::memory::OperatorMemoryContext::consumer_name(
+                "SpillableAggregatePush",
+            ),
         ));
         let adapter =
             std::sync::Arc::new(OperatorConsumerAdapter::new(std::sync::Arc::clone(&state)));
-        ctx.register_consumer(adapter);
+        let registration = ctx.register_consumer(adapter);
 
         // Pre-create partitioned state using the spill manager from memory context
         // (None: this open has no spill path, so the aggregate cannot spill).
@@ -387,6 +460,8 @@ impl SpillableAggregatePushOperator {
 
         Self {
             group_by,
+            // Evaluated before `aggregates` moves into the operator.
+            growing: GrowingStates::of(&aggregates),
             aggregates,
             spill_manager: None,
             partitioned_groups: partitioned,
@@ -395,9 +470,11 @@ impl SpillableAggregatePushOperator {
             spill_threshold: DEFAULT_AGGREGATE_SPILL_THRESHOLD,
             using_partitioned,
             memory_ctx: Some(ctx),
-            grant: None,
+            grant: crate::execution::memory::OperatorGrant::default(),
+            registration: Some(registration),
             spill_state: Some(state),
             estimated_bytes: 0,
+            keys_heap: 0,
             input_types: ColumnTypes::default(),
             temporal: TemporalComparison::TypesApart,
         }
@@ -453,9 +530,8 @@ impl SpillableAggregatePushOperator {
             partitioned
                 .spill_largest()
                 .map_err(crate::execution::spill::spill_error)?;
-            // Part of the state went to disk; release the grant, the next
-            // chunk re-grows it for what remains.
-            self.grant = None;
+            // The grant stays: the estimate counts the spilled groups too
+            // (see `groups_counted`), so the next chunk would take it again.
         }
 
         Ok(())
@@ -497,10 +573,74 @@ impl SpillableAggregatePushOperator {
         Ok(())
     }
 
-    /// Unregisters this operator's consumer from the BufferManager.
-    fn unregister_consumer(&self) {
-        if let (Some(ctx), Some(state)) = (&self.memory_ctx, &self.spill_state) {
-            ctx.unregister_consumer(state.name());
+    /// Unregisters this operator's consumer and gives back its grant.
+    fn unregister_consumer(&mut self) {
+        self.registration = None;
+        if let Some(ctx) = &self.memory_ctx {
+            ctx.release(&mut self.grant);
+        }
+    }
+
+    /// The groups it counts: all of them, a spilled partition's too. A
+    /// spilled partition is loaded whole again by the next row whose key
+    /// falls in it, so spilling does not bound what the groups hold; counting
+    /// them all refuses at the first chunk past the bound instead of spilling
+    /// and reloading partitions until the deadline.
+    fn groups_counted(&self) -> usize {
+        if self.using_partitioned {
+            self.partitioned_groups
+                .as_ref()
+                .map_or(0, PartitionedState::total_size)
+        } else {
+            self.groups.len()
+        }
+    }
+
+    /// The estimate of what the groups hold: key values and accumulators per
+    /// group (see [`groups_counted`](Self::groups_counted)), and what the
+    /// in-memory groups' growing states hold (read after `rows` more rows
+    /// when a read is due).
+    fn estimate_group_bytes(&mut self, rows: usize) -> usize {
+        let key_size = self.group_by.len() * std::mem::size_of::<Value>();
+        let acc_size = self.aggregates.len() * 64; // rough accumulator size
+        let groups = self.groups_counted();
+        let partitioned = self
+            .partitioned_groups
+            .as_ref()
+            .filter(|_| self.using_partitioned);
+        let in_memory = self.groups.values();
+        let global = self.global_state.as_deref().unwrap_or_default();
+        let states = || -> Box<dyn Iterator<Item = &AggregateState> + '_> {
+            match partitioned {
+                Some(partitioned) => Box::new(
+                    partitioned
+                        .in_memory_values()
+                        .flat_map(|group| group.accumulators.iter())
+                        .chain(global.iter()),
+                ),
+                None => Box::new(
+                    in_memory
+                        .flat_map(|group| group.accumulators.iter())
+                        .chain(global.iter()),
+                ),
+            }
+        };
+        let growing = self.growing.after(rows, groups.max(1), states);
+        (groups * (key_size + acc_size + 48))
+            .saturating_add(growing)
+            .saturating_add(self.keys_heap)
+    }
+
+    /// Grows the groups' grant to the estimate. A refusal stands: the
+    /// estimate counts spilled groups too (see
+    /// [`groups_counted`](Self::groups_counted)), so a spill would not bring
+    /// it under the bound.
+    fn grow_grant(&mut self) -> Result<(), OperatorError> {
+        match &self.memory_ctx {
+            Some(ctx) => ctx
+                .grow(&mut self.grant, self.estimated_bytes)
+                .map_err(OperatorError::from),
+            None => Ok(()),
         }
     }
 }
@@ -512,6 +652,14 @@ impl PushOperator for SpillableAggregatePushOperator {
             return Ok(true);
         }
         self.input_types.add(&chunk);
+        // The key columns that hold heap memory, picked once per chunk (none
+        // without a statement's memory to count against).
+        let heap = if self.memory_ctx.is_some() {
+            crate::execution::memory::HeapColumns::of(&chunk, Some(self.group_by.as_slice()))
+        } else {
+            crate::execution::memory::HeapColumns::none()
+        };
+        let mut new_keys_heap: usize = 0;
 
         for row in chunk.selected_indices() {
             if self.group_by.is_empty() {
@@ -533,9 +681,17 @@ impl PushOperator for SpillableAggregatePushOperator {
                     let key =
                         RowKey::from_row(&chunk, row, group_by, self.temporal).representatives();
                     let state = partitioned
-                        .get_or_insert_with(key, || GroupState {
-                            key_values: RowKey::values_of(&chunk, row, group_by),
-                            accumulators: aggregates.iter().map(AggregateState::for_expr).collect(),
+                        .get_or_insert_with(key, || {
+                            if !heap.is_empty() {
+                                new_keys_heap = new_keys_heap.saturating_add(heap.row_bytes(row));
+                            }
+                            GroupState {
+                                key_values: RowKey::values_of(&chunk, row, group_by),
+                                accumulators: aggregates
+                                    .iter()
+                                    .map(AggregateState::for_expr)
+                                    .collect(),
+                            }
                         })
                         .map_err(crate::execution::spill::spill_error)?;
 
@@ -550,9 +706,14 @@ impl PushOperator for SpillableAggregatePushOperator {
                 let state = self
                     .groups
                     .entry(RowKey::from_row(&chunk, row, group_by, self.temporal))
-                    .or_insert_with(|| GroupState {
-                        key_values: RowKey::values_of(&chunk, row, group_by),
-                        accumulators: aggregates.iter().map(AggregateState::for_expr).collect(),
+                    .or_insert_with(|| {
+                        if !heap.is_empty() {
+                            new_keys_heap = new_keys_heap.saturating_add(heap.row_bytes(row));
+                        }
+                        GroupState {
+                            key_values: RowKey::values_of(&chunk, row, group_by),
+                            accumulators: aggregates.iter().map(AggregateState::for_expr).collect(),
+                        }
                     });
 
                 for (acc, expr) in state.accumulators.iter_mut().zip(&self.aggregates) {
@@ -561,45 +722,22 @@ impl PushOperator for SpillableAggregatePushOperator {
             }
         }
 
-        // Update memory consumer usage estimate
-        if let Some(ref spill_state) = self.spill_state {
-            // Estimate: each group has key_values + accumulators
-            // Rough sizing: key columns * Value size + num_aggregates * 64 bytes per accumulator
-            let group_count = if self.using_partitioned {
-                self.partitioned_groups
-                    .as_ref()
-                    .map_or(0, |p| p.total_size())
-            } else {
-                self.groups.len()
-            };
-            let key_size = self.group_by.len() * std::mem::size_of::<Value>();
-            let acc_size = self.aggregates.len() * 64; // rough accumulator size
-            self.estimated_bytes = group_count * (key_size + acc_size + 48);
-            spill_state.set_usage(self.estimated_bytes);
+        self.keys_heap = self.keys_heap.saturating_add(new_keys_heap);
+        // Update memory consumer usage estimate: each group has key values
+        // and accumulators.
+        if self.spill_state.is_some() {
+            self.estimated_bytes = self.estimate_group_bytes(chunk.row_count());
+            if let Some(ref spill_state) = self.spill_state {
+                spill_state.set_usage(self.estimated_bytes);
+            }
         }
 
-        // The statement's query memory limit bounds the groups: grow the grant
-        // per chunk. Over it, spill first; what cannot spill refuses, naming
-        // the query limit (patch 9, #751).
-        let over_limit = self
-            .memory_ctx
-            .clone()
-            .map(|ctx| ctx.grow(&mut self.grant, self.estimated_bytes));
-        if let Some(Err(error)) = over_limit {
-            let can_spill = self.spill_manager.is_some()
-                || self
-                    .memory_ctx
-                    .as_ref()
-                    .and_then(|c| c.spill_manager().cloned())
-                    .is_some();
-            if can_spill {
-                self.maybe_spill()?;
-            }
-            if self.estimated_bytes == 0 {
-                self.grant = None;
-            } else {
-                return Err(OperatorError::Wrapped(Box::new(error)));
-            }
+        // The statement's memory bounds the groups: grow the grant per chunk
+        // (a compare within it). Past the query memory limit or the memory
+        // limit it refuses at once, naming the bound: spilled groups count
+        // too (see `groups_counted`).
+        if self.memory_ctx.is_some() && self.estimated_bytes > self.grant.size() {
+            self.grow_grant()?;
         }
 
         // Check if we need to spill

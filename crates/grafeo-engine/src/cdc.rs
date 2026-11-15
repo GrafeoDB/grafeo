@@ -841,14 +841,13 @@ impl CdcLog {
         self.events
             .read()
             .get(&(graph.map(str::to_string), entity_id))
-            .map(|events| {
+            .map_or_default(|events| {
                 events
                     .iter()
                     .filter(|e| e.epoch >= since_epoch)
                     .cloned()
                     .collect()
             })
-            .unwrap_or_default()
     }
 
     /// Returns all change events across all entities and graphs in an epoch

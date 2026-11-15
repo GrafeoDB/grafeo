@@ -91,7 +91,7 @@ impl RdfGraphStoreAdapter {
     /// This performs a single pass over all triples to build node/edge
     /// mappings, adjacency lists, labels, and properties.
     pub fn new(store: &RdfStore) -> Self {
-        let triples = store.triples();
+        let triples = store.triples_latest();
         Self::from_triples(&triples)
     }
 
@@ -251,8 +251,6 @@ impl RdfGraphStoreAdapter {
     #[must_use]
     pub fn term_for_node_id(&self, id: NodeId) -> Option<&Term> {
         // reason: node IDs are sequential indices into Vec, fit usize
-        #[allow(clippy::cast_possible_truncation)]
-        // reason: entity IDs are sequential indices into Vec, fit usize
         #[allow(clippy::cast_possible_truncation)]
         let idx = id.as_u64() as usize;
         self.node_to_term.get(idx)

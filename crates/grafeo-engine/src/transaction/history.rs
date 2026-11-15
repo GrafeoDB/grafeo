@@ -234,6 +234,23 @@ impl History {
         }
     }
 
+    /// Starts the history at `published`, now: what a database keeps once a
+    /// snapshot arrived (an import, a restore). A snapshot carries no
+    /// history, so the floor moves to its epoch, as a load of a file
+    /// without a time index starts at its checkpoint, and the commit times
+    /// before it go: they name states the snapshot replaced. The caller
+    /// holds the read pins' lock, as for [`collected_at`](Self::collected_at).
+    pub(crate) fn restart(&self, published: EpochId) {
+        self.floor.fetch_max(published.as_u64(), Ordering::AcqRel);
+        if !self.is_on() {
+            return;
+        }
+        let now = self.next_time();
+        let mut times = self.times.lock();
+        times.clear();
+        times.push_back((published.as_u64(), now));
+    }
+
     /// The error of a read at `epoch`, before the floor.
     pub(crate) fn before_floor(&self, epoch: EpochId) -> Error {
         Error::InvalidValue(format!(

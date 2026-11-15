@@ -345,6 +345,60 @@ impl super::GrafeoDB {
             })
     }
 
+    /// Performs hybrid search combining text (BM25) and vector similarity,
+    /// with the vector half at the index's default beam width.
+    ///
+    /// The same search as [`hybrid_search_with`](Self::hybrid_search_with),
+    /// which also takes the vector half's beam width (`ef`), with the
+    /// optional arguments as [`HybridSearchOptions`](super::HybridSearchOptions).
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - Node label to search within
+    /// * `text_property` - Property indexed for text search
+    /// * `vector_property` - Property indexed for vector search
+    /// * `query_text` - Text query for BM25 search
+    /// * `query_vector` - Vector query for similarity search (optional)
+    /// * `k` - Number of results to return
+    /// * `fusion` - Score fusion method (default: RRF with k=60)
+    /// * `filters` - Optional property filters (see
+    ///   [`HybridSearchOptions::filters`](super::HybridSearchOptions::filters))
+    ///
+    /// # Errors
+    ///
+    /// As [`hybrid_search_with`](Self::hybrid_search_with).
+    #[cfg(feature = "hybrid-search")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a stable signature; hybrid_search_with takes its options as one type"
+    )]
+    pub fn hybrid_search(
+        &self,
+        label: &str,
+        text_property: &str,
+        vector_property: &str,
+        query_text: &str,
+        query_vector: Option<&[f32]>,
+        k: usize,
+        fusion: Option<grafeo_core::index::text::FusionMethod>,
+        filters: Option<&std::collections::HashMap<String, Value>>,
+    ) -> Result<Vec<(NodeId, f64)>> {
+        let options = super::HybridSearchOptions {
+            query_vector,
+            ef: None,
+            fusion,
+            filters,
+        };
+        self.hybrid_search_with(
+            label,
+            text_property,
+            vector_property,
+            query_text,
+            k,
+            &options,
+        )
+    }
+
     /// Performs hybrid search combining text (BM25) and vector similarity.
     ///
     /// Runs both text search and vector search, then fuses results using
@@ -358,15 +412,9 @@ impl super::GrafeoDB {
     /// * `text_property` - Property indexed for text search
     /// * `vector_property` - Property indexed for vector search
     /// * `query_text` - Text query for BM25 search
-    /// * `query_vector` - Vector query for similarity search (optional)
     /// * `k` - Number of results to return
-    /// * `fusion` - Score fusion method (default: RRF with k=60)
-    /// * `filters` - Optional property filters, as for
-    ///   [`vector_search`](Self::vector_search): equality filters and
-    ///   operator filters (`$gt`, `$in`, ...). Both the text and the vector
-    ///   search keep only the nodes of `label` that match all of them before
-    ///   the results are fused, so up to `k` matching nodes come back.
-    ///   Text scores stay those of the whole index.
+    /// * `options` - The query vector, the vector half's beam width, the
+    ///   fusion method and the filters (see [`HybridSearchOptions`](super::HybridSearchOptions))
     ///
     /// # Returns
     ///
@@ -389,21 +437,19 @@ impl super::GrafeoDB {
     /// query vector is one it cannot measure (see
     /// [`vector_search`](Self::vector_search)).
     #[cfg(feature = "hybrid-search")]
-    #[allow(clippy::too_many_arguments)]
-    pub fn hybrid_search(
+    pub fn hybrid_search_with(
         &self,
         label: &str,
         text_property: &str,
         vector_property: &str,
         query_text: &str,
-        query_vector: Option<&[f32]>,
         k: usize,
-        fusion: Option<grafeo_core::index::text::FusionMethod>,
-        filters: Option<&std::collections::HashMap<String, Value>>,
+        options: &super::HybridSearchOptions<'_>,
     ) -> Result<Vec<(NodeId, f64)>> {
         use grafeo_core::index::text::fuse_results;
 
-        let fusion_method = fusion.unwrap_or_default();
+        let query_vector = options.query_vector;
+        let fusion_method = options.fusion.clone().unwrap_or_default();
         let mut sources: Vec<Vec<(NodeId, f64)>> = Vec::new();
         let store = self.current_lpg_store()?;
         let fetch = k.saturating_mul(2);
@@ -429,19 +475,24 @@ impl super::GrafeoDB {
         // Both searches keep only the nodes that match the filters, before
         // fusion: filtering the fused results would return fewer than k.
         let (_pin, view) = self.search_view();
-        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view)?;
+        let allowlist = Self::compute_filter_allowlist(&store, label, options.filters, view)?;
         if allowlist.as_ref().is_some_and(|allowed| allowed.is_empty()) {
             return Ok(Vec::new());
         }
-        let search = IndexSearch {
+        // A text index has no beam: only the vector half reads `ef`.
+        let text_half = IndexSearch {
             k: fetch,
             ef: None,
             allowed: allowlist.as_ref(),
         };
+        let vector_half = IndexSearch {
+            ef: options.ef,
+            ..text_half
+        };
 
         // Text search
         if let Some(text_results) =
-            store.text_index_search_at(label, text_property, query_text, search, view)?
+            store.text_index_search_at(label, text_property, query_text, text_half, view)?
             && !text_results.is_empty()
         {
             sources.push(text_results);
@@ -450,8 +501,13 @@ impl super::GrafeoDB {
         // Vector search (if query vector provided)
         if let Some(query_vec) = query_vector
             && vector_config.is_some()
-            && let Some(vector_results) =
-                store.vector_index_search_at(label, vector_property, query_vec, search, view)?
+            && let Some(vector_results) = store.vector_index_search_at(
+                label,
+                vector_property,
+                query_vec,
+                vector_half,
+                view,
+            )?
             && !vector_results.is_empty()
         {
             // Negate distances so that "closer = higher score", matching

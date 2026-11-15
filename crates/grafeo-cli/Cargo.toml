@@ -41,7 +41,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [features]
-default = ["gql", "jsonl-import"]
+# The default build opens every file the `grafeo` crate's default build writes (#763).
+default = ["gql", "jsonl-import", "ai", "algos"]
 lpg = []  # Deprecated: the LPG store is always built, so this enables nothing. Removed in 0.7.0.
 gql = ["grafeo-engine/gql"]
 cypher = ["grafeo-engine/cypher"]

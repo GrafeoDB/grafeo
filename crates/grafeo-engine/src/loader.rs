@@ -422,10 +422,9 @@ impl Layout {
                     .collect(),
             });
         }
-        let names = records
-            .next_record()?
-            .map(|(_, fields)| fields.into_iter().map(Cow::into_owned).collect::<Vec<_>>())
-            .unwrap_or_default();
+        let names = records.next_record()?.map_or_default(|(_, fields)| {
+            fields.into_iter().map(Cow::into_owned).collect::<Vec<_>>()
+        });
         for column in columns {
             if !names.contains(&column.name) {
                 return Err(OperatorError::Execution(format!(

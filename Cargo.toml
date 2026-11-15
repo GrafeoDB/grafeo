@@ -18,23 +18,20 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.2"
+version = "0.6.3"
 edition = "2024"
-rust-version = "1.99.0"
+rust-version = "1.100.0"
 license = "Apache-2.0"
 repository = "https://github.com/GrafeoDB/grafeo"
 authors = ["S.T. Grond"]
-description = "A high-performance, embeddable graph database with support for LPG RDF and all major graph query languages."
 
 [workspace.dependencies]
 # Internal crates (default-features = false to allow per-crate control)
-grafeo-common = { path = "crates/grafeo-common", version = "0.6.2" }
-grafeo-core = { path = "crates/grafeo-core", version = "0.6.2", default-features = false }
-grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.6.2", default-features = false }
-grafeo-storage = { path = "crates/grafeo-storage", version = "0.6.2", default-features = false }
-grafeo-engine = { path = "crates/grafeo-engine", version = "0.6.2", default-features = false }
-grafeo = { path = "crates/grafeo", version = "0.6.2" }
-grafeo-bindings-common = { path = "crates/bindings/common", version = "0.6.2", default-features = false }
+grafeo-common = { path = "crates/grafeo-common", version = "0.6.3" }
+grafeo-core = { path = "crates/grafeo-core", version = "0.6.3", default-features = false }
+grafeo-adapters = { path = "crates/grafeo-adapters", version = "0.6.3", default-features = false }
+grafeo-storage = { path = "crates/grafeo-storage", version = "0.6.3", default-features = false }
+grafeo-engine = { path = "crates/grafeo-engine", version = "0.6.3", default-features = false }
 
 # Error handling
 thiserror = "2.0"
@@ -57,8 +54,8 @@ libc = "0.2"
 
 # Data structures
 hashbrown = { version = "0.17", features = ["serde"] }
-smallvec = "1"
-bumpalo = "3"
+smallvec = "1.16.5"
+bumpalo = "3.20.4"
 indexmap = "2"
 dashmap = "6"
 arcstr = { version = "1", features = ["serde"] }
@@ -112,7 +109,7 @@ unicode-normalization = "0.1.26"
 # Testing
 num-bigint = "0.5"
 proptest = "1"
-criterion = { package = "codspeed-criterion-compat", version = "4" }
+criterion = { package = "codspeed-criterion-compat", version = "6" }
 tempfile = "3"
 
 # Allocators (platform-optimized)
@@ -123,13 +120,19 @@ mimalloc = "0.1"
 ordered-float = "5"
 rand = "0.10.3"
 
+[workspace.lints.cargo]
+# A dependency no target of its crate uses fails the build.
+unused_dependencies = "deny"
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 missing_docs = "warn"
 # Set by the CodSpeed workflow only: the deterministic benchmark build (a fixed
 # hash seed in grafeo_common::utils::hash, the SIMD kernels the build's target
-# features name instead of the ones the runner's CPU offers).
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(grafeo_codspeed)"] }
+# features name instead of the ones the runner's CPU offers). `coverage` is set
+# by `cargo llvm-cov` (the Code Coverage job): a longer child deadline in
+# grafeo_common::testing::child_process.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(grafeo_codspeed)", "cfg(coverage)"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

@@ -152,11 +152,13 @@ fn encoded(value: &Value) -> String {
 fn dump_triples(lines: &mut Vec<String>, db: &GrafeoDB) {
     let rdf = db.rdf_store();
     push_triples(lines, "rdf default graph", rdf);
-    let mut names = rdf.graph_names();
+    let mut names = rdf.graph_names(&grafeo_core::graph::rdf::RdfView::latest(
+        grafeo_core::graph::rdf::LatestUse::Test,
+    ));
     names.sort();
     for name in names {
         let graph = rdf
-            .graph(&name)
+            .graph_latest(&name)
             .unwrap_or_else(|| panic!("the listed RDF graph {name} exists"));
         push_triples(lines, &format!("rdf graph {name}"), &graph);
     }
@@ -166,7 +168,9 @@ fn dump_triples(lines: &mut Vec<String>, db: &GrafeoDB) {
 fn push_triples(lines: &mut Vec<String>, title: &str, store: &grafeo_core::graph::rdf::RdfStore) {
     lines.push(title.to_string());
     let mut triples: Vec<String> = store
-        .triples()
+        .triples(&grafeo_core::graph::rdf::RdfView::latest(
+            grafeo_core::graph::rdf::LatestUse::Test,
+        ))
         .iter()
         .map(|triple| format!("  {triple}"))
         .collect();
@@ -684,7 +688,13 @@ fn every_section_kind_in_one_database_survives_a_reopen_in_small_chunks() {
             "{what}: the named graph"
         );
         let rdf = db.rdf_store();
-        let triples: Vec<String> = rdf.triples().iter().map(ToString::to_string).collect();
+        let triples: Vec<String> = rdf
+            .triples(&grafeo_core::graph::rdf::RdfView::latest(
+                grafeo_core::graph::rdf::LatestUse::Test,
+            ))
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         assert_eq!(
             triples.len(),
             2,
@@ -697,9 +707,11 @@ fn every_section_kind_in_one_database_survives_a_reopen_in_small_chunks() {
             "{what}: the non-ASCII literal: {triples:?}"
         );
         let named: Vec<String> = rdf
-            .graph("http://example.org/trips")
+            .graph_latest("http://example.org/trips")
             .unwrap_or_else(|| panic!("{what}: the RDF graph"))
-            .triples()
+            .triples(&grafeo_core::graph::rdf::RdfView::latest(
+                grafeo_core::graph::rdf::LatestUse::Test,
+            ))
             .iter()
             .map(ToString::to_string)
             .collect();
@@ -708,7 +720,7 @@ fn every_section_kind_in_one_database_survives_a_reopen_in_small_chunks() {
             "{what}: the named RDF graph: {named:?}"
         );
         assert_eq!(
-            rdf.ring().map(|ring| ring.len()),
+            rdf.ring_latest().map(|ring| ring.len()),
             Some(2),
             "{what}: the ring"
         );

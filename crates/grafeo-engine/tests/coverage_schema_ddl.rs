@@ -339,7 +339,7 @@ fn test_full_schema_lifecycle() {
     // keeps a graph type that a graph has as its type.
     session.execute("DROP GRAPH hr_graph").unwrap();
     session.execute("DROP GRAPH TYPE org_chart").unwrap();
-    // The types only it listed went with it.
-    assert!(session.execute("DROP NODE TYPE Employee").is_err());
-    assert!(session.execute("DROP EDGE TYPE REPORTS_TO").is_err());
+    // The types stand on their own, so they stayed (#764), and drop now.
+    session.execute("DROP NODE TYPE Employee").unwrap();
+    session.execute("DROP EDGE TYPE REPORTS_TO").unwrap();
 }

@@ -2912,6 +2912,7 @@ impl GqlTranslator {
         Ok(LogicalOperator::Create(CreateOp {
             elements,
             input: None,
+            claim: None,
         }))
     }
 

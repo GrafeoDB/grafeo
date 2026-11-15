@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "grafeo-datasets"
+version = "0.6.3"
+description = "The Silicon Valley demo dataset for Grafeo: nodes and edges, a timeline, GQL, Cypher, Turtle and MiniLM vectors."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.12"
+authors = [
+    { name = "S.T. Grond" }
+]
+keywords = ["graph", "database", "dataset", "demo", "gql", "cypher", "turtle", "grafeo"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+grafeo = ["grafeo>=0.6.3"]
+
+[project.urls]
+Homepage = "https://grafeo.dev"
+Documentation = "https://grafeo.dev"
+Repository = "https://github.com/GrafeoDB/grafeo"
+Issues = "https://github.com/GrafeoDB/grafeo/issues"
+
+[tool.hatch.build]
+# The staged data is git-ignored, so name it here.
+artifacts = ["grafeo_datasets/data/**"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["grafeo_datasets"]
+
+[tool.hatch.build.targets.sdist]
+include = ["grafeo_datasets", "README.md", "LICENSE"]

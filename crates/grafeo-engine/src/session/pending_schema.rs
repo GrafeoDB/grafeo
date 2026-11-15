@@ -16,93 +16,21 @@ use grafeo_common::types::{EpochId, ReadView, TransactionId};
 use grafeo_common::utils::error::{Error, Result, TransactionError};
 
 use grafeo_core::graph::GraphStore;
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::Session;
 use crate::catalog::{Catalog, CatalogConstraintValidator, RuleScope, check_data_against_rules};
+use crate::database::index::{IndexTarget, drop_names_left_without_index, store_has};
 use crate::database::standalone::{
-    Applying, apply, apply_to_catalog, claims_of, copy_of_catalog, refuse_drop_with_changes_in,
+    Applying, apply, apply_to_catalog, claims_of, copy_of_catalog, index_key,
+    refuse_drop_with_changes_in,
 };
 use crate::query::cache::QueryCache;
 use crate::transaction::{BuiltIndex, QueuedSchemaOp, StandaloneChange};
 
-/// The plans a transaction with its own catalog makes, kept from every other session.
-const PRIVATE_PLANS: usize = 64;
-
-/// Which named RDF graphs exist as a commit's queued operations apply in order, for a check
-/// ahead of logging: one that does not apply once logged poisons the database.
-#[cfg(feature = "triple-store")]
-struct RdfGraphsAhead<'a> {
-    store: &'a grafeo_core::graph::rdf::RdfStore,
-    /// The graphs the operations so far made or took away.
-    changed: std::collections::HashMap<String, bool>,
-    /// Whether one took away every named graph there was.
-    all_gone: bool,
-}
-
-#[cfg(feature = "triple-store")]
-impl<'a> RdfGraphsAhead<'a> {
-    fn new(store: &'a grafeo_core::graph::rdf::RdfStore) -> Self {
-        Self {
-            store,
-            changed: std::collections::HashMap::new(),
-            all_gone: false,
-        }
-    }
-
-    fn exists(&self, name: &str) -> bool {
-        self.changed
-            .get(name)
-            .copied()
-            .unwrap_or_else(|| !self.all_gone && self.store.graph(name).is_some())
-    }
-
-    /// Whether `op` applies after those before it, as `RdfStore::apply_graph_op` would.
-    fn applies(&mut self, op: &grafeo_common::change::RdfGraphOp) -> bool {
-        use grafeo_common::change::RdfGraphOp;
-        use grafeo_common::storage::log_record::RdfGraphTarget;
-        match op {
-            RdfGraphOp::Create { name } => {
-                if self.exists(name) {
-                    return false;
-                }
-                self.changed.insert(name.clone(), true);
-            }
-            RdfGraphOp::Drop {
-                target: RdfGraphTarget::Named(name),
-            } => {
-                if !self.exists(name) {
-                    return false;
-                }
-                self.changed.insert(name.clone(), false);
-            }
-            RdfGraphOp::Drop {
-                target: RdfGraphTarget::All | RdfGraphTarget::AllNamed,
-            }
-            | RdfGraphOp::Clear {
-                target: RdfGraphTarget::All | RdfGraphTarget::AllNamed,
-            } => {
-                self.changed.clear();
-                self.all_gone = true;
-            }
-            RdfGraphOp::Drop { .. } | RdfGraphOp::Clear { .. } => {}
-            RdfGraphOp::Copy { source, target }
-            | RdfGraphOp::Move { source, target }
-            | RdfGraphOp::Add { source, target } => {
-                if source != target {
-                    if matches!(op, RdfGraphOp::Move { .. })
-                        && let Some(source) = source
-                    {
-                        self.changed.insert(source.clone(), false);
-                    }
-                    if let Some(target) = target {
-                        self.changed.insert(target.clone(), true);
-                    }
-                }
-            }
-        }
-        true
-    }
-}
+/// The share of the plan cache's bound a transaction with its own catalog
+/// plans in, kept from every other session.
+const PRIVATE_SHARE: usize = 16;
 
 /// A transaction's own view of the catalog.
 pub(super) struct PendingSchema {
@@ -116,7 +44,6 @@ pub(super) struct PendingSchema {
 }
 
 /// The property indexes that serve a label and a key in a graph.
-#[cfg(feature = "gql")]
 #[derive(Clone, Copy)]
 pub(super) struct PropertyIndexesOn {
     /// The index on the key, on every label.
@@ -125,7 +52,6 @@ pub(super) struct PropertyIndexesOn {
     pub this_label: bool,
 }
 
-#[cfg(feature = "gql")]
 impl PropertyIndexesOn {
     /// Whether either is there.
     pub fn any(self) -> bool {
@@ -168,7 +94,11 @@ impl Session {
             )));
         };
         let mark = self.transaction_manager.mark_claims(transaction)?;
-        for claim in change.ops().flat_map(claims_of) {
+        for claim in change
+            .ops()
+            .flat_map(claims_of)
+            .chain(change.claims().cloned())
+        {
             if let Err(error) = self.transaction_manager.record_key(transaction, claim) {
                 self.transaction_manager.restore_claims(transaction, mark)?;
                 return Err(error);
@@ -183,7 +113,9 @@ impl Session {
                 *pending = Some(PendingSchema {
                     base,
                     overlay: Arc::clone(&overlay),
-                    plans: Arc::new(QueryCache::new(PRIVATE_PLANS)),
+                    plans: Arc::new(QueryCache::with_limit(
+                        self.query_cache.limit() / PRIVATE_SHARE,
+                    )),
                 });
                 overlay
             }
@@ -204,7 +136,8 @@ impl Session {
             changes.queue_schema(op, graph);
         }
         self.refresh_pending_graphs(&changes);
-        self.plan_cache().clear();
+        // The transaction's own plans only: the change is not committed.
+        self.plan_cache().advance();
         Ok(())
     }
 
@@ -251,7 +184,9 @@ impl Session {
                     .try_for_each(|queued| apply_to_catalog(&queued.op, &overlay))
             })?;
             pending.overlay = Arc::new(overlay);
-            pending.plans = Arc::new(QueryCache::new(PRIVATE_PLANS));
+            pending.plans = Arc::new(QueryCache::with_limit(
+                self.query_cache.limit() / PRIVATE_SHARE,
+            ));
         }
         drop(pending);
         self.refresh_pending_graphs(&changes);
@@ -320,8 +255,6 @@ impl Session {
         let mut made = std::collections::HashSet::new();
         let view = ReadView::transaction(transaction, EpochId::LATEST);
         let mut built = Vec::with_capacity(queue.len());
-        #[cfg(feature = "triple-store")]
-        let mut rdf_graphs = RdfGraphsAhead::new(&self.rdf_store);
         for queued in queue {
             apply_to_catalog(&queued.op, &check).map_err(|error| conflict(error.to_string()))?;
             let mut index = None;
@@ -340,13 +273,6 @@ impl Session {
                             return Err(conflict(format!("graph '{name}'")));
                         }
                         refuse_drop_with_changes_in(&open, name)?;
-                    }
-                }
-                #[cfg(feature = "triple-store")]
-                StandaloneOp::RdfGraph(op) => {
-                    crate::transaction::refuse_graph_op_with_changes_in(&open, op)?;
-                    if !rdf_graphs.applies(op) {
-                        return Err(conflict(format!("the RDF graph of {op:?}")));
                     }
                 }
                 StandaloneOp::PutCatalog(CatalogRecord::Index(record)) => {
@@ -405,7 +331,6 @@ impl Session {
 
     /// The property indexes that serve `label` and `key` in `store`, the graph `graph`, as the
     /// transaction's queue leaves them, in order: one it creates counts, one it drops does not.
-    #[cfg(feature = "gql")]
     pub(super) fn property_indexes_on(
         &self,
         graph: &Option<String>,
@@ -456,24 +381,118 @@ impl Session {
         there
     }
 
+    /// Whether the graph `graph` (`None` the default graph), whose store is `store`, has the
+    /// index `target` stands for, as the transaction's queue leaves it: the store's indexes
+    /// with the queued puts and drops of that graph applied in order, so an index it creates
+    /// counts and one it drops does not (#723).
+    pub(super) fn has_index_of(
+        &self,
+        graph: &Option<String>,
+        store: &RowGroupStore,
+        target: &IndexTarget,
+    ) -> bool {
+        use grafeo_common::storage::catalog_record::CatalogKey;
+
+        let Some(key) = target.search_key() else {
+            return self
+                .property_indexes_on(graph, store, &target.label, &target.property)
+                .any();
+        };
+        let mut there = store_has(store, target);
+        let Some(changes) = self.changes.lock().clone() else {
+            return there;
+        };
+        changes.read_schema(|queue| {
+            for queued in queue {
+                match &queued.op {
+                    StandaloneOp::PutCatalog(CatalogRecord::Index(record))
+                        if record.graph == *graph && index_key(&record.index) == key =>
+                    {
+                        there = true;
+                    }
+                    StandaloneOp::DropCatalog(CatalogKey::Index {
+                        graph: on_graph,
+                        index,
+                    }) if on_graph == graph && *index == key => there = false,
+                    _ => {}
+                }
+            }
+        });
+        there
+    }
+
+    /// Adds to `change` what dropping the indexes `dropped` matches in the graph `graph` does
+    /// to the index names, by every graph this session reaches as its transaction leaves them
+    /// (see [`drop_names_left_without_index`]).
+    pub(super) fn drop_names_left_without_index(
+        &self,
+        change: &mut StandaloneChange,
+        graph: Option<&str>,
+        dropped: impl Fn(&IndexTarget) -> bool,
+    ) {
+        drop_names_left_without_index(
+            change,
+            &self.effective_catalog(),
+            &self.reachable_lpg_graphs(),
+            graph,
+            dropped,
+            |(key, store), target| self.has_index_of(key, store, target),
+        );
+    }
+
+    /// Adds to `change`, which drops the named graph with storage key `key`, the drop of each
+    /// index name only that graph has an index of (#723).
+    #[cfg(feature = "gql")]
+    pub(super) fn drop_names_only_graph_had(&self, change: &mut StandaloneChange, key: &str) {
+        let Some(store) = self.named_graph(key) else {
+            return;
+        };
+        let graph = Some(key.to_string());
+        self.drop_names_left_without_index(change, Some(key), |target| {
+            self.has_index_of(&graph, &store, target)
+        });
+    }
+
     /// Every graph a statement of this session can reach, by storage key (`None` for the
     /// default graph).
     fn reachable_graphs(&self) -> Vec<(Option<String>, Arc<dyn GraphStore>)> {
-        let mut graphs: Vec<(Option<String>, Arc<dyn GraphStore>)> =
-            vec![(None, Arc::clone(&self.stores.graph_store))];
-        for name in self
+        std::iter::once((None, Arc::clone(&self.stores.graph_store)))
+            .chain(
+                self.reachable_named_graphs()
+                    .into_iter()
+                    .map(|(name, graph)| (Some(name), graph as Arc<dyn GraphStore>)),
+            )
+            .collect()
+    }
+
+    /// The built-in store of every graph a statement of this session can reach, by storage
+    /// key, as [`reachable_graphs`](Self::reachable_graphs): none on a backend of its own.
+    pub(super) fn reachable_lpg_graphs(&self) -> Vec<(Option<String>, Arc<RowGroupStore>)> {
+        let Some(root) = self.root_store() else {
+            return Vec::new();
+        };
+        std::iter::once((None, root))
+            .chain(
+                self.reachable_named_graphs()
+                    .into_iter()
+                    .map(|(name, graph)| (Some(name), graph)),
+            )
+            .collect()
+    }
+
+    /// The named graphs a statement of this session can reach, by storage key: the committed
+    /// ones its transaction did not drop, and the ones it created.
+    fn reachable_named_graphs(&self) -> Vec<(String, Arc<RowGroupStore>)> {
+        let mut graphs: Vec<(String, Arc<RowGroupStore>)> = self
             .root_store()
-            .map(|root| root.graph_names())
-            .unwrap_or_default()
-        {
-            if let Some(graph) = self.named_graph(&name) {
-                graphs.push((Some(name), graph as Arc<dyn GraphStore>));
-            }
-        }
+            .map_or_default(|root| root.graph_names())
+            .into_iter()
+            .filter_map(|name| self.named_graph(&name).map(|graph| (name, graph)))
+            .collect();
         let pending = self.stores.pending_graphs.read();
         for (name, graph) in &pending.created {
-            if !graphs.iter().any(|(key, _)| key.as_ref() == Some(name)) {
-                graphs.push((Some(name.clone()), Arc::clone(graph) as Arc<dyn GraphStore>));
+            if !graphs.iter().any(|(key, _)| key == name) {
+                graphs.push((name.clone(), Arc::clone(graph)));
             }
         }
         graphs
@@ -698,33 +717,6 @@ impl Session {
         })
     }
 
-    /// Refuses a SPARQL statement after a queued SPARQL graph operation: the RDF store
-    /// holds only what is committed, so its reads would still see a graph the transaction
-    /// dropped, and its triples apply ahead of the operation. Until reads of RDF are
-    /// isolated by triple (#718).
-    ///
-    /// # Errors
-    ///
-    /// An invalid transaction state. The transaction goes on.
-    #[cfg(feature = "triple-store")]
-    pub(super) fn refuse_sparql_after_graph_op(&self) -> Result<()> {
-        let queued = self.changes.lock().as_ref().is_some_and(|changes| {
-            changes.read_schema(|queue| {
-                queue
-                    .iter()
-                    .any(|queued| matches!(queued.op, StandaloneOp::RdfGraph(_)))
-            })
-        });
-        if queued {
-            return Err(Error::Transaction(TransactionError::InvalidState(
-                "this transaction ran a SPARQL graph operation, which applies at its commit: \
-                 no SPARQL statement can run after it until then"
-                    .to_string(),
-            )));
-        }
-        Ok(())
-    }
-
     /// Fails when another open transaction claimed the name a statement creates: the
     /// conflict, not what that transaction's view hides from this one.
     ///
@@ -843,19 +835,6 @@ impl Session {
                 (StandaloneOp::CreateGraph { name }, Some(graph), Some(root)) => {
                     root.install_graph(name, Arc::clone(graph));
                 }
-                #[cfg(feature = "triple-store")]
-                (op @ StandaloneOp::RdfGraph(_), _, _) => {
-                    // A repeat is no error: it was checked at its statement, and an
-                    // operation outside a transaction may have got there first.
-                    let mut unbuilt = Vec::new();
-                    crate::database::standalone::apply_rdf(
-                        op,
-                        &self.rdf_store,
-                        &Applying::Replay {
-                            unbuilt: &mut unbuilt,
-                        },
-                    )?;
-                }
                 (op, _, root) => {
                     apply(op, index, root.as_ref(), &self.catalog, &mut Applying::Live)?;
                 }
@@ -901,7 +880,8 @@ impl Session {
                 _ => {}
             }
         }
-        self.query_cache.clear();
+        // Committed: every session's plans are made again.
+        self.query_cache.advance();
     }
 }
 

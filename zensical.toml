@@ -7,7 +7,7 @@
 site_name = "Grafeo"
 site_description = "A high-performance, embeddable graph database with a Rust core and no required C dependencies. Python, Node.js, Go, WebAssembly, C#/.NET and Dart bindings. Supports LPG and RDF data models, multiple query languages (GQL, Cypher, Gremlin, GraphQL, SPARQL, SQL/PGQ), ACID transactions and extensible storage backends."
 site_author = "S.T. Grond"
-site_url = "https://grafeo.dev/"
+site_url = "https://docs.grafeo.dev/"
 repo_url = "https://github.com/GrafeoDB/grafeo"
 repo_name = "GrafeoDB/grafeo"
 edit_uri = "edit/main/docs/"

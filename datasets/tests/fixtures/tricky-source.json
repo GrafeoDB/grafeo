@@ -1,0 +1,47 @@
+{
+  "name": "tricky",
+  "nodes": [
+    {
+      "key": "jian-yang",
+      "label": "Person",
+      "name": "Jian-Yang \"JY\" Yang",
+      "description": "Jian-Yang's \"Not Hotdog\" notes live in docs\\temp\\new, one line\nthen a tab\there, and a café menu.",
+      "props": {
+        "title": "Erlich's tenant"
+      }
+    },
+    {
+      "key": "the-palapa",
+      "label": "City",
+      "name": "Erlich's palapa",
+      "description": "A thatched shelter on the roof."
+    },
+    {
+      "key": "tricky-co",
+      "label": "Company",
+      "name": "Tricky Co",
+      "description": "A company founded in a single month.",
+      "props": {
+        "founded": "2014-03"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "type": "WORKS_AT",
+      "source": "jian-yang",
+      "target": "tricky-co",
+      "props": {
+        "role": "Intern",
+        "from": "2014-03",
+        "to": "2014-03-15"
+      }
+    },
+    {
+      "type": "LIVES_IN",
+      "source": "jian-yang",
+      "target": "the-palapa",
+      "props": {}
+    }
+  ]
+}

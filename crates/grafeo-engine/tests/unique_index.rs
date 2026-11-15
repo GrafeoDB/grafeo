@@ -642,15 +642,17 @@ fn a_rule_and_a_graph_in_one_transaction_meet_in_either_order() {
     }
 }
 
-/// `DROP INDEX` takes the name and the active graph's index; the others stay, with no name.
+/// `DROP INDEX` takes the active graph's index; the other graph keeps its own, under the name
+/// (#723).
 #[test]
 fn drop_index_takes_the_active_graphs_index_and_the_others_stay() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
     run_all(&session, &["CREATE GRAPH other", RULE, "DROP INDEX c1"]);
     assert!(!db.has_property_index("id"));
+    assert_eq!(shown(&session), rows(&[]));
     run_all(&session, &["USE GRAPH other", "INSERT (:File {id: 1})"]);
-    assert_eq!(shown(&session), rows(&[["NULL", "Hash", "File", "id"]]));
+    assert_eq!(shown(&session), rows(&[["c1", "Hash", "File", "id"]]));
     assert!(reads_index(&session, "File", "id"));
 }
 

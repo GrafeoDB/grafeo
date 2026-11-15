@@ -716,8 +716,13 @@ fn expired_deadline_returns_timeout_instead_of_partial_path_rows() {
     assert_eq!(error.error_code(), ErrorCode::QueryTimeout, "{error}");
 }
 
+/// A path search over its budget fails whole: with a memory limit of one byte the budget is one
+/// byte (a quarter of it, at least one), and the path refuses with `GRAFEO-S001` naming the path
+/// search budget, never returning part of its rows (#492; it was `GRAFEO-Q006`).
 #[test]
-fn exhausted_memory_returns_error_instead_of_partial_path_rows() {
+fn a_path_over_its_budget_returns_an_error_instead_of_partial_rows() {
+    use grafeo_common::utils::error::{LimitBound, LimitRefusal};
+
     let db = GrafeoDB::with_config(
         Config::in_memory()
             .with_graph_model(GraphModel::Rdf)
@@ -727,8 +732,19 @@ fn exhausted_memory_returns_error_instead_of_partial_path_rows() {
     insert_terms(&db, &[(Term::iri(iri("s")), Term::iri(iri("a")))]);
     let error = db
         .execute_sparql(&format!("{PREFIX} SELECT ?o WHERE {{ e:s e:p+ ?o }}"))
-        .expect_err("exhausted memory must not return a partial query result");
-    assert_eq!(error.error_code(), ErrorCode::QueryExecution, "{error}");
+        .expect_err("a path over its budget must not return a partial query result");
+    assert_eq!(error.error_code(), ErrorCode::StorageFull, "{error}");
+    assert!(
+        matches!(
+            error.limit_refusal(),
+            Some(LimitRefusal::Memory {
+                bound: LimitBound::PathSearchBudget,
+                limit: 1,
+                ..
+            })
+        ),
+        "{error}"
+    );
 }
 
 #[test]

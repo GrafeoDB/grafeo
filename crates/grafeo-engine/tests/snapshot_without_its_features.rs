@@ -25,6 +25,17 @@
 //! ```
 
 #![cfg(all(feature = "gql", not(miri)))]
+#![cfg_attr(
+    all(
+        feature = "triple-store",
+        feature = "vector-index",
+        feature = "text-index"
+    ),
+    expect(
+        deprecated,
+        reason = "tests read the RDF store directly to check what was committed; GrafeoDB::rdf_store() is deprecated for users and goes crate-private in 0.7.0"
+    )
+)]
 
 use std::path::Path;
 
@@ -110,7 +121,9 @@ fn write_the_fixture() {
 ))]
 fn stored(store: &grafeo_core::graph::rdf::RdfStore) -> Vec<[String; 3]> {
     let mut triples: Vec<[String; 3]> = store
-        .triples()
+        .triples(&grafeo_core::graph::rdf::RdfView::latest(
+            grafeo_core::graph::rdf::LatestUse::Test,
+        ))
         .iter()
         .map(|triple| {
             [
@@ -193,7 +206,7 @@ fn assert_documents(db: &GrafeoDB) {
     );
     assert_eq!(
         db.rdf_store()
-            .graph("http://example.org/trips")
+            .graph_latest("http://example.org/trips")
             .map(|graph| stored(&graph)),
         Some(vec![triple("gus", "visited", "prague")]),
         "the triples of the named graph"

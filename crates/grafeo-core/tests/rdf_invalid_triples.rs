@@ -11,6 +11,7 @@
 
 #![cfg(feature = "triple-store")]
 
+use grafeo_core::graph::rdf::{LatestUse, RdfView};
 use std::io::Cursor;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -131,11 +132,14 @@ fn valid_documents_load() {
         .load_ntriples(Cursor::new(document.as_bytes()))
         .unwrap();
     assert_eq!(loaded.triple_count, 4);
-    assert!(store.contains(&Triple::new(
-        Term::iri("http://ex.org/alix"),
-        Term::iri("http://ex.org/knows"),
-        Term::iri("http://ex.org/gus"),
-    )));
+    assert!(store.contains(
+        &RdfView::latest(LatestUse::Test),
+        &Triple::new(
+            Term::iri("http://ex.org/alix"),
+            Term::iri("http://ex.org/knows"),
+            Term::iri("http://ex.org/gus"),
+        )
+    ));
 
     let store = RdfStore::new();
     assert_eq!(store.load_turtle(&document).unwrap().triple_count, 4);

@@ -14,3 +14,4 @@
 mod cli_runs;
 mod cli_warnings;
 mod commands;
+mod default_features_open;

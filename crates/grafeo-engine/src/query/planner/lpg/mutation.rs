@@ -11,9 +11,11 @@ use super::{
     ShortestPathOperator, UnaryOp, UnwindOp, UnwindOperator, Value,
 };
 use super::{CallProcedureOp, StaticResultOperator};
+use crate::query::plan::PatternClaim;
 use crate::query::plan::{Callee, PathMode, PathSelection};
 use grafeo_common::utils::error::{QueryError, QueryErrorKind};
 use grafeo_core::execution::DataChunk;
+use grafeo_core::execution::operators::merge_claim::{ClaimDirection, ClaimSource};
 use grafeo_core::execution::operators::{BuiltinFunction, FilterExpression, Volatility};
 use grafeo_core::execution::operators::{
     ExecutionPathMode, ExecutionPathSelection, JoinCondition, JoinedRowCondition,
@@ -31,7 +33,7 @@ impl super::Planner {
             labels: create.labels.clone(),
             properties: create.properties.clone(),
         };
-        self.plan_creation(create.input.as_deref(), std::slice::from_ref(&node))
+        self.plan_creation(create.input.as_deref(), std::slice::from_ref(&node), None)
     }
 
     /// Plans a CREATE EDGE operator: a [`CreateOperator`] of one edge.
@@ -46,16 +48,21 @@ impl super::Planner {
             edge_type: create.edge_type.clone(),
             properties: create.properties.clone(),
         };
-        self.plan_creation(Some(&create.input), std::slice::from_ref(&edge))
+        self.plan_creation(Some(&create.input), std::slice::from_ref(&edge), None)
     }
 
-    /// Plans the [`CreateOp`] of an INSERT or CREATE clause: one
-    /// [`CreateOperator`] that creates every node and edge for each row.
+    /// Plans the [`CreateOp`] of an INSERT or CREATE clause, or of a MERGE's
+    /// create branch with its claim: one [`CreateOperator`] that creates
+    /// every node and edge for each row.
     pub(super) fn plan_create(
         &self,
         create: &CreateOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        self.plan_creation(create.input.as_deref(), &create.elements)
+        self.plan_creation(
+            create.input.as_deref(),
+            &create.elements,
+            create.claim.as_deref(),
+        )
     }
 
     /// Plans a [`CreateOperator`] that creates `elements` for each row of
@@ -66,22 +73,26 @@ impl super::Planner {
         &self,
         input: Option<&LogicalOperator>,
         elements: &[CreateElement],
+        claim: Option<&PatternClaim>,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let input = match input {
             Some(input) => Some(self.plan_write_input(input)?),
             None => None,
         };
-        self.build_creation(input, elements)
+        self.build_creation(input, elements, claim)
     }
 
     /// Builds the [`CreateOperator`] of `elements` over the planned `input`;
     /// a clause that starts the statement (no input) runs once, for a single
-    /// row.
+    /// row. With a MERGE's `claim`, the elements' properties read the input
+    /// columns only (a MERGE pattern's values come from the row before it),
+    /// and the operator claims the pattern before it creates.
     #[inline(never)]
     fn build_creation(
         &self,
         input: Option<(Box<dyn Operator>, Vec<String>)>,
         elements: &[CreateElement],
+        claim: Option<&PatternClaim>,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let has_input = input.is_some();
         let (input_op, mut columns) = input.unwrap_or_else(|| (single_row_input(), Vec::new()));
@@ -99,7 +110,19 @@ impl super::Planner {
         };
 
         let mut steps = Vec::with_capacity(elements.len());
-        for element in elements {
+        // For a claim only: the step each element became, by element (a
+        // plain CREATE fills nothing here).
+        let mut element_steps: Vec<(usize, usize)> = Vec::new();
+        // How many columns the properties read: the input's only for a
+        // MERGE's create branch, else the row so far.
+        let readable = |columns: &[String]| {
+            if claim.is_some() {
+                input_width
+            } else {
+                columns.len()
+            }
+        };
+        for (index, element) in elements.iter().enumerate() {
             match element {
                 CreateElement::Node {
                     variable,
@@ -114,9 +137,13 @@ impl super::Planner {
                     {
                         continue;
                     }
-                    let properties = self.row_property_sources(properties, &columns)?;
+                    let properties =
+                        self.row_property_sources(properties, &columns[..readable(&columns)])?;
                     positions.entry(variable.clone()).or_insert(columns.len());
                     columns.push(variable.clone());
+                    if claim.is_some() {
+                        element_steps.push((index, steps.len()));
+                    }
                     steps.push(CreateStep::node(labels.clone(), properties));
                 }
                 CreateElement::Edge {
@@ -128,7 +155,11 @@ impl super::Planner {
                 } => {
                     let from_column = column_of(&positions, from_variable, "Source")?;
                     let to_column = column_of(&positions, to_variable, "Target")?;
-                    let properties = self.row_property_sources(properties, &columns)?;
+                    let properties =
+                        self.row_property_sources(properties, &columns[..readable(&columns)])?;
+                    if claim.is_some() {
+                        element_steps.push((index, steps.len()));
+                    }
                     if let Some(variable) = variable {
                         positions.entry(variable.clone()).or_insert(columns.len());
                         columns.push(variable.clone());
@@ -150,9 +181,13 @@ impl super::Planner {
         if steps.is_empty() && has_input {
             return Ok((input_op, columns));
         }
-        let operator = CreateOperator::new(self.graph_writer()?, input_op, input_width, steps)
+        let mut operator = CreateOperator::new(self.graph_writer()?, input_op, input_width, steps)
             .with_search_store(Arc::clone(&self.store))
             .with_session_context(self.session_context.clone());
+        if let Some(claim) = claim {
+            let sources = claim_sources(claim, elements, &columns[..input_width], &element_steps)?;
+            operator = operator.with_claim(sources);
+        }
         Ok((Box::new(operator), columns))
     }
 
@@ -1757,8 +1792,6 @@ pub(super) fn read_first_after_a_write(
     input: &LogicalOperator,
 ) -> Box<dyn Operator> {
     if super::after_write::writes_pending(input) {
-        #[cfg(feature = "spill")]
-        let _ = grafeo_core::execution::capture_operator_memory(false);
         Box::new(EagerOperator::new(op))
     } else {
         op
@@ -1819,8 +1852,6 @@ fn read_before_writing(op: Box<dyn Operator>, input: &LogicalOperator) -> Box<dy
     if super::after_write::read_in_one_pass(input) {
         op
     } else {
-        #[cfg(feature = "spill")]
-        let _ = grafeo_core::execution::capture_operator_memory(false);
         Box::new(EagerOperator::new(op))
     }
 }
@@ -2001,4 +2032,83 @@ fn naming_the_argument(error: Error, argument: &str, procedure: &str) -> Error {
         Error::InvalidValue(message) => Error::InvalidValue(prefix(&message)),
         other => other,
     }
+}
+
+/// Where the elements of the MERGE pattern `claim` are for the operator that
+/// creates `elements` (see [`CreateOperator::with_claim`]), in path order: a
+/// node the input rows hold (one of `input_columns`) by its column, a new node
+/// by the step of the first element that creates it, a relationship by its
+/// element's step (`element_steps`, the step each element became) and its
+/// direction along the path: from the node before it, against it, or either
+/// way.
+///
+/// # Errors
+///
+/// An internal error when a node or relationship of the claim is not among
+/// the elements, or a relationship's endpoint is not the node before it.
+fn claim_sources(
+    claim: &PatternClaim,
+    elements: &[CreateElement],
+    input_columns: &[String],
+    element_steps: &[(usize, usize)],
+) -> Result<Vec<ClaimSource>> {
+    let internal = |what: String| Error::Internal(format!("a MERGE claim {what}"));
+    let node = |variable: &str| {
+        if let Some(column) = input_columns.iter().position(|name| name == variable) {
+            Ok(ClaimSource::Bound(column))
+        } else if let Some(&(_, step)) = element_steps.iter().find(|(index, _)| {
+            matches!(&elements[*index], CreateElement::Node { variable: name, .. } if name == variable)
+        }) {
+            Ok(ClaimSource::Node(step))
+        } else {
+            Err(internal(format!(
+                "names the node {variable}, which nothing holds"
+            )))
+        }
+    };
+    let Some(first) = claim.nodes.first() else {
+        return Err(internal("has no node".to_string()));
+    };
+    if claim.nodes.len() != claim.relationships.len() + 1 {
+        return Err(internal(format!(
+            "has {} nodes for {} relationships",
+            claim.nodes.len(),
+            claim.relationships.len()
+        )));
+    }
+    let mut sources = vec![node(first)?];
+    for (position, &(index, either)) in claim.relationships.iter().enumerate() {
+        let (
+            Some(CreateElement::Edge {
+                from_variable,
+                to_variable,
+                ..
+            }),
+            Some(&(_, step)),
+        ) = (
+            elements.get(index),
+            element_steps.iter().find(|(element, _)| *element == index),
+        )
+        else {
+            return Err(internal(format!(
+                "names element {index}, not a relationship"
+            )));
+        };
+        let left = &claim.nodes[position];
+        if from_variable != left && to_variable != left {
+            return Err(internal(format!(
+                "reads relationship {index} from {left}, which it does not touch"
+            )));
+        }
+        let direction = if either {
+            ClaimDirection::Either
+        } else if from_variable == left {
+            ClaimDirection::Out
+        } else {
+            ClaimDirection::In
+        };
+        sources.push(ClaimSource::Relationship { step, direction });
+        sources.push(node(&claim.nodes[position + 1])?);
+    }
+    Ok(sources)
 }

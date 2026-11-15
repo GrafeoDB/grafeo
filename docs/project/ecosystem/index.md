@@ -52,7 +52,7 @@ The GrafeoDB ecosystem extends beyond the core database with AI/LLM integrations
 
     [:octicons-arrow-right-24: Learn more](grafeo-langchain.md)
 
--   :material-llama:{ .lg .middle } **grafeo-llamaindex**
+-   :material-book-search:{ .lg .middle } **grafeo-llamaindex**
 
     ---
 

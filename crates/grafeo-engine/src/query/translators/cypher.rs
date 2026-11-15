@@ -1883,6 +1883,21 @@ impl CypherTranslator {
             },
             None => ast::Pattern::Path(path),
         };
+        // What the create branch claims before it creates (see
+        // `claim_merge_pattern`): the nodes in path order, and each
+        // relationship with whether it matches either way.
+        let claim_nodes: Vec<String> = std::iter::once(&path.start)
+            .chain(path.chain.iter().map(|rel| &rel.target))
+            .filter_map(|node| node.variable.clone())
+            .collect();
+        let claim_relationships: Vec<(String, bool)> = path
+            .chain
+            .iter()
+            .filter_map(|rel| {
+                let either = rel.direction == ast::Direction::Undirected;
+                rel.variable.clone().map(|variable| (variable, either))
+            })
+            .collect();
         // An undirected relationship is matched either way and created from
         // left to right.
         let mut created = path.clone();
@@ -1965,6 +1980,7 @@ impl CypherTranslator {
             has_input,
             Some(&outer_names),
         )?;
+        let create = super::common::claim_merge_pattern(create, claim_nodes, &claim_relationships)?;
         Ok(LogicalOperator::Apply(ApplyOp {
             input: Box::new(input.unwrap_or(LogicalOperator::Empty)),
             subplan: Box::new(LogicalOperator::Otherwise(OtherwiseOp {
@@ -2936,6 +2952,7 @@ impl CypherTranslator {
         Ok(LogicalOperator::Create(CreateOp {
             elements,
             input: input.map(Box::new),
+            claim: None,
         }))
     }
 
@@ -3040,6 +3057,7 @@ impl CypherTranslator {
         let root = LogicalOperator::Create(CreateOp {
             elements,
             input: None,
+            claim: None,
         });
         Ok(LogicalPlan::new(no_result(root)))
     }

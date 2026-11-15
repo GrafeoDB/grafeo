@@ -1358,6 +1358,7 @@ mod tests {
         assert_eq!(missing_feature(&["grafeo".into(), "no_such".into()]), None);
     }
 
+    #[cfg(feature = "algos")]
     #[test]
     fn test_registry_has_all_algorithms() {
         let registry = BuiltinProcedures::new();
@@ -1369,6 +1370,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "algos")]
     #[test]
     fn test_resolve_with_namespace() {
         let registry = BuiltinProcedures::new();
@@ -1376,6 +1378,7 @@ mod tests {
         assert!(registry.get(&name).is_some());
     }
 
+    #[cfg(feature = "algos")]
     #[test]
     fn test_resolve_without_namespace() {
         let registry = BuiltinProcedures::new();
@@ -1499,6 +1502,7 @@ mod tests {
         assert!(error.to_string().contains("'projection'"), "{error}");
     }
 
+    #[cfg(feature = "algos")]
     #[test]
     fn test_adapter_forwards_metadata() {
         let algo: Arc<dyn GraphAlgorithm> = Arc::new(PageRankAlgorithm);
@@ -1573,6 +1577,7 @@ mod tests {
     // here silently breaks RETURN / YIELD lists.
     // ---------------------------------------------------------------
 
+    #[cfg(feature = "algos")]
     #[test]
     fn canonical_output_columns_for_shortest_path_algorithms() {
         let dijkstra: Arc<dyn GraphAlgorithm> = Arc::new(DijkstraAlgorithm);
@@ -1594,6 +1599,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "algos")]
     #[test]
     fn canonical_output_columns_for_community_algorithms() {
         let louvain: Arc<dyn GraphAlgorithm> = Arc::new(LouvainAlgorithm);
@@ -1609,6 +1615,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "algos")]
     #[test]
     fn canonical_output_columns_for_mst_algorithms() {
         let kruskal: Arc<dyn GraphAlgorithm> = Arc::new(KruskalAlgorithm);
@@ -1623,6 +1630,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "algos")]
     #[test]
     fn canonical_output_columns_for_structural_algorithms() {
         let ap: Arc<dyn GraphAlgorithm> = Arc::new(ArticulationPointsAlgorithm);
@@ -1646,7 +1654,9 @@ mod tests {
 
     /// A stand-in GraphAlgorithm whose name is not in the canonical list,
     /// used to verify the fallback branch.
+    #[cfg(feature = "algos")]
     struct UnknownAlgo;
+    #[cfg(feature = "algos")]
     impl GraphAlgorithm for UnknownAlgo {
         fn name(&self) -> &str {
             "totally_new_algorithm"
@@ -1667,6 +1677,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "algos")]
     #[test]
     fn canonical_output_columns_falls_back_to_node_id_value() {
         let unknown: Arc<dyn GraphAlgorithm> = Arc::new(UnknownAlgo);
@@ -1808,6 +1819,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "algos")]
     #[test]
     fn procedures_result_parameter_description_distinguishes_required_and_default() {
         let registry = BuiltinProcedures::new();
@@ -2021,6 +2033,7 @@ mod tests {
     /// Every graph algorithm, called in each shape its arguments give, names
     /// as many columns as its rows hold, so a `YIELD` of a listed column
     /// reads that column and a call without `YIELD` names every value.
+    #[cfg(feature = "algos")]
     #[test]
     fn declared_columns_match_the_rows_of_every_argument_shape() {
         // A small DAG with weights, capacities and costs: a -> b -> c, a -> c

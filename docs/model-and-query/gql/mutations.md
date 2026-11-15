@@ -227,6 +227,8 @@ ON MATCH SET p.lastSeen = timestamp()
 When the pattern matches more than one existing node or relationship, `MERGE` binds each of them, one row per
 match, and `ON MATCH` and a later `SET` apply to all of them.
 
+Two transactions that MERGE the same pattern do not both create it: the second fails with the retryable `GRAFEO-T001`, so retry the statement or the transaction, and the retry matches. `INSERT` and `CREATE` of the same node still add one each time (see [MERGE and concurrent transactions](../../operate/transactions.md#merge-and-concurrent-transactions)).
+
 ## LOAD DATA (Multi-Format Import)
 
 Import data from external files directly in GQL:

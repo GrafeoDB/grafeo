@@ -291,7 +291,10 @@ fn after_a_commit_that_does_not_complete_sparql_updates_fail_with_its_code() {
     }
     assert!(db.rdf_store().is_empty(), "no triple was added");
     assert_eq!(
-        db.rdf_store().graph_names(),
+        db.rdf_store()
+            .graph_names(&grafeo_core::graph::rdf::RdfView::latest(
+                grafeo_core::graph::rdf::LatestUse::Test
+            )),
         ["http://ex.org/paris".to_string()],
         "no graph was created or dropped"
     );

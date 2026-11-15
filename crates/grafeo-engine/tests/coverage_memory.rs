@@ -9,16 +9,35 @@
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
+/// A new database reports what it holds: its total is the sum of its parts, its plan caches
+/// hold nothing (they allocate at their first plan) under a bound in force, and no version chain
+/// has grown. The total may be 0: the report counts what is held, not room reserved.
 #[test]
 fn test_memory_usage_empty_database() {
     let db = GrafeoDB::new_in_memory();
     let usage = db.memory_usage();
-    // Empty database still has structural overhead
-    assert!(
-        usage.total_bytes > 0,
-        "total should include structural overhead"
+    assert_eq!(
+        usage.total_bytes,
+        usage.store.total_bytes
+            + usage.indexes.total_bytes
+            + usage.mvcc.total_bytes
+            + usage.caches.total_bytes
+            + usage.string_pool.total_bytes
+            + usage.rdf.total_bytes
+            + usage.cdc.total_bytes
+            + usage
+                .buffer_manager
+                .execution_buffers_bytes
+                .saturating_sub(usage.cdc.granted_bytes)
+            + usage.buffer_manager.spill_staging_bytes,
+        "the total is the sum of the parts"
     );
-    // No nodes or edges, but store has allocated maps
+    assert_eq!(usage.caches.total_bytes, 0, "no plan cached yet");
+    assert_eq!(usage.caches.cached_plan_count, 0);
+    assert!(
+        usage.caches.plan_cache_limit_bytes > 0,
+        "the default bound is in force"
+    );
     assert_eq!(usage.mvcc.max_chain_depth, 0);
 }
 

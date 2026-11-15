@@ -187,6 +187,133 @@ impl std::fmt::Display for KeyClaim {
     }
 }
 
+/// How a conflict message names a key or MERGE pattern claim: `on key ...`,
+/// `on MERGE ...`.
+enum ClaimName<'a> {
+    Key(&'a KeyClaim),
+    Pattern(&'a dyn std::fmt::Display),
+}
+
+impl std::fmt::Display for ClaimName<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Key(key) => write!(f, "on key {key}"),
+            Self::Pattern(pattern) => write!(f, "on MERGE {pattern}"),
+        }
+    }
+}
+
+/// How a conflict message names the holder that kept a key or MERGE pattern
+/// claim (see [`TransactionManager::record_key`]).
+fn holder_kind(committing: bool) -> &'static str {
+    if committing {
+        "is committing"
+    } else {
+        "began first"
+    }
+}
+
+/// The fingerprints of the MERGE patterns a transaction created (see
+/// [`TransactionManager::record_pattern`]): the first few inline and the
+/// rest in a set, so a statement that claims one or two, as an auto-commit
+/// MERGE does, allocates nothing for them.
+#[derive(Debug, Default)]
+pub(crate) struct PatternSet {
+    /// The first fingerprints, `inline[..len]`.
+    inline: [u64; PatternSet::INLINE],
+    len: usize,
+    /// The fingerprints past the first `INLINE`, boxed: most transactions
+    /// claim fewer, and every one carries the set.
+    spilled: Option<Box<FingerprintSet>>,
+}
+
+/// A set of fingerprints, which are hashes already: the set takes each as
+/// its own hash.
+type FingerprintSet = hashbrown::HashSet<u64, std::hash::BuildHasherDefault<FingerprintHasher>>;
+
+/// The hasher of a [`FingerprintSet`]: a fingerprint is its own hash.
+#[derive(Default)]
+struct FingerprintHasher(u64);
+
+impl std::hash::Hasher for FingerprintHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        // Only `write_u64` is called for a `u64` key; any other input is
+        // folded in, so the hasher stays correct for it.
+        for byte in bytes {
+            self.0 = self.0.rotate_left(8) ^ u64::from(*byte);
+        }
+    }
+
+    fn write_u64(&mut self, fingerprint: u64) {
+        self.0 = fingerprint;
+    }
+}
+
+impl PatternSet {
+    /// How many fingerprints are kept inline.
+    const INLINE: usize = 4;
+
+    /// Whether the set holds `fingerprint`.
+    fn contains(&self, fingerprint: u64) -> bool {
+        self.inline[..self.len].contains(&fingerprint)
+            || self
+                .spilled
+                .as_ref()
+                .is_some_and(|spilled| spilled.contains(&fingerprint))
+    }
+
+    /// Adds `fingerprint`; whether it was new.
+    fn insert(&mut self, fingerprint: u64) -> bool {
+        if self.contains(fingerprint) {
+            return false;
+        }
+        if self.len < Self::INLINE {
+            self.inline[self.len] = fingerprint;
+            self.len += 1;
+        } else {
+            self.spilled
+                .get_or_insert_with(Box::default)
+                .insert(fingerprint);
+        }
+        true
+    }
+
+    /// Removes `fingerprint`.
+    fn remove(&mut self, fingerprint: u64) {
+        if let Some(index) = self.inline[..self.len]
+            .iter()
+            .position(|held| *held == fingerprint)
+        {
+            self.inline[index] = self.inline[self.len - 1];
+            self.len -= 1;
+        } else if let Some(spilled) = &mut self.spilled {
+            spilled.remove(&fingerprint);
+        }
+    }
+
+    /// How many fingerprints the set holds.
+    fn len(&self) -> usize {
+        self.len + self.spilled.as_ref().map_or(0, |spilled| spilled.len())
+    }
+
+    /// Whether the set holds none.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The fingerprints, in no order.
+    fn iter(&self) -> impl Iterator<Item = u64> + '_ {
+        self.inline[..self.len]
+            .iter()
+            .chain(self.spilled.iter().flat_map(|spilled| spilled.iter()))
+            .copied()
+    }
+}
+
 /// Information about an active transaction.
 pub struct TransactionInfo {
     /// Transaction state.
@@ -209,11 +336,28 @@ pub struct TransactionInfo {
     /// The values the transaction wrote under UNIQUE, PRIMARY KEY and NODE
     /// KEY constraints (see [`TransactionManager::record_key`]).
     pub(crate) key_set: FxHashSet<KeyClaim>,
+    /// The fingerprints of the MERGE patterns the transaction created (see
+    /// [`TransactionManager::record_pattern`]).
+    pub(crate) pattern_set: PatternSet,
+    /// The older transaction that took a key or MERGE pattern claim from
+    /// this one, when one did, and the claim it took (`on key ...`, `on
+    /// MERGE ...`): oldest claim wins (see [`TransactionManager::record_key`]).
+    /// The transaction's key and pattern claims no longer count, and it fails
+    /// at its next claim and at commit, naming the claim; a rollback to a
+    /// savepoint keeps the mark.
+    doomed_by: Option<(TransactionId, String)>,
     /// What the transaction changed, while it is open or committing: a
     /// checkpoint reads the committed state of what open transactions
     /// changed from it (see [`TransactionManager::open_change_sets`]).
     /// Dropped once the transaction is committed or aborted.
     pub(crate) changes: Option<Arc<TransactionChanges>>,
+    /// Its RDF writes from the start of its commit (the net of each triple
+    /// it wrote, per graph), for the conflict checks of the commits after
+    /// it: read without its change set, whose lock its commit holds while it
+    /// applies them. Dropped at its publish when no transaction is open that
+    /// began before it.
+    #[cfg(feature = "triple-store")]
+    rdf_writes: Option<KeptRdfWrites>,
     /// Whether this is a private transaction (a direct call, see
     /// [`TransactionManager::begin_private`]): nobody asks for its state, so
     /// it leaves the manager as soon as no other transaction can conflict
@@ -234,6 +378,7 @@ enum ClaimUndo {
     Delete(GraphEntity),
     Endpoint(GraphEntity),
     Key(KeyClaim),
+    Pattern(u64),
 }
 
 impl TransactionInfo {
@@ -253,8 +398,35 @@ impl TransactionInfo {
             delete_set: FxHashSet::default(),
             endpoint_set: FxHashSet::default(),
             key_set: FxHashSet::default(),
+            pattern_set: PatternSet::default(),
+            doomed_by: None,
             changes: Some(changes),
+            #[cfg(feature = "triple-store")]
+            rdf_writes: None,
             private,
+            claim_undo: None,
+        }
+    }
+
+    /// A committed writer that was no transaction (a bulk RDF load), kept
+    /// for the conflict checks of the transactions open across it: its RDF
+    /// `writes` at `epoch`, nothing else.
+    #[cfg(feature = "triple-store")]
+    fn committed_writer(epoch: EpochId, writes: KeptRdfWrites) -> Self {
+        Self {
+            state: TransactionState::Committed,
+            isolation_level: IsolationLevel::default(),
+            start_epoch: epoch,
+            write_set: FxHashSet::default(),
+            read_set: FxHashSet::default(),
+            delete_set: FxHashSet::default(),
+            endpoint_set: FxHashSet::default(),
+            key_set: FxHashSet::default(),
+            pattern_set: PatternSet::default(),
+            doomed_by: None,
+            changes: None,
+            rdf_writes: Some(writes),
+            private: false,
             claim_undo: None,
         }
     }
@@ -276,6 +448,66 @@ impl TransactionInfo {
             )),
             _ => None,
         }
+    }
+
+    /// The conflict of `ours`, the RDF writes of a transaction that commits
+    /// now, with this transaction's, which committed after it began: read
+    /// from the writes its commit's start took out (`rdf_writes`), never
+    /// from its change set.
+    #[cfg(feature = "triple-store")]
+    fn rdf_conflict(&self, ours: &TransactionChanges) -> Option<Error> {
+        self.rdf_writes
+            .as_ref()
+            .and_then(|theirs| ours.rdf_conflict_with(&theirs.writes))
+    }
+}
+
+/// The RDF writes a committed transaction (or a load) keeps for the
+/// conflict checks of the transactions that began before it: in the memory
+/// report while kept (`TransactionManager::kept_rdf_writes_bytes`), and
+/// counted out when dropped.
+#[cfg(feature = "triple-store")]
+#[derive(Debug)]
+struct KeptRdfWrites {
+    writes: Box<super::rdf::PendingTriples>,
+    /// Their heap bytes, measured before they were kept.
+    bytes: usize,
+    /// The manager's count of every kept write set's bytes.
+    counted: Arc<std::sync::atomic::AtomicUsize>,
+    /// Their grant from the database's buffer manager, forced (the commit
+    /// holds them already), given back when they drop.
+    _grant: Option<grafeo_common::memory::buffer::MemoryGrant>,
+}
+
+#[cfg(feature = "triple-store")]
+impl KeptRdfWrites {
+    /// Keeps `writes`, of `bytes` heap bytes, counted in `counted` and
+    /// granted by `memory`.
+    fn new(
+        writes: super::rdf::PendingTriples,
+        bytes: usize,
+        counted: &Arc<std::sync::atomic::AtomicUsize>,
+        memory: Option<Arc<grafeo_common::memory::buffer::BufferManager>>,
+    ) -> Self {
+        counted.fetch_add(bytes, Ordering::Relaxed);
+        Self {
+            writes: Box::new(writes),
+            bytes,
+            counted: Arc::clone(counted),
+            _grant: memory.map(|memory| {
+                memory.reserve_forced(
+                    bytes,
+                    grafeo_common::memory::buffer::MemoryRegion::GraphStorage,
+                )
+            }),
+        }
+    }
+}
+
+#[cfg(feature = "triple-store")]
+impl Drop for KeptRdfWrites {
+    fn drop(&mut self) {
+        self.counted.fetch_sub(self.bytes, Ordering::Relaxed);
     }
 }
 
@@ -433,6 +665,10 @@ pub struct TransactionManager {
     /// manager (the vector consumer's collect horizon), and a strong handle
     /// would keep both, and the spill directory, past the database.
     memory: std::sync::OnceLock<std::sync::Weak<grafeo_common::memory::buffer::BufferManager>>,
+    /// The heap bytes of the RDF writes committed transactions keep for the
+    /// conflict checks of older ones (see `KeptRdfWrites`).
+    #[cfg(feature = "triple-store")]
+    kept_rdf_bytes: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// The most emptied change sets the manager keeps for new transactions.
@@ -450,9 +686,28 @@ const SPARE_CHANGE_SETS: usize = 16;
 #[derive(Debug, Default)]
 struct ReadPins {
     epochs: Mutex<VecDeque<(u64, usize)>>,
+    /// What runs once a reader ends, its pin or its transaction (see
+    /// [`TransactionManager::on_reader_end`]), with no lock held.
+    reader_end: std::sync::OnceLock<ReaderEnd>,
+}
+
+/// The work a reader's end may let go (see `ReadPins::reader_end`).
+struct ReaderEnd(Box<dyn Fn() + Send + Sync>);
+
+impl std::fmt::Debug for ReaderEnd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ReaderEnd")
+    }
 }
 
 impl ReadPins {
+    /// Runs the reader-end work, if any is set: called with no lock held.
+    fn reader_ended(&self) {
+        if let Some(ReaderEnd(work)) = self.reader_end.get() {
+            work();
+        }
+    }
+
     /// Counts a reader at the published epoch, read while the lock is held,
     /// and returns that epoch: the read horizon reads the published epoch
     /// under the same lock, so it never passes a reader it has not counted.
@@ -541,6 +796,7 @@ impl std::fmt::Debug for ReadPin {
 impl Drop for ReadPin {
     fn drop(&mut self) {
         self.pins.release(self.epoch);
+        self.pins.reader_ended();
     }
 }
 
@@ -804,11 +1060,22 @@ impl Publish<'_> {
             drop(turn);
             return Err(error);
         }
+        // Writes kept for nobody, dropped once the lock is released.
+        #[cfg(feature = "triple-store")]
+        let mut released: Option<KeptRdfWrites> = None;
         {
             let mut transactions = manager.transactions.write();
             if let Some(info) = transactions.get_mut(&self.transaction_id) {
                 info.state = TransactionState::Committed;
                 info.claim_undo = None;
+                // Its RDF writes serve the commits of the transactions still
+                // open, which began before this publish. Counted under this
+                // lock (see `register`): with no other, none begins below the
+                // epoch, and they serve no check.
+                #[cfg(feature = "triple-store")]
+                if manager.active_count.load(Ordering::Acquire) <= 1 {
+                    released = info.rdf_writes.take();
+                }
                 // Stamped: what it changed is committed state now.
                 info.changes = None;
                 // It reads no more: its snapshot holds the horizon no more.
@@ -852,6 +1119,11 @@ impl Publish<'_> {
         if self.changed {
             manager.run_first_commit_hook();
         }
+        // After every lock: the writes kept for nobody go, and what older
+        // readers needed may go too.
+        #[cfg(feature = "triple-store")]
+        drop(released);
+        manager.reads.reader_ended();
         Ok(())
     }
 }
@@ -966,7 +1238,85 @@ impl TransactionManager {
             history: History::default(),
             spare_changes: Mutex::new(Vec::new()),
             memory: std::sync::OnceLock::new(),
+            #[cfg(feature = "triple-store")]
+            kept_rdf_bytes: Arc::default(),
         }
+    }
+
+    /// Sets the work that runs once a reader ends (a read pin drops, a
+    /// transaction aborts or publishes), with no lock of the manager held:
+    /// what was kept for older readers may go then. Set once; later calls
+    /// keep the first.
+    #[cfg(feature = "triple-store")]
+    pub(crate) fn on_reader_end(&self, work: impl Fn() + Send + Sync + 'static) {
+        let _ = self.reads.reader_end.set(ReaderEnd(Box::new(work)));
+    }
+
+    /// The heap bytes of the RDF writes kept for the conflict checks of
+    /// transactions that began before their commits.
+    #[cfg(feature = "triple-store")]
+    #[must_use]
+    pub(crate) fn kept_rdf_writes_bytes(&self) -> usize {
+        self.kept_rdf_bytes.load(Ordering::Relaxed)
+    }
+
+    /// The count behind [`kept_rdf_writes_bytes`](Self::kept_rdf_writes_bytes),
+    /// for a check at a reader's end that needs no handle on the manager.
+    #[cfg(feature = "triple-store")]
+    #[must_use]
+    pub(crate) fn kept_rdf_writes_counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        Arc::clone(&self.kept_rdf_bytes)
+    }
+
+    /// Lets go of the RDF writes no open transaction's commit is checked
+    /// against any more: those of commits before every open transaction
+    /// began. One atomic load when none is kept; what goes is dropped after
+    /// the lock.
+    #[cfg(feature = "triple-store")]
+    pub(crate) fn release_kept_rdf_writes(&self) {
+        if self.kept_rdf_bytes.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        // The commits whose writes no open transaction is checked against:
+        // found under the read side, so a reader's end while an older
+        // transaction stays open takes no write lock.
+        let releasable = |transactions: &FxHashMap<TransactionId, TransactionInfo>,
+                          committed: &FxHashMap<TransactionId, EpochId>| {
+            let oldest_open = transactions
+                .values()
+                .filter(|info| {
+                    matches!(
+                        info.state,
+                        TransactionState::Active | TransactionState::Committing
+                    )
+                })
+                .map(|info| info.start_epoch)
+                .min();
+            transactions
+                .iter()
+                .filter(|(id, info)| {
+                    info.state == TransactionState::Committed
+                        && info.rdf_writes.is_some()
+                        && oldest_open.is_none_or(|oldest| {
+                            committed.get(*id).is_some_and(|epoch| *epoch < oldest)
+                        })
+                })
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>()
+        };
+        if releasable(&self.transactions.read(), &self.committed_epochs.read()).is_empty() {
+            return;
+        }
+        let released: Vec<KeptRdfWrites> = {
+            let mut transactions = self.transactions.write();
+            let committed = self.committed_epochs.read();
+            // Again under the write side: a transaction may have begun since.
+            releasable(&transactions, &committed)
+                .into_iter()
+                .filter_map(|id| transactions.get_mut(&id)?.rdf_writes.take())
+                .collect()
+        };
+        drop(released);
     }
 
     /// Gives the change sets made from now on their grants from `manager`
@@ -1174,6 +1524,7 @@ impl TransactionManager {
                     info.state,
                     TransactionState::Active | TransactionState::Committing
                 )
+                && info.doomed_by.is_none()
                 && info.key_set.contains(key)
         });
         if claimed {
@@ -1234,6 +1585,68 @@ impl TransactionManager {
             .read()
             .get(&transaction_id)
             .map(|info| info.isolation_level)
+    }
+
+    /// Fails when `transaction_id` was doomed (see
+    /// [`record_key`](Self::record_key)): it lost a key or MERGE pattern
+    /// claim to an older transaction, so it can claim nothing more and
+    /// cannot commit.
+    fn refuse_doomed(info: &TransactionInfo, transaction_id: TransactionId) -> Result<()> {
+        match &info.doomed_by {
+            Some((older, lost)) => Err(Error::Transaction(TransactionError::WriteConflict(
+                format!(
+                    "{lost}: transaction {transaction_id} lost this claim to transaction {older}, \
+                     which began first; retry the transaction"
+                ),
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Settles a key or MERGE pattern claim of `requester` against the other
+    /// open transactions that `holds` (oldest claim wins, without waiting):
+    /// a holder that is committing, or that began before the requester,
+    /// keeps the claim, and the requester fails; every younger holder that
+    /// is still active is doomed, and the requester takes the claim. A
+    /// doomed holder's claims do not count, and a doomed one keeps `claim`
+    /// (`on key ...`, formatted only when one is doomed) for its error.
+    /// Returns the holder that kept the claim and whether it was committing;
+    /// fails first when the requester itself was doomed, which then dooms
+    /// nobody.
+    fn settle_claim(
+        txns: &mut FxHashMap<TransactionId, TransactionInfo>,
+        requester: TransactionId,
+        claim: &dyn std::fmt::Display,
+        holds: impl Fn(&TransactionInfo) -> bool,
+    ) -> Result<std::result::Result<(), (TransactionId, bool)>> {
+        let mut younger = Vec::new();
+        for (other, info) in txns.iter() {
+            if *other == requester {
+                Self::refuse_doomed(info, requester)?;
+                continue;
+            }
+            let open = matches!(
+                info.state,
+                TransactionState::Active | TransactionState::Committing
+            );
+            if !open || info.doomed_by.is_some() || !holds(info) {
+                continue;
+            }
+            let committing = info.state == TransactionState::Committing;
+            if committing || *other < requester {
+                return Ok(Err((*other, committing)));
+            }
+            younger.push(*other);
+        }
+        if !younger.is_empty() {
+            let lost = claim.to_string();
+            for other in younger {
+                if let Some(info) = txns.get_mut(&other) {
+                    info.doomed_by = Some((requester, lost.clone()));
+                }
+            }
+        }
+        Ok(Ok(()))
     }
 
     /// Records a write operation for the transaction.
@@ -1312,12 +1725,14 @@ impl TransactionManager {
         // progress still holds its writes.
         if self.active_count.load(Ordering::Relaxed) > 1 {
             for (other_tx, other_info) in txns.iter() {
-                if *other_tx == transaction_id
-                    || !matches!(
-                        other_info.state,
-                        TransactionState::Active | TransactionState::Committing
-                    )
-                {
+                if *other_tx == transaction_id {
+                    Self::refuse_doomed(other_info, transaction_id)?;
+                    continue;
+                }
+                if !matches!(
+                    other_info.state,
+                    TransactionState::Active | TransactionState::Committing
+                ) {
                     continue;
                 }
                 if let Some(conflict) = entities
@@ -1343,6 +1758,7 @@ impl TransactionManager {
                 "Transaction is not active".to_string(),
             )));
         }
+        Self::refuse_doomed(info, transaction_id)?;
 
         for entity in entities {
             match claim {
@@ -1397,23 +1813,19 @@ impl TransactionManager {
     pub fn record_key(&self, transaction_id: TransactionId, key: KeyClaim) -> Result<()> {
         self.check_no_incomplete_commit()?;
         let mut txns = self.transactions.write();
-        if self.active_count.load(Ordering::Relaxed) > 1 {
-            for (other_tx, other_info) in txns.iter() {
-                if *other_tx != transaction_id
-                    && matches!(
-                        other_info.state,
-                        TransactionState::Active | TransactionState::Committing
-                    )
-                    && other_info.key_set.contains(&key)
-                {
-                    return Err(Error::Transaction(TransactionError::WriteConflict(
-                        format!(
-                            "on key {key}: another open transaction writes the same \
-                         value of the key"
-                        ),
-                    )));
-                }
-            }
+        if self.active_count.load(Ordering::Relaxed) > 1
+            && let Err((holder, committing)) =
+                Self::settle_claim(&mut txns, transaction_id, &ClaimName::Key(&key), |info| {
+                    info.key_set.contains(&key)
+                })?
+        {
+            return Err(Error::Transaction(TransactionError::WriteConflict(
+                format!(
+                    "on key {key}: transaction {holder} ({}) writes the same value of the key; \
+                 retry the statement, or the transaction (transaction {transaction_id})",
+                    holder_kind(committing)
+                ),
+            )));
         }
         let info = txns.get_mut(&transaction_id).ok_or_else(|| {
             Error::Transaction(TransactionError::InvalidState(
@@ -1425,12 +1837,69 @@ impl TransactionManager {
                 "Transaction is not active".to_string(),
             )));
         }
+        Self::refuse_doomed(info, transaction_id)?;
         if let Some(undo) = &mut info.claim_undo {
             if info.key_set.insert(key.clone()) {
                 undo.push(ClaimUndo::Key(key));
             }
         } else {
             info.key_set.insert(key);
+        }
+        Ok(())
+    }
+
+    /// Claims `fingerprint`, a MERGE pattern the transaction creates (the
+    /// pattern `pattern` names, for the error), so two transactions that MERGE
+    /// one pattern do not both create it: when another open transaction
+    /// claimed it, this one fails, first writer wins, and at commit it fails
+    /// if one that claimed it committed after it began. A transaction may
+    /// claim one pattern any number of times. A MERGE calls this when nothing
+    /// matched, before it creates.
+    ///
+    /// # Errors
+    ///
+    /// Returns a write conflict if another open transaction claimed
+    /// `fingerprint`, and an error if the transaction is not active or an
+    /// earlier commit did not complete.
+    pub fn record_pattern(
+        &self,
+        transaction_id: TransactionId,
+        fingerprint: u64,
+        pattern: &dyn std::fmt::Display,
+    ) -> Result<()> {
+        self.check_no_incomplete_commit()?;
+        let mut txns = self.transactions.write();
+        if self.active_count.load(Ordering::Relaxed) > 1
+            && let Err((holder, committing)) = Self::settle_claim(
+                &mut txns,
+                transaction_id,
+                &ClaimName::Pattern(pattern),
+                |info| info.pattern_set.contains(fingerprint),
+            )?
+        {
+            return Err(Error::Transaction(TransactionError::WriteConflict(
+                format!(
+                    "on MERGE {pattern}: transaction {holder} ({}) creates the same pattern; \
+                 retry the statement, or the transaction (transaction {transaction_id})",
+                    holder_kind(committing)
+                ),
+            )));
+        }
+        let info = txns.get_mut(&transaction_id).ok_or_else(|| {
+            Error::Transaction(TransactionError::InvalidState(
+                "Transaction not found".to_string(),
+            ))
+        })?;
+        if info.state != TransactionState::Active {
+            return Err(Error::Transaction(TransactionError::InvalidState(
+                "Transaction is not active".to_string(),
+            )));
+        }
+        Self::refuse_doomed(info, transaction_id)?;
+        if info.pattern_set.insert(fingerprint)
+            && let Some(undo) = &mut info.claim_undo
+        {
+            undo.push(ClaimUndo::Pattern(fingerprint));
         }
         Ok(())
     }
@@ -1540,6 +2009,18 @@ impl TransactionManager {
         transaction_id: TransactionId,
         quiet: bool,
     ) -> Result<CommitGuard<'_>> {
+        // The bytes of the RDF writes the commit keeps, measured before any
+        // lock of the manager is taken (it walks them): only this thread
+        // changes them now.
+        #[cfg(feature = "triple-store")]
+        let kept_bytes = {
+            let changes = self
+                .transactions
+                .read()
+                .get(&transaction_id)
+                .and_then(|info| info.changes.clone());
+            changes.map_or(0, |changes| changes.rdf_writes_bytes())
+        };
         let commit_lock = self.commit_lock.lock();
         if quiet {
             self.wait_for_written_commits();
@@ -1567,6 +2048,7 @@ impl TransactionManager {
                 "Transaction is not active".to_string(),
             )));
         }
+        Self::refuse_doomed(ours, transaction_id)?;
         let our_start_epoch = ours.start_epoch;
 
         // Only a transaction that committed after ours began can conflict
@@ -1648,6 +2130,58 @@ impl TransactionManager {
             }
         }
 
+        // The same for MERGE patterns: a transaction that committed after our
+        // snapshot created a pattern a MERGE of ours created, which neither
+        // MERGE could see. Only fingerprints are kept, so the message cannot
+        // name the pattern.
+        if others_committed && !ours.pattern_set.is_empty() {
+            for (other_tx, commit_epoch) in committed.iter() {
+                if *other_tx != transaction_id
+                    && commit_epoch.as_u64() > our_start_epoch.as_u64()
+                    && let Some(other_info) = txns.get(other_tx)
+                {
+                    let (smaller, larger) =
+                        if ours.pattern_set.len() <= other_info.pattern_set.len() {
+                            (&ours.pattern_set, &other_info.pattern_set)
+                        } else {
+                            (&other_info.pattern_set, &ours.pattern_set)
+                        };
+                    if smaller
+                        .iter()
+                        .any(|fingerprint| larger.contains(fingerprint))
+                    {
+                        return Err(Error::Transaction(TransactionError::WriteConflict(
+                            "a transaction that committed after this one began created a \
+                             pattern a MERGE of this transaction creates; retry the transaction"
+                                .to_string(),
+                        )));
+                    }
+                }
+            }
+        }
+
+        // The same for RDF triples: a transaction that committed after our
+        // snapshot wrote a triple we wrote, and one of the two deletes it.
+        // Its writes are in its change set until its commit is published,
+        // which needs no commit lock (the next commit may check meanwhile),
+        // and kept with it after while a transaction that began before is
+        // open (see `Publish::complete_with`).
+        #[cfg(feature = "triple-store")]
+        if others_committed
+            && let Some(our_changes) = &ours.changes
+            && our_changes.has_pending_triples()
+        {
+            for (other_tx, commit_epoch) in committed.iter() {
+                if *other_tx != transaction_id
+                    && commit_epoch.as_u64() > our_start_epoch.as_u64()
+                    && let Some(other_info) = txns.get(other_tx)
+                    && let Some(conflict) = other_info.rdf_conflict(our_changes)
+                {
+                    return Err(conflict);
+                }
+            }
+        }
+
         // SSI validation for Serializable isolation level.
         // Check for read-write conflicts: if we read an entity that another
         // transaction (that committed after we started) wrote, we have a
@@ -1689,6 +2223,19 @@ impl TransactionManager {
         // dropped.
         if let Some(info) = txns.get_mut(&transaction_id) {
             info.state = TransactionState::Committing;
+            // Its RDF writes, for the checks of the commits after it, which
+            // then never wait on its change set while they hold this lock.
+            #[cfg(feature = "triple-store")]
+            if let Some(changes) = &info.changes
+                && changes.has_pending_triples()
+            {
+                info.rdf_writes = Some(KeptRdfWrites::new(
+                    changes.take_rdf_writes(),
+                    kept_bytes,
+                    &self.kept_rdf_bytes,
+                    self.memory_manager(),
+                ));
+            }
         }
         committed.insert(transaction_id, commit_epoch);
 
@@ -1866,6 +2413,8 @@ impl TransactionManager {
             Ok(()) => None,
         };
         self.abort_registered(transaction_id)?;
+        // After the lock: what was kept for this reader may go.
+        self.reads.reader_ended();
         undo_error.map_or(Ok(()), Err)
     }
 
@@ -1957,6 +2506,9 @@ impl TransactionManager {
                 Some(ClaimUndo::Key(key)) => {
                     info.key_set.remove(&key);
                 }
+                Some(ClaimUndo::Pattern(fingerprint)) => {
+                    info.pattern_set.remove(fingerprint);
+                }
                 None => break,
             }
         }
@@ -2040,6 +2592,69 @@ impl TransactionManager {
             .fetch_max(epoch.as_u64(), Ordering::SeqCst);
         self.published_epoch
             .fetch_max(epoch.as_u64(), Ordering::SeqCst);
+        self.wake_publish_waiters();
+    }
+
+    /// Publishes `epoch`, a bulk RDF load's, which the caller applied while
+    /// it holds commits off (`_commits`). While a transaction is open, the
+    /// load is first recorded as a committed writer whose RDF writes
+    /// `writes` gives (its net inserts), so the commit of a transaction open
+    /// across it checks against them as against a transaction's. Recorded
+    /// and published under the `transactions` lock, under which a
+    /// transaction begins: none begins between the check and the publish
+    /// and reads below the load unrecorded. The load itself conflicts with
+    /// nothing: it applied against the newest state at its own epoch.
+    #[cfg(feature = "triple-store")]
+    pub(crate) fn publish_load(
+        &self,
+        _commits: &CommitsHeld<'_>,
+        epoch: EpochId,
+        writes: impl FnOnce() -> super::rdf::PendingTriples,
+    ) {
+        // Built before the `transactions` lock while a transaction is open,
+        // which every begin and commit check takes: a load's run is walked
+        // whole. Commits are held, so only a begin can come between.
+        let measured = |writes: super::rdf::PendingTriples| {
+            let bytes = writes.heap_bytes();
+            (writes, bytes)
+        };
+        let mut writes = Some(writes);
+        let built = (self.active_count.load(Ordering::Acquire) > 0)
+            .then(|| writes.take().map(|writes| measured(writes())))
+            .flatten();
+        {
+            let mut transactions = self.transactions.write();
+            // Counted under this lock (see `register`): one that began since
+            // the read above is open across the load too, and its writes are
+            // built here then, a rare case.
+            if self.active_count.load(Ordering::Acquire) > 0 {
+                let (writes, bytes) = built
+                    .or_else(|| writes.take().map(|writes| measured(writes())))
+                    .unwrap_or_default();
+                let transaction_id =
+                    TransactionId::new(self.next_transaction_id.fetch_add(1, Ordering::Relaxed));
+                transactions.insert(
+                    transaction_id,
+                    TransactionInfo::committed_writer(
+                        epoch,
+                        KeptRdfWrites::new(
+                            writes,
+                            bytes,
+                            &self.kept_rdf_bytes,
+                            self.memory_manager(),
+                        ),
+                    ),
+                );
+                // Transactions, then committed epochs, as `gc` takes them.
+                self.committed_epochs.write().insert(transaction_id, epoch);
+            }
+            self.assigned_epoch
+                .fetch_max(epoch.as_u64(), Ordering::SeqCst);
+            self.published_epoch
+                .fetch_max(epoch.as_u64(), Ordering::SeqCst);
+        }
+        // After the `transactions` lock: a commit's publish takes the publish
+        // turn first, then that lock.
         self.wake_publish_waiters();
     }
 
@@ -2208,6 +2823,16 @@ impl TransactionManager {
         }
     }
 
+    /// After a snapshot arrived (an import, a restore): the history starts
+    /// at the published epoch, now, so a read before it is refused under
+    /// every retention setting (a snapshot carries no history). Taken under
+    /// the read pins' lock, so no read pins below the new floor meanwhile.
+    pub(crate) fn restart_history(&self) {
+        let _readers = self.reads.epochs.lock();
+        self.history
+            .restart(EpochId::new(self.published_epoch.load(Ordering::Acquire)));
+    }
+
     /// At the end of an open or a new database: a history that is on and
     /// holds no commit at or after the published epoch starts there, now,
     /// so a read at a time from now on finds its epoch.
@@ -2319,6 +2944,30 @@ impl Default for TransactionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pattern set answers as a set past its inline fingerprints: each
+    /// held once, removed from either part, and its length both parts.
+    #[test]
+    fn the_pattern_set_holds_each_fingerprint_once_inline_or_spilled() {
+        let mut set = PatternSet::default();
+        assert!(set.is_empty());
+        for fingerprint in 0..10 {
+            assert!(set.insert(fingerprint));
+            assert!(!set.insert(fingerprint), "{fingerprint} twice");
+        }
+        assert_eq!(set.len(), 10);
+        set.remove(1);
+        set.remove(8);
+        assert_eq!(set.len(), 8);
+        assert!(!set.contains(1) && !set.contains(8));
+        let mut held: Vec<u64> = set.iter().collect();
+        held.sort_unstable();
+        assert_eq!(held, [0, 2, 3, 4, 5, 6, 7, 9]);
+        // A freed inline place takes the next one.
+        assert!(set.insert(1));
+        assert!(set.contains(1));
+        assert_eq!(set.len(), 9);
+    }
 
     #[cfg(feature = "gql")]
     mod failed_storage_undo {

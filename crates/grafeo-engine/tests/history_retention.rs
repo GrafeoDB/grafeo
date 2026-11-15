@@ -890,3 +890,199 @@ fn transaction_history_never_reads_past_the_transaction_snapshot() {
     session.clear_viewing_epoch();
     session.rollback().unwrap();
 }
+
+/// A snapshot of three people, inserted one commit each into a database that
+/// keeps its history: the snapshot holds the state, none of the history.
+fn three_people_snapshot() -> Vec<u8> {
+    let source = keeping(HistoryRetention::Forever);
+    for name in ["Alix", "Gus", "Vincent"] {
+        insert(&source, name);
+    }
+    source.export_snapshot().unwrap()
+}
+
+/// A commit after a snapshot arrived: its epoch, the people a read at it
+/// counts, and a time after it.
+type Later = (EpochId, i64, Timestamp);
+
+/// Checks what `db` answers, which holds the three-people snapshot since the
+/// epoch `arrived`, and lists what is wrong in `failures` under `row`:
+/// - every read before `arrived` (a query at each epoch, a direct read at
+///   epoch 1) is refused with `GRAFEO-V001`, "history before epoch
+///   `arrived` is not retained";
+/// - a query at `before`, a time before the arrival, is refused (a database
+///   that keeps no history refuses every time);
+/// - a query at `arrived` counts the snapshot's three people;
+/// - each commit in `later` keeps its history, by epoch and by time.
+fn check_arrival(
+    db: &GrafeoDB,
+    row: &str,
+    arrived: EpochId,
+    before: Timestamp,
+    later: &[Later],
+    failures: &mut Vec<String>,
+) {
+    let floor = format!("history before epoch {} is not retained", arrived.as_u64());
+    let refused = |error: &grafeo_common::utils::error::Error| {
+        let text = error.to_string();
+        text.contains("GRAFEO-V001") && text.contains(&floor)
+    };
+    // Every epoch before the arrival: the source's, and for a restore over
+    // history the database's own.
+    for epoch in (1..arrived.as_u64()).map(EpochId::new) {
+        match db.execute_at_epoch(COUNT, epoch) {
+            Err(error) if refused(&error) => {}
+            other => failures.push(format!(
+                "{row}: a query at {epoch:?} gave {other:?}, not \"{floor}\""
+            )),
+        }
+    }
+    let early = EpochId::new(1);
+    match db.get_node_at_epoch(grafeo_common::types::NodeId::new(0), early) {
+        Err(error) if refused(&error) => {}
+        other => failures.push(format!(
+            "{row}: a direct read at {early:?} gave {other:?}, not \"{floor}\""
+        )),
+    }
+    if let Ok(result) = db.execute_as_of(COUNT, before) {
+        failures.push(format!(
+            "{row}: a query at a time before the arrival counted {}",
+            count(&result)
+        ));
+    }
+    let epochs = std::iter::once((arrived, 3)).chain(later.iter().map(|&(e, p, _)| (e, p)));
+    for (epoch, people) in epochs {
+        match db.execute_at_epoch(COUNT, epoch) {
+            Ok(result) if count(&result) == people => {}
+            other => failures.push(format!(
+                "{row}: a query at {epoch:?} gave {other:?}, not {people} people"
+            )),
+        }
+    }
+    for &(epoch, people, after) in later {
+        match db.execute_as_of(COUNT, after) {
+            Ok(result) if count(&result) == people => {}
+            other => failures.push(format!(
+                "{row}: a query at the time after {epoch:?} gave {other:?}, not {people} people"
+            )),
+        }
+    }
+}
+
+/// Two commits after a snapshot arrived, then a collect: the commits that a
+/// database keeping history must answer reads at.
+fn two_later_commits(db: &GrafeoDB) -> Vec<Later> {
+    let (beatrix, after_beatrix) = insert(db, "Beatrix");
+    let (hans, after_hans) = insert(db, "Hans");
+    db.gc();
+    vec![(beatrix, 4, after_beatrix), (hans, 5, after_hans)]
+}
+
+/// A time now, then a pause, so that what follows commits later.
+fn a_time_before() -> Timestamp {
+    let before = Timestamp::now();
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    before
+}
+
+/// Five commits of a database's own; the time after the last.
+fn five_own_commits(db: &GrafeoDB) -> Timestamp {
+    let mut before = Timestamp::now();
+    for name in ["Jules", "Mia", "Butch", "Django", "Shosanna"] {
+        (_, before) = insert(db, name);
+    }
+    before
+}
+
+/// A snapshot carries no history, so a database that holds one answers no
+/// read before the epoch it arrived at, with history retention on or off,
+/// and the commits after it keep their history as any other (see
+/// `check_arrival`). Every in-memory arrival: an import, a restore into a new
+/// database, and a restore over a database's own history, whose commit
+/// times name states the restore replaced. The failures are listed together,
+/// so one run shows each path that answers a read it cannot know.
+#[test]
+fn a_read_before_a_snapshot_arrived_is_refused() {
+    let bytes = three_people_snapshot();
+    let mut failures = Vec::new();
+    for retention in [
+        HistoryRetention::Off,
+        HistoryRetention::Forever,
+        HistoryRetention::Duration(std::time::Duration::from_secs(3600)),
+    ] {
+        let config = || Config::in_memory().with_history_retention(retention);
+        let imported = || {
+            let before = a_time_before();
+            let db = GrafeoDB::import_snapshot_with_config(&bytes, config()).unwrap();
+            (db, before)
+        };
+        let restored_into_new = || {
+            let db = GrafeoDB::with_config(config()).unwrap();
+            let before = a_time_before();
+            db.restore_snapshot(&bytes).unwrap();
+            (db, before)
+        };
+        let restored_over_history = || {
+            let db = GrafeoDB::with_config(config()).unwrap();
+            let before = five_own_commits(&db);
+            db.restore_snapshot(&bytes).unwrap();
+            (db, before)
+        };
+        let arrivals: [(&str, &dyn Fn() -> (GrafeoDB, Timestamp)); 3] = [
+            ("an import", &imported),
+            ("a restore into a new database", &restored_into_new),
+            ("a restore over five commits", &restored_over_history),
+        ];
+        for (arrival, arrive) in arrivals {
+            let row = format!("{arrival} with retention {retention:?}");
+            let (db, before) = arrive();
+            let arrived = db.current_epoch();
+            assert!(arrived.as_u64() > 1, "{row}: arrived at {arrived:?}");
+            assert_eq!(count(&db.execute(COUNT).unwrap()), 3, "{row}");
+            // Without history a collect moves the floor past the arrival, so
+            // only a database that keeps history answers the later commits.
+            let later = if retention == HistoryRetention::Off {
+                Vec::new()
+            } else {
+                two_later_commits(&db)
+            };
+            check_arrival(&db, &row, arrived, before, &later, &mut failures);
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// What a database file answers after a snapshot arrived stays so after a
+/// reopen, which reads the floor and the commit times from the checkpoint:
+/// a restore over the file's own history, reopened right after the restore
+/// and again after two later commits and the checkpoint of a close. (An
+/// import opens in memory only, and `save` copies the state, not the
+/// history.)
+#[cfg(feature = "grafeo-file")]
+#[test]
+fn a_read_before_a_snapshot_arrived_stays_refused_after_a_reopen() {
+    let bytes = three_people_snapshot();
+    let dir = tempfile::tempdir().unwrap();
+    let mut failures = Vec::new();
+
+    let path = dir.path().join("restored.grafeo");
+    let db = GrafeoDB::with_config(
+        Config::persistent(&path).with_history_retention(HistoryRetention::Forever),
+    )
+    .unwrap();
+    let before = five_own_commits(&db);
+    db.restore_snapshot(&bytes).unwrap();
+    let arrived = db.current_epoch();
+    assert!(arrived.as_u64() > 1, "arrived at {arrived:?}");
+    db.close().unwrap();
+    let db = GrafeoDB::open(&path).unwrap();
+    let row = "a restore over five commits, reopened";
+    check_arrival(&db, row, arrived, before, &[], &mut failures);
+    let later = two_later_commits(&db);
+    db.close().unwrap();
+    let db = GrafeoDB::open(&path).unwrap();
+    let row = "a restore over five commits, two commits later, reopened";
+    check_arrival(&db, row, arrived, before, &later, &mut failures);
+    db.close().unwrap();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

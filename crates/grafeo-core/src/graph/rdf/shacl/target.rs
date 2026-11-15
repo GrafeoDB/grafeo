@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use crate::graph::rdf::{RdfStore, Term, TriplePattern};
+use crate::graph::rdf::{GraphAt, Term, TriplePattern};
 
 use super::shape::{RDF, Shape, Target};
 
@@ -13,7 +13,7 @@ use super::shape::{RDF, Shape, Target};
 ///
 /// Multiple targets on a single shape produce the deduplicated union of all
 /// matching nodes.
-pub fn resolve_targets(shape: &Shape, data_graph: &RdfStore) -> Vec<Term> {
+pub fn resolve_targets(shape: &Shape, data_graph: GraphAt<'_>) -> Vec<Term> {
     let mut focus_nodes: HashSet<Term> = HashSet::new();
 
     for target in shape.targets() {
@@ -47,7 +47,7 @@ pub fn resolve_targets(shape: &Shape, data_graph: &RdfStore) -> Vec<Term> {
 }
 
 /// Finds all subjects that are `rdf:type` instances of the given class.
-fn resolve_class_target(class: &Term, data_graph: &RdfStore, out: &mut HashSet<Term>) {
+fn resolve_class_target(class: &Term, data_graph: GraphAt<'_>, out: &mut HashSet<Term>) {
     let rdf_type = Term::iri(RDF::TYPE);
     let pattern = TriplePattern {
         subject: None,
@@ -64,6 +64,10 @@ mod tests {
     use super::super::shape::{NodeShape, Severity};
     use super::*;
     use crate::graph::rdf::{RdfStore, Triple};
+
+    /// The view the tests read through.
+    static LATEST: crate::graph::rdf::RdfView =
+        crate::graph::rdf::RdfView::latest(crate::graph::rdf::LatestUse::Test);
 
     fn make_node_shape(id: &str, targets: Vec<Target>) -> Shape {
         Shape::Node(NodeShape {
@@ -120,7 +124,7 @@ mod tests {
             "http://ex.org/S",
             vec![Target::Class(Term::iri("http://ex.org/Person"))],
         );
-        let nodes = resolve_targets(&shape, &data);
+        let nodes = resolve_targets(&shape, data.at(&LATEST));
         assert_eq!(nodes.len(), 2);
     }
 
@@ -131,7 +135,7 @@ mod tests {
             "http://ex.org/S",
             vec![Target::Node(Term::iri("http://ex.org/alix"))],
         );
-        let nodes = resolve_targets(&shape, &data);
+        let nodes = resolve_targets(&shape, data.at(&LATEST));
         assert_eq!(nodes.len(), 1);
         assert!(nodes.contains(&Term::iri("http://ex.org/alix")));
     }
@@ -143,7 +147,7 @@ mod tests {
             "http://ex.org/S",
             vec![Target::SubjectsOf(Term::iri("http://ex.org/likes"))],
         );
-        let nodes = resolve_targets(&shape, &data);
+        let nodes = resolve_targets(&shape, data.at(&LATEST));
         assert_eq!(nodes.len(), 2); // alix and gus
     }
 
@@ -154,7 +158,7 @@ mod tests {
             "http://ex.org/S",
             vec![Target::ObjectsOf(Term::iri("http://ex.org/likes"))],
         );
-        let nodes = resolve_targets(&shape, &data);
+        let nodes = resolve_targets(&shape, data.at(&LATEST));
         assert_eq!(nodes.len(), 2); // amsterdam and berlin
     }
 
@@ -163,7 +167,7 @@ mod tests {
         let data = sample_data();
         // Shape IRI matches a class used in rdf:type, no explicit targets
         let shape = make_node_shape("http://ex.org/Person", vec![]);
-        let nodes = resolve_targets(&shape, &data);
+        let nodes = resolve_targets(&shape, data.at(&LATEST));
         assert_eq!(nodes.len(), 2); // alix and gus
     }
 
@@ -177,7 +181,7 @@ mod tests {
                 Target::Node(Term::iri("http://ex.org/amsterdam")),
             ],
         );
-        let nodes = resolve_targets(&shape, &data);
+        let nodes = resolve_targets(&shape, data.at(&LATEST));
         assert_eq!(nodes.len(), 3); // alix, gus, amsterdam
     }
 
@@ -188,7 +192,7 @@ mod tests {
             "http://ex.org/S",
             vec![Target::Class(Term::iri("http://ex.org/NonExistent"))],
         );
-        let nodes = resolve_targets(&shape, &data);
+        let nodes = resolve_targets(&shape, data.at(&LATEST));
         assert!(nodes.is_empty(), "{nodes:?}");
     }
 
@@ -208,7 +212,7 @@ mod tests {
             "http://ex.org/S",
             vec![Target::Class(Term::iri("http://ex.org/Person"))],
         );
-        let nodes = resolve_targets(&shape, &graph);
+        let nodes = resolve_targets(&shape, graph.at(&LATEST));
         assert_eq!(nodes.len(), 1);
     }
 }

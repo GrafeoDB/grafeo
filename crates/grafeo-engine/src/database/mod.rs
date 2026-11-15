@@ -45,8 +45,12 @@ mod graph_handle;
 mod stored_config;
 pub use direct::BatchEdge;
 pub use graph_handle::GraphHandle;
+#[cfg(feature = "hybrid-search")]
+pub use hybrid_search_options::HybridSearchOptions;
 #[cfg(feature = "gql")]
 pub use upsert::{EdgeUpsertOptions, UpsertSummary};
+#[cfg(feature = "hybrid-search")]
+mod hybrid_search_options;
 mod import;
 pub(crate) mod index;
 #[cfg(feature = "wal")]
@@ -577,6 +581,10 @@ impl GrafeoDB {
         // So do the RDF store's and the change sets'.
         #[cfg(feature = "triple-store")]
         rdf_store.attach_memory(Arc::clone(&buffer_manager));
+        // What it keeps for readers at an older snapshot goes when the last
+        // of them ends.
+        #[cfg(feature = "triple-store")]
+        Self::watch_rdf_snapshots(&rdf_store, &transaction_manager);
         transaction_manager.attach_memory(Arc::clone(&buffer_manager));
 
         // Create catalog early so WAL replay can restore schema definitions
@@ -969,14 +977,23 @@ impl GrafeoDB {
         #[cfg(feature = "wal")]
         let wal_flusher: Option<grafeo_storage::wal::AdaptiveFlusher> = None;
 
-        // Create query cache with default capacity (1000 queries)
-        let query_cache = Arc::new(QueryCache::default());
+        // The plan cache, bounded by the setting under the memory budget.
+        let query_cache = Arc::new(QueryCache::with_limit(
+            config
+                .plan_cache_limit()
+                .bytes_under(buffer_manager.hard_limit()),
+        ));
 
         // After all snapshot/WAL recovery, the database continues at the
         // highest epoch the file, its WAL or any graph reached, collected at
         // the collect horizon; the history goes on from here: a read at a
         // time from now on finds its epoch.
         Self::continue_epochs(&store, &transaction_manager);
+        // The counts the planner reads, as the open found them, anchor the
+        // plans; a large move of one from now on moves the planning
+        // generation.
+        store.attach_planning_generation(Arc::clone(query_cache.planning_generation()));
+        store.anchor_plan_statistics();
 
         #[cfg(feature = "cdc")]
         let cdc_enabled_val = config.cdc_enabled();
@@ -1230,6 +1247,10 @@ impl GrafeoDB {
         let rdf_store = Arc::new(RdfStore::new());
         #[cfg(feature = "triple-store")]
         rdf_store.attach_memory(Arc::clone(&buffer_manager));
+        // What it keeps for readers at an older snapshot goes when the last
+        // of them ends.
+        #[cfg(feature = "triple-store")]
+        Self::watch_rdf_snapshots(&rdf_store, &transaction_manager);
         #[cfg(feature = "cdc")]
         let cdc_log = Arc::new(crate::cdc::CdcLog::with_retention(
             config.cdc_retention().clone(),
@@ -1237,7 +1258,12 @@ impl GrafeoDB {
         #[cfg(feature = "cdc")]
         cdc_log.attach_memory(Arc::clone(&buffer_manager));
 
-        let query_cache = Arc::new(QueryCache::default());
+        // The plan cache, bounded by the setting under the memory budget.
+        let query_cache = Arc::new(QueryCache::with_limit(
+            config
+                .plan_cache_limit()
+                .bytes_under(buffer_manager.hard_limit()),
+        ));
 
         #[cfg(feature = "cdc")]
         let cdc_enabled_val = config.cdc_enabled();
@@ -1357,6 +1383,10 @@ impl GrafeoDB {
         let rdf_store = Arc::new(RdfStore::new());
         #[cfg(feature = "triple-store")]
         rdf_store.attach_memory(Arc::clone(&buffer_manager));
+        // What it keeps for readers at an older snapshot goes when the last
+        // of them ends.
+        #[cfg(feature = "triple-store")]
+        Self::watch_rdf_snapshots(&rdf_store, &transaction_manager);
         #[cfg(feature = "cdc")]
         let cdc_log = Arc::new(crate::cdc::CdcLog::with_retention(
             config.cdc_retention().clone(),
@@ -1364,7 +1394,12 @@ impl GrafeoDB {
         #[cfg(feature = "cdc")]
         cdc_log.attach_memory(Arc::clone(&buffer_manager));
 
-        let query_cache = Arc::new(QueryCache::default());
+        // The plan cache, bounded by the setting under the memory budget.
+        let query_cache = Arc::new(QueryCache::with_limit(
+            config
+                .plan_cache_limit()
+                .bytes_under(buffer_manager.hard_limit()),
+        ));
 
         #[cfg(feature = "cdc")]
         let cdc_enabled_val = config.cdc_enabled();
@@ -1486,6 +1521,42 @@ impl GrafeoDB {
     #[deprecated(since = "0.6.0", note = "use `compact()`, which this calls")]
     pub fn recompact(&mut self) -> Result<crate::admin::CompactReport> {
         self.compact()
+    }
+
+    /// Lets what `rdf_store` keeps for readers at an older snapshot go once
+    /// the last reader that needs it ends, without waiting for a commit:
+    /// at a reader's end (a read pin drops, a transaction aborts or
+    /// publishes), the RDF writes kept for older commits' conflict checks
+    /// and the overlay entries below the read horizon are released. Both are
+    /// one atomic load when nothing is kept.
+    #[cfg(feature = "triple-store")]
+    fn watch_rdf_snapshots(
+        rdf_store: &Arc<RdfStore>,
+        transaction_manager: &Arc<TransactionManager>,
+    ) {
+        // The manager holds this work, so it holds nothing that holds data:
+        // the store and the manager weakly, and two counts. A strong store
+        // would close a cycle (the store's buffer manager holds consumers
+        // that hold the manager) and keep the store, its dictionary and its
+        // overlay alive past the database (#712).
+        let store = Arc::downgrade(rdf_store);
+        let entries = rdf_store.overlay().len_counter();
+        let kept = transaction_manager.kept_rdf_writes_counter();
+        let manager = Arc::downgrade(transaction_manager);
+        transaction_manager.on_reader_end(move || {
+            // Every read outside a transaction ends here: two atomic loads
+            // when nothing is kept, no upgrade.
+            if kept.load(std::sync::atomic::Ordering::Relaxed) == 0
+                && entries.load(std::sync::atomic::Ordering::Acquire) == 0
+            {
+                return;
+            }
+            let (Some(store), Some(manager)) = (store.upgrade(), manager.upgrade()) else {
+                return;
+            };
+            manager.release_kept_rdf_writes();
+            crate::transaction::prune_rdf_overlay(&store, &manager);
+        });
     }
 
     /// Moves the root store, every named graph and the transaction manager
@@ -2509,41 +2580,6 @@ impl GrafeoDB {
         &self.config
     }
 
-    /// Creates a per-query `OperatorMemoryContext` for one statement: the
-    /// buffer manager, the open's spill account when the open has a spill
-    /// path, and the query memory limit the statement's operators are bounded
-    /// by (patch 9, #751).
-    #[cfg(feature = "spill")]
-    pub(crate) fn operator_memory_context(
-        &self,
-    ) -> Option<grafeo_core::execution::OperatorMemoryContext> {
-        static NEXT_QUERY_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let bm = &self.buffer_manager;
-        let query_limit = self
-            .config
-            .query_memory_limit()
-            .map_or_else(|| bm.budget(), |query| query.min(bm.budget()));
-        let spill_manager = bm.config().spill_path.as_ref().and_then(|spill_path| {
-            let query_id = NEXT_QUERY_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let mut manager = grafeo_core::execution::SpillManager::new(
-                spill_path.join(format!("query_{query_id}")),
-            )
-            .ok()?
-            .with_owned_dir();
-            if let Some(account) = &self.spill_account {
-                manager = manager.with_account(std::sync::Arc::clone(account));
-            }
-            Some(std::sync::Arc::new(manager))
-        });
-        Some(
-            grafeo_core::execution::OperatorMemoryContext::new(
-                std::sync::Arc::clone(bm),
-                spill_manager,
-            )
-            .with_query_limit(query_limit),
-        )
-    }
-
     /// The deadline of a statement that starts now under the database's query timeout
     /// ([`Config::query_timeout`]), as a query reckons it; `None` without a timeout. A binding's
     /// algorithm call runs under it, so it stops as `execute` past its timeout does.
@@ -2703,11 +2739,15 @@ impl GrafeoDB {
         }
         let held = self.hold_for_standalone(true)?;
         // Checked under the hold, as every standalone change.
-        if self.lpg_store()?.graph(name).is_none() {
+        let Some(graph) = self.lpg_store()?.graph(name) else {
             return Ok(false);
-        }
+        };
         standalone::refuse_drop_with_open_changes(&self.transaction_manager, &held, name)?;
         let mut change = crate::transaction::StandaloneChange::new();
+        // The names only this graph has an index of go with it (#723).
+        self.drop_names_left_without_index(&mut change, Some(name), |target| {
+            index::store_has(&graph, target)
+        })?;
         change.push(grafeo_common::change::StandaloneOp::DropGraph {
             name: name.to_string(),
         });
@@ -2728,8 +2768,7 @@ impl GrafeoDB {
     pub fn list_graphs(&self) -> Vec<String> {
         let mut names = self
             .root_store()
-            .map(|store| store.graph_names())
-            .unwrap_or_default();
+            .map_or_default(|store| store.graph_names());
         names.sort_unstable();
         names
     }
@@ -2893,13 +2932,22 @@ impl GrafeoDB {
         &self.query_cache
     }
 
+    /// Holds the plan cache's puts until the returned guard drops: a
+    /// statement that planned waits before it stores its plan (feature
+    /// `testing-plan-cache`, for tests of a change racing a statement's plan).
+    #[cfg(feature = "testing-plan-cache")]
+    #[must_use]
+    pub fn hold_plan_puts(&self) -> crate::query::cache::PlanPutHold {
+        self.query_cache.hold_puts()
+    }
+
     /// Clears all cached query plans.
     ///
     /// This is called automatically after DDL operations, but can also be
     /// invoked manually after external schema changes (e.g., WAL replay,
     /// import) or when you want to force re-optimization of all queries.
     pub fn clear_plan_cache(&self) {
-        self.query_cache.clear();
+        self.query_cache.advance();
     }
 
     // =========================================================================
@@ -3273,12 +3321,17 @@ impl GrafeoDB {
     ///
     /// # Errors
     ///
-    /// As [`standalone::commit`].
+    /// A write conflict (`GRAFEO-T001`) while an open transaction holds a
+    /// name the change claims without an op (an index name a direct drop
+    /// decides about); else as [`standalone::commit`].
     pub(crate) fn commit_standalone(
         &self,
         change: crate::transaction::StandaloneChange,
         held: &crate::transaction::CommitsHeld<'_>,
     ) -> Result<()> {
+        for claim in change.claims() {
+            self.transaction_manager.refuse_claimed(claim, None)?;
+        }
         standalone::commit(
             change,
             held,
@@ -3291,7 +3344,7 @@ impl GrafeoDB {
         // A graph, index, constraint or type changed: a cached plan may have
         // been optimized for what was there before (an index it now lacks or
         // could use), so every plan is made again.
-        self.query_cache.clear();
+        self.query_cache.advance();
         Ok(())
     }
 
@@ -5032,6 +5085,7 @@ mod tests {
         assert!(db.close().is_ok());
     }
 
+    #[cfg(feature = "gql")]
     #[test]
     fn test_with_store_external_backend() {
         use grafeo_core::graph::rowgroup::RowGroupStore;
@@ -5051,11 +5105,8 @@ mod tests {
         let session = db.session();
 
         // Session should see data from the external store via execute
-        #[cfg(feature = "gql")]
-        {
-            let result = session.execute("MATCH (p:Person) RETURN p.name").unwrap();
-            assert_eq!(result.rows.len(), 1);
-        }
+        let result = session.execute("MATCH (p:Person) RETURN p.name").unwrap();
+        assert_eq!(result.rows.len(), 1);
     }
 
     #[test]
@@ -5732,6 +5783,7 @@ mod tests {
     // session_read_only
     // =========================================================================
 
+    #[cfg(feature = "gql")]
     #[test]
     #[allow(deprecated)]
     fn test_session_read_only() {
@@ -5740,11 +5792,8 @@ mod tests {
 
         let session = db.session_read_only();
         // Read queries should work
-        #[cfg(feature = "gql")]
-        {
-            let result = session.execute("MATCH (n) RETURN count(n)").unwrap();
-            assert_eq!(result.rows.len(), 1);
-        }
+        let result = session.execute("MATCH (n) RETURN count(n)").unwrap();
+        assert_eq!(result.rows.len(), 1);
     }
 
     // =========================================================================

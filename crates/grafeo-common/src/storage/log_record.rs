@@ -288,6 +288,10 @@ pub enum LogRecordRef<'a> {
     },
     /// A change applied on its own.
     Standalone(&'a StandaloneOp),
+    /// A transaction's whole-graph RDF operation, in its place among its
+    /// writes: the bytes of `LogRecord::Standalone(StandaloneOp::RdfGraph(op))`
+    /// (kinds 66 to 71), so replay reads it as that record.
+    RdfGraph(&'a RdfGraphOp),
 }
 
 impl DataOp {
@@ -583,6 +587,7 @@ impl LogRecordRef<'_> {
             Self::GroupBegin(_) => KIND_GROUP_BEGIN,
             Self::Data { op, .. } => op.kind(),
             Self::Standalone(op) => op.kind(),
+            Self::RdfGraph(op) => op.kind(),
         }
     }
 
@@ -624,6 +629,7 @@ impl LogRecordRef<'_> {
                     encode_data(graph, op, out)
                 }
                 Self::Standalone(op) => encode_standalone(op, out),
+                Self::RdfGraph(op) => encode_rdf_graph(op, out),
             }
         })
     }
@@ -730,15 +736,20 @@ fn encode_standalone(op: &StandaloneOp, out: &mut PayloadWriter<'_>) -> Result<(
         }
         StandaloneOp::PutCatalog(record) => encode_catalog_record(record, out),
         StandaloneOp::DropCatalog(key) => encode_catalog_key(key, out),
-        StandaloneOp::RdfGraph(op) => match op {
-            RdfGraphOp::Create { name } => encode_bincode_payload(name, out),
-            RdfGraphOp::Drop { target } | RdfGraphOp::Clear { target } => {
-                encode_bincode_payload(target, out)
-            }
-            RdfGraphOp::Copy { source, target }
-            | RdfGraphOp::Move { source, target }
-            | RdfGraphOp::Add { source, target } => encode_bincode_payload(&(source, target), out),
-        },
+        StandaloneOp::RdfGraph(op) => encode_rdf_graph(op, out),
+    }
+}
+
+/// Writes the payload of an RDF graph operation's record.
+fn encode_rdf_graph(op: &RdfGraphOp, out: &mut PayloadWriter<'_>) -> Result<()> {
+    match op {
+        RdfGraphOp::Create { name } => encode_bincode_payload(name, out),
+        RdfGraphOp::Drop { target } | RdfGraphOp::Clear { target } => {
+            encode_bincode_payload(target, out)
+        }
+        RdfGraphOp::Copy { source, target }
+        | RdfGraphOp::Move { source, target }
+        | RdfGraphOp::Add { source, target } => encode_bincode_payload(&(source, target), out),
     }
 }
 
@@ -1687,6 +1698,7 @@ mod tests {
                 constraints: Vec::new(),
                 parent_types: names(&["Place"]),
                 key_labels: Vec::new(),
+                standalone: false,
             }),
             CatalogRecord::EdgeType(EdgeTypeRecord {
                 name: "ROUTE".into(),
@@ -1697,6 +1709,7 @@ mod tests {
                     target: None,
                 }],
                 key_labels: Vec::new(),
+                standalone: false,
             }),
             CatalogRecord::GraphType(GraphTypeRecord {
                 name: "travel".into(),
@@ -1871,6 +1884,39 @@ mod tests {
             let back = read_all(&bytes).unwrap();
             assert_eq!(back, std::slice::from_ref(&record), "{record:?}");
             assert_eq!(framed(&back[0]), bytes, "{record:?}");
+        }
+    }
+
+    /// A standalone type a graph type lists (#764), put in the WAL, comes back marked; the same
+    /// type unmarked comes back unmarked. The catalog kind after the log kind is 12 or 13.
+    #[test]
+    fn a_put_of_a_standalone_type_round_trips_marked() {
+        for record in catalog_records() {
+            let (marked, kind) = match &record {
+                CatalogRecord::NodeType(node) => (
+                    CatalogRecord::NodeType(NodeTypeRecord {
+                        standalone: true,
+                        ..node.clone()
+                    }),
+                    12,
+                ),
+                CatalogRecord::EdgeType(edge) => (
+                    CatalogRecord::EdgeType(EdgeTypeRecord {
+                        standalone: true,
+                        ..edge.clone()
+                    }),
+                    13,
+                ),
+                _ => continue,
+            };
+            for put in [record, marked] {
+                let log = LogRecord::Standalone(StandaloneOp::PutCatalog(put.clone()));
+                let bytes = framed(&log);
+                assert_eq!(read_all(&bytes).unwrap(), [log], "{put:?}");
+                let catalog_kind = bytes[RECORD_HEADER_BYTES];
+                assert_eq!(catalog_kind, put.kind(), "{put:?}");
+                assert_eq!(catalog_kind == kind, put.kind() == kind);
+            }
         }
     }
 
@@ -2289,7 +2335,7 @@ mod tests {
             (KIND_PUT_CATALOG, "catalog record"),
             (KIND_DROP_CATALOG, "catalog key"),
         ] {
-            let optional = [&[kind, 0, 4, 0, 0, 0, 12, 3, 19, 88][..], &group].concat();
+            let optional = [&[kind, 0, 4, 0, 0, 0, 240, 3, 19, 88][..], &group].concat();
             assert_eq!(
                 read_all(&optional).unwrap(),
                 [one_of_each()[0].clone()],
@@ -2297,14 +2343,14 @@ mod tests {
             );
             let required = [
                 &group[..],
-                &[kind, RECORD_REQUIRED, 4, 0, 0, 0, 12, 3, 19, 88],
+                &[kind, RECORD_REQUIRED, 4, 0, 0, 0, 240, 3, 19, 88],
             ]
             .concat();
             let error = read_error(&required);
             assert!(
                 error.contains("log record 1 at byte 17")
                     && error.contains(&format!("kind {kind}"))
-                    && error.contains(&format!("{what} of kind 12")),
+                    && error.contains(&format!("{what} of kind 240")),
                 "kind {kind}, required: {error}"
             );
 
@@ -2329,7 +2375,18 @@ mod tests {
     /// a newer release wrote is refused as such, never as damage.
     #[test]
     fn damage_is_corruption_and_a_newer_catalog_kind_is_not() {
-        let newer = [KIND_PUT_CATALOG, RECORD_REQUIRED, 4, 0, 0, 0, 12, 3, 19, 88];
+        let newer = [
+            KIND_PUT_CATALOG,
+            RECORD_REQUIRED,
+            4,
+            0,
+            0,
+            0,
+            240,
+            3,
+            19,
+            88,
+        ];
         let error = read_all(&newer).unwrap_err();
         assert!(matches!(error, Error::Serialization(_)), "{error:?}");
         let group = framed(&one_of_each()[0]);
@@ -2830,5 +2887,27 @@ mod tests {
         labels.rotate_right(1);
         let record = node_of(labels, Vec::new());
         assert_eq!(read_all(&framed(&record)).unwrap(), [record]);
+    }
+
+    /// A transaction's graph operation, borrowed from its change set, is
+    /// written as the standalone record of that operation: the same kind,
+    /// flags and bytes, so replay reads it as one.
+    #[test]
+    fn a_borrowed_graph_operation_encodes_as_its_standalone_record() {
+        let mut seen = 0;
+        for record in every_variant() {
+            let LogRecord::Standalone(StandaloneOp::RdfGraph(op)) = &record else {
+                continue;
+            };
+            let borrowed = LogRecordRef::RdfGraph(op);
+            assert_eq!(borrowed.kind(), record.borrowed().kind(), "{op:?}");
+            assert_eq!(borrowed.flags(), record.borrowed().flags(), "{op:?}");
+            let mut bytes = Vec::new();
+            borrowed.encode_framed(&mut bytes).unwrap();
+            assert_eq!(bytes, framed(&record), "{op:?}");
+            assert_eq!(read_all(&bytes).unwrap(), std::slice::from_ref(&record));
+            seen += 1;
+        }
+        assert!(seen >= 6, "every graph operation, {seen} seen");
     }
 }

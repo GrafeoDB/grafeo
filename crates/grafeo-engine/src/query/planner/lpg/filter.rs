@@ -735,23 +735,28 @@ impl super::Planner {
                     _ => return None,
                 };
 
-                // A zone map orders values as the store does, which can
-                // differ from the query's comparison of datetimes and times.
-                if !self.store_orders_like_query(&value) {
-                    return None;
-                }
                 // Node statistics only describe nodes: consult the zone map that
                 // matches what the variable is bound to, or nothing at all.
-                let key = property.into();
-                match binding_kind(input, variable)? {
-                    BindingKind::Node => Some(
+                let key: grafeo_common::types::PropertyKey = property.into();
+                let nodes = match binding_kind(input, variable)? {
+                    BindingKind::Node => true,
+                    BindingKind::Edge => false,
+                };
+                // A zone map orders values as the store does, which can
+                // differ from the query's comparison of datetimes and times.
+                if !self.store_column_orders_like_query(nodes, key.as_str(), &value) {
+                    return None;
+                }
+                if nodes {
+                    Some(
                         self.store
                             .node_property_might_match(&key, compare_op, &value),
-                    ),
-                    BindingKind::Edge => Some(
+                    )
+                } else {
+                    Some(
                         self.store
                             .edge_property_might_match(&key, compare_op, &value),
-                    ),
+                    )
                 }
             }
 
@@ -1216,8 +1221,8 @@ impl super::Planner {
         if let Some((variable, property, min, max, min_inc, max_inc)) =
             Self::extract_between_predicate(&filter.predicate)
             && variable == scan_variable
-            && self.store_orders_like_query(&min)
-            && self.store_orders_like_query(&max)
+            && self.store_column_orders_like_query(true, &property, &min)
+            && self.store_column_orders_like_query(true, &property, &max)
         {
             self.record_absorbed_scan_entry("NodeScan", &filter.input);
             return self.plan_range_filter(
@@ -1237,7 +1242,7 @@ impl super::Planner {
         if let Some((variable, property, op, value)) =
             Self::extract_range_predicate(&filter.predicate)
             && variable == scan_variable
-            && self.store_orders_like_query(&value)
+            && self.store_column_orders_like_query(true, &property, &value)
         {
             let (min, max, min_inc, max_inc) = match op {
                 BinaryOp::Lt => (None, Some(value), false, false),
@@ -1434,11 +1439,39 @@ impl super::Planner {
     /// never left to them. The same holds for a time or datetime inside a
     /// list, a map or a path, whose elements they compare the same way.
     fn store_orders_like_query(&self, value: &Value) -> bool {
-        // SQL/PGQ raises for two kinds, which only its filter meets.
+        // SQL/PGQ raises for two kinds, which only its filter meets: its
+        // ordered reads go through `store_column_orders_like_query`, which
+        // proves the column holds no value of another kind.
         if self.session_context.language == grafeo_common::types::StatementLanguage::SqlPgq {
             return false;
         }
         self.store_orders_elements_like_query(value)
+    }
+
+    /// Whether the store's range lookups and zone maps of `property`'s column
+    /// order the values as the query compares them against `value`: as
+    /// [`store_orders_like_query`](Self::store_orders_like_query), and for
+    /// SQL/PGQ, whose filter raises for two kinds, only when every value the
+    /// column holds is of `value`'s kind or a null, so no row can raise.
+    fn store_column_orders_like_query(&self, nodes: bool, property: &str, value: &Value) -> bool {
+        use grafeo_core::execution::operators::value_utils::ValueKinds;
+
+        if self.session_context.language == grafeo_common::types::StatementLanguage::SqlPgq {
+            // A null operand gives null and never raises.
+            if matches!(value, Value::Null) {
+                return true;
+            }
+            if !self.store_orders_elements_like_query(value) {
+                return false;
+            }
+            let kind = ValueKinds::of(value);
+            return kind.is_one()
+                && self
+                    .store
+                    .column_holds_only_kind(nodes, property, kind)
+                    .unwrap_or(false);
+        }
+        self.store_orders_like_query(value)
     }
 
     /// [`store_orders_like_query`](Self::store_orders_like_query) for

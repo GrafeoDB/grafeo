@@ -13,5 +13,6 @@
 
 mod config_from_the_facade;
 mod example_backend;
+mod hybrid_search_from_the_facade;
 mod open_with_default_features;
 mod rdf_profile;

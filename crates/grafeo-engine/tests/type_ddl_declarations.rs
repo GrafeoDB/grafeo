@@ -488,16 +488,17 @@ fn every_edge_write_applies_the_default() {
     );
 }
 
-/// The default applies in a named graph, and in a graph typed with a graph
-/// type that lists the edge type.
+/// The default of a standalone edge type applies in a named graph, and in a
+/// graph typed with a graph type that lists it: listed, it stays a rule by its
+/// edge type in every graph (#764).
 #[test]
-fn edge_type_defaults_apply_in_typed_graphs_only() {
+fn a_standalone_edge_types_default_applies_in_every_graph() {
     let db = routes();
     db.execute("CREATE GRAPH TYPE travel (NODE TYPE City, EDGE TYPE ROUTE)")
         .unwrap();
     db.execute("CREATE GRAPH atlas").unwrap();
     db.execute("CREATE GRAPH trips TYPED travel").unwrap();
-    for (graph, km) in [("atlas", Value::Null), ("trips", Value::Int64(88))] {
+    for (graph, km) in [("atlas", Value::Int64(88)), ("trips", Value::Int64(88))] {
         let session = db.session();
         session
             .execute(&format!("SESSION SET GRAPH {graph}"))

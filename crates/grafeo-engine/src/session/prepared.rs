@@ -9,8 +9,28 @@ use grafeo_common::utils::error::Result;
 use grafeo_core::graph::GraphStore;
 
 use super::Session;
-use crate::query::cache::CacheKey;
+use crate::query::cache::{CacheKey, CachedPlan, Stage};
 use crate::query::plan::LogicalPlan;
+
+/// The plan a statement runs: a cached plan, shared, or one made for this
+/// run (filled with its values). Either reads as a [`LogicalPlan`].
+pub(crate) enum RunPlan {
+    /// A plan the cache holds or just stored.
+    Shared(std::sync::Arc<CachedPlan>),
+    /// A plan of this run alone.
+    Owned(LogicalPlan),
+}
+
+impl std::ops::Deref for RunPlan {
+    type Target = LogicalPlan;
+
+    fn deref(&self) -> &LogicalPlan {
+        match self {
+            Self::Shared(cached) => cached.plan(),
+            Self::Owned(plan) => plan,
+        }
+    }
+}
 
 impl Session {
     /// The plan cache's key for `query` in `language` in this session: its
@@ -32,10 +52,10 @@ impl Session {
         &self,
         key: &CacheKey,
         params: Option<&HashMap<String, Value>>,
-    ) -> Option<LogicalPlan> {
+    ) -> Option<std::sync::Arc<CachedPlan>> {
         match params {
-            None => self.plan_cache().get_optimized(key),
-            Some(_) => self.plan_cache().get_optimized(&key.prepared()),
+            None => self.plan_cache().get(key, Stage::Optimized),
+            Some(_) => self.plan_cache().get(&key.prepared(), Stage::Optimized),
         }
     }
 
@@ -66,7 +86,8 @@ impl Session {
         params: &HashMap<String, Value>,
         store: &std::sync::Arc<dyn GraphStore>,
         bound_by_value: bool,
-    ) -> Result<LogicalPlan> {
+        generation: u64,
+    ) -> Result<RunPlan> {
         use crate::query::binder::Binder;
 
         let optimizer = self.optimizer_for(store, key.language());
@@ -78,13 +99,15 @@ impl Session {
             binder.bind(&plan)?;
             if !binder.binds_by_value() {
                 let prepared = optimizer.optimize(plan)?;
-                self.plan_cache()
-                    .put_optimized(key.prepared(), prepared.clone());
+                let prepared =
+                    self.plan_cache()
+                        .put(key.prepared(), Stage::Optimized, prepared, generation);
                 return Self::fill_prepared(prepared, Some(params));
             }
-            self.plan_cache().put_parsed(key.clone(), plan);
+            self.plan_cache()
+                .put(key.clone(), Stage::Parsed, plan, generation);
         }
-        optimizer.optimize(filled)
+        optimizer.optimize(filled).map(RunPlan::Owned)
     }
 
     /// The plan a call runs from a cached plan: a prepared plan (a call with
@@ -95,13 +118,16 @@ impl Session {
     ///
     /// As [`fill_values`].
     pub(super) fn fill_prepared(
-        mut plan: LogicalPlan,
+        plan: std::sync::Arc<CachedPlan>,
         params: Option<&HashMap<String, Value>>,
-    ) -> Result<LogicalPlan> {
-        if let Some(params) = params {
-            fill_values(&mut plan, params)?;
-        }
-        Ok(plan)
+    ) -> Result<RunPlan> {
+        let Some(params) = params else {
+            return Ok(RunPlan::Shared(plan));
+        };
+        // This call's copy: the cached plan stays as it is for the next.
+        let mut filled = plan.plan().clone();
+        fill_values(&mut filled, params)?;
+        Ok(RunPlan::Owned(filled))
     }
 }
 
@@ -145,7 +171,10 @@ mod tests {
 
         let cached = |session: &super::Session| {
             let key = session.plan_cache_key(query, QueryLanguage::Gql);
-            session.plan_cache().get_optimized(&key).is_some()
+            session
+                .plan_cache()
+                .get(&key, crate::query::cache::Stage::Optimized)
+                .is_some()
         };
         assert!(cached(&plain));
         assert!(!cached(&usual));

@@ -82,6 +82,20 @@ pub trait ConstraintValidator: Send + Sync {
         Ok(())
     }
 
+    /// Claims the MERGE pattern `key` for the writing transaction, before a
+    /// MERGE creates it: of two transactions that claim one pattern, the
+    /// second fails with a retryable write conflict (see
+    /// [`merge_claim`](super::merge_claim)). Nothing by default.
+    ///
+    /// # Errors
+    ///
+    /// A write conflict when another open transaction claimed the pattern,
+    /// and the error of a transaction that cannot claim.
+    fn claim_pattern(&self, key: &super::merge_claim::PatternKey<'_>) -> Result<(), OperatorError> {
+        let _ = key;
+        Ok(())
+    }
+
     /// Validates a single property value for an edge of the given type.
     ///
     /// # Errors
@@ -806,6 +820,9 @@ pub struct CreateOperator {
     steps: Vec<CreateStep>,
     /// Evaluates the computed property values of each step.
     expressions: Vec<PropertyExpressions>,
+    /// The MERGE pattern the steps create, claimed for each row before any
+    /// of them runs; `None` for an INSERT or CREATE.
+    claim: Option<Vec<super::merge_claim::ClaimSource>>,
 }
 
 impl CreateOperator {
@@ -828,7 +845,61 @@ impl CreateOperator {
             input_width,
             steps,
             expressions,
+            claim: None,
         }
+    }
+
+    /// Makes the steps the create branch of a MERGE of the pattern `claim`
+    /// lists, in path order: for each row the operator resolves every step's
+    /// properties once, claims the pattern's key with those values (see
+    /// [`GraphWriter::claim_pattern`]), then creates with the same values. A
+    /// row whose bound node is null claims nothing, so the create's own error
+    /// comes out. The steps' properties read the input columns only.
+    #[must_use]
+    pub fn with_claim(mut self, claim: Vec<super::merge_claim::ClaimSource>) -> Self {
+        self.claim = Some(claim);
+        self
+    }
+
+    /// The key of the claimed pattern for `row` of `chunk`, from the values
+    /// `resolved` (step by step, `rows` per step); `None` when a bound node is null or a
+    /// value is not equal to itself.
+    fn claim_key<'s>(
+        &'s self,
+        claim: &[super::merge_claim::ClaimSource],
+        resolved: &'s [Vec<(String, Value)>],
+        rows: usize,
+        chunk: &DataChunk,
+        row: usize,
+    ) -> Result<Option<super::merge_claim::PatternKey<'s>>, OperatorError> {
+        use super::merge_claim::{ClaimSource, PatternKey};
+        let not_a = |kind: &str, step: usize| {
+            OperatorError::Internal(format!("a MERGE claim names step {step}, not a {kind}"))
+        };
+        let mut builder = PatternKey::builder();
+        for source in claim {
+            match *source {
+                ClaimSource::Bound(column) => {
+                    let Some(id) = chunk.column(column).and_then(|ids| ids.get_node_id(row)) else {
+                        return Ok(None);
+                    };
+                    builder.bound_node(id);
+                }
+                ClaimSource::Node(step) => {
+                    let Some(CreateStep::Node { labels, .. }) = self.steps.get(step) else {
+                        return Err(not_a("node", step));
+                    };
+                    builder.node(labels, &resolved[step * rows + row]);
+                }
+                ClaimSource::Relationship { step, direction } => {
+                    let Some(CreateStep::Edge { edge_type, .. }) = self.steps.get(step) else {
+                        return Err(not_a("relationship", step));
+                    };
+                    builder.relationship(edge_type, &resolved[step * rows + row], direction);
+                }
+            }
+        }
+        Ok(builder.finish())
     }
 
     /// Provides a search-store handle so computed property values
@@ -873,13 +944,55 @@ impl Operator for CreateOperator {
         let mut out = DataChunk::new(columns);
         out.set_count(rows.len());
 
-        for (step, expressions) in self.steps.iter().zip(&mut self.expressions) {
+        // A MERGE's create branch: every row's values first, then each row's
+        // claim, before anything is created with those values.
+        let mut resolved = match &self.claim {
+            Some(claim) => {
+                // One list, step by step, a row's values each.
+                let mut resolved = Vec::with_capacity(self.steps.len() * rows.len());
+                for (step, expressions) in self.steps.iter().zip(&mut self.expressions) {
+                    let properties = match step {
+                        CreateStep::Node { properties, .. }
+                        | CreateStep::Edge { properties, .. } => properties,
+                    };
+                    for row in 0..rows.len() {
+                        resolved.push(expressions.resolve_row(
+                            properties,
+                            &out,
+                            row,
+                            &self.writer,
+                        )?);
+                    }
+                }
+                for row in 0..rows.len() {
+                    if let Some(key) = self.claim_key(claim, &resolved, rows.len(), &out, row)? {
+                        self.writer.claim_pattern(&key)?;
+                    }
+                }
+                Some(resolved)
+            }
+            None => None,
+        };
+        let writer = &self.writer;
+        let mut values = |index: usize,
+                          expressions: &mut PropertyExpressions,
+                          properties: &[(String, PropertySource)],
+                          out: &DataChunk,
+                          row: usize|
+         -> Result<Vec<(String, Value)>, OperatorError> {
+            match &mut resolved {
+                Some(resolved) => Ok(std::mem::take(&mut resolved[index * rows.len() + row])),
+                None => expressions.resolve_row(properties, out, row, writer),
+            }
+        };
+
+        for (index, (step, expressions)) in self.steps.iter().zip(&mut self.expressions).enumerate()
+        {
             match step {
                 CreateStep::Node { labels, properties } => {
                     let mut ids = ValueVector::with_capacity(LogicalType::Node, rows.len());
                     for row in 0..rows.len() {
-                        let properties =
-                            expressions.resolve_row(properties, &out, row, &self.writer)?;
+                        let properties = values(index, expressions, properties, &out, row)?;
                         ids.push_node_id(self.writer.create_node(labels, properties)?);
                     }
                     out.push_column(ids);
@@ -896,8 +1009,7 @@ impl Operator for CreateOperator {
                     for row in 0..rows.len() {
                         let from = NodeId(id_at(&out, *from_column, row, START, "node")?);
                         let to = NodeId(id_at(&out, *to_column, row, END, "node")?);
-                        let properties =
-                            expressions.resolve_row(properties, &out, row, &self.writer)?;
+                        let properties = values(index, expressions, properties, &out, row)?;
                         let edge_id = self.writer.create_edge(from, to, edge_type, properties)?;
                         if let Some(ids) = &mut ids {
                             ids.push_edge_id(edge_id);

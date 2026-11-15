@@ -1,0 +1,89 @@
+[
+  {
+    "type": "WORKS_AT",
+    "source": "richard-hendricks",
+    "target": "hooli",
+    "props": {
+      "to": "2014-03"
+    }
+  },
+  {
+    "type": "WORKS_AT",
+    "source": "gavin-belson",
+    "target": "hooli",
+    "props": {
+      "role": "CEO"
+    }
+  },
+  {
+    "type": "FOUNDED",
+    "source": "richard-hendricks",
+    "target": "pied-piper",
+    "props": {
+      "date": "2014-03"
+    }
+  },
+  {
+    "type": "MAKES",
+    "source": "pied-piper",
+    "target": "pied-piper-app",
+    "props": {}
+  },
+  {
+    "type": "USES",
+    "source": "pied-piper-app",
+    "target": "middle-out",
+    "props": {}
+  },
+  {
+    "type": "BASED_IN",
+    "source": "pied-piper",
+    "target": "hacker-hostel",
+    "props": {
+      "from": "2014-03",
+      "to": "2014-09"
+    }
+  },
+  {
+    "type": "LOCATED_IN",
+    "source": "hacker-hostel",
+    "target": "palo-alto",
+    "props": {}
+  },
+  {
+    "type": "OWNS",
+    "source": "erlich-bachman",
+    "target": "hacker-hostel",
+    "props": {}
+  },
+  {
+    "type": "WORKS_AT",
+    "source": "bertram-gilfoyle",
+    "target": "pied-piper",
+    "props": {
+      "from": "2014-03"
+    }
+  },
+  {
+    "type": "WORKS_AT",
+    "source": "dinesh-chugtai",
+    "target": "pied-piper",
+    "props": {
+      "from": "2014-03"
+    }
+  },
+  {
+    "type": "BASED_IN",
+    "source": "pied-piper",
+    "target": "pied-piper-office",
+    "props": {
+      "from": "2014-09"
+    }
+  },
+  {
+    "type": "LOCATED_IN",
+    "source": "pied-piper-office",
+    "target": "mountain-view",
+    "props": {}
+  }
+]

@@ -10,7 +10,10 @@ cd grafeo
 cargo build --workspace
 ```
 
-You'll need **Rust 1.99.0+** and optionally **Python 3.12+** / **Node.js 20+** for the bindings.
+You'll need **Rust 1.100.0+** and optionally **Python 3.12+** / **Node.js 20+** for the bindings.
+
+Cargo ignores crate versions published in the last 3 days (`.cargo/config.toml`), so a just-released version
+needs a few days before `cargo update` takes it.
 
 ## Branching
 
@@ -164,6 +167,7 @@ Contributors don't need to do anything special: write the test once, name it as 
 ## Code Style
 
 - Standard Rust conventions: `rustfmt` and `clippy` are enforced in CI
+- An unused dependency fails the build (`cargo::unused_dependencies`)
 - Use `thiserror` for error types
 - Tests go in the same file under `#[cfg(test)]`
 - Descriptive test names: `test_<function>_<scenario>`
@@ -192,7 +196,8 @@ pull request:
 
 - A breaking change to the stable surface (the `grafeo` crate and its re-exports, the bindings, the CLI, the file
   format) or a higher minimum Rust version goes into a minor release (`0.6` to `0.7`). Mark its CHANGELOG entry
-  **Breaking**; patch releases have none.
+  **Breaking**; patch releases have none. 0.6.3 is the one exception: it raises the minimum Rust version from 1.99
+  to 1.100 in a patch release.
 - Changes inside the implementation crates (`grafeo-common`, `grafeo-core`, `grafeo-storage`, `grafeo-adapters`,
   `grafeo-engine`) that do not reach the stable surface can go into any release.
 - Bug fixes go into patch releases, also when they change query results.

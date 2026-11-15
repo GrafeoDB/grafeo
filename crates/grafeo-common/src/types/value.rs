@@ -564,8 +564,32 @@ impl Value {
     /// This is a best-effort approximation used for enforcing property size
     /// limits. Fixed-size types return 0 (only the enum discriminant, which
     /// is already accounted for on the stack).
+    ///
+    /// Inline for the fixed-size kinds and strings, which operators count per
+    /// row; the other kinds go through a separate, out-of-line helper.
     #[must_use]
+    #[inline]
     pub fn estimated_size_bytes(&self) -> usize {
+        match self {
+            Value::Null
+            | Value::Bool(_)
+            | Value::Int64(_)
+            | Value::Float64(_)
+            | Value::Timestamp(_)
+            | Value::Date(_)
+            | Value::Time(_)
+            | Value::Duration(_)
+            | Value::ZonedDatetime(_)
+            | Value::Decimal(_) => 0,
+            Value::String(s) => s.len(),
+            _ => self.nested_size_bytes(),
+        }
+    }
+
+    /// [`estimated_size_bytes`](Self::estimated_size_bytes) of the kinds that
+    /// are neither fixed-size nor strings.
+    #[inline(never)]
+    fn nested_size_bytes(&self) -> usize {
         match self {
             Value::Null
             | Value::Bool(_)

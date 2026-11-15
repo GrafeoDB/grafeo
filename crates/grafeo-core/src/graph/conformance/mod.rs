@@ -429,7 +429,8 @@ impl<'s, S: Store> Tx<'s, S> {
             .iter()
             .filter_map(|change| match change {
                 grafeo_common::change::Change::Data { op, .. } => Some(op.clone()),
-                grafeo_common::change::Change::Bulk(_) => None,
+                grafeo_common::change::Change::Bulk(_)
+                | grafeo_common::change::Change::RdfGraph { .. } => None,
             })
             .collect()
     }
@@ -1016,14 +1017,13 @@ pub(crate) fn paths_at<S: Store + ?Sized>(
         expected
             .nodes
             .get(&node.as_u64())
-            .map(|(_, values)| {
+            .map_or_default(|(_, values)| {
                 values
                     .iter()
                     .filter(|(key, _)| keys.is_none_or(|keys| keys.contains(&key.as_str())))
                     .cloned()
                     .collect()
             })
-            .unwrap_or_default()
     };
     for key in KEYS {
         let found = ok(
@@ -1122,17 +1122,17 @@ pub(crate) fn paths_at<S: Store + ?Sized>(
         "edge_properties_selective_batch",
     );
     for (index, edge) in edges.iter().enumerate() {
-        let wanted: Vec<(String, Value)> = expected
-            .edges
-            .get(&edge.as_u64())
-            .map(|(_, _, _, values)| {
-                values
-                    .iter()
-                    .filter(|(key, _)| key == "since")
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
+        let wanted: Vec<(String, Value)> =
+            expected
+                .edges
+                .get(&edge.as_u64())
+                .map_or_default(|(_, _, _, values)| {
+                    values
+                        .iter()
+                        .filter(|(key, _)| key == "since")
+                        .cloned()
+                        .collect()
+                });
         let found = found.get(index).map(sorted_map);
         if found.as_ref() != Some(&wanted) {
             problems.push(format!(

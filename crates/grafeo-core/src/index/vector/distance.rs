@@ -250,8 +250,7 @@ mod tests {
                 let message = outcome
                     .expect_err("mismatched lengths must panic")
                     .downcast::<String>()
-                    .map(|message| *message)
-                    .unwrap_or_default();
+                    .map_or_default(|message| *message);
                 assert!(
                     message.contains("vector lengths must match"),
                     "{metric:?}, {} and {}: {message}",

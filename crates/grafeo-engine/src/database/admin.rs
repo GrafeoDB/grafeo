@@ -1,10 +1,12 @@
 //! Admin, introspection, and diagnostic operations for GrafeoDB.
 
 use std::path::Path;
+use std::sync::Arc;
 
-use grafeo_common::types::EdgeId;
+use grafeo_common::types::{EdgeId, ReadView};
 use grafeo_common::utils::error::Result;
 use grafeo_core::graph::GraphStore;
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 impl super::GrafeoDB {
     // =========================================================================
@@ -161,8 +163,7 @@ impl super::GrafeoDB {
 
         let (store, indexes, mvcc, string_pool) = self
             .root_store()
-            .map(|store| store.counted_breakdown())
-            .unwrap_or_default();
+            .map_or_default(|store| store.counted_breakdown());
 
         let (parsed_bytes, optimized_bytes, cached_plan_count) =
             self.query_cache.heap_memory_bytes();
@@ -170,6 +171,7 @@ impl super::GrafeoDB {
             parsed_plan_cache_bytes: parsed_bytes,
             optimized_plan_cache_bytes: optimized_bytes,
             cached_plan_count,
+            plan_cache_limit_bytes: self.query_cache.limit(),
             ..Default::default()
         };
         caches.compute_total();
@@ -211,6 +213,8 @@ impl super::GrafeoDB {
                 term_dictionary_bytes,
                 ring_index_bytes,
                 named_graph_count,
+                snapshot_bytes: self.rdf_store.snapshot_bytes()
+                    + self.transaction_manager.kept_rdf_writes_bytes(),
                 total_bytes: 0,
             };
             usage.rdf.compute_total();
@@ -352,25 +356,30 @@ impl super::GrafeoDB {
         Ok(crate::admin::SchemaInfo::Lpg(summary))
     }
 
-    /// Returns detailed information about all indexes: the ones
-    /// `CREATE INDEX` made, by the name it gave them, as `SHOW INDEXES`
-    /// lists them, and the current graph's indexes made through the API,
-    /// whose `name` is empty. The target of a property index made through
-    /// the API, which covers every label, has an empty label (`:age`).
+    /// Returns detailed information about the current graph's indexes: the
+    /// ones `CREATE INDEX` made, by the name it gave them, as `SHOW INDEXES`
+    /// lists them, and the ones made through the API, whose `name` is empty.
+    /// A name whose index only another graph has is not listed. The target
+    /// of a property index made through the API, which covers every label,
+    /// has an empty label (`:age`).
     #[must_use]
     pub fn list_indexes(&self) -> Vec<crate::admin::IndexInfo> {
         let store = self.current_lpg_store().ok();
-        super::index::listed_indexes(&self.catalog, store.as_deref())
-            .into_iter()
-            .map(|index| crate::admin::IndexInfo {
-                name: index.name.unwrap_or_default(),
-                index_type: format!("{:?}", index.kind),
-                target: format!("{}:{}", index.label.unwrap_or_default(), index.property),
-                unique: false,
-                cardinality: None,
-                size_bytes: None,
-            })
-            .collect()
+        super::index::listed_indexes(&self.catalog, store.as_deref(), |target| {
+            store
+                .as_deref()
+                .is_some_and(|store| super::index::store_has(store, target))
+        })
+        .into_iter()
+        .map(|index| crate::admin::IndexInfo {
+            name: index.name.unwrap_or_default(),
+            index_type: format!("{:?}", index.kind),
+            target: format!("{}:{}", index.label.unwrap_or_default(), index.property),
+            unique: false,
+            cardinality: None,
+            size_bytes: None,
+        })
+        .collect()
     }
 
     /// The types whose rules an older release applied in graphs not bound to their graph
@@ -421,7 +430,8 @@ impl super::GrafeoDB {
                     "{kind} type '{short}' is listed by graph type '{graph_type}', so its rules \
                      apply only in graphs bound to that type, and {graph} holds some: to keep \
                      them enforced there, use a graph typed by it, or take the type out of the \
-                     graph type and declare it with CREATE {} TYPE",
+                     graph type, declare it with CREATE {} TYPE and list it again, which keeps it \
+                     a rule by its label; validate() names the nodes that would break it",
                     kind.to_uppercase()
                 ),
                 context: Some(format!("{kind}_type:{short}")),
@@ -433,7 +443,13 @@ impl super::GrafeoDB {
                 continue;
             }
             for name in &def.allowed_node_types {
-                if !warned.insert(("node", name.clone())) {
+                // A standalone type a graph type lists applies in every graph (#764).
+                if !warned.insert(("node", name.clone()))
+                    || self
+                        .catalog
+                        .get_node_type(name)
+                        .is_some_and(|def| def.standalone)
+                {
                     continue;
                 }
                 let label = crate::catalog::unqualified(name);
@@ -447,7 +463,12 @@ impl super::GrafeoDB {
                 }
             }
             for name in &def.allowed_edge_types {
-                if !warned.insert(("edge", name.clone())) {
+                if !warned.insert(("edge", name.clone()))
+                    || self
+                        .catalog
+                        .get_edge_type_def(name)
+                        .is_some_and(|def| def.standalone)
+                {
                     continue;
                 }
                 let edge_type = crate::catalog::unqualified(name);
@@ -467,6 +488,121 @@ impl super::GrafeoDB {
             }
         }
         warnings
+    }
+
+    /// The nodes that would break a listed node type in a graph not bound to a graph type that
+    /// lists it (#764): for each type and graph that `GRAPH_TYPE_NOT_BOUND` covers, its nodes of
+    /// the type's label checked against the type, one warning with the count, the first ids and
+    /// the steps to make the type a rule by its label again. A file of an older release cannot
+    /// tell a standalone type a graph type took over from one it declared, so both are checked.
+    /// On demand: O(nodes of the label) per such graph, read at `view`.
+    ///
+    /// # Errors
+    ///
+    /// A read that fails.
+    fn listed_type_row_warnings(
+        &self,
+        view: ReadView,
+    ) -> Result<Vec<crate::admin::ValidationWarning>> {
+        /// The ids a warning names at most.
+        const NAMED: usize = 10;
+
+        let mut warnings = Vec::new();
+        let mut graph_types: Vec<_> = self
+            .catalog
+            .all_graph_type_defs()
+            .into_iter()
+            .filter(|def| !crate::catalog::is_current_graph_type(&def.name))
+            .collect();
+        let Some(root) = self.root_store().filter(|_| !graph_types.is_empty()) else {
+            return Ok(warnings);
+        };
+        graph_types.sort_by(|a, b| a.name.cmp(&b.name));
+        let bindings = self.catalog.all_graph_type_bindings();
+        let mut graph_names = root.graph_names();
+        graph_names.sort();
+        let mut names: Vec<&String> = graph_types
+            .iter()
+            .flat_map(|def| &def.allowed_node_types)
+            .collect();
+        names.sort();
+        names.dedup();
+        for name in names {
+            let Some(def) = self
+                .catalog
+                .resolved_node_type(name)
+                .filter(|def| !def.standalone)
+            else {
+                continue;
+            };
+            let listing: Vec<&str> = graph_types
+                .iter()
+                .filter(|graph_type| graph_type.allowed_node_types.contains(name))
+                .map(|graph_type| graph_type.name.as_str())
+                .collect();
+            let bound = |graph: &str| {
+                bindings.iter().any(|(bound_graph, graph_type)| {
+                    bound_graph == graph && listing.contains(&graph_type.as_str())
+                })
+            };
+            let in_schema = name.rsplit_once('/').map(|(schema, _)| schema);
+            let mut graphs: Vec<(String, Arc<RowGroupStore>)> = Vec::new();
+            if in_schema.is_none() {
+                graphs.push(("the default graph".to_string(), Arc::clone(&root)));
+            }
+            for graph in &graph_names {
+                if graph.rsplit_once('/').map(|(schema, _)| schema) == in_schema
+                    && !bound(graph)
+                    && let Some(store) = root.graph(graph)
+                {
+                    graphs.push((format!("graph '{graph}'"), store));
+                }
+            }
+            let label = crate::catalog::unqualified(name);
+            let graph_type = crate::catalog::unqualified(listing[0]);
+            for (graph, store) in graphs {
+                let mut breaking = Vec::new();
+                for id in store.nodes_by_label(label, view)? {
+                    let Some(node) = store.node(id, view)? else {
+                        continue;
+                    };
+                    let property = |key: &str| {
+                        node.properties
+                            .get(&grafeo_common::types::PropertyKey::from(key))
+                    };
+                    if crate::catalog::breaks_node_type(&def, property) {
+                        breaking.push(id.0);
+                    }
+                }
+                if breaking.is_empty() {
+                    continue;
+                }
+                let count = breaking.len();
+                breaking.sort_unstable();
+                let ids: Vec<String> = breaking
+                    .iter()
+                    .take(NAMED)
+                    .map(ToString::to_string)
+                    .collect();
+                let more = if count > NAMED { ", ..." } else { "" };
+                warnings.push(crate::admin::ValidationWarning {
+                    code: "LISTED_TYPE_ROWS".to_string(),
+                    message: format!(
+                        "{count} nodes of {graph} would break node type '{label}' if it applied \
+                         there (ids {}{more}): graph type '{graph_type}' lists it, so it applies \
+                         only in graphs bound to that type. To make it a rule by its label in \
+                         every graph again: fix or remove these nodes; drop or unbind the graphs \
+                         typed by '{graph_type}'; DROP GRAPH TYPE {graph_type} (it drops '{label}' \
+                         when no other graph type lists it); CREATE NODE TYPE {label} with its \
+                         properties; CREATE GRAPH TYPE {graph_type} listing NODE TYPE {label} \
+                         again; bind the graphs again",
+                        ids.join(", ")
+                    ),
+                    context: Some(format!("node_type:{label}")),
+                });
+            }
+        }
+        Ok(warnings)
     }
 
     /// Validates database integrity.
@@ -538,6 +674,7 @@ impl super::GrafeoDB {
             });
         }
         result.warnings.extend(self.graph_type_scope_warnings());
+        result.warnings.extend(self.listed_type_row_warnings(view)?);
 
         Ok(result)
     }

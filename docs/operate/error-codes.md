@@ -48,7 +48,7 @@ Categories:
 
 | Code          | Name                     | Retryable | Meaning                                                    |
 | ------------- | ------------------------ | --------- | ---------------------------------------------------------- |
-| `GRAFEO-T001` | TransactionConflict      | **yes**   | Write-write conflict with another transaction. Retry the whole transaction. |
+| `GRAFEO-T001` | TransactionConflict      | **yes**   | Write-write conflict with another transaction, or two MERGEs of one pattern. Retry the statement or the whole transaction. |
 | `GRAFEO-T002` | TransactionTimeout       | **yes**   | Transaction exceeded its TTL. |
 | `GRAFEO-T003` | TransactionReadOnly      | no        | Attempted a write inside `START TRANSACTION READ ONLY`. |
 | `GRAFEO-T004` | TransactionInvalidState  | no        | `COMMIT` / `ROLLBACK` without an active transaction, a transaction command outside GQL, or `START TRANSACTION`, `COMMIT` or `ROLLBACK` run through a transaction object's `execute` (end it with its `commit()` or `rollback()` call). |

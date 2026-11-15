@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy
 
@@ -100,7 +100,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: actions/cache@v6
         with:
           path: |
@@ -122,7 +122,7 @@ jobs:
         with:
           python-version: '3.14'
       - uses: astral-sh/setup-uv@v7
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: actions/cache@v6
         with:
           path: |
@@ -153,7 +153,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: actions/cache@v6
         with:
           path: |
@@ -182,7 +182,7 @@ jobs:
         with:
           go-version: '1.22'
           cache: false
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: actions/cache@v6
         with:
           path: |
@@ -208,7 +208,7 @@ jobs:
       - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '8.0'
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: actions/cache@v6
         with:
           path: |
@@ -236,7 +236,7 @@ jobs:
       - uses: dart-lang/setup-dart@v1
         with:
           sdk: stable
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: actions/cache@v6
         with:
           path: |
@@ -266,7 +266,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           targets: wasm32-unknown-unknown
       - uses: cargo-bins/cargo-binstall@main
@@ -300,7 +300,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           targets: wasm32-unknown-unknown
       - uses: cargo-bins/cargo-binstall@main
@@ -350,13 +350,20 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
+      # sccache 0.17 to 0.19 expand cargo's response file and spawn rustc with
+      # the whole command line, which for grafeo-engine is over the 32K Windows
+      # limit since cargo 1.100 passes one `-L dependency=` per crate folder
+      # (os error 206). 0.16.0 hands the response file on to rustc. Move
+      # Windows back to the latest once a release has mozilla/sccache#3026.
       - name: Configure sccache
         uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: ${{ runner.os == 'Windows' && 'v0.16.0' || '' }}
 
       # Crate sources only: archiving this job's target directory filled the
       # runner's disk, and sccache keeps the compiled crates between runs.
@@ -414,7 +421,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: clippy
 
@@ -491,7 +498,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: clippy
 
@@ -550,7 +557,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -605,10 +612,13 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
 
+      # Windows on sccache 0.16.0, as in rust-test (os error 206).
       - name: Configure sccache
         uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: ${{ runner.os == 'Windows' && 'v0.16.0' || '' }}
 
       # Crate sources only, as in the other test jobs.
       - name: Cache cargo registry
@@ -695,7 +705,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -763,6 +773,109 @@ jobs:
         env:
           RUSTC_WRAPPER: sccache
 
+  # Feature builds: the library and its unit tests in reduced feature sets, linted with
+  # `-D warnings`. The feature matrix builds the engine library without lints and without its
+  # unit tests, and `--all-features` hides a test or an item gated on the wrong feature, an
+  # import a set leaves unused, and code only another feature calls. One row per set that broke
+  # before; a set added here stays building. `grafeo-core` also in the release profile, as its
+  # debug-only checks call code a release build may not.
+  rust-feature-builds:
+    name: Feature Builds (${{ matrix.name }})
+    needs: [rust-check]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: engine defaults
+            args: "-p grafeo-engine"
+            lint_unit_tests: true
+          - name: engine vector-index
+            args: "-p grafeo-engine --no-default-features --features vector-index"
+          - name: engine wal
+            args: "-p grafeo-engine --no-default-features --features wal"
+          - name: engine triple-store ring-index
+            args: "-p grafeo-engine --no-default-features --features triple-store,regex,ring-index"
+          - name: engine sparql ring-index cdc
+            args: "-p grafeo-engine --no-default-features --features sparql,regex,ring-index,cdc"
+          - name: core release
+            args: "--release -p grafeo-core"
+            lib_only: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          components: clippy
+
+      - name: Configure sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-feature-builds-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-feature-builds-
+
+      - name: Clippy, library (${{ matrix.name }})
+        run: cargo clippy ${{ matrix.args }} --lib -- -D warnings
+        env:
+          RUSTC_WRAPPER: sccache
+
+      # The library's unit tests (`cfg(test)`), not the integration tests, which assume
+      # more features: linted with the default features, compiled in the reduced sets (their
+      # test-only items are not yet gated per feature).
+      - name: Clippy, unit tests (${{ matrix.name }})
+        if: ${{ matrix.lint_unit_tests }}
+        run: cargo clippy ${{ matrix.args }} --lib --profile test -- -D warnings
+        env:
+          RUSTC_WRAPPER: sccache
+
+      - name: Check, unit tests (${{ matrix.name }})
+        if: ${{ !matrix.lib_only && !matrix.lint_unit_tests }}
+        run: cargo check ${{ matrix.args }} --lib --profile test
+        env:
+          RUSTC_WRAPPER: sccache
+
+  # Memory per entity (#431): bytes per node, per edge and per property value on a fixed
+  # workload, counted by an allocator and as `memory_usage()` reports them. Fails when a count
+  # moves more than 5%, up or down, from benches/memory_per_entity.baseline.json, or is in one and
+  # not the other; a change that moves memory updates the baseline in the same commit
+  # (`-- --update-baseline`). The table goes to the job summary, with the compact store's targets
+  # beside it.
+  memory-per-entity:
+    name: Memory per Entity
+    needs: [rust-check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.100.0
+
+      - name: Configure sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-memory-per-entity-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-memory-per-entity-
+
+      - name: Measure and check against the baseline
+        run: cargo bench -p grafeo-engine --bench memory_per_entity -- --check
+        env:
+          RUSTC_WRAPPER: sccache
+
   # Miri undefined behavior check
   miri:
     name: Miri UB Check
@@ -824,7 +937,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: llvm-tools-preview
 
@@ -877,7 +990,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -943,7 +1056,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -973,6 +1086,138 @@ jobs:
       - name: Run Python tests
         run: pytest crates/bindings/python/tests/ -v --ignore=crates/bindings/python/tests/benchmark_phases.py
 
+  # The demo dataset (datasets/) and its packages (@grafeo-db/datasets, grafeo-datasets):
+  # the derived files match the source, the tools and the staged npm package pass their
+  # tests, and the wheel of this commit loads the GQL, Cypher, Turtle and vector files and
+  # answers queries on each (the story in GQL, the Turtle in SPARQL, a vector search); the
+  # Python package builds and passes `twine check`. Plain Node, no npm install: no step needs
+  # the embedder. A push always runs it; a pull request runs it when it changes the dataset,
+  # its packages, the engine (crates/, Cargo.lock) or this workflow, so an engine pull
+  # request costs one more release wheel build.
+  # Release profile, as in python-test: maturin builds grafeo-python with pyproject.toml's features.
+  datasets:
+    name: Datasets
+    needs: [python-spec]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # A pull request needs its base commit for the diff below; a push needs no history
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+
+      - name: Decide whether to run
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only "$BASE" HEAD)
+          if grep -qE '^(datasets/|packages/grafeo-datasets-|crates/|Cargo\.lock$|\.github/workflows/ci\.yml$)' <<< "$changed"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "No change to the dataset, its packages, the engine or ci.yml: skipping"
+          fi
+
+      - name: Set up Python
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Install uv
+        if: steps.gate.outputs.run == 'true'
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Rust toolchain
+        if: steps.gate.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@1.100.0
+
+      - name: Cache cargo registry
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-datasets-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-datasets-
+            ${{ runner.os }}-cargo-python-
+
+      - name: Build Python wheel
+        if: steps.gate.outputs.run == 'true'
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist -m crates/bindings/python/Cargo.toml
+          sccache: 'true'
+
+      - name: Setup Node.js
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Check the derived files against the source
+        if: steps.gate.outputs.run == 'true'
+        run: node datasets/tools/build.mjs --check
+
+      - name: Run the dataset tools tests
+        if: steps.gate.outputs.run == 'true'
+        run: node --test "datasets/tools/test/*.test.mjs"
+
+      - name: Stage both packages
+        if: steps.gate.outputs.run == 'true'
+        run: node datasets/tools/stage.mjs
+
+      - name: Run the npm package tests
+        if: steps.gate.outputs.run == 'true'
+        working-directory: packages/grafeo-datasets-npm
+        run: npm test
+
+      - name: Install the wheel, the Python package and test dependencies
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: |
+          uv pip install --system dist/*.whl
+          uv pip install --system -r datasets/tests/requirements.txt build twine
+          uv pip install --system -e packages/grafeo-datasets-python
+
+      - name: Run the dataset tests
+        if: steps.gate.outputs.run == 'true'
+        run: pytest datasets/tests packages/grafeo-datasets-python/tests -v -rs --junitxml="$RUNNER_TEMP/datasets-pytest.xml"
+
+      # Every test runs against the wheel above: none may be skipped, and an empty run fails.
+      - name: Check that no test was skipped
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          python - "$RUNNER_TEMP/datasets-pytest.xml" <<'EOF'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root)
+          tests = sum(int(s.get("tests", 0)) for s in suites)
+          skipped = sum(int(s.get("skipped", 0)) for s in suites)
+          print(f"{tests} tests, {skipped} skipped")
+          if tests == 0 or skipped:
+              print("::error::The dataset tests must all run: none were collected or some were skipped")
+              sys.exit(1)
+          EOF
+
+      # The same build and metadata check the release job runs before publishing.
+      - name: Build the Python package and check it
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          python -m build packages/grafeo-datasets-python --outdir "$RUNNER_TEMP/datasets-dist"
+          twine check "$RUNNER_TEMP/datasets-dist/"*
+
   # Node.js tests
   # Default profile: napi-rs builds grafeo-node with its crate-level default
   # features, its `embedded` profile.
@@ -994,7 +1239,7 @@ jobs:
           node-version: ${{ matrix.node }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -1040,7 +1285,7 @@ jobs:
           cache: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -1099,7 +1344,7 @@ jobs:
           dotnet-version: '8.0'
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -1164,7 +1409,7 @@ jobs:
           sdk: stable
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -1221,7 +1466,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
         with:
           targets: wasm32-unknown-unknown
           components: clippy
@@ -1274,6 +1519,12 @@ jobs:
           echo "WASM gzip size: $SIZE bytes ($(( SIZE / 1024 )) KB)"
           if [ "$SIZE" -gt 409600 ]; then echo "::warning::WASM exceeds 400KB gzip target"; fi
 
+      # The full package's size gate, the one the release applies (release.yml
+      # builds the published package with --features full). Without it a full
+      # build over its limit passes CI and fails only at release time.
+      - name: Build WASM (full, size gate)
+        run: bash scripts/build-wasm.sh --features full --out-dir target/wasm-full
+
   # Benchmark regression check (PR only, same-runner comparison)
   #
   # Runs both base and PR benchmarks on the same runner to eliminate
@@ -1292,7 +1543,7 @@ jobs:
           fetch-depth: 0 # Need full history to checkout base commit
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -1360,7 +1611,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Cache cargo registry
         uses: actions/cache@v6
@@ -1408,11 +1659,11 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install MSRV toolchain
-        uses: dtolnay/rust-toolchain@1.99.0
+        uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Check compilation with MSRV
-        # Explicit `+1.99.0` so rust-toolchain.toml does not override the MSRV toolchain
-        run: cargo +1.99.0 check --workspace --all-features
+        # Explicit `+1.100.0` so rust-toolchain.toml does not override the MSRV toolchain
+        run: cargo +1.100.0 check --workspace --all-features
 
   # Typo detection
   typos:
@@ -1451,7 +1702,7 @@ jobs:
         with:
           python-version: '3.14'
       - uses: astral-sh/setup-uv@v7
-      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: actions/cache@v6
         with:
           path: |
@@ -1488,9 +1739,12 @@ jobs:
       - minimal-features
       - shipped-features
       - rust-feature-matrix
+      - rust-feature-builds
+      - memory-per-entity
       - miri
       - python-test
       - python-test-lpg
+      - datasets
       - node-test
       - go-test
       - csharp-test

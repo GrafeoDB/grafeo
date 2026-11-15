@@ -245,6 +245,23 @@ impl GraphWriter {
         self
     }
 
+    /// Claims the MERGE pattern `key` for the writer's transaction before a
+    /// MERGE creates it (see [`ConstraintValidator::claim_pattern`]); nothing
+    /// without a validator.
+    ///
+    /// # Errors
+    ///
+    /// A write conflict when another transaction claimed the pattern.
+    pub fn claim_pattern(
+        &self,
+        key: &super::merge_claim::PatternKey<'_>,
+    ) -> Result<(), OperatorError> {
+        match &self.validator {
+            Some(validator) => validator.claim_pattern(key),
+            None => Ok(()),
+        }
+    }
+
     /// Adds `n` to the count `field` selects, if this writer counts.
     fn count(&self, field: impl Fn(&WriteCounter) -> &AtomicU64, n: usize) {
         if n > 0
@@ -496,6 +513,13 @@ impl GraphWriter {
     ) -> Result<(), OperatorError> {
         refuse_too_deep(assigned_values(assignments))?;
         self.require_node(id)?;
+        // A list that can change no property writes nothing, so it claims
+        // nothing: a MERGE that only matches, or `SET n += {}`, does not
+        // conflict with another transaction's (`SET n = {}` replaces, and
+        // does).
+        if changes_no_property(assignments, replace) {
+            return Ok(());
+        }
         self.claim(WriteClaim::Node(id))?;
         let mut assignments = Cow::Borrowed(assignments);
         if let Some(validator) = &self.validator {
@@ -817,6 +841,10 @@ impl GraphWriter {
     ) -> Result<(), OperatorError> {
         refuse_too_deep(assigned_values(assignments))?;
         self.require_edge(id)?;
+        // As for a node: a list that can change no property claims nothing.
+        if changes_no_property(assignments, replace) {
+            return Ok(());
+        }
         self.claim(WriteClaim::Edge(id))?;
         let mut assignments = Cow::Borrowed(assignments);
         if let Some(validator) = &self.validator
@@ -1212,9 +1240,7 @@ impl GraphWriter {
                 let others = if other == id {
                     remaining.clone()
                 } else {
-                    self.node(other)?
-                        .map(|node| node_labels(&node))
-                        .unwrap_or_default()
+                    self.node(other)?.map_or_default(|node| node_labels(&node))
                 };
                 let (source, target) = if is_source {
                     (&remaining, &others)
@@ -1239,10 +1265,7 @@ impl GraphWriter {
             return Ok(());
         }
         let labels_of = |id| -> Result<Vec<String>, OperatorError> {
-            Ok(self
-                .node(id)?
-                .map(|node| node_labels(&node))
-                .unwrap_or_default())
+            Ok(self.node(id)?.map_or_default(|node| node_labels(&node)))
         };
         validator.validate_edge_endpoints(edge_type, &labels_of(src)?, &labels_of(dst)?)
     }
@@ -1366,14 +1389,12 @@ impl GraphWriter {
             Entity::Node(id) => self.node(id)?.map(|node| node.properties),
             Entity::Edge(id) => self.edge(id)?.map(|edge| edge.properties),
         };
-        Ok(properties
-            .map(|properties| {
-                properties
-                    .iter()
-                    .map(|(key, _)| key.as_str().to_string())
-                    .collect()
-            })
-            .unwrap_or_default())
+        Ok(properties.map_or_default(|properties| {
+            properties
+                .iter()
+                .map(|(key, _)| key.as_str().to_string())
+                .collect()
+        }))
     }
 
     /// Applies a SET: plain assignments write their value, map entries write
@@ -1408,6 +1429,18 @@ impl GraphWriter {
         }
         Ok(())
     }
+}
+
+/// Whether a property set of `assignments` can change no property: without
+/// `replace`, every assignment merges an empty map (`SET n += {}`), which is
+/// so for none. A named property, a map with entries, a replace and a merge
+/// of a value that is not a map (which writes nothing, but is not decided
+/// here) can.
+fn changes_no_property(assignments: &[(String, Value)], replace: bool) -> bool {
+    !replace
+        && assignments.iter().all(|(name, value)| {
+            name == MAP_ASSIGNMENT && matches!(value, Value::Map(map) if map.is_empty())
+        })
 }
 
 /// Records in `recording` what the store reported it applied for `op`;

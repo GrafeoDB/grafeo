@@ -1195,6 +1195,12 @@ final class GrafeoBindings {
       int Function(
           Pointer<Void>, int)>('grafeo_options_set_query_memory_limit');
 
+  /// Sets the path search budget in bytes, above zero. Returns GrafeoStatus.
+  late final grafeoOptionsSetPathSearchBudget = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64),
+      int Function(
+          Pointer<Void>, int)>('grafeo_options_set_path_search_budget');
+
   /// Sets the spill limit in bytes; zero means nothing spills. Returns
   /// GrafeoStatus.
   late final grafeoOptionsSetSpillLimit = library.lookupFunction<

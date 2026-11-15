@@ -554,7 +554,7 @@ impl RowGroupStore {
             }
             _ => {}
         }
-        let applied = {
+        let (applied, moved) = {
             let mut inner = self.inner.write();
             // Admitted before any change, so a refusal changes nothing.
             if mode.refusable() {
@@ -604,8 +604,14 @@ impl RowGroupStore {
             if let Some(epoch) = mode.epoch {
                 self.sync_epoch(epoch);
             }
-            applied
+            // An immediate write commits as it applies: a count it moved far
+            // enough replans what was planned from it. A replay's moves are
+            // anchored once the open ends (`anchor_plan_statistics`).
+            let moved =
+                matches!(writer, Writer::Immediate { .. }) && inner.counts.plan_statistics_moved();
+            (applied, moved)
         };
+        self.note_plan_statistics(moved);
         match op {
             DataOp::CreateNode { id, .. } => {
                 self.next_node_id
@@ -685,7 +691,7 @@ impl GraphBackend for RowGroupStore {
     ) -> Result<(), ApplyError> {
         let pending = pending_stamp(transaction.id())?;
         let at = epoch.as_u64();
-        {
+        let moved = {
             let mut inner = self.inner.write();
             // The writes' bracket closes first. A commit stamps the versions
             // its writes made, in place, and grows no part but the counts'
@@ -716,6 +722,9 @@ impl GraphBackend for RowGroupStore {
                         inner.stamp_bulk(range, pending, at);
                         inner.mark_bulk(range);
                     }
+                    // An RDF graph operation is the RDF store's; a commit
+                    // passes a backend only the entries of its own graphs.
+                    Change::RdfGraph { .. } => {}
                 }
                 if stamped.is_err() {
                     break;
@@ -730,7 +739,11 @@ impl GraphBackend for RowGroupStore {
             stamped?;
             // Under the lock, as `apply` moves it.
             self.sync_epoch(epoch);
-        }
+            // A count the commit moved far enough replans what was planned
+            // from it.
+            inner.counts.plan_statistics_moved()
+        };
+        self.note_plan_statistics(moved);
         Ok(())
     }
 
@@ -795,6 +808,8 @@ impl RowGroupStore {
                     undone = inner.undo_op(op, before, *version, pending);
                 }
                 Change::Bulk(range) => inner.undo_bulk(range, pending),
+                // The RDF store's, never a backend's (see `commit`).
+                Change::RdfGraph { .. } => {}
             }
             if undone.is_err() {
                 break;
@@ -1297,7 +1312,7 @@ impl Inner {
                         .node(raw)
                         .is_some_and(|(group, row)| group.version(row).created == pending)
                     {
-                        self.touch(Touched::Groups {
+                        self.touch(Touched {
                             nodes: [Some(locate(raw).0), None],
                             edge: None,
                         });
@@ -1311,7 +1326,7 @@ impl Inner {
                         .map(|(group, row)| group.ends(row));
                     if let Some((src, dst, _)) = ends {
                         let (src, dst) = (locate(src).0, locate(dst).0);
-                        self.touch(Touched::Groups {
+                        self.touch(Touched {
                             nodes: [Some(src), (dst != src).then_some(dst)],
                             edge: Some(locate(raw).0),
                         });

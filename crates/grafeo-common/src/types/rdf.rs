@@ -46,6 +46,57 @@ pub enum Term {
 }
 
 impl Term {
+    /// The heap bytes of the term's text: the allocation of each string it
+    /// holds (an IRI, a blank node's id, a literal's value, datatype and
+    /// language tag). A shared datatype constant (see `TermId`) counts
+    /// nothing.
+    #[must_use]
+    pub fn text_bytes(&self) -> usize {
+        self.text_bytes_where(|_| true)
+    }
+
+    /// [`text_bytes`](Self::text_bytes) of the strings nothing else holds
+    /// (by their reference counts, at the time of the call).
+    #[must_use]
+    pub fn unshared_text_bytes(&self) -> usize {
+        self.text_bytes_where(|text| Arc::strong_count(text) == 1)
+    }
+
+    /// Whether this term holds `other`'s text, the same allocation, not a
+    /// copy of it: a term cloned from the other (or the other from it).
+    #[must_use]
+    pub fn shares_text_with(&self, other: &Term) -> bool {
+        match (self, other) {
+            (Term::Iri(a), Term::Iri(b)) => Arc::ptr_eq(&a.value, &b.value),
+            (Term::BlankNode(a), Term::BlankNode(b)) => Arc::ptr_eq(&a.id, &b.id),
+            (Term::Literal(a), Term::Literal(b)) => Arc::ptr_eq(&a.value, &b.value),
+            _ => false,
+        }
+    }
+
+    fn text_bytes_where(&self, counts: impl Fn(&Arc<str>) -> bool) -> usize {
+        let string = |text: &Arc<str>| {
+            if counts(text) {
+                (2 * std::mem::size_of::<usize>() + text.len())
+                    .next_multiple_of(std::mem::align_of::<usize>())
+            } else {
+                0
+            }
+        };
+        match self {
+            Term::Iri(iri) => string(&iri.value),
+            Term::BlankNode(blank) => string(&blank.id),
+            Term::Literal(literal) => {
+                let datatype = if super::term_id::is_shared_datatype(&literal.datatype) {
+                    0
+                } else {
+                    string(&literal.datatype)
+                };
+                string(&literal.value) + datatype + literal.language.as_ref().map_or(0, string)
+            }
+        }
+    }
+
     /// Creates an IRI term.
     #[inline]
     pub fn iri(value: impl Into<Arc<str>>) -> Self {

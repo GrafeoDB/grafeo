@@ -429,10 +429,9 @@ mod tests {
                 .split('_')
                 .map(|part| {
                     let mut chars = part.chars();
-                    chars
-                        .next()
-                        .map(|first| first.to_uppercase().chain(chars).collect::<String>())
-                        .unwrap_or_default()
+                    chars.next().map_or_default(|first| {
+                        first.to_uppercase().chain(chars).collect::<String>()
+                    })
                 })
                 .collect();
             let entry = arms.entry(group).or_default();

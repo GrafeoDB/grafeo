@@ -204,6 +204,12 @@ A `NODE TYPE` or `EDGE TYPE` with a property list, even an empty one (`EDGE TYPE
 clause, defines the type in the graph type. A bare name (`EDGE TYPE KNOWS`) refers to a type that already exists
 in the catalog.
 
+A type the graph type defines applies only in the graphs bound to the graph type. A type made on its own with
+`CREATE NODE TYPE` or `CREATE EDGE TYPE` applies by its label in every graph, and still does once a graph type
+lists it; it then also applies in that graph type's graphs. A graph type names such a type only as it is: a pattern
+that gives it other properties or endpoints is refused. `DROP GRAPH TYPE` and `ALTER GRAPH TYPE ... DROP` leave
+it, and `DROP NODE TYPE` or `DROP EDGE TYPE` is refused while a graph type lists it.
+
 The element types can also be written as patterns, in braces as ISO GQL writes them or in parentheses. An edge pattern declares its edge type with the node types at its ends as the only sources and targets:
 
 ```sql
@@ -284,14 +290,24 @@ A property or B-tree index holds the nodes of its label only, so writes on other
 
 `create_property_index` in the API makes an index on a property of every label, which also serves a query with no label. An index on the label and property, or one on the property of every label, makes a later `CREATE INDEX` on them build nothing: its name stands for the index that is there. `drop_property_index` drops every index on the property in the current graph.
 
-Index names belong to the database, not to one graph: a name stands for one index definition in all of its graphs.
-`CREATE INDEX` with a name that already stands for another label, property or kind of index, in any graph, fails
-naming it, and `IF NOT EXISTS` (also on `CREATE VECTOR INDEX`) keeps the existing index.
-`DROP INDEX` drops the index the name stands for, whatever its kind, and every property of an index over several.
-`SHOW INDEXES` lists each index by name, with its type, label and property (one row per property), also the indexes
-made through the API (`create_property_index`, `create_vector_index`, `create_text_index`): those have a null name,
-and a property index made that way covers every label, so its label is null too. An index a constraint built without
-a name has a null name and its label.
+Index names belong to the database, and each graph has its own indexes: a name stands for one index definition,
+and each graph may have that index or not. `CREATE INDEX` with a name that already stands for another label,
+property or kind of index, in any graph, fails naming it, and `IF NOT EXISTS` (also on `CREATE VECTOR INDEX`) keeps
+the existing index. `CREATE INDEX` of the same definition in another graph builds that graph's index under the name.
+
+`SHOW INDEXES` lists the current graph's indexes, as its transaction leaves them: each named one by name, with its
+type, label and property (one row per property), and the indexes made through the API (`create_property_index`,
+`create_vector_index`, `create_text_index`), which have a null name; a property index made that way covers every
+label, so its label is null too. An index a constraint built without a name has a null name and its label. A name
+whose index only another graph has is not listed.
+
+`DROP INDEX` drops the current graph's index of the name, whatever its kind, and every property of an index over
+several. The name stays while another graph has its index, and goes with the last one; it is then free for another
+definition. In a graph without the index, `DROP INDEX` fails while another graph has it (`IF EXISTS` changes
+nothing), and removes a name that no graph has an index of. The direct drops (`drop_property_index`,
+`drop_text_index`, `drop_vector_index`) and dropping a graph or a schema also remove a name that no graph uses any
+more. `CREATE OR REPLACE PROPERTY GRAPH` drops the old graph's index names this way, so name its indexes again after
+a replace.
 
 ### Text Indexes
 
@@ -329,11 +345,25 @@ CREATE CONSTRAINT FOR (p:Person) ON (p.email) UNIQUE
 
 ### NODE KEY
 
-Composite uniqueness across multiple properties:
+A node key names the properties that together identify a node of a label, as a primary key does for a row in SQL:
 
 ```sql
-CREATE CONSTRAINT FOR (p:Person) ON (p.firstName, p.lastName) NODE KEY
+CREATE CONSTRAINT person_key FOR (p:Person) ON (p.firstName, p.lastName) NODE KEY
 ```
+
+- **Required**: every node with the label has a value for each key property. A write that leaves one out or sets it to `NULL` fails: an insert without it, `SET p.lastName = NULL`, `REMOVE p.lastName`, `SET p = {...}` without it, and `SET n:Person` on a node that lacks it.
+- **Unique together**: no two nodes with the label hold the same values for all key properties. A key over several properties is unique as a whole, so `('Alix', 'Gus')` and `('Alix', 'Mia')` are two keys. Values compare as `=` does: `1` and `1.0` are one key, `1` and `'1'` are two, and lists compare element by element.
+- **Changeable**: a key property may be updated to values no other node holds; an update to a key another node holds fails. Deleting a node, or removing the label from it, frees its key.
+- **Checked at each write**: a key is checked as each property is written, not at the end of the statement, so two nodes cannot swap their keys in one `SET`. Move one of them to a free value first.
+- **By label**: a node is held to the key when it has the label, whatever other labels it has. A label may have more than one key, and each holds.
+- **Per graph**: the constraint belongs to the database and applies in every graph, those created later included, but each graph has its own keys: the same key may be used once in each graph.
+- **Concurrent writers**: of two open transactions that write the same key, the second write fails with a write conflict (GQLSTATUS `40000`) right away, without waiting for the first to commit.
+
+A write that breaks a key fails with `GRAFEO-V001`, and nothing of the statement is kept. Like `UNIQUE`, a node key builds an index on its first property, which lookups that name that property use (see below).
+
+A `NODE KEY` on several properties does what `UNIQUE` on those properties together and `NOT NULL` on each of them do, in one constraint with one name. `UNIQUE` alone accepts nodes that lack a key property, as a missing value is never a duplicate.
+
+`NODE KEY` is a Grafeo extension: ISO GQL has no constraint statements, and its `KEY` in a graph type is a set of labels that identifies an element type, not a property key. Cypher's spelling, `REQUIRE (p.firstName, p.lastName) IS NODE KEY`, is accepted too, and a `PRIMARY KEY` column in [SQL/PGQ](../sql-pgq/index.md) `CREATE PROPERTY GRAPH` is the same rule. It is part of the stable query language (see [Stability](../../project/stability.md)).
 
 ### NOT NULL
 

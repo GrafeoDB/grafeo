@@ -8,8 +8,10 @@ namespace Grafeo;
 /// The memory and spill settings a database opens with, for
 /// <see cref="GrafeoDB.Open(string?, GrafeoOptions?)"/>. Unset means the default: 75% of the
 /// memory the process may use for the memory limit, the memory limit for the query memory
-/// limit, half the spill volume's free space for the spill limit. A write past the memory limit
-/// fails with GRAFEO-S001. One object may open several databases.
+/// limit, a quarter of the memory limit (at most 256 MiB) for the path search budget, half the
+/// spill volume's free space for the spill limit. A write past the memory limit fails with
+/// GRAFEO-S001, and so does a path search over its budget. One object may open several
+/// databases.
 /// </summary>
 /// <remarks>
 /// It holds no native resource: the settings reach the library when a database opens.
@@ -19,6 +21,7 @@ public sealed class GrafeoOptions : IDisposable
 {
     private ulong? _memoryLimit;
     private ulong? _queryMemoryLimit;
+    private ulong? _pathSearchBudget;
     private ulong? _spillLimit;
     private bool _unlimitedSpill;
 
@@ -38,6 +41,18 @@ public sealed class GrafeoOptions : IDisposable
     public GrafeoOptions SetQueryMemoryLimit(long bytes)
     {
         _queryMemoryLimit = Bytes(bytes);
+        return this;
+    }
+
+    /// <summary>
+    /// How many bytes one path search may hold: the paths a variable-length or shortest-path
+    /// search keeps at once, or what an RDF property path search visits (the nodes an ANY SHORTEST
+    /// or shortestPath search visits are not counted yet). Never more than the memory limit. A
+    /// search over it fails with GRAFEO-S001. A zero or negative budget fails at the open.
+    /// </summary>
+    public GrafeoOptions SetPathSearchBudget(long bytes)
+    {
+        _pathSearchBudget = Bytes(bytes);
         return this;
     }
 
@@ -71,6 +86,8 @@ public sealed class GrafeoOptions : IDisposable
             GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_memory_limit(native, memory));
         if (_queryMemoryLimit is { } query)
             GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_query_memory_limit(native, query));
+        if (_pathSearchBudget is { } paths)
+            GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_path_search_budget(native, paths));
         if (_unlimitedSpill)
             GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_unlimited_spill(native));
         else if (_spillLimit is { } spill)

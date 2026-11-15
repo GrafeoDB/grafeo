@@ -89,6 +89,72 @@ fn final_return_mut(plan: &mut LogicalOperator) -> Option<&mut ReturnOp> {
     }
 }
 
+/// Gives the one CREATE of `branch`, the create branch of a MERGE of a path,
+/// the claim of the pattern it creates (see
+/// [`PatternClaim`](crate::query::plan::PatternClaim)): `nodes`, the node
+/// variables in path order, and per relationship in path order its variable
+/// and whether it matches either way.
+///
+/// # Errors
+///
+/// An internal error unless the branch holds exactly one CREATE, and it
+/// creates each relationship.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+pub(super) fn claim_merge_pattern(
+    branch: LogicalOperator,
+    nodes: Vec<String>,
+    relationships: &[(String, bool)],
+) -> Result<LogicalOperator> {
+    /// Sets `claim` on the CREATE below `op`.
+    fn walk(op: LogicalOperator, claim: &crate::query::plan::PatternClaim) -> LogicalOperator {
+        match op.map_children(|child| walk(child, claim)) {
+            LogicalOperator::Create(mut create) => {
+                create.claim = Some(std::sync::Arc::new(claim.clone()));
+                LogicalOperator::Create(create)
+            }
+            other => other,
+        }
+    }
+    let internal = |what: String| Error::Internal(format!("a MERGE's create branch {what}"));
+    let mut creates = Vec::new();
+    let mut pending = vec![&branch];
+    while let Some(op) = pending.pop() {
+        if let LogicalOperator::Create(create) = op {
+            creates.push(create);
+        }
+        pending.extend(op.children());
+    }
+    let [create] = creates.as_slice() else {
+        return Err(internal(format!(
+            "holds {} CREATEs, not one",
+            creates.len()
+        )));
+    };
+    // The relationships' places among the CREATE's elements, by variable.
+    let relationships = relationships
+        .iter()
+        .map(|(variable, either)| {
+            create
+                .elements
+                .iter()
+                .position(|element| {
+                    matches!(
+                        element,
+                        crate::query::plan::CreateElement::Edge { variable: Some(name), .. }
+                            if name == variable
+                    )
+                })
+                .map(|index| (index, *either))
+                .ok_or_else(|| internal(format!("creates no relationship {variable}")))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let claim = crate::query::plan::PatternClaim {
+        nodes,
+        relationships,
+    };
+    Ok(walk(branch, &claim))
+}
+
 /// The variables a `CALL` subquery imports (see [`call_imports`]) while its
 /// body is translated: none outside one. They stay in scope for the whole
 /// body: a `WITH` in it that leaves one out passes it on all the same

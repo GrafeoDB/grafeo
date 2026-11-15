@@ -2084,29 +2084,32 @@ mod sparql_reads_of_queued_graphs {
         ]
     }
 
-    /// Triples apply ahead of a queued graph operation, so in that transaction every later SPARQL
-    /// statement fails with `GRAFEO-T004`, reads and updates alike, whichever graph they name.
-    /// Its GQL work, its commit and other sessions are untouched.
+    /// A transaction's own graph operation is visible to its later SPARQL statements, reads and
+    /// updates alike, whichever graph they name (#718, item 6): it reads the graphs as the operation
+    /// left them, and a later update applies after it. Its GQL work goes on, other sessions read the
+    /// committed state until the commit, and the commit leaves what the operation and the update
+    /// did, in that order.
     #[test]
-    fn sparql_after_a_queued_graph_operation_fails_until_the_commit() {
-        for (operation, affected) in operations() {
+    fn sparql_after_a_graph_operation_in_a_transaction_sees_it() {
+        for (operation, _) in operations() {
             let db = GrafeoDB::new_in_memory();
             with_graphs(&db);
             let mut session = db.session();
             session.begin_transaction().unwrap();
             session.execute_sparql(&operation).unwrap();
-            let update = format!(
-                "INSERT DATA {{ GRAPH <{ROME}> {{ <http://example.org/y> <http://example.org/name> 'Lucas' }} }}"
+            let want = after_commit(&operation);
+            assert_eq!(
+                (answer(&session, PARIS), answer(&session, BERLIN)),
+                want,
+                "{operation}: its own reads see it"
             );
-            for statement in [read(PARIS), read(BERLIN), read(ROME), update] {
-                let error = session
-                    .execute_sparql(&statement)
-                    .expect_err(&format!("{operation}: {statement}"));
-                assert!(
-                    error.to_string().contains("GRAFEO-T004"),
-                    "{operation}: {statement}: {error}"
-                );
-            }
+            assert_eq!(answer(&session, ROME), 1, "{operation}: a graph it leaves");
+            session
+                .execute_sparql(&format!(
+                    "INSERT DATA {{ GRAPH <{ROME}> {{ <http://example.org/y> <http://example.org/name> 'Lucas' }} }}"
+                ))
+                .unwrap_or_else(|error| panic!("{operation}: an update after it: {error}"));
+            assert_eq!(answer(&session, ROME), 2, "{operation}: its own update");
             session
                 .execute("INSERT (:Marker {name: 'Jules'})")
                 .unwrap_or_else(|error| panic!("{operation}: GQL work: {error}"));
@@ -2119,19 +2122,19 @@ mod sparql_reads_of_queued_graphs {
                 );
             }
             session.commit().unwrap();
-            for graph in &affected {
-                session
-                    .execute_sparql(&read(graph))
-                    .unwrap_or_else(|error| panic!("{operation}: {graph} after: {error}"));
-            }
-            assert_eq!(answer(&session, ROME), 1, "{operation}: after the commit");
-            assert_eq!(markers(&db.session()), 1, "{operation}: the data write");
+            let other = db.session();
+            assert_eq!(
+                (answer(&other, PARIS), answer(&other, BERLIN)),
+                want,
+                "{operation}: after the commit"
+            );
+            assert_eq!(answer(&other, ROME), 2, "{operation}: the update after it");
+            assert_eq!(markers(&other), 1, "{operation}: the data write");
         }
     }
 
-    /// The refusal holds only inside a transaction: outside one the operation applies at once, and
-    /// the same session goes on reading and updating. A transaction that holds no queued operation
-    /// runs SPARQL as before.
+    /// Outside a transaction the operation applies at once, and the same session goes on reading
+    /// and updating. A transaction that holds no graph operation runs SPARQL as before.
     #[test]
     fn outside_a_transaction_sparql_after_a_graph_operation_runs() {
         for (operation, _) in operations() {
@@ -2168,9 +2171,10 @@ mod sparql_reads_of_queued_graphs {
         assert_eq!(answer(&db.session(), ROME), 2);
     }
 
-    /// A savepoint rollback past the operation lets SPARQL run again, and the operation is gone.
+    /// A savepoint rollback past the operation undoes it: the transaction's reads see it before the
+    /// rollback and not after, and the commit leaves the graphs as they were.
     #[test]
-    fn a_savepoint_rollback_past_the_operation_lets_sparql_run() {
+    fn a_savepoint_rollback_past_the_operation_undoes_it() {
         for (operation, _) in operations() {
             let db = GrafeoDB::new_in_memory();
             with_graphs(&db);
@@ -2178,7 +2182,11 @@ mod sparql_reads_of_queued_graphs {
             session.begin_transaction().unwrap();
             session.savepoint("s").unwrap();
             session.execute_sparql(&operation).unwrap();
-            assert!(session.execute_sparql(&read(ROME)).is_err(), "{operation}");
+            assert_eq!(
+                (answer(&session, PARIS), answer(&session, BERLIN)),
+                after_commit(&operation),
+                "{operation}: seen before the rollback"
+            );
             session.rollback_to_savepoint("s").unwrap();
             assert_eq!(answer(&session, PARIS), 1, "{operation}: its own read");
             session.commit().unwrap();

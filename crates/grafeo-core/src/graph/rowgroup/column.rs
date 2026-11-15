@@ -252,6 +252,33 @@ impl Bound {
     }
 }
 
+/// Whether `value` is a null, which never compares and never raises, or of
+/// `kind`'s one kind.
+fn value_holds_only_kind(
+    value: &Value,
+    kind: crate::execution::operators::value_utils::ValueKinds,
+) -> bool {
+    kind.is_one()
+        && (matches!(value, Value::Null)
+            || crate::execution::operators::value_utils::ValueKinds::of(value) == kind)
+}
+
+/// Whether every value a hot column's `bound` covers is of `kind`'s kind or a
+/// null: `None` when the bound saw values that do not order, which says
+/// nothing about the kinds.
+fn bound_holds_only_kind(
+    bound: &Bound,
+    kind: crate::execution::operators::value_utils::ValueKinds,
+) -> Option<bool> {
+    match bound {
+        Bound::Empty => Some(true),
+        Bound::Any => None,
+        Bound::Range { min, max } => {
+            Some(value_holds_only_kind(min, kind) && value_holds_only_kind(max, kind))
+        }
+    }
+}
+
 impl Hot {
     /// The value at `row`, if it has one.
     fn get(&self, row: usize) -> Option<Value> {
@@ -1387,9 +1414,10 @@ impl Columns {
         }
     }
 
-    /// The heap bytes of the columns' entries in the map.
+    /// The heap bytes of the columns' entries in the map: its whole table as hashbrown
+    /// allocates it (buckets, padded entries, control bytes).
     fn entries_bytes(&self) -> usize {
-        self.by_key.capacity() * (std::mem::size_of::<u32>() + std::mem::size_of::<Column>())
+        self.by_key.allocation_size()
     }
 
     /// What a compression of the hot columns encodes: each hot column with
@@ -1545,6 +1573,44 @@ impl Columns {
             Some(hot) => hot.bound.might_match(op, value),
             None => !cold.is_empty(),
         })
+    }
+
+    /// Whether every value the column of key `key` holds is of `kind`'s kind
+    /// or a null: by the hot column's bound, or by the cold chunks' zone maps.
+    /// `None` when a part of the column keeps no bounds; `Some(true)` without a
+    /// column of the key, which holds nothing.
+    pub(super) fn holds_only_kind(
+        &self,
+        key: u32,
+        kind: crate::execution::operators::value_utils::ValueKinds,
+    ) -> Option<bool> {
+        let Some(column) = self.by_key.get(&key) else {
+            return Some(true);
+        };
+        if let Some(hot) = column.hot.get() {
+            return bound_holds_only_kind(&hot.bound, kind);
+        }
+        // Under the chunks' lock: a thaw publishes the hot form first.
+        let cold = column.cold.lock();
+        if let Some(hot) = column.hot.get() {
+            return bound_holds_only_kind(&hot.bound, kind);
+        }
+        for chunk in cold.iter() {
+            let zone = read_zone_map(&chunk.bytes, chunk.codec, chunk.row_count).ok()??;
+            let holds = match &zone {
+                ZoneMap::Values(min, max) => {
+                    value_holds_only_kind(min, kind) && value_holds_only_kind(max, kind)
+                }
+                // A dictionary chunk holds strings only.
+                ZoneMap::Strings(_) => {
+                    kind == crate::execution::operators::value_utils::ValueKinds::STRINGS
+                }
+            };
+            if !holds {
+                return Some(false);
+            }
+        }
+        Some(true)
     }
 
     /// The columns that still hold their chunks encoded.
@@ -1832,8 +1898,7 @@ impl Columns {
 
     /// The heap bytes of the decoded values and of the columns themselves.
     pub(super) fn hot_bytes(&self) -> usize {
-        self.by_key.values().map(Column::hot_bytes).sum::<usize>()
-            + self.by_key.capacity() * (std::mem::size_of::<u32>() + std::mem::size_of::<Column>())
+        self.by_key.values().map(Column::hot_bytes).sum::<usize>() + self.entries_bytes()
     }
 
     /// The heap bytes of the chunks its columns still hold encoded.

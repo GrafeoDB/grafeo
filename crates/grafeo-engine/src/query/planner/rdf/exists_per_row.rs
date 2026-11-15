@@ -55,6 +55,7 @@ impl RowBinding {
 #[derive(Clone)]
 pub(super) struct RowPlanParts {
     pub(super) store: Arc<RdfStore>,
+    pub(super) view: grafeo_core::graph::rdf::RdfView,
     pub(super) chunk_size: usize,
     pub(super) writer: Option<RdfWriter>,
     pub(super) terms: Arc<QueryTermIds>,
@@ -63,6 +64,13 @@ pub(super) struct RowPlanParts {
     pub(super) read_counter: Arc<grafeo_core::execution::operators::ReadCounter>,
     pub(super) warnings: Arc<grafeo_common::utils::warning::WarningSink>,
     pub(super) clock: StatementClock,
+    /// Who the plan is for: a session's per-row plans check that they run in
+    /// the statement's memory scope.
+    #[cfg(any(lpg_language, rdf_language))]
+    pub(super) planned_for: super::super::PlannedFor,
+    /// The statement's memory, captured when the pattern was planned: the
+    /// rows' plans, made while the rows are pulled, take their grants in it.
+    pub(super) memory: Option<grafeo_core::execution::StatementMemory>,
 }
 
 /// A name of the pattern that the row has: its column on each side of the row.
@@ -238,7 +246,14 @@ impl ExistsPerRow {
                 .collect(),
             binds_anything,
         };
+        // Planned while the rows are pulled: in the statement's memory.
+        let _memory = self
+            .parts
+            .memory
+            .clone()
+            .map(grafeo_core::execution::enter_operator_memory);
         let planner = RdfPlanner::for_row(&self.parts, Arc::new(binding));
+        planner.check_statement_scope();
         let (mut operator, _, _) = planner.plan_operator(rewrite)?;
         while let Some(chunk) = operator.next()? {
             if chunk.selected_indices().next().is_some() {

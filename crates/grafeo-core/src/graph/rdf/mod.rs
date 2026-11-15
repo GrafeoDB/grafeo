@@ -16,7 +16,7 @@
 //! # Example
 //!
 //! ```
-//! use grafeo_core::graph::rdf::{RdfStore, Term, Triple};
+//! use grafeo_core::graph::rdf::{LatestUse, RdfStore, RdfView, Term, Triple};
 //!
 //! let store = RdfStore::new();
 //!
@@ -27,9 +27,11 @@
 //!     Term::literal("Alix"),
 //! ));
 //!
-//! // Query triples with a specific subject
+//! // Query triples with a specific subject, in the newest committed state
+//! // (a database's reader reads at its snapshot instead)
 //! let subject = Term::iri("http://example.org/alix");
-//! for triple in store.triples_with_subject(&subject) {
+//! let view = RdfView::latest(LatestUse::Test);
+//! for triple in store.triples_with_subject(&view, &subject) {
 //!     println!("{:?}", triple);
 //! }
 //! ```
@@ -38,6 +40,7 @@ pub(crate) mod chunked;
 mod dictionary;
 mod graph_store_adapter;
 pub mod nquads;
+pub mod overlay;
 pub(crate) mod path_budget;
 pub mod section;
 pub mod sink;
@@ -60,11 +63,12 @@ pub mod shacl;
 
 pub use dictionary::{DictionaryEntry, DictionaryFull, TermDictionary};
 pub use graph_store_adapter::RdfGraphStoreAdapter;
+pub use overlay::{LatestUse, RdfOverlay, RdfView, SnapshotGone};
 pub use section::RdfStoreSection;
 pub use sink::{BatchInsertSink, CountSink, TripleSink, VecSink};
 pub use store::{
-    BulkLoadResult, NTriplesError, RdfStore, RdfStoreConfig, STATISTICS_MIN_DRIFT, parse_ntriples,
-    parse_ntriples_text,
+    Applied, ApplyMode, BulkLoadResult, CommitChange, GraphAt, NTriplesError, RdfStore,
+    RdfStoreConfig, STATISTICS_MIN_DRIFT, parse_ntriples, parse_ntriples_text,
 };
 pub use term::{BlankNode, Iri, Literal, Term, TermParseError};
 pub use triple::{Triple, TriplePattern};

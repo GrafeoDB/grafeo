@@ -191,15 +191,13 @@ impl Indexes {
 
     /// Whether the store has a text or a vector index.
     fn searches(&self) -> bool {
-        #[cfg(feature = "text-index")]
-        if !self.text.is_empty() {
-            return true;
-        }
-        #[cfg(feature = "vector-index")]
-        if !self.vector.is_empty() {
-            return true;
-        }
-        false
+        [
+            #[cfg(feature = "text-index")]
+            !self.text.is_empty(),
+            #[cfg(feature = "vector-index")]
+            !self.vector.is_empty(),
+        ]
+        .contains(&true)
     }
 }
 

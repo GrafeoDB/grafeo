@@ -1,0 +1,14 @@
+{
+  "name": "fixture",
+  "nodes": [
+    { "key": "ann", "label": "Person", "name": "Ann", "description": "A founder. She writes code." },
+    { "key": "bob", "label": "Person", "name": "Bob", "description": "An engineer at Acme Inc. and a friend of Ann." },
+    { "key": "acme", "label": "Company", "name": "Acme", "description": "A small company.", "props": { "founded": "2014-03" } },
+    { "key": "palo-alto", "label": "City", "name": "Palo Alto", "description": "A city." }
+  ],
+  "edges": [
+    { "type": "KNOWS", "source": "ann", "target": "bob" },
+    { "type": "WORKS_AT", "source": "bob", "target": "acme", "props": { "role": "Engineer", "from": "2014-03", "to": "2014-03-15" } },
+    { "type": "BASED_IN", "source": "acme", "target": "palo-alto" }
+  ]
+}

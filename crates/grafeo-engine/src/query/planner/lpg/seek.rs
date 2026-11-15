@@ -459,8 +459,7 @@ impl<'a> LookupLabels<'a> {
     /// finds out.
     pub(crate) fn to_read(&self, store: &dyn GraphStore, key: &str) -> Vec<String> {
         self.read_in(store, key)
-            .map(|labels| labels.iter().map(ToString::to_string).collect())
-            .unwrap_or_default()
+            .map_or_default(|labels| labels.iter().map(ToString::to_string).collect())
     }
 }
 

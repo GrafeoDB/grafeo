@@ -13,14 +13,21 @@ import (
 
 // Options are the memory and spill settings a database opens with (see OpenWithOptions). A nil
 // field is the default: 75% of the memory the process may use for MemoryLimit, MemoryLimit for
-// QueryMemoryLimit, half the spill volume's free space for SpillLimit. A write past the memory
-// limit fails with GRAFEO-S001. One Options value may open several databases.
+// QueryMemoryLimit, a quarter of MemoryLimit (at most 256 MiB) for PathSearchBudget, half the
+// spill volume's free space for SpillLimit. A write past the memory limit fails with
+// GRAFEO-S001, and so does a path search over its budget. One Options value may open several
+// databases.
 type Options struct {
 	// MemoryLimit is how many bytes the database may hold; zero fails at the open.
 	MemoryLimit *uint64
 	// QueryMemoryLimit is how many bytes one statement's sorts, joins and aggregates may hold,
 	// never more than MemoryLimit; zero fails at the open.
 	QueryMemoryLimit *uint64
+	// PathSearchBudget is how many bytes one path search may hold: the paths a variable-length or
+	// shortest-path search keeps at once, or what an RDF property path search visits (the nodes an
+	// ANY SHORTEST or shortestPath search visits are not counted yet). Never more than
+	// MemoryLimit; zero fails at the open.
+	PathSearchBudget *uint64
 	// SpillLimit is how many bytes may spill to disk; zero means nothing spills.
 	SpillLimit *uint64
 	// UnlimitedSpill lifts the spill limit; it wins over SpillLimit. An in-memory database
@@ -38,6 +45,11 @@ func (o *Options) apply(native *C.GrafeoOptions) error {
 	}
 	if o.QueryMemoryLimit != nil {
 		if err := statusToError(C.grafeo_options_set_query_memory_limit(native, C.uint64_t(*o.QueryMemoryLimit))); err != nil {
+			return err
+		}
+	}
+	if o.PathSearchBudget != nil {
+		if err := statusToError(C.grafeo_options_set_path_search_budget(native, C.uint64_t(*o.PathSearchBudget))); err != nil {
 			return err
 		}
 	}

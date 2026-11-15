@@ -117,7 +117,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Look up a person's name by their raw node ID from CALL procedure results.
 fn get_person_name(db: &GrafeoDB, raw_id: i64) -> grafeo::Result<String> {
-    let node_id = NodeId::from(raw_id as u64);
+    let Ok(raw_id) = u64::try_from(raw_id) else {
+        return Ok("?".to_string());
+    };
+    let node_id = NodeId::from(raw_id);
     Ok(db
         .get_node(node_id)?
         .and_then(|n| {

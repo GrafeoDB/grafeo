@@ -476,4 +476,151 @@ mod crash {
     fn a_crash_at_every_point_of_an_incremental_checkpoint_with_history_keeps_every_commit() {
         crash_sweep(true);
     }
+
+    #[cfg(all(feature = "sparql", feature = "triple-store"))]
+    const RDF_POINT_VAR: &str = "GRAFEO_INCREMENTAL_RDF_CRASH_POINT";
+    #[cfg(all(feature = "sparql", feature = "triple-store"))]
+    const RDF_PATH_VAR: &str = "GRAFEO_INCREMENTAL_RDF_CRASH_PATH";
+    /// The triples the RDF child writes before its first checkpoint.
+    #[cfg(all(feature = "sparql", feature = "triple-store"))]
+    const TRIPLES: usize = 5_000;
+    #[cfg(all(feature = "sparql", feature = "triple-store"))]
+    const PREFIX: &str = "PREFIX ex: <http://ex.org/> ";
+
+    /// The values of `ex:v` `db` holds, each as its debug text, sorted.
+    #[cfg(all(feature = "sparql", feature = "triple-store"))]
+    fn values_of(db: &GrafeoDB) -> Vec<String> {
+        let mut values: Vec<String> = db
+            .execute_sparql(&format!("{PREFIX}SELECT ?o WHERE {{ ?s ex:v ?o }}"))
+            .unwrap()
+            .rows()
+            .iter()
+            .map(|row| format!("{:?}", row[0]))
+            .collect();
+        values.sort();
+        values
+    }
+
+    /// The values of `ex:v` the database at `path` holds (see [`values_of`]).
+    #[cfg(all(feature = "sparql", feature = "triple-store"))]
+    fn rdf_values(path: &std::path::Path) -> Vec<String> {
+        let db = GrafeoDB::open(path).unwrap();
+        let values = values_of(&db);
+        db.close().unwrap();
+        values
+    }
+
+    /// The triples the RDF child writes before its checkpoints.
+    #[cfg(all(feature = "sparql", feature = "triple-store"))]
+    fn rdf_insert() -> String {
+        use std::fmt::Write;
+
+        let mut insert = format!("{PREFIX}INSERT DATA {{ ");
+        for i in 0..TRIPLES {
+            write!(insert, "ex:s{i} ex:v \"{i}\" . ").unwrap();
+        }
+        insert.push('}');
+        insert
+    }
+
+    /// The child's delete after its first checkpoint, and its insert during the second.
+    #[cfg(all(feature = "sparql", feature = "triple-store"))]
+    const RDF_DELETE: &str = "DELETE DATA { ex:s5 ex:v \"5\" . }";
+    #[cfg(all(feature = "sparql", feature = "triple-store"))]
+    const RDF_DURING: &str = "INSERT DATA { ex:during ex:v \"during\" . }";
+
+    /// Child-process entry of the RDF sweep; a no-op when run directly. The RDF and ring
+    /// sections are written after the checkpoint lets commits go on, and a SPARQL commit lands
+    /// right then.
+    #[cfg(all(feature = "sparql", feature = "triple-store"))]
+    #[test]
+    fn rdf_crash_child() {
+        let (Ok(point), Some(path)) =
+            (std::env::var(RDF_POINT_VAR), std::env::var_os(RDF_PATH_VAR))
+        else {
+            return;
+        };
+        let point: u64 = point.parse().unwrap();
+        let db =
+            std::sync::Arc::new(GrafeoDB::with_config(config(PathBuf::from(path), false)).unwrap());
+        db.execute_sparql(&rdf_insert()).unwrap();
+        db.wal_checkpoint().unwrap();
+        db.execute_sparql(&format!("{PREFIX}{RDF_DELETE}")).unwrap();
+        let writer = std::sync::Arc::clone(&db);
+        grafeo_common::testing::commit_hook::during_next_checkpoint_write(move || {
+            // On a thread of its own: its crash points are not counted.
+            std::thread::spawn(move || {
+                writer
+                    .execute_sparql(&format!("{PREFIX}{RDF_DURING}"))
+                    .unwrap();
+            })
+            .join()
+            .unwrap();
+            println!("{WROTE_DURING}");
+        });
+        let target = std::panic::AssertUnwindSafe(&db);
+        let result =
+            grafeo_common::testing::crash::with_crash_at(point, move || target.wal_checkpoint());
+        if let grafeo_common::testing::crash::CrashResult::Completed(checkpoint) = result {
+            checkpoint.unwrap();
+            std::process::exit(COMPLETED);
+        }
+        // Crash: no close(), no destructors.
+        std::process::exit(0);
+    }
+
+    /// A crash at each point of an incremental checkpoint of a database holding RDF triples,
+    /// with a SPARQL commit landing while the RDF and ring sections are written: the reopen
+    /// holds every commit, the one in the middle once it was done (#718). The sweep runs until a
+    /// point lets the checkpoint finish.
+    #[cfg(all(feature = "sparql", feature = "triple-store"))]
+    #[test]
+    fn a_crash_at_every_point_of_a_checkpoint_of_rdf_keeps_every_commit() {
+        // The oracle: the same statements in memory, read as the reopen is.
+        let oracle = GrafeoDB::new_in_memory();
+        oracle.execute_sparql(&rdf_insert()).unwrap();
+        oracle
+            .execute_sparql(&format!("{PREFIX}{RDF_DELETE}"))
+            .unwrap();
+        let before = values_of(&oracle);
+        oracle
+            .execute_sparql(&format!("{PREFIX}{RDF_DURING}"))
+            .unwrap();
+        let during = values_of(&oracle);
+        assert_eq!(before.len(), TRIPLES - 1);
+        assert_eq!(during.len(), TRIPLES);
+        let (mut completed, mut crashed_after_the_commit) = (false, false);
+        for point in 1..=400_u64 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("rdf-crash.grafeo");
+            let output = child_process::output(
+                grafeo_common::child_test!("rdf_crash_child")
+                    .env(RDF_POINT_VAR, point.to_string())
+                    .env(RDF_PATH_VAR, &path),
+            )
+            .unwrap();
+            let code = output.status.code();
+            assert!(
+                matches!(code, Some(0 | COMPLETED)),
+                "point {point}: the child failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let wrote = String::from_utf8_lossy(&output.stdout).contains(WROTE_DURING);
+            crashed_after_the_commit |= wrote && code == Some(0);
+            let expected = if wrote { &during } else { &before };
+            assert!(
+                rdf_values(&path) == *expected,
+                "crash point {point}: the triples differ"
+            );
+            if code == Some(COMPLETED) {
+                completed = true;
+                break;
+            }
+        }
+        assert!(completed, "a point lets the checkpoint finish");
+        assert!(
+            crashed_after_the_commit,
+            "some crashes come after the commit in the middle"
+        );
+    }
 }

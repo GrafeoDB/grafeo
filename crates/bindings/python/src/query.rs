@@ -455,8 +455,7 @@ impl PyQueryResult {
     fn __repr__(&self) -> String {
         let time_str = self
             .execution_time_ms
-            .map(|t| format!(", time={:.2}ms", t))
-            .unwrap_or_default();
+            .map_or_default(|t| format!(", time={:.2}ms", t));
         format!(
             "QueryResult(columns={:?}, rows={}{})",
             self.columns,

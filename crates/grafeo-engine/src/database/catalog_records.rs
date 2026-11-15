@@ -173,6 +173,7 @@ pub(crate) fn node_type_record(def: &NodeTypeDefinition) -> NodeTypeRecord {
         constraints: def.constraints.iter().map(type_constraint_record).collect(),
         parent_types: def.parent_types.clone(),
         key_labels: def.key_labels.clone(),
+        standalone: def.standalone,
     }
 }
 
@@ -208,6 +209,7 @@ impl LegacyNodeType {
             constraints,
             parent_types: self.parent_types.clone(),
             key_labels: Vec::new(),
+            standalone: false,
         })
     }
 }
@@ -243,6 +245,7 @@ impl LegacyEdgeType {
             source_node_types: self.source_node_types.clone(),
             target_node_types: self.target_node_types.clone(),
             key_labels: Vec::new(),
+            standalone: false,
         })
     }
 }
@@ -265,6 +268,7 @@ pub(crate) fn node_type_definition(record: NodeTypeRecord) -> Result<NodeTypeDef
         constraints,
         parent_types: record.parent_types,
         key_labels: record.key_labels,
+        standalone: record.standalone,
     })
 }
 
@@ -282,6 +286,7 @@ pub(crate) fn edge_type_record(def: &EdgeTypeDefinition) -> Result<EdgeTypeRecor
         constraints: def.constraints.iter().map(type_constraint_record).collect(),
         endpoints: endpoint_pairs(&def.name, &def.source_node_types, &def.target_node_types)?,
         key_labels: def.key_labels.clone(),
+        standalone: def.standalone,
     })
 }
 
@@ -306,6 +311,7 @@ pub(crate) fn edge_type_definition(record: EdgeTypeRecord) -> Result<EdgeTypeDef
         source_node_types,
         target_node_types,
         key_labels: record.key_labels,
+        standalone: record.standalone,
     })
 }
 
@@ -1112,6 +1118,7 @@ mod tests {
             ],
             parent_types: names(&["Place", "CityKey"]),
             key_labels: names(&["CityKey"]),
+            standalone: false,
         }
     }
 
@@ -1141,6 +1148,7 @@ mod tests {
             source_node_types: Vec::new(),
             target_node_types: Vec::new(),
             key_labels: Vec::new(),
+            standalone: false,
         })
         .unwrap();
         edge.constraints.push(check);
@@ -1167,6 +1175,7 @@ mod tests {
             source_node_types: names(&["City", "Museum"]),
             target_node_types: names(&["City"]),
             key_labels: names(&["RouteKey"]),
+            standalone: false,
         };
         let record = edge_type_record(&route).unwrap();
         assert_eq!(
@@ -1231,6 +1240,7 @@ mod tests {
             source_node_types: cities(320),
             target_node_types: cities(320),
             key_labels: Vec::new(),
+            standalone: false,
         };
         let record = edge_type_record(&fits).unwrap();
         assert_eq!(record.endpoints.len(), 320 * 320);
@@ -1265,6 +1275,7 @@ mod tests {
             source_node_types: names(&["Person"]),
             target_node_types: names(&["City"]),
             key_labels: Vec::new(),
+            standalone: false,
         })
         .unwrap();
         record.endpoints.push(pair(Some("Museum"), Some("Paris")));

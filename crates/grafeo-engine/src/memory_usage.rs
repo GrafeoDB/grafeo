@@ -150,20 +150,27 @@ impl MemoryUsage {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct CacheMemory {
-    /// Total cache memory.
+    /// Total cache memory: the parsed and optimized plans and the sessions'
+    /// own caches.
     pub total_bytes: usize,
-    /// Parsed plan cache.
+    /// Parsed plans, by a deep estimate of what each holds.
     pub parsed_plan_cache_bytes: usize,
-    /// Optimized plan cache.
+    /// Optimized plans, by a deep estimate of what each holds.
     pub optimized_plan_cache_bytes: usize,
     /// Number of cached plans (parsed + optimized).
     pub cached_plan_count: usize,
+    /// The plan cache's bound in force (see `Config::with_plan_cache_limit`).
+    pub plan_cache_limit_bytes: usize,
+    /// What the sessions' own plan caches hold besides the shared plans.
+    pub session_plan_cache_bytes: usize,
 }
 
 impl CacheMemory {
     /// Recomputes `total_bytes` from child values.
     pub fn compute_total(&mut self) {
-        self.total_bytes = self.parsed_plan_cache_bytes + self.optimized_plan_cache_bytes;
+        self.total_bytes = self.parsed_plan_cache_bytes
+            + self.optimized_plan_cache_bytes
+            + self.session_plan_cache_bytes;
     }
 }
 
@@ -196,6 +203,12 @@ pub struct RdfMemory {
     /// Named graphs in the default store (does not include nested graph memory,
     /// which is summed into `triples_and_indexes_bytes`).
     pub named_graph_count: usize,
+    /// What is kept for transactions at an older snapshot: the triples later
+    /// commits deleted, the graphs they cleared or dropped, and the writes of
+    /// commits that an older transaction's commit is checked against. It goes
+    /// once no reader needs it.
+    #[serde(default)]
+    pub snapshot_bytes: usize,
 }
 
 impl RdfMemory {
@@ -208,8 +221,10 @@ impl RdfMemory {
 
     /// Recomputes `total_bytes` from child values.
     pub fn compute_total(&mut self) {
-        self.total_bytes =
-            self.triples_and_indexes_bytes + self.term_dictionary_bytes + self.ring_index_bytes;
+        self.total_bytes = self.triples_and_indexes_bytes
+            + self.term_dictionary_bytes
+            + self.ring_index_bytes
+            + self.snapshot_bytes;
     }
 }
 

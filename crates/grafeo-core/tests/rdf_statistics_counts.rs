@@ -13,6 +13,7 @@
 
 #![cfg(feature = "triple-store")]
 
+use grafeo_core::graph::rdf::{LatestUse, RdfView};
 use std::collections::{BTreeMap, BTreeSet};
 
 use grafeo_core::graph::rdf::{RdfStore, Term, Triple};
@@ -129,7 +130,11 @@ fn counts(statistics: &RdfStatistics) -> Counts {
 
 /// The store's triples, as it holds them.
 fn held(store: &RdfStore) -> Vec<Triple> {
-    store.triples().iter().map(|t| t.as_ref().clone()).collect()
+    store
+        .triples(&RdfView::latest(LatestUse::Test))
+        .iter()
+        .map(|t| t.as_ref().clone())
+        .collect()
 }
 
 #[test]

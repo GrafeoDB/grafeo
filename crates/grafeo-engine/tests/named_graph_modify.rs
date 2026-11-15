@@ -37,7 +37,7 @@ mod tests {
             .unwrap();
         let rdf = db.rdf_store();
         assert!(
-            rdf.graph("http://ex.org/missing").is_none(),
+            rdf.graph_latest("http://ex.org/missing").is_none(),
             "a zero-match named DELETE WHERE must not create an empty named sub-store"
         );
     }
@@ -60,7 +60,7 @@ mod tests {
             .unwrap();
         let rdf = db.rdf_store();
         assert!(
-            rdf.graph("http://ex.org/missing").is_none(),
+            rdf.graph_latest("http://ex.org/missing").is_none(),
             "a WITH-scoped delete against a missing graph must not create it"
         );
     }

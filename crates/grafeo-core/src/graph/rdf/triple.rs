@@ -107,6 +107,26 @@ impl Triple {
         self
     }
 
+    /// The subject, predicate and object, for a store that swaps one for
+    /// the dictionary's equal term.
+    pub(crate) fn terms_mut(&mut self) -> [&mut Term; 3] {
+        [&mut self.subject, &mut self.predicate, &mut self.object]
+    }
+
+    /// What a stored triple holds of its own: its shared allocation, with
+    /// the text of its inlined terms. A dictionary term's text is the
+    /// dictionary's, which the stored triple shares.
+    #[must_use]
+    pub(crate) fn stored_bytes(&self) -> usize {
+        let inlined = [&self.subject, &self.predicate, &self.object]
+            .into_iter()
+            .zip(self.ids)
+            .filter(|(_, id)| TermId::from_raw(*id).is_some_and(|id| id.index().is_none()))
+            .map(|(term, _)| term.text_bytes())
+            .sum::<usize>();
+        2 * std::mem::size_of::<usize>() + std::mem::size_of::<Self>() + inlined
+    }
+
     /// The ids of subject, predicate and object when a store holds the
     /// triple; `None` for a triple no store has taken (a pending write, a
     /// triple a query builds).
@@ -118,6 +138,15 @@ impl Triple {
         }
         let [subject, predicate, object] = self.ids.map(TermId::from_raw);
         Some([subject?, predicate?, object?])
+    }
+
+    /// This triple with the raw ids `ids`, as a store would give them: for
+    /// tests of what keys a triple by its ids.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_raw_ids(mut self, ids: [u64; 3]) -> Self {
+        self.ids = ids;
+        self
     }
 
     /// The raw ids of a triple a store holds, which its indexes key it by

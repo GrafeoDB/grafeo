@@ -1,0 +1,280 @@
+[
+  {
+    "subject": "bertram-gilfoyle",
+    "relation": "WORKS_AT",
+    "object": "pied-piper",
+    "from": "2014-03"
+  },
+  {
+    "subject": "dinesh-chugtai",
+    "relation": "WORKS_AT",
+    "object": "pied-piper",
+    "from": "2014-03"
+  },
+  {
+    "subject": "erlich-bachman",
+    "relation": "INVESTED_IN",
+    "object": "pied-piper",
+    "from": "2014-03",
+    "to": "2014-03"
+  },
+  {
+    "subject": "peter-gregory",
+    "relation": "INVESTED_IN",
+    "object": "pied-piper",
+    "from": "2014-03",
+    "to": "2014-03"
+  },
+  {
+    "subject": "pied-piper",
+    "relation": "BASED_IN",
+    "object": "hacker-hostel",
+    "from": "2014-03",
+    "to": "2014-09"
+  },
+  {
+    "subject": "richard-hendricks",
+    "relation": "FOUNDED",
+    "object": "pied-piper",
+    "from": "2014-03",
+    "to": "2014-03"
+  },
+  {
+    "subject": "richard-hendricks",
+    "relation": "WORKS_AT",
+    "object": "hooli",
+    "to": "2014-03"
+  },
+  {
+    "subject": "richard-hendricks",
+    "relation": "WORKS_AT",
+    "object": "pied-piper",
+    "from": "2014-03",
+    "to": "2015-06"
+  },
+  {
+    "subject": "ron-laflamme",
+    "relation": "WORKS_AT",
+    "object": "pied-piper",
+    "from": "2014-03"
+  },
+  {
+    "subject": "jared-dunn",
+    "relation": "WORKS_AT",
+    "object": "hooli",
+    "to": "2014-04"
+  },
+  {
+    "subject": "jared-dunn",
+    "relation": "WORKS_AT",
+    "object": "pied-piper",
+    "from": "2014-04"
+  },
+  {
+    "subject": "nelson-bighetti",
+    "relation": "WORKS_AT",
+    "object": "hooli",
+    "from": "2014-04",
+    "to": "2016-04"
+  },
+  {
+    "subject": "hooli",
+    "relation": "ATTENDED",
+    "object": "techcrunch-disrupt",
+    "from": "2014-06",
+    "to": "2014-06"
+  },
+  {
+    "subject": "pied-piper",
+    "relation": "ATTENDED",
+    "object": "techcrunch-disrupt",
+    "from": "2014-06",
+    "to": "2014-06"
+  },
+  {
+    "subject": "richard-hendricks",
+    "relation": "ATTENDED",
+    "object": "techcrunch-disrupt",
+    "from": "2014-06",
+    "to": "2014-06"
+  },
+  {
+    "subject": "pied-piper",
+    "relation": "BASED_IN",
+    "object": "pied-piper-office",
+    "from": "2014-09"
+  },
+  {
+    "subject": "laurie-bream",
+    "relation": "WORKS_AT",
+    "object": "raviga",
+    "from": "2015-04",
+    "to": "2018-03"
+  },
+  {
+    "subject": "peter-gregory",
+    "relation": "LIVES_IN",
+    "object": "menlo-park",
+    "to": "2015-04"
+  },
+  {
+    "subject": "peter-gregory",
+    "relation": "WORKS_AT",
+    "object": "raviga",
+    "to": "2015-04"
+  },
+  {
+    "subject": "russ-hanneman",
+    "relation": "INVESTED_IN",
+    "object": "pied-piper",
+    "from": "2015-04",
+    "to": "2015-04"
+  },
+  {
+    "subject": "pied-piper",
+    "relation": "ATTENDED",
+    "object": "condor-stream",
+    "from": "2015-06",
+    "to": "2015-06"
+  },
+  {
+    "subject": "raviga",
+    "relation": "INVESTED_IN",
+    "object": "pied-piper",
+    "from": "2015-06",
+    "to": "2015-06"
+  },
+  {
+    "subject": "carla-walton",
+    "relation": "WORKS_AT",
+    "object": "pied-piper",
+    "from": "2016-04"
+  },
+  {
+    "subject": "erlich-bachman",
+    "relation": "FOUNDED",
+    "object": "bachmanity",
+    "from": "2016-04",
+    "to": "2016-04"
+  },
+  {
+    "subject": "jack-barker",
+    "relation": "WORKS_AT",
+    "object": "pied-piper",
+    "from": "2016-04",
+    "to": "2016-05"
+  },
+  {
+    "subject": "nelson-bighetti",
+    "relation": "FOUNDED",
+    "object": "bachmanity",
+    "from": "2016-04",
+    "to": "2016-04"
+  },
+  {
+    "subject": "nelson-bighetti",
+    "relation": "INVESTED_IN",
+    "object": "bachmanity",
+    "from": "2016-04",
+    "to": "2016-04"
+  },
+  {
+    "subject": "nelson-bighetti",
+    "relation": "WORKS_AT",
+    "object": "hooli-xyz",
+    "to": "2016-04"
+  },
+  {
+    "subject": "richard-hendricks",
+    "relation": "WORKS_AT",
+    "object": "pied-piper",
+    "from": "2016-04",
+    "to": "2016-05"
+  },
+  {
+    "subject": "erlich-bachman",
+    "relation": "ATTENDED",
+    "object": "bachmanity-insanity",
+    "from": "2016-05",
+    "to": "2016-05"
+  },
+  {
+    "subject": "nelson-bighetti",
+    "relation": "ATTENDED",
+    "object": "bachmanity-insanity",
+    "from": "2016-05",
+    "to": "2016-05"
+  },
+  {
+    "subject": "richard-hendricks",
+    "relation": "WORKS_AT",
+    "object": "pied-piper",
+    "from": "2016-05"
+  },
+  {
+    "subject": "erlich-bachman",
+    "relation": "FOUNDED",
+    "object": "seefood",
+    "from": "2017-05",
+    "to": "2017-05"
+  },
+  {
+    "subject": "jian-yang",
+    "relation": "FOUNDED",
+    "object": "seefood",
+    "from": "2017-05",
+    "to": "2017-05"
+  },
+  {
+    "subject": "hooli",
+    "relation": "ATTENDED",
+    "object": "hooli-con",
+    "from": "2017-06",
+    "to": "2017-06"
+  },
+  {
+    "subject": "jack-barker",
+    "relation": "ATTENDED",
+    "object": "hooli-con",
+    "from": "2017-06",
+    "to": "2017-06"
+  },
+  {
+    "subject": "bream-hall",
+    "relation": "BASED_IN",
+    "object": "sand-hill-road",
+    "from": "2018-03"
+  },
+  {
+    "subject": "laurie-bream",
+    "relation": "FOUNDED",
+    "object": "bream-hall",
+    "from": "2018-03",
+    "to": "2018-03"
+  },
+  {
+    "subject": "laurie-bream",
+    "relation": "WORKS_AT",
+    "object": "bream-hall",
+    "from": "2018-03"
+  },
+  {
+    "subject": "monica-hall",
+    "relation": "FOUNDED",
+    "object": "bream-hall",
+    "from": "2018-03",
+    "to": "2018-03"
+  },
+  {
+    "subject": "monica-hall",
+    "relation": "WORKS_AT",
+    "object": "bream-hall",
+    "from": "2018-03"
+  },
+  {
+    "subject": "monica-hall",
+    "relation": "WORKS_AT",
+    "object": "raviga",
+    "to": "2018-03"
+  }
+]

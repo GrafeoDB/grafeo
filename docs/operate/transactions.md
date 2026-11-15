@@ -28,7 +28,7 @@ Grafeo supports two isolation levels, configurable per transaction:
 | `read_committed` | See committed data; non-repeatable reads possible |
 | `snapshot` | Default: consistent snapshot at transaction start; the strongest level |
 
-`serializable` is not available yet. Preventing write skew (two transactions that each read the same data and then each change something different based on it) needs the reads of queries recorded, and they are not yet, so asking for `serializable` fails with `GRAFEO-Q004` instead of running snapshot isolation under its name. Until then, a `UNIQUE` constraint keeps concurrent duplicates out, and a transaction that writes the data it decided on conflicts with one that writes it too.
+`serializable` is not available yet. Preventing write skew (two transactions that each read the same data and then each change something different based on it) needs the reads of queries recorded, and they are not yet, so asking for `serializable` fails with `GRAFEO-Q004` instead of running snapshot isolation under its name. Until then, a `UNIQUE` constraint keeps concurrent duplicates out, two MERGEs of one pattern conflict (see [MERGE and concurrent transactions](#merge-and-concurrent-transactions)), and a transaction that writes the data it decided on conflicts with one that writes it too.
 
 ```python
 # Default (snapshot isolation)
@@ -97,9 +97,11 @@ When a conflict is detected, the application should:
 2. Optionally retry the transaction
 3. Or report the conflict
 
-## Important Limitation: RDF Reads Are Not Isolated Yet
+## RDF and SPARQL
 
-The guarantees above hold for property graph queries (GQL, Cypher, SQL/PGQ and the others). A SPARQL query in a transaction does not read a snapshot yet: it sees the triples that other transactions commit after it started, and two transactions that delete the same triple both commit. A transaction's own uncommitted triples stay private to it, and a rollback still leaves nothing behind. Snapshot isolation for RDF is planned for 0.6.2 ([#718](https://github.com/GrafeoDB/grafeo/issues/718)).
+The same guarantees hold for RDF data. A SPARQL query in a transaction reads the triples and named graphs as they were when the transaction started, with its own updates, and at the same point as its property graph queries; what other transactions commit meanwhile stays invisible to it. A SPARQL query outside a transaction reads one committed state for its whole run.
+
+Two transactions conflict on a triple when both write it in the same graph and one of them deletes it: the second to commit fails with a write conflict (`GRAFEO-T001`). Two inserts of the same triple both commit, and the triple is stored once. A bulk load (`load_rdf_text`, `load_rdf_into`, `batch_insert_rdf`) counts as a commit of the triples it adds: a transaction open across it conflicts with it by the same rule. The load itself is never refused: it applies to the newest state at its own point. Graph operations (`CREATE`, `DROP`, `CLEAR`, `COPY`, `MOVE`) conflict when two transactions change the same graph; see [SPARQL updates](../model-and-query/sparql/update.md#graph-operations-and-transactions).
 
 ## Important Limitation: Write Skew
 
@@ -194,6 +196,39 @@ def withdraw(db, account, amount):
         # ... perform withdrawal ...
         tx.commit()
 ```
+
+### MERGE and concurrent transactions
+
+Two transactions that `MERGE` the same pattern do not both create it: a MERGE that finds no match claims its
+pattern before it creates it. Values under a `UNIQUE`, `PRIMARY KEY` or `NODE KEY` constraint are claimed the same
+way. Of two open transactions that claim one pattern or key value, the one that began first wins, and the other
+fails with the retryable `GRAFEO-T001`:
+
+- A transaction that claims second fails at once, when the holder began first or is committing.
+- A transaction that claimed first, but began after the one that claims now, fails at its next write or at its
+  commit. Its reads go on, but it can no longer commit.
+- A commit fails when a transaction that claimed the same pattern or key value committed after this one began.
+
+So in any cycle of such claims the transaction that began first commits. A MERGE that only matches claims nothing.
+Grafeo does not retry for the application: retry the statement (auto-commit) or the whole transaction (explicit),
+and the retry matches what the other one created. A short backoff between retries saves work, but is not needed for
+progress. This holds for node, relationship and path MERGEs in GQL and Cypher, for `upsert_nodes` and
+`upsert_edges`, and for inserts under key constraints.
+
+Two MERGEs claim one pattern when each would match what the other creates: the same labels in any order, the same
+match properties by value (`1` and `1.0` are one value, `'1'` and `1` are two), and a path read either way. What
+stays out:
+
+- `INSERT` and `CREATE` of the same node still add one each time.
+- A concurrent `SET` that makes an existing node match a MERGE's pattern is not seen.
+- Different patterns that each match what the other creates (`MERGE (n:A {k: 1}) ON CREATE SET n:B` against
+  `MERGE (:A:B {k: 1})`) do not conflict.
+- A Gremlin `coalesce(V().has(...), addV(...))` upsert is a read and a create, not a MERGE.
+- Updates of existing nodes keep first-writer-wins until 0.6.4: transactions that update the same nodes in
+  overlapping orders (`MERGE ... ON MATCH SET`, `SET n += ...`, `upsert_nodes` over existing keys) can fail on
+  every retry.
+
+For a guarantee against every writer, add a `UNIQUE` or `NODE KEY` constraint.
 
 ## What Gets Rolled Back
 

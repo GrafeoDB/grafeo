@@ -149,6 +149,9 @@ every commit within that window. Retention is a setting of the database, stored 
 
 Changing the retention takes effect from then on: what was collected before stays gone.
 
+A snapshot holds the state, not the history. A database made by `import_snapshot`, or after `restore_snapshot`, keeps
+history from that point on: a read before it, by epoch or by time, fails the same way.
+
 ---
 
 ## Time-Travel Queries

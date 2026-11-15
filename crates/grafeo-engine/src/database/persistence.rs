@@ -1066,6 +1066,10 @@ impl super::GrafeoDB {
     /// The `data` must have been produced by [`export_snapshot()`](Self::export_snapshot),
     /// so it is plaintext (snapshots are never encrypted).
     ///
+    /// A snapshot holds the state, not the history: the database continues
+    /// at the snapshot's epoch, and a time-travel read before it is refused
+    /// ("history before ... is not retained"), whatever the history retention.
+    ///
     /// All edge references are validated before any data is inserted: every
     /// edge's source and destination must reference a node present in the
     /// snapshot, and duplicate node/edge IDs are rejected. If validation
@@ -1119,8 +1123,10 @@ impl super::GrafeoDB {
         // The open applied ForceDisk before the restore; the restored rows
         // stay on disk only if the overrides are reapplied after it.
         db.apply_force_disk_overrides();
-        // The database continues at the snapshot's epoch.
+        // The database continues at the snapshot's epoch, and its history
+        // starts there: a snapshot carries none.
         Self::continue_epochs(&root, &db.transaction_manager);
+        db.transaction_manager.restart_history();
         // What the open would say of the database as imported: its data, past the limit or not,
         // came after the empty open's warnings.
         let fallback = db
@@ -1147,6 +1153,11 @@ impl super::GrafeoDB {
     /// The `data` must have been produced by
     /// [`export_snapshot()`](Self::export_snapshot), so it is plaintext
     /// (snapshots are never encrypted).
+    ///
+    /// A snapshot holds the state, not the history: the history the database
+    /// kept goes with the state it replaces, and a time-travel read before
+    /// the restore, by epoch or by time, is refused ("history before ... is
+    /// not retained"), whatever the history retention.
     ///
     /// All validation (duplicate IDs, dangling edge references, RDF terms,
     /// data this build cannot read) is performed before any data is
@@ -1198,8 +1209,11 @@ impl super::GrafeoDB {
         let root = self.lpg_store()?;
         row_groups::restore(&self.snapshot_parts(&root), data, "restore")?;
         // The database continues at the snapshot's epoch, or above it when
-        // it had committed further (epochs never go back).
+        // it had committed further (epochs never go back). Its history
+        // starts there: a snapshot carries none, and what the database kept
+        // before is of the state the restore replaced.
         Self::continue_epochs(&root, &self.transaction_manager);
+        self.transaction_manager.restart_history();
         // Its graphs, indexes and types are the snapshot's now: no cached
         // plan was made for them, and their counts anchor the next.
         root.anchor_plan_statistics();

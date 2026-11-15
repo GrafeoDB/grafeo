@@ -2528,6 +2528,16 @@ impl TransactionManager {
         }
     }
 
+    /// After a snapshot arrived (an import, a restore): the history starts
+    /// at the published epoch, now, so a read before it is refused under
+    /// every retention setting (a snapshot carries no history). Taken under
+    /// the read pins' lock, so no read pins below the new floor meanwhile.
+    pub(crate) fn restart_history(&self) {
+        let _readers = self.reads.epochs.lock();
+        self.history
+            .restart(EpochId::new(self.published_epoch.load(Ordering::Acquire)));
+    }
+
     /// At the end of an open or a new database: a history that is on and
     /// holds no commit at or after the published epoch starts there, now,
     /// so a read at a time from now on finds its epoch.

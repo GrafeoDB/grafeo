@@ -187,6 +187,32 @@ impl std::fmt::Display for KeyClaim {
     }
 }
 
+/// How a conflict message names a key or MERGE pattern claim: `on key ...`,
+/// `on MERGE ...`.
+enum ClaimName<'a> {
+    Key(&'a KeyClaim),
+    Pattern(&'a dyn std::fmt::Display),
+}
+
+impl std::fmt::Display for ClaimName<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Key(key) => write!(f, "on key {key}"),
+            Self::Pattern(pattern) => write!(f, "on MERGE {pattern}"),
+        }
+    }
+}
+
+/// How a conflict message names the holder that kept a key or MERGE pattern
+/// claim (see [`TransactionManager::record_key`]).
+fn holder_kind(committing: bool) -> &'static str {
+    if committing {
+        "is committing"
+    } else {
+        "began first"
+    }
+}
+
 /// The fingerprints of the MERGE patterns a transaction created (see
 /// [`TransactionManager::record_pattern`]): the first few inline and the
 /// rest in a set, so a statement that claims one or two, as an auto-commit
@@ -313,6 +339,13 @@ pub struct TransactionInfo {
     /// The fingerprints of the MERGE patterns the transaction created (see
     /// [`TransactionManager::record_pattern`]).
     pub(crate) pattern_set: PatternSet,
+    /// The older transaction that took a key or MERGE pattern claim from
+    /// this one, when one did, and the claim it took (`on key ...`, `on
+    /// MERGE ...`): oldest claim wins (see [`TransactionManager::record_key`]).
+    /// The transaction's key and pattern claims no longer count, and it fails
+    /// at its next claim and at commit, naming the claim; a rollback to a
+    /// savepoint keeps the mark.
+    doomed_by: Option<(TransactionId, String)>,
     /// What the transaction changed, while it is open or committing: a
     /// checkpoint reads the committed state of what open transactions
     /// changed from it (see [`TransactionManager::open_change_sets`]).
@@ -366,6 +399,7 @@ impl TransactionInfo {
             endpoint_set: FxHashSet::default(),
             key_set: FxHashSet::default(),
             pattern_set: PatternSet::default(),
+            doomed_by: None,
             changes: Some(changes),
             #[cfg(feature = "triple-store")]
             rdf_writes: None,
@@ -389,6 +423,7 @@ impl TransactionInfo {
             endpoint_set: FxHashSet::default(),
             key_set: FxHashSet::default(),
             pattern_set: PatternSet::default(),
+            doomed_by: None,
             changes: None,
             rdf_writes: Some(writes),
             private: false,
@@ -1489,6 +1524,7 @@ impl TransactionManager {
                     info.state,
                     TransactionState::Active | TransactionState::Committing
                 )
+                && info.doomed_by.is_none()
                 && info.key_set.contains(key)
         });
         if claimed {
@@ -1549,6 +1585,68 @@ impl TransactionManager {
             .read()
             .get(&transaction_id)
             .map(|info| info.isolation_level)
+    }
+
+    /// Fails when `transaction_id` was doomed (see
+    /// [`record_key`](Self::record_key)): it lost a key or MERGE pattern
+    /// claim to an older transaction, so it can claim nothing more and
+    /// cannot commit.
+    fn refuse_doomed(info: &TransactionInfo, transaction_id: TransactionId) -> Result<()> {
+        match &info.doomed_by {
+            Some((older, lost)) => Err(Error::Transaction(TransactionError::WriteConflict(
+                format!(
+                    "{lost}: transaction {transaction_id} lost this claim to transaction {older}, \
+                     which began first; retry the transaction"
+                ),
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Settles a key or MERGE pattern claim of `requester` against the other
+    /// open transactions that `holds` (oldest claim wins, without waiting):
+    /// a holder that is committing, or that began before the requester,
+    /// keeps the claim, and the requester fails; every younger holder that
+    /// is still active is doomed, and the requester takes the claim. A
+    /// doomed holder's claims do not count, and a doomed one keeps `claim`
+    /// (`on key ...`, formatted only when one is doomed) for its error.
+    /// Returns the holder that kept the claim and whether it was committing;
+    /// fails first when the requester itself was doomed, which then dooms
+    /// nobody.
+    fn settle_claim(
+        txns: &mut FxHashMap<TransactionId, TransactionInfo>,
+        requester: TransactionId,
+        claim: &dyn std::fmt::Display,
+        holds: impl Fn(&TransactionInfo) -> bool,
+    ) -> Result<std::result::Result<(), (TransactionId, bool)>> {
+        let mut younger = Vec::new();
+        for (other, info) in txns.iter() {
+            if *other == requester {
+                Self::refuse_doomed(info, requester)?;
+                continue;
+            }
+            let open = matches!(
+                info.state,
+                TransactionState::Active | TransactionState::Committing
+            );
+            if !open || info.doomed_by.is_some() || !holds(info) {
+                continue;
+            }
+            let committing = info.state == TransactionState::Committing;
+            if committing || *other < requester {
+                return Ok(Err((*other, committing)));
+            }
+            younger.push(*other);
+        }
+        if !younger.is_empty() {
+            let lost = claim.to_string();
+            for other in younger {
+                if let Some(info) = txns.get_mut(&other) {
+                    info.doomed_by = Some((requester, lost.clone()));
+                }
+            }
+        }
+        Ok(Ok(()))
     }
 
     /// Records a write operation for the transaction.
@@ -1627,12 +1725,14 @@ impl TransactionManager {
         // progress still holds its writes.
         if self.active_count.load(Ordering::Relaxed) > 1 {
             for (other_tx, other_info) in txns.iter() {
-                if *other_tx == transaction_id
-                    || !matches!(
-                        other_info.state,
-                        TransactionState::Active | TransactionState::Committing
-                    )
-                {
+                if *other_tx == transaction_id {
+                    Self::refuse_doomed(other_info, transaction_id)?;
+                    continue;
+                }
+                if !matches!(
+                    other_info.state,
+                    TransactionState::Active | TransactionState::Committing
+                ) {
                     continue;
                 }
                 if let Some(conflict) = entities
@@ -1658,6 +1758,7 @@ impl TransactionManager {
                 "Transaction is not active".to_string(),
             )));
         }
+        Self::refuse_doomed(info, transaction_id)?;
 
         for entity in entities {
             match claim {
@@ -1712,23 +1813,19 @@ impl TransactionManager {
     pub fn record_key(&self, transaction_id: TransactionId, key: KeyClaim) -> Result<()> {
         self.check_no_incomplete_commit()?;
         let mut txns = self.transactions.write();
-        if self.active_count.load(Ordering::Relaxed) > 1 {
-            for (other_tx, other_info) in txns.iter() {
-                if *other_tx != transaction_id
-                    && matches!(
-                        other_info.state,
-                        TransactionState::Active | TransactionState::Committing
-                    )
-                    && other_info.key_set.contains(&key)
-                {
-                    return Err(Error::Transaction(TransactionError::WriteConflict(
-                        format!(
-                            "on key {key}: another open transaction writes the same \
-                         value of the key"
-                        ),
-                    )));
-                }
-            }
+        if self.active_count.load(Ordering::Relaxed) > 1
+            && let Err((holder, committing)) =
+                Self::settle_claim(&mut txns, transaction_id, &ClaimName::Key(&key), |info| {
+                    info.key_set.contains(&key)
+                })?
+        {
+            return Err(Error::Transaction(TransactionError::WriteConflict(
+                format!(
+                    "on key {key}: transaction {holder} ({}) writes the same value of the key; \
+                 retry the statement, or the transaction (transaction {transaction_id})",
+                    holder_kind(committing)
+                ),
+            )));
         }
         let info = txns.get_mut(&transaction_id).ok_or_else(|| {
             Error::Transaction(TransactionError::InvalidState(
@@ -1740,6 +1837,7 @@ impl TransactionManager {
                 "Transaction is not active".to_string(),
             )));
         }
+        Self::refuse_doomed(info, transaction_id)?;
         if let Some(undo) = &mut info.claim_undo {
             if info.key_set.insert(key.clone()) {
                 undo.push(ClaimUndo::Key(key));
@@ -1771,23 +1869,21 @@ impl TransactionManager {
     ) -> Result<()> {
         self.check_no_incomplete_commit()?;
         let mut txns = self.transactions.write();
-        if self.active_count.load(Ordering::Relaxed) > 1 {
-            for (other_tx, other_info) in txns.iter() {
-                if *other_tx != transaction_id
-                    && matches!(
-                        other_info.state,
-                        TransactionState::Active | TransactionState::Committing
-                    )
-                    && other_info.pattern_set.contains(fingerprint)
-                {
-                    return Err(Error::Transaction(TransactionError::WriteConflict(
-                        format!(
-                            "on MERGE {pattern}: another open transaction creates the same \
-                             pattern; retry the statement, or the transaction"
-                        ),
-                    )));
-                }
-            }
+        if self.active_count.load(Ordering::Relaxed) > 1
+            && let Err((holder, committing)) = Self::settle_claim(
+                &mut txns,
+                transaction_id,
+                &ClaimName::Pattern(pattern),
+                |info| info.pattern_set.contains(fingerprint),
+            )?
+        {
+            return Err(Error::Transaction(TransactionError::WriteConflict(
+                format!(
+                    "on MERGE {pattern}: transaction {holder} ({}) creates the same pattern; \
+                 retry the statement, or the transaction (transaction {transaction_id})",
+                    holder_kind(committing)
+                ),
+            )));
         }
         let info = txns.get_mut(&transaction_id).ok_or_else(|| {
             Error::Transaction(TransactionError::InvalidState(
@@ -1799,6 +1895,7 @@ impl TransactionManager {
                 "Transaction is not active".to_string(),
             )));
         }
+        Self::refuse_doomed(info, transaction_id)?;
         if info.pattern_set.insert(fingerprint)
             && let Some(undo) = &mut info.claim_undo
         {
@@ -1951,6 +2048,7 @@ impl TransactionManager {
                 "Transaction is not active".to_string(),
             )));
         }
+        Self::refuse_doomed(ours, transaction_id)?;
         let our_start_epoch = ours.start_epoch;
 
         // Only a transaction that committed after ours began can conflict

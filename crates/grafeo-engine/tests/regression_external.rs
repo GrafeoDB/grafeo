@@ -880,7 +880,8 @@ mod concurrent_merge {
 
     /// Ten sessions MERGE one node at once (a barrier). The ones that lose
     /// to an open transaction's MERGE of the pattern fail with the retryable
-    /// `GRAFEO-T001` and retry, as an application does; the retry matches.
+    /// `GRAFEO-T001` and retry after a random pause, as an application does;
+    /// the retry matches.
     /// One node, and every session ends Ok.
     #[test]
     fn concurrent_merge_no_duplicates() {
@@ -892,14 +893,22 @@ mod concurrent_merge {
                     scope.spawn(|| {
                         let s = db.session();
                         barrier.wait();
-                        for _ in 0..1_000 {
+                        for retry in 0..1_000_u32 {
                             match s.execute("MERGE (:Singleton {key: 'only_one'})") {
                                 Ok(_) => return,
                                 Err(error)
                                     if error.error_code()
                                         == grafeo_common::utils::error::ErrorCode::TransactionConflict =>
                                 {
-                                    std::thread::yield_now();
+                                    // A random pause that grows with each retry, as
+                                    // an application's retry loop takes.
+                                    use std::hash::BuildHasher;
+                                    let bound = 40_u64 << retry.min(6);
+                                    let random = std::collections::hash_map::RandomState::new()
+                                        .hash_one(retry);
+                                    std::thread::sleep(std::time::Duration::from_micros(
+                                        random % bound + 1,
+                                    ));
                                 }
                                 Err(error) => panic!("not a write conflict: {error}"),
                             }

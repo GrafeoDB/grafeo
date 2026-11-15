@@ -200,12 +200,20 @@ def withdraw(db, account, amount):
 ### MERGE and concurrent transactions
 
 Two transactions that `MERGE` the same pattern do not both create it: a MERGE that finds no match claims its
-pattern before it creates it, and the second transaction to claim it fails with the retryable `GRAFEO-T001`. In
-auto-commit mode the statement fails; in an explicit transaction the MERGE fails while the other transaction is
-open, or the commit fails when the other one committed after this one began. Grafeo does not retry for the
-application: retry the statement (auto-commit) or the whole transaction (explicit), and the retry matches what the
-other one created. This holds for node, relationship and path MERGEs in GQL and Cypher, and for `upsert_nodes` and
-`upsert_edges`.
+pattern before it creates it. Values under a `UNIQUE`, `PRIMARY KEY` or `NODE KEY` constraint are claimed the same
+way. Of two open transactions that claim one pattern or key value, the one that began first wins, and the other
+fails with the retryable `GRAFEO-T001`:
+
+- A transaction that claims second fails at once, when the holder began first or is committing.
+- A transaction that claimed first, but began after the one that claims now, fails at its next write or at its
+  commit. Its reads go on, but it can no longer commit.
+- A commit fails when a transaction that claimed the same pattern or key value committed after this one began.
+
+So in any cycle of such claims the transaction that began first commits. A MERGE that only matches claims nothing.
+Grafeo does not retry for the application: retry the statement (auto-commit) or the whole transaction (explicit),
+and the retry matches what the other one created. A short backoff between retries saves work, but is not needed for
+progress. This holds for node, relationship and path MERGEs in GQL and Cypher, for `upsert_nodes` and
+`upsert_edges`, and for inserts under key constraints.
 
 Two MERGEs claim one pattern when each would match what the other creates: the same labels in any order, the same
 match properties by value (`1` and `1.0` are one value, `'1'` and `1` are two), and a path read either way. What
@@ -216,6 +224,9 @@ stays out:
 - Different patterns that each match what the other creates (`MERGE (n:A {k: 1}) ON CREATE SET n:B` against
   `MERGE (:A:B {k: 1})`) do not conflict.
 - A Gremlin `coalesce(V().has(...), addV(...))` upsert is a read and a create, not a MERGE.
+- Updates of existing nodes keep first-writer-wins until 0.6.4: transactions that update the same nodes in
+  overlapping orders (`MERGE ... ON MATCH SET`, `SET n += ...`, `upsert_nodes` over existing keys) can fail on
+  every retry.
 
 For a guarantee against every writer, add a `UNIQUE` or `NODE KEY` constraint.
 

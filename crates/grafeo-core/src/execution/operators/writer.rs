@@ -513,6 +513,13 @@ impl GraphWriter {
     ) -> Result<(), OperatorError> {
         refuse_too_deep(assigned_values(assignments))?;
         self.require_node(id)?;
+        // A list that can change no property writes nothing, so it claims
+        // nothing: a MERGE that only matches, or `SET n += {}`, does not
+        // conflict with another transaction's (`SET n = {}` replaces, and
+        // does).
+        if changes_no_property(assignments, replace) {
+            return Ok(());
+        }
         self.claim(WriteClaim::Node(id))?;
         let mut assignments = Cow::Borrowed(assignments);
         if let Some(validator) = &self.validator {
@@ -834,6 +841,10 @@ impl GraphWriter {
     ) -> Result<(), OperatorError> {
         refuse_too_deep(assigned_values(assignments))?;
         self.require_edge(id)?;
+        // As for a node: a list that can change no property claims nothing.
+        if changes_no_property(assignments, replace) {
+            return Ok(());
+        }
         self.claim(WriteClaim::Edge(id))?;
         let mut assignments = Cow::Borrowed(assignments);
         if let Some(validator) = &self.validator
@@ -1418,6 +1429,18 @@ impl GraphWriter {
         }
         Ok(())
     }
+}
+
+/// Whether a property set of `assignments` can change no property: without
+/// `replace`, every assignment merges an empty map (`SET n += {}`), which is
+/// so for none. A named property, a map with entries, a replace and a merge
+/// of a value that is not a map (which writes nothing, but is not decided
+/// here) can.
+fn changes_no_property(assignments: &[(String, Value)], replace: bool) -> bool {
+    !replace
+        && assignments.iter().all(|(name, value)| {
+            name == MAP_ASSIGNMENT && matches!(value, Value::Map(map) if map.is_empty())
+        })
 }
 
 /// Records in `recording` what the store reported it applied for `op`;

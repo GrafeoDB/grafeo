@@ -135,9 +135,25 @@ fn in_transaction(
     result
 }
 
+/// The pause before retry number `retry` (1 for the first): a random time up
+/// to a bound that doubles with each retry, from 40 microseconds to about
+/// 2.5 milliseconds, as an application's retry loop takes. The races check
+/// that each key is created once and that every session finishes; progress
+/// itself is the deterministic cycle rows' to prove, since under load a
+/// descheduled older holder makes a younger session fail for as long as it
+/// stalls, and immediate retries would spend a budget counted in tries on
+/// that.
+fn backoff(retry: usize) -> std::time::Duration {
+    use std::hash::BuildHasher;
+    let bound = 20_u64 << retry.min(7);
+    let random = std::collections::hash_map::RandomState::new().hash_one(retry);
+    std::time::Duration::from_micros(random % bound + 1)
+}
+
 /// `sessions` sessions start `work` at once (a barrier) and retry it on the
-/// write conflict, as an application does. Each result is the number of
-/// retries, or the error that was not a write conflict.
+/// write conflict after a random pause (see [`backoff`]), as an application
+/// does. Each result is the number of retries, or the error that was not a
+/// write conflict.
 fn race(
     db: &GrafeoDB,
     sessions: usize,
@@ -157,7 +173,7 @@ fn race(
                             Ok(()) => return Ok(retries),
                             Err(error) if is_conflict(&error) && retries < MAX_RETRIES => {
                                 retries += 1;
-                                std::thread::yield_now();
+                                std::thread::sleep(backoff(retries));
                             }
                             Err(error) => return Err(error),
                         }
@@ -843,13 +859,25 @@ fn row(pairs: &[(&str, Value)]) -> HashMap<PropertyKey, Value> {
         .collect()
 }
 
-/// Eight sessions upsert overlapping node rows at once: each key once.
+/// The keys every session of an upsert race writes, in one order: 0 to 5.
+///
+/// An upsert also updates the rows it matches (`SET n += row`), so sessions
+/// that upsert overlapping rows in different orders update committed nodes
+/// in a cycle. A write cycle on existing elements can still fail every
+/// member on every retry until wait-die covers write claims, planned for
+/// 0.6.4; the rotated create cycle is covered by the UNWIND, FOREACH and
+/// UNIQUE races. Rotate these keys again once that lands.
+fn ordered_keys() -> Value {
+    Value::List((0..6_i64).map(Value::Int64).collect::<Vec<_>>().into())
+}
+
+/// Eight sessions upsert the same node rows at once: each key once.
 #[test]
 fn eight_sessions_upsert_nodes_create_each_key_once() {
     for round in 0..10 {
         let db = GrafeoDB::new_in_memory();
-        let results = race(&db, 8, &|session, index| {
-            let Value::List(keys) = overlapping_keys(index) else {
+        let results = race(&db, 8, &|session, _| {
+            let Value::List(keys) = ordered_keys() else {
                 unreachable!()
             };
             let rows = keys
@@ -863,8 +891,9 @@ fn eight_sessions_upsert_nodes_create_each_key_once() {
     }
 }
 
-/// Eight sessions upsert overlapping edge rows between existing nodes at
-/// once: each edge key once.
+/// Eight sessions upsert the same edge rows between existing nodes at once:
+/// each edge key once. The rows come in one order, as for the node upsert
+/// (see [`ordered_keys`]): an edge upsert updates the edges it matches.
 #[test]
 fn eight_sessions_upsert_edges_create_each_key_once() {
     let options = grafeo_engine::database::EdgeUpsertOptions::new();
@@ -872,8 +901,8 @@ fn eight_sessions_upsert_edges_create_each_key_once() {
         let db = GrafeoDB::new_in_memory();
         db.execute("UNWIND range(0, 6) AS i INSERT (:Stop {id: i})")
             .unwrap();
-        let results = race(&db, 8, &|session, index| {
-            let Value::List(keys) = overlapping_keys(index) else {
+        let results = race(&db, 8, &|session, _| {
+            let Value::List(keys) = ordered_keys() else {
                 unreachable!()
             };
             let rows = keys
@@ -1068,6 +1097,526 @@ fn explain_shows_the_claim_on_the_create_line() {
             .unwrap();
         let (lines, plan) = claiming_create_lines(&create);
         assert_eq!(lines, 0, "a plain CREATE: {plan}");
+    }
+}
+
+// The oldest claim wins: progress when claims form a cycle.
+//
+// Of two open transactions that claim one MERGE pattern or one key under
+// UNIQUE, PRIMARY KEY or NODE KEY, the one that began first wins. A younger
+// requester fails at once with `GRAFEO-T001`. An older requester goes on,
+// and the younger holder is doomed: its claims stop counting, its reads go
+// on, and it fails with `GRAFEO-T001` at its next claim of any kind and at
+// its commit. A holder that is committing beats any requester. So in a cycle
+// of claims the oldest member always commits.
+
+/// `count` sessions, each with an open transaction, begun in order: the
+/// first is the oldest.
+fn open_in_order(db: &GrafeoDB, count: usize) -> Vec<Session> {
+    (0..count)
+        .map(|_| {
+            let mut session = db.session();
+            session.begin_transaction().unwrap();
+            session
+        })
+        .collect()
+}
+
+/// Asserts that `outcome` is the retryable `GRAFEO-T001`.
+fn assert_conflict<T: std::fmt::Debug>(outcome: Result<T, Error>, what: &str) {
+    match outcome {
+        Err(error) if is_conflict(&error) => {}
+        other => panic!("{what}: {other:?}, not GRAFEO-T001"),
+    }
+}
+
+/// A three-transaction cycle, with `claim(session, k)` writing the key `k`:
+/// each holds its own key, then the oldest claims the middle one's, the
+/// middle one the youngest's, and the youngest the oldest's. The oldest goes
+/// on and commits; the middle one is doomed by it and fails at its next
+/// claim and at its commit; the youngest fails at once against the oldest.
+/// Their retries then finish the work: each key once.
+fn a_cycle_of_three_lets_the_oldest_commit(
+    db: &GrafeoDB,
+    claim: fn(&Session, &str) -> Result<(), Error>,
+    keys: fn(&GrafeoDB) -> Vec<(String, i64)>,
+) {
+    let mut sessions = open_in_order(db, 3);
+    for (session, key) in sessions.iter().zip(["k1", "k2", "k3"]) {
+        claim(session, key).unwrap_or_else(|error| panic!("{key} alone: {error}"));
+    }
+    claim(&sessions[0], "k2").expect("the oldest claims the middle one's key and goes on");
+    assert_conflict(
+        claim(&sessions[1], "k3"),
+        "the doomed middle one's next claim",
+    );
+    assert_conflict(claim(&sessions[2], "k1"), "the youngest against the oldest");
+    sessions[0].commit().expect("the oldest commits");
+    assert_conflict(sessions[1].commit(), "the doomed middle one's commit");
+    if sessions[2].in_transaction() {
+        sessions[2].rollback().unwrap();
+    }
+    assert_eq!(
+        keys(db),
+        [("k1".to_string(), 1), ("k2".to_string(), 1)],
+        "only the oldest's work is committed"
+    );
+    // The retries, as an application runs them.
+    in_transaction(&mut sessions[1], |session| {
+        claim(session, "k2")?;
+        claim(session, "k3")
+    })
+    .unwrap();
+    in_transaction(&mut sessions[2], |session| {
+        claim(session, "k3")?;
+        claim(session, "k1")
+    })
+    .unwrap();
+    assert_eq!(
+        keys(db),
+        [
+            ("k1".to_string(), 1),
+            ("k2".to_string(), 1),
+            ("k3".to_string(), 1)
+        ]
+    );
+}
+
+/// The `:Memory` keys and how many nodes hold each, in key order.
+fn memory_keys(db: &GrafeoDB) -> Vec<(String, i64)> {
+    db.execute("MATCH (m:Memory) RETURN m.key AS k, count(m) AS c ORDER BY k")
+        .unwrap()
+        .rows()
+        .iter()
+        .map(|row| match &row[0] {
+            Value::String(key) => (key.to_string(), int(&row[1])),
+            other => panic!("a key, got {other:?}"),
+        })
+        .collect()
+}
+
+fn merge_memory(session: &Session, key: &str) -> Result<(), Error> {
+    session
+        .execute_with_params(
+            "MERGE (:Memory {key: $key})",
+            params(&[("key", Value::from(key))]),
+        )
+        .map(drop)
+}
+
+fn insert_memory(session: &Session, key: &str) -> Result<(), Error> {
+    session
+        .execute_with_params(
+            "INSERT (:Memory {key: $key})",
+            params(&[("key", Value::from(key))]),
+        )
+        .map(drop)
+}
+
+/// Row 1: a cycle of MERGE patterns.
+#[test]
+fn a_cycle_of_merge_patterns_lets_the_oldest_commit() {
+    let db = GrafeoDB::new_in_memory();
+    a_cycle_of_three_lets_the_oldest_commit(&db, merge_memory, memory_keys);
+}
+
+/// Row 2: the same cycle with UNIQUE keys, written by INSERT. The retries
+/// MERGE, since an INSERT of a key the oldest committed meets the
+/// constraint.
+#[test]
+fn a_cycle_of_unique_keys_lets_the_oldest_commit() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute("CREATE CONSTRAINT memory_key FOR (m:Memory) ON (m.key) UNIQUE")
+        .unwrap();
+    let mut sessions = open_in_order(&db, 3);
+    for (session, key) in sessions.iter().zip(["k1", "k2", "k3"]) {
+        insert_memory(session, key).unwrap_or_else(|error| panic!("{key} alone: {error}"));
+    }
+    insert_memory(&sessions[0], "k2").expect("the oldest claims the middle one's key and goes on");
+    assert_conflict(
+        insert_memory(&sessions[1], "k3"),
+        "the doomed middle one's next claim",
+    );
+    assert_conflict(
+        insert_memory(&sessions[2], "k1"),
+        "the youngest against the oldest",
+    );
+    sessions[0].commit().expect("the oldest commits");
+    assert_conflict(sessions[1].commit(), "the doomed middle one's commit");
+    if sessions[2].in_transaction() {
+        sessions[2].rollback().unwrap();
+    }
+    assert_eq!(
+        memory_keys(&db),
+        [("k1".to_string(), 1), ("k2".to_string(), 1)]
+    );
+    in_transaction(&mut sessions[1], |session| {
+        merge_memory(session, "k2")?;
+        merge_memory(session, "k3")
+    })
+    .unwrap();
+    assert_eq!(
+        memory_keys(&db),
+        [
+            ("k1".to_string(), 1),
+            ("k2".to_string(), 1),
+            ("k3".to_string(), 1)
+        ]
+    );
+}
+
+/// Row 3: a doomed transaction's reads go on, and it fails at its commit
+/// even when it claims nothing more; a write fails at once.
+#[test]
+fn a_doomed_transaction_reads_and_fails_at_its_next_write_and_commit() {
+    for writes in [false, true] {
+        let db = GrafeoDB::new_in_memory();
+        let mut sessions = open_in_order(&db, 2);
+        merge_memory(&sessions[1], "ssi").unwrap();
+        merge_memory(&sessions[0], "ssi").expect("the older claims the pattern and goes on");
+        let read = sessions[1]
+            .execute("MATCH (m:Memory) RETURN count(m) AS c")
+            .expect("a doomed transaction still reads");
+        assert_eq!(int(&read.rows()[0][0]), 1, "its own node");
+        if writes {
+            assert_conflict(
+                sessions[1].execute("MATCH (m:Memory {key: 'ssi'}) SET m.city = 'Paris'"),
+                "a doomed transaction's write",
+            );
+        }
+        assert_conflict(sessions[1].commit(), "a doomed transaction's commit");
+        sessions[0].commit().unwrap();
+        assert_eq!(ssi_count(&db), 1, "writes: {writes}");
+    }
+}
+
+/// Row 4: a younger requester against an older open holder fails at once,
+/// for a MERGE pattern and for a UNIQUE key, and the holder is not harmed.
+#[test]
+fn a_younger_requester_fails_at_once() {
+    for (constraint, claim) in [
+        (
+            None,
+            merge_memory as fn(&Session, &str) -> Result<(), Error>,
+        ),
+        (
+            Some("CREATE CONSTRAINT memory_key FOR (m:Memory) ON (m.key) UNIQUE"),
+            insert_memory,
+        ),
+    ] {
+        let db = GrafeoDB::new_in_memory();
+        if let Some(constraint) = constraint {
+            db.execute(constraint).unwrap();
+        }
+        let mut sessions = open_in_order(&db, 2);
+        claim(&sessions[0], "ssi").unwrap();
+        assert_conflict(claim(&sessions[1], "ssi"), "the younger requester");
+        sessions[0].commit().expect("the older holder commits");
+        sessions[1].rollback().unwrap();
+        assert_eq!(ssi_count(&db), 1, "{constraint:?}");
+    }
+}
+
+/// Row 5: a holder that is committing beats any requester, even an older
+/// one: the requester fails, and the holder's commit goes through. The
+/// requester's MERGE runs from inside the holder's commit, right after its
+/// epoch is assigned, on its own thread.
+#[cfg(feature = "testing-statement-injection")]
+#[test]
+fn a_requester_against_a_committing_holder_fails() {
+    use std::sync::{Arc, Mutex};
+    for (constraint, claim) in [
+        (
+            None,
+            merge_memory as fn(&Session, &str) -> Result<(), Error>,
+        ),
+        (
+            Some("CREATE CONSTRAINT memory_key FOR (m:Memory) ON (m.key) UNIQUE"),
+            insert_memory,
+        ),
+    ] {
+        let db = GrafeoDB::new_in_memory();
+        if let Some(constraint) = constraint {
+            db.execute(constraint).unwrap();
+        }
+        let mut older = db.session();
+        older.begin_transaction().unwrap();
+        let mut younger = db.session();
+        younger.begin_transaction().unwrap();
+        claim(&younger, "ssi").unwrap();
+        let outcome: Arc<Mutex<Option<(Session, Result<(), Error>)>>> = Arc::default();
+        let slot = Arc::clone(&outcome);
+        grafeo_common::testing::commit_hook::after_next_commit_epoch(move || {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let result = claim(&older, "ssi");
+                sender.send((older, result)).unwrap();
+            });
+            let done = receiver
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("the requester does not wait for the commit");
+            *slot.lock().unwrap() = Some(done);
+        });
+        younger
+            .commit()
+            .expect("the committing holder's commit goes through");
+        let (mut older, result) = outcome
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the hook ran inside the commit");
+        assert_conflict(result, "an older requester against a committing holder");
+        older.rollback().unwrap();
+        assert_eq!(ssi_count(&db), 1, "{constraint:?}");
+    }
+}
+
+/// Row 6: a doomed holder's claims do not block a third transaction. The
+/// middle one holds two patterns; the oldest dooms it on one; the youngest
+/// then claims the other without a conflict, and commits.
+#[test]
+fn a_doomed_holder_does_not_block_a_third_transaction() {
+    let db = GrafeoDB::new_in_memory();
+    let mut sessions = open_in_order(&db, 3);
+    merge_memory(&sessions[1], "k1").unwrap();
+    merge_memory(&sessions[1], "k2").unwrap();
+    merge_memory(&sessions[0], "k1").expect("the oldest dooms the middle one");
+    merge_memory(&sessions[2], "k2").expect("the doomed holder's claim does not count");
+    sessions[0].commit().unwrap();
+    sessions[2].commit().unwrap();
+    assert_conflict(sessions[1].commit(), "the doomed holder's commit");
+    assert_eq!(
+        memory_keys(&db),
+        [("k1".to_string(), 1), ("k2".to_string(), 1)]
+    );
+}
+
+/// Row 7: a rollback to a savepoint undoes the claims since it, but not the
+/// doom: the transaction fails at its commit all the same.
+#[test]
+fn a_rollback_to_a_savepoint_keeps_a_transaction_doomed() {
+    let db = GrafeoDB::new_in_memory();
+    let mut sessions = open_in_order(&db, 2);
+    sessions[1].savepoint("before").unwrap();
+    merge_memory(&sessions[1], "ssi").unwrap();
+    merge_memory(&sessions[0], "ssi").expect("the older dooms the younger");
+    sessions[1].rollback_to_savepoint("before").unwrap();
+    sessions[1]
+        .execute("MATCH (m:Memory) RETURN count(m) AS c")
+        .expect("its reads go on");
+    assert_conflict(sessions[1].commit(), "the doomed transaction's commit");
+    sessions[0].commit().unwrap();
+    assert_eq!(ssi_count(&db), 1);
+}
+
+/// Eight sessions MERGE overlapping keys in rotated orders under a UNIQUE
+/// constraint, so key claims and pattern claims meet: each key once, and
+/// every session finishes.
+#[test]
+fn eight_sessions_unwind_merges_under_unique_create_each_key_once() {
+    for round in 0..10 {
+        let db = GrafeoDB::new_in_memory();
+        db.execute("CREATE CONSTRAINT a_key FOR (n:A) ON (n.k) UNIQUE")
+            .unwrap();
+        let results = race(&db, 8, &|session, index| {
+            session
+                .execute_with_params(
+                    "UNWIND $keys AS x MERGE (:A {k: x})",
+                    params(&[("keys", overlapping_keys(index))]),
+                )
+                .map(drop)
+        });
+        assert_all_ok(&results, &format!("round {round}"));
+        assert_each_key_once(&db, "A", 6, &format!("round {round}: {results:?}"));
+    }
+}
+
+// A MERGE that only matches writes nothing, so it claims nothing.
+
+/// `statement` (with `pairs` as its parameters) runs in two open
+/// transactions over the committed state that `setup` wrote; both must
+/// commit. Returns what failed, for the message.
+fn both_commit(setup: &str, statement: &str, pairs: &[(&str, Value)]) -> Result<(), String> {
+    let db = GrafeoDB::new_in_memory();
+    db.execute(setup).unwrap();
+    let mut first = db.session();
+    let mut second = db.session();
+    first.begin_transaction().unwrap();
+    second.begin_transaction().unwrap();
+    first
+        .execute_with_params(statement, params(pairs))
+        .map_err(|error| format!("the first transaction's statement: {error}"))?;
+    second
+        .execute_with_params(statement, params(pairs))
+        .map_err(|error| format!("the second transaction's statement: {error}"))?;
+    first
+        .commit()
+        .map_err(|error| format!("the first commit: {error}"))?;
+    second
+        .commit()
+        .map_err(|error| format!("the second commit: {error}"))
+}
+
+const MEMORY: &str = "INSERT (:Memory {key: 'ssi', city: 'Prague'})";
+
+/// Two open transactions MERGE the same committed node without ON MATCH:
+/// each only matches, writes nothing and claims nothing, so both commit and
+/// the node is unchanged. Before, each matched node was set with an empty
+/// list, which claimed a write, so the second failed with `GRAFEO-T001`.
+#[test]
+fn two_merges_that_only_match_both_commit() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute(MEMORY).unwrap();
+    let mut first = db.session();
+    let mut second = db.session();
+    first.begin_transaction().unwrap();
+    second.begin_transaction().unwrap();
+    first.execute("MERGE (:Memory {key: 'ssi'})").unwrap();
+    second
+        .execute("MERGE (:Memory {key: 'ssi'})")
+        .expect("a MERGE that only matches claims no write");
+    first.commit().unwrap();
+    second.commit().expect("nothing of it conflicts at commit");
+    assert_eq!(ssi_count(&db), 1);
+    assert_eq!(
+        count(
+            &db,
+            "MATCH (m:Memory {key: 'ssi', city: 'Prague'}) RETURN count(m)"
+        ),
+        1,
+        "the node is as it was"
+    );
+}
+
+/// The write cycle of the release races: two transactions MERGE two
+/// committed nodes in opposite orders, without ON MATCH. Nothing is written,
+/// so both commit.
+#[test]
+fn merges_that_only_match_in_opposite_orders_both_commit() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute("INSERT (:A {k: 0}), (:A {k: 1})").unwrap();
+    let mut first = db.session();
+    let mut second = db.session();
+    first.begin_transaction().unwrap();
+    second.begin_transaction().unwrap();
+    first.execute("MERGE (:A {k: 0})").unwrap();
+    second.execute("MERGE (:A {k: 1})").unwrap();
+    first
+        .execute("MERGE (:A {k: 1})")
+        .expect("the first matches the second's node");
+    second
+        .execute("MERGE (:A {k: 0})")
+        .expect("the second matches the first's node");
+    first.commit().unwrap();
+    second.commit().unwrap();
+    assert_eq!(count(&db, "MATCH (n:A) RETURN count(n)"), 2);
+}
+
+/// The other statements that only match or can change no property: each
+/// runs in two open transactions and both commit. A set that can change no
+/// property claims nothing, on a node or an edge.
+/// - `SET n += {}` and `SET n += $empty` (an empty map parameter) on a
+///   committed node, and `SET r += {}` on a committed edge.
+/// - A Cypher node MERGE without ON MATCH, and with `ON MATCH SET n += {}`.
+/// - A relationship MERGE between two bound nodes, and a path MERGE, that
+///   match: their match branch never wrote, and must not start to.
+#[test]
+fn statements_that_change_nothing_both_commit() {
+    let path = "INSERT (:P {n: 'Vincent'})-[:KNOWS {since: 1994}]->(:P {n: 'Jules'})";
+    let empty = Value::Map(std::sync::Arc::new(std::collections::BTreeMap::new()));
+    let cases: Vec<(&str, &str, &str, Vec<(&str, Value)>)> = vec![
+        (
+            "SET n += {}",
+            MEMORY,
+            "MATCH (m:Memory {key: 'ssi'}) SET m += {}",
+            vec![],
+        ),
+        (
+            "SET n += $empty",
+            MEMORY,
+            "MATCH (m:Memory {key: 'ssi'}) SET m += $empty",
+            vec![("empty", empty)],
+        ),
+        (
+            "SET r += {} on an edge",
+            path,
+            "MATCH ()-[r:KNOWS]->() SET r += {}",
+            vec![],
+        ),
+        (
+            "a relationship MERGE that matches",
+            path,
+            "MATCH (a:P {n: 'Vincent'}), (b:P {n: 'Jules'}) MERGE (a)-[:KNOWS]->(b)",
+            vec![],
+        ),
+        (
+            "a path MERGE that matches",
+            path,
+            "MERGE (:P {n: 'Vincent'})-[:KNOWS]->(:P {n: 'Jules'})",
+            vec![],
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (name, setup, statement, pairs) in &cases {
+        if let Err(failure) = both_commit(setup, statement, pairs) {
+            wrong.push(format!("{name}: {failure}"));
+        }
+    }
+    #[cfg(feature = "cypher")]
+    for (name, statement) in [
+        (
+            "a Cypher node MERGE without ON MATCH",
+            "MERGE (:Memory {key: 'ssi'})",
+        ),
+        (
+            "a Cypher node MERGE with ON MATCH SET n += {}",
+            "MERGE (m:Memory {key: 'ssi'}) ON MATCH SET m += {}",
+        ),
+    ] {
+        let db = GrafeoDB::new_in_memory();
+        db.execute(MEMORY).unwrap();
+        let mut first = db.session();
+        let mut second = db.session();
+        first.begin_transaction().unwrap();
+        second.begin_transaction().unwrap();
+        let outcome = first
+            .execute_cypher(statement)
+            .and_then(|_| second.execute_cypher(statement))
+            .and_then(|_| first.commit())
+            .and_then(|()| second.commit());
+        if let Err(error) = outcome {
+            wrong.push(format!("{name}: {error}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// `SET n = {}` and `SET r = {}` replace the properties, so they write the
+/// element and claim it: the second transaction's SET fails with
+/// `GRAFEO-T001`, as any write of one element by two open transactions
+/// does.
+#[test]
+fn set_to_an_empty_map_still_conflicts() {
+    for (setup, statement) in [
+        (MEMORY, "MATCH (m:Memory {key: 'ssi'}) SET m = {}"),
+        (
+            "INSERT (:P {n: 'Vincent'})-[:KNOWS {since: 1994}]->(:P {n: 'Jules'})",
+            "MATCH ()-[r:KNOWS]->() SET r = {}",
+        ),
+    ] {
+        let db = GrafeoDB::new_in_memory();
+        db.execute(setup).unwrap();
+        let mut first = db.session();
+        let mut second = db.session();
+        first.begin_transaction().unwrap();
+        second.begin_transaction().unwrap();
+        first.execute(statement).unwrap();
+        let error = second
+            .execute(statement)
+            .expect_err("a replace writes the element");
+        assert!(is_conflict(&error), "{statement}: {error}");
+        first.commit().unwrap();
+        second.rollback().unwrap();
     }
 }
 

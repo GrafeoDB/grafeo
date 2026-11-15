@@ -355,8 +355,15 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
+      # sccache 0.17 to 0.19 expand cargo's response file and spawn rustc with
+      # the whole command line, which for grafeo-engine is over the 32K Windows
+      # limit since cargo 1.100 passes one `-L dependency=` per crate folder
+      # (os error 206). 0.16.0 hands the response file on to rustc. Move
+      # Windows back to the latest once a release has mozilla/sccache#3026.
       - name: Configure sccache
         uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: ${{ runner.os == 'Windows' && 'v0.16.0' || '' }}
 
       # Crate sources only: archiving this job's target directory filled the
       # runner's disk, and sccache keeps the compiled crates between runs.
@@ -607,8 +614,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.100.0
 
+      # Windows on sccache 0.16.0, as in rust-test (os error 206).
       - name: Configure sccache
         uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: ${{ runner.os == 'Windows' && 'v0.16.0' || '' }}
 
       # Crate sources only, as in the other test jobs.
       - name: Cache cargo registry

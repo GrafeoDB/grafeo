@@ -190,6 +190,7 @@ Settings.embed_model = OpenAIEmbedding(model="text-embedding-3-small")
 
 - **The graph has only `text_chunk` nodes**: entity extraction failed for every chunk. LlamaIndex's extractors log the error and carry on; pass `kg_extractors=[SimpleLLMPathExtractor(llm=Settings.llm, raise_on_error=True)]` (from `llama_index.core.indices.property_graph`) to `from_documents` to see it (a rejected model name, a missing API key, a rate limit).
 - **`RuntimeError: Event loop is closed`**: while building an index, pass `use_async=False`; on a later `insert`, insert through a new index with a new LLM object (see [Adding documents later](#adding-documents-later)).
+- **`PermissionError: Security Violation [pathsec.open]: refusing multiply-linked file ... nltk_cache ...`** while building from long documents on Linux: NLTK 3.10 refuses to open the data files LlamaIndex's sentence splitter reads when uv installed them as hard links, uv's default on Linux. Reinstall with copies: `UV_LINK_MODE=copy uv sync --reinstall`, and keep `UV_LINK_MODE=copy` set for later installs.
 - **`ValueError` about embedding dimensions**: the store was created with other dimensions than the embedding model gives. Pass `embed_model=` to the store, or the model's size as `embedding_dimensions`.
 
 ### Querying the graph

@@ -209,7 +209,7 @@ fails with the retryable `GRAFEO-T001`:
   commit. Its reads go on, but it can no longer commit.
 - A commit fails when a transaction that claimed the same pattern or key value committed after this one began.
 
-So in any cycle of such claims the transaction that began first commits. A MERGE that only matches claims nothing.
+So a cycle of such claims always lets one transaction commit. A MERGE that only matches claims nothing.
 Grafeo does not retry for the application: retry the statement (auto-commit) or the whole transaction (explicit),
 and the retry matches what the other one created. A short backoff between retries saves work, but is not needed for
 progress. This holds for node, relationship and path MERGEs in GQL and Cypher, for `upsert_nodes` and

@@ -1191,24 +1191,24 @@ impl super::Planner {
             };
 
             match &sort_key.expression {
+                #[cfg(feature = "vector-index")]
                 LogicalExpression::FunctionCall {
-                    callee: Callee::Builtin(function),
+                    callee:
+                        Callee::Builtin(
+                            function @ (BuiltinFunction::CosineSimilarity
+                            | BuiltinFunction::EuclideanDistance
+                            | BuiltinFunction::DotProduct
+                            | BuiltinFunction::ManhattanDistance),
+                        ),
                     args,
                     ..
-                } => match function {
-                    #[cfg(feature = "vector-index")]
-                    BuiltinFunction::CosineSimilarity
-                    | BuiltinFunction::EuclideanDistance
-                    | BuiltinFunction::DotProduct
-                    | BuiltinFunction::ManhattanDistance => {
-                        self.try_vector_topk(*function, args, k, &scan_var, label, sort_key)
-                    }
-                    #[cfg(feature = "text-index")]
-                    BuiltinFunction::TextScore => {
-                        self.try_text_topk(args, k, &scan_var, label, sort_key)
-                    }
-                    _ => Ok(None),
-                },
+                } => self.try_vector_topk(*function, args, k, &scan_var, label, sort_key),
+                #[cfg(feature = "text-index")]
+                LogicalExpression::FunctionCall {
+                    callee: Callee::Builtin(BuiltinFunction::TextScore),
+                    args,
+                    ..
+                } => self.try_text_topk(args, k, &scan_var, label, sort_key),
                 _ => Ok(None),
             }
         }

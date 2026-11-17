@@ -87,6 +87,7 @@ mod comparison_across_kinds;
 mod comparison_by_language;
 mod comparison_of_lists;
 mod concurrent_sessions;
+mod connected_components_partition;
 mod constraints_over_existing_data;
 mod correlated_label_seek;
 mod corruption;

@@ -41,6 +41,9 @@ pub struct TopKOperator {
     limit: usize,
     /// The column types of the input chunks: the output keeps them.
     column_types: ColumnTypes,
+    /// How many leading columns the output keeps, when the trailing ones are
+    /// sort keys added only to sort by (see [`with_output_width`](Self::with_output_width)).
+    output_width: Option<usize>,
     state: TopKState,
     /// How the sort keys read a local datetime against a zoned one (see
     /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
@@ -139,6 +142,7 @@ impl TopKOperator {
             sort_keys: Arc::new(sort_keys),
             limit,
             column_types: ColumnTypes::default(),
+            output_width: None,
             state: TopKState::Building {
                 heap: BinaryHeap::new(),
                 next_insertion_id: 0,
@@ -156,6 +160,22 @@ impl TopKOperator {
     pub fn with_temporal(mut self, temporal: TemporalComparison) -> Self {
         self.temporal = temporal;
         self
+    }
+
+    /// The operator returning only the first `width` columns: the ones after
+    /// them are sort keys added only to sort by, as for
+    /// [`SortOperator::with_output_width`](super::SortOperator::with_output_width).
+    #[must_use]
+    pub fn with_output_width(mut self, width: usize) -> Self {
+        self.output_width = Some(width);
+        self
+    }
+
+    /// How many leading columns each output row keeps, when the top-k drops
+    /// trailing sort-key columns.
+    #[must_use]
+    pub fn output_width(&self) -> Option<usize> {
+        self.output_width
     }
 
     /// How the sort keys read temporal values (see [`Self::with_temporal`]).
@@ -269,10 +289,13 @@ impl Operator for TopKOperator {
         if let TopKState::Draining { rows, position } = &mut self.state {
             if *position < rows.len() {
                 let types = self.column_types.types();
-                let mut builder = DataChunkBuilder::with_capacity(types, 2048);
+                let width = self
+                    .output_width
+                    .map_or(types.len(), |width| width.min(types.len()));
+                let mut builder = DataChunkBuilder::with_capacity(&types[..width], 2048);
                 while *position < rows.len() && !builder.is_full() {
                     let entry = &rows[*position];
-                    for col_idx in 0..types.len() {
+                    for col_idx in 0..width {
                         if let Some(dst_col) = builder.column_mut(col_idx) {
                             let val = entry.row_values[col_idx].clone().unwrap_or(Value::Null);
                             dst_col.push_value(val);

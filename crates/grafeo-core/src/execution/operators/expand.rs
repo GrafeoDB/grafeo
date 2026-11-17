@@ -1,6 +1,7 @@
 //! Expand operator for relationship traversal.
 
 use super::node_seek::node_ids;
+use super::value_utils::{EqualAcrossKinds, ValueKinds};
 use super::{Operator, OperatorError, OperatorResult, ReadCounter, SeekKey};
 use crate::execution::DataChunk;
 use crate::graph::Direction;
@@ -75,6 +76,9 @@ pub struct ExpandOperator {
     view: ReadView,
     /// Counts the edges the expansion reads.
     reads: Option<Arc<ReadCounter>>,
+    /// What the statement's `=` gives two values of two kinds, which decides when a target key
+    /// may be read (see [`with_equal_across_kinds`](Self::with_equal_across_kinds)).
+    equal: EqualAcrossKinds,
 }
 
 /// The nodes that may hold `value` under `property`, through the indexes on `labels` or with no
@@ -127,6 +131,32 @@ impl ExpandOperator {
             exhausted: false,
             view,
             reads: None,
+            equal: EqualAcrossKinds::False,
+        }
+    }
+
+    /// Reads a target key only where it answers as a statement whose `=` gives `equal` across
+    /// kinds compares: where `=` raises (SQL/PGQ), only when no node the hop can reach holds a
+    /// value of another kind (see `key_answers_as_compared`); otherwise it lists every edge.
+    #[must_use]
+    pub fn with_equal_across_kinds(mut self, equal: EqualAcrossKinds) -> Self {
+        self.equal = equal;
+        self
+    }
+
+    /// Whether finding the target by `key` = `value` answers as the filter that compares every
+    /// reached node would, under `=` that raises across kinds: a null compares as unknown and
+    /// never raises; an `id()` is a number; a property key needs its whole column, on nodes of
+    /// every label, to hold `value`'s kind alone (or nulls), so no reached node can raise.
+    fn key_answers_as_compared(&self, key: &SeekKey, value: &Value) -> bool {
+        let kind = ValueKinds::of(value);
+        match key {
+            SeekKey::Id => kind.within(ValueKinds::of(&Value::Int64(0))),
+            SeekKey::Property(property) => {
+                value.is_null()
+                    || (kind.is_one()
+                        && self.store.column_holds_only_kind(true, property, kind) == Some(true))
+            }
         }
     }
 
@@ -173,6 +203,10 @@ impl ExpandOperator {
         let HopTarget::Key(key, value, labels) = &self.target else {
             return Ok(());
         };
+        if self.equal == EqualAcrossKinds::Raises && !self.key_answers_as_compared(key, value) {
+            self.target = HopTarget::Unknown;
+            return Ok(());
+        }
         let found = match key {
             SeekKey::Id => Some(node_ids(value)),
             SeekKey::Property(property) => find_few_through_label_indexes(

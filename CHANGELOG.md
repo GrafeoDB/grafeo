@@ -2,6 +2,20 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.6.4] - Unreleased
+
+Performance and memory release, in progress: this section lists what has landed so far.
+
+### Performance
+
+- **`ORDER BY ... LIMIT` keeps only its top rows for any input**: a SQL/PGQ query's outer `ORDER BY ... LIMIT`, and a GQL or Cypher `ORDER BY` on a property the `RETURN` leaves out, sorted every row before the limit; graph-bench's SQL/PGQ order plus limit takes 16 ms instead of 43 (medium).
+- **A SQL/PGQ hop finds a far end its key pins by that key**: when the key's property holds values of one kind only, as GQL and Cypher already did; graph-bench's SQL/PGQ common friends takes 1.0 ms instead of 20 (medium). A property that holds values of two kinds keeps the plain expand, so a reached value of another kind still raises 22G04.
+- **Weakly connected components read each edge once**: `connected_components` and its procedure read every edge from its source only, where they read each one from both ends; graph-bench's Graphalytics WCC takes 11 ms instead of 21 (medium).
+
+### Fixed
+
+- **PROFILE shows the top-k that runs**: an `ORDER BY ... LIMIT` is one `TopK` line naming its sort, where PROFILE showed a full sort the statement does not run.
+
 ## [0.6.3] - 2026-11-15
 
 SPARQL transactions release: SPARQL in a transaction reads one snapshot, conflicting updates fail at commit and graph operations run inside transactions; the plan cache, the per-query memory limit and path searches are bounded. Results that change on upgrade: a statement over the per-query memory limit fails with `GRAFEO-S001` in builds with disk spilling, a path search over its budget fails with `GRAFEO-S001` instead of `GRAFEO-Q006`, the second of two transactions that write one SPARQL triple, one of them deleting it, fails with `GRAFEO-T001`, SPARQL at a viewing epoch fails with `GRAFEO-Q004`, a standalone type that a graph type lists keeps applying in the default graph, `CLEAR GRAPH` of a missing graph fails unless `SILENT`, a SPARQL `MINUS` after another one or after a sub-SELECT removes its solutions, a time-travel read before a snapshot import or restore fails with `GRAFEO-V001`, a MERGE of a pattern another open transaction is creating now fails with the retryable `GRAFEO-T001` instead of creating a duplicate (the application retries the statement or the transaction), and reported RDF memory rises to what the store holds, so an RDF database near its memory limit reaches it sooner. Building from source needs Rust 1.100 or later.

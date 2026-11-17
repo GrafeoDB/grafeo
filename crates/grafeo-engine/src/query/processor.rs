@@ -68,6 +68,33 @@ impl QueryLanguage {
         EqualAcrossKinds::False
     }
 
+    /// The statement language whose value rules a statement in this language follows.
+    #[must_use]
+    pub const fn statement_language(&self) -> grafeo_common::types::StatementLanguage {
+        use grafeo_common::types::StatementLanguage;
+        match self {
+            #[cfg(feature = "gql")]
+            Self::Gql => StatementLanguage::Gql,
+            #[cfg(feature = "cypher")]
+            Self::Cypher => StatementLanguage::Cypher,
+            #[cfg(feature = "gremlin")]
+            Self::Gremlin => StatementLanguage::Gremlin,
+            #[cfg(feature = "graphql")]
+            Self::GraphQL => StatementLanguage::GraphQl,
+            #[cfg(feature = "sql-pgq")]
+            Self::SqlPgq => StatementLanguage::SqlPgq,
+            #[cfg(feature = "sparql")]
+            Self::Sparql => StatementLanguage::Sparql,
+            #[cfg(all(feature = "graphql", feature = "triple-store"))]
+            Self::GraphQLRdf => StatementLanguage::GraphQl,
+            #[allow(
+                unreachable_patterns,
+                reason = "only a build with no query language reaches it; a reference to an empty enum still needs an arm"
+            )]
+            _ => StatementLanguage::Gql,
+        }
+    }
+
     /// Returns whether this language targets LPG (vs RDF).
     #[must_use]
     pub const fn is_lpg(&self) -> bool {
@@ -94,6 +121,23 @@ impl QueryLanguage {
 
 /// Query parameters for prepared statements.
 pub type QueryParams = HashMap<String, Value>;
+
+/// What a statement in `language` plans with: its value rules, and openCypher's comparison of a
+/// zoned and a local time for Cypher, else the local one at UTC (a processor has no session time
+/// zone).
+fn statement_context(language: QueryLanguage) -> grafeo_core::execution::operators::SessionContext {
+    use grafeo_common::types::{StatementLanguage, TemporalComparison};
+    let language = language.statement_language();
+    grafeo_core::execution::operators::SessionContext {
+        temporal_comparison: if language == StatementLanguage::Cypher {
+            TemporalComparison::TypesApart
+        } else {
+            TemporalComparison::default()
+        },
+        language,
+        ..Default::default()
+    }
+}
 
 /// Processes queries through the full pipeline.
 ///
@@ -129,8 +173,6 @@ pub struct QueryProcessor {
     transaction_manager: Arc<TransactionManager>,
     /// Catalog for schema and index metadata.
     catalog: Arc<Catalog>,
-    /// Query optimizer.
-    optimizer: Optimizer,
     /// Current transaction context (if any).
     transaction_context: Option<(EpochId, TransactionId)>,
     /// The storage key of the graph the store holds (`None`: the default
@@ -152,7 +194,6 @@ impl QueryProcessor {
     /// epoch of its own) included.
     #[must_use]
     pub fn for_lpg(store: Arc<RowGroupStore>) -> Self {
-        let optimizer = Optimizer::from_graph_store(&*store);
         let graph_store = Arc::clone(&store) as Arc<dyn GraphStore>;
         let write_store = Some(Arc::clone(&store) as Arc<dyn GraphBackend>);
         Self {
@@ -161,7 +202,6 @@ impl QueryProcessor {
             write_store,
             transaction_manager: Arc::new(TransactionManager::new()),
             catalog: Arc::new(Catalog::new()),
-            optimizer,
             transaction_context: None,
             graph: None,
             follows_store_epoch: true,
@@ -176,7 +216,6 @@ impl QueryProcessor {
         store: Arc<RowGroupStore>,
         transaction_manager: Arc<TransactionManager>,
     ) -> Self {
-        let optimizer = Optimizer::from_graph_store(&*store);
         let graph_store = Arc::clone(&store) as Arc<dyn GraphStore>;
         let write_store = Some(Arc::clone(&store) as Arc<dyn GraphBackend>);
         Self {
@@ -185,7 +224,6 @@ impl QueryProcessor {
             write_store,
             transaction_manager,
             catalog: Arc::new(Catalog::new()),
-            optimizer,
             transaction_context: None,
             graph: None,
             follows_store_epoch: false,
@@ -203,7 +241,6 @@ impl QueryProcessor {
         store: Arc<dyn GraphBackend>,
         transaction_manager: Arc<TransactionManager>,
     ) -> Result<Self> {
-        let optimizer = Optimizer::from_graph_store(&*store);
         let read_store = Arc::clone(&store) as Arc<dyn GraphStore>;
         Ok(Self {
             lpg_store: None,
@@ -211,7 +248,6 @@ impl QueryProcessor {
             write_store: Some(store),
             transaction_manager,
             catalog: Arc::new(Catalog::new()),
-            optimizer,
             transaction_context: None,
             graph: None,
             follows_store_epoch: false,
@@ -230,14 +266,12 @@ impl QueryProcessor {
         write_store: Option<Arc<dyn GraphBackend>>,
         transaction_manager: Arc<TransactionManager>,
     ) -> Result<Self> {
-        let optimizer = Optimizer::from_graph_store(&*read_store);
         Ok(Self {
             lpg_store: None,
             graph_store: read_store,
             write_store,
             transaction_manager,
             catalog: Arc::new(Catalog::new()),
-            optimizer,
             transaction_context: None,
             graph: None,
             follows_store_epoch: false,
@@ -281,13 +315,6 @@ impl QueryProcessor {
     #[must_use]
     pub fn with_catalog(mut self, catalog: Arc<Catalog>) -> Self {
         self.catalog = catalog;
-        self
-    }
-
-    /// Sets a custom optimizer.
-    #[must_use]
-    pub fn with_optimizer(mut self, optimizer: Optimizer) -> Self {
-        self.optimizer = optimizer;
         self
     }
 
@@ -374,7 +401,9 @@ impl QueryProcessor {
         let _binding_context = binder.bind(&logical_plan)?;
 
         // 4. Optimize the plan
-        let optimized_plan = self.optimizer.optimize(logical_plan)?;
+        let optimized_plan = Optimizer::from_graph_store(self.graph_store.as_ref())
+            .with_equal_across_kinds(language.equal_across_kinds())
+            .optimize(logical_plan)?;
 
         // A processor with its own transaction manager reads what the
         // store's direct writes stamped (each at an epoch of its own) outside
@@ -412,7 +441,12 @@ impl QueryProcessor {
                 .transaction_manager
                 .start_epoch(transaction)
                 .unwrap_or_else(|| self.transaction_manager.current_epoch());
-            return match self.run_plan(&optimized_plan, Some((epoch, transaction)), start_time) {
+            return match self.run_plan(
+                &optimized_plan,
+                language,
+                Some((epoch, transaction)),
+                start_time,
+            ) {
                 Ok(result) => {
                     self.transaction_manager.commit(transaction)?;
                     Ok(result)
@@ -426,14 +460,20 @@ impl QueryProcessor {
                 }
             };
         }
-        self.run_plan(&optimized_plan, self.transaction_context, start_time)
+        self.run_plan(
+            &optimized_plan,
+            language,
+            self.transaction_context,
+            start_time,
+        )
     }
 
-    /// Plans and runs `optimized_plan` in `context` (its epoch and
-    /// transaction), or outside a transaction.
+    /// Plans and runs `optimized_plan`, a statement in `language`, in
+    /// `context` (its epoch and transaction), or outside a transaction.
     fn run_plan(
         &self,
         optimized_plan: &LogicalPlan,
+        language: QueryLanguage,
         context: Option<(EpochId, TransactionId)>,
         start_time: grafeo_common::clock::Instant,
     ) -> Result<QueryResult> {
@@ -464,7 +504,8 @@ impl QueryProcessor {
                 self.transaction_manager.current_epoch(),
             )
         }
-        .with_read_only(is_read_only);
+        .with_read_only(is_read_only)
+        .with_session_context(statement_context(language));
         let mut physical_plan = planner.plan(optimized_plan)?;
 
         // 6. Execute and collect results
@@ -555,12 +596,6 @@ impl QueryProcessor {
     pub fn catalog(&self) -> &Arc<Catalog> {
         &self.catalog
     }
-
-    /// Returns a reference to the optimizer.
-    #[must_use]
-    pub fn optimizer(&self) -> &Optimizer {
-        &self.optimizer
-    }
 }
 
 impl QueryProcessor {
@@ -583,7 +618,6 @@ impl QueryProcessor {
         lpg_store: Arc<RowGroupStore>,
         rdf_store: Arc<grafeo_core::graph::rdf::RdfStore>,
     ) -> Self {
-        let optimizer = Optimizer::from_graph_store(&*lpg_store);
         let graph_store = Arc::clone(&lpg_store) as Arc<dyn GraphStore>;
         let write_store = Some(Arc::clone(&lpg_store) as Arc<dyn GraphBackend>);
         Self {
@@ -592,7 +626,6 @@ impl QueryProcessor {
             write_store,
             transaction_manager: Arc::new(TransactionManager::new()),
             catalog: Arc::new(Catalog::new()),
-            optimizer,
             transaction_context: None,
             graph: None,
             follows_store_epoch: false,
@@ -1724,7 +1757,9 @@ mod tests {
         // Planned now, run after A's index is gone.
         let logical = processor.translate_lpg(query, QueryLanguage::Gql).unwrap();
         Binder::new().bind(&logical).unwrap();
-        let optimized = processor.optimizer.optimize(logical).unwrap();
+        let optimized = Optimizer::from_graph_store(&*store)
+            .optimize(logical)
+            .unwrap();
         let planner = Planner::new(
             Arc::clone(&store) as Arc<dyn GraphStore>,
             processor.transaction_manager.current_epoch(),

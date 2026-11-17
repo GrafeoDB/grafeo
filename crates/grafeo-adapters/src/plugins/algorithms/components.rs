@@ -131,20 +131,10 @@ pub(crate) fn connected_components_on(
 
     let mut uf = UnionFind::new(n);
 
-    // Process all edges (treating graph as undirected)
-    for &node in &node_ids {
-        let idx = node_to_idx[&node];
-
-        // Outgoing edges
+    // Every edge once, from its source: a union joins both ends whatever the
+    // edge's direction, so the incoming lists would only repeat each union.
+    for (idx, &node) in node_ids.iter().enumerate() {
         for (neighbor, _) in store.edges(node, Direction::Outgoing) {
-            ticker.tick()?;
-            if let Some(&neighbor_idx) = node_to_idx.get(&neighbor) {
-                uf.union(idx, neighbor_idx);
-            }
-        }
-
-        // Incoming edges (for weakly connected)
-        for (neighbor, _) in store.edges(node, Direction::Incoming) {
             ticker.tick()?;
             if let Some(&neighbor_idx) = node_to_idx.get(&neighbor) {
                 uf.union(idx, neighbor_idx);

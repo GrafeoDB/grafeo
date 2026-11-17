@@ -1094,7 +1094,7 @@ impl Planner {
             LogicalOperator::Project(project) => self.plan_project(project),
             LogicalOperator::Limit(limit) => self.plan_limit(limit),
             LogicalOperator::Skip(skip) => self.plan_skip(skip),
-            LogicalOperator::Sort(sort) => self.plan_sort(sort),
+            LogicalOperator::Sort(sort) => self.plan_sort(sort, None),
             LogicalOperator::Aggregate(agg) => self.plan_aggregate(agg),
             LogicalOperator::Join(join) => self.plan_join(join),
             LogicalOperator::Union(union) => self.plan_union(union),
@@ -2032,14 +2032,14 @@ mod tests {
     #[test]
     fn test_limit_pushdown_blocked_by_sort_in_between() {
         use grafeo_core::execution::operators::{
-            LimitOperator, ProjectOperator, RangeScanOperator, SortOperator,
+            LimitOperator, ProjectOperator, RangeScanOperator, TopKOperator,
         };
         let store = create_test_store();
         let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // LIMIT 5 over SORT BY n.name over WHERE n.age > 30 over Scan(n:Person)
-        // Sort needs full materialization; the LIMIT must NOT be pushed
-        // through it into the range scan.
+        // runs as one top-k of 5, which reads its whole input: the LIMIT must
+        // NOT be pushed through it into the range scan.
         let logical = LogicalPlan::new(LogicalOperator::Limit(LogicalLimitOp {
             count: 5.into(),
             input: Box::new(LogicalOperator::Sort(SortOp {
@@ -2073,28 +2073,23 @@ mod tests {
         let physical = planner.plan(&logical).unwrap();
         let root = physical.into_operator();
 
-        // Walk down: Limit → Sort → Project → RangeScan, asserting at each step.
-        let limit_op = root
+        // Walk down: TopK → Project → RangeScan, asserting at each step.
+        // The top-k also drops the sort-key column (`n_name`) it needed.
+        let top_k = root
             .into_any()
-            .downcast::<LimitOperator>()
-            .expect("top operator is LimitOperator");
-        let (after_limit, _cap) = limit_op.into_parts();
+            .downcast::<TopKOperator>()
+            .expect("LIMIT over ORDER BY runs as a top-k");
+        assert_eq!(top_k.output_width(), Some(1));
+        let (after_sort, _keys, limit) = top_k.into_parts();
+        assert_eq!(limit, 5);
 
-        // The Sort also drops the sort-key column (`n_name`) it needed.
-        let sort_op = after_limit
-            .into_any()
-            .downcast::<SortOperator>()
-            .expect("operator under Limit must be Sort (Sort blocks pushdown)");
-        assert_eq!(sort_op.output_width(), Some(1));
-        let (after_sort, _keys, _width) = sort_op.into_parts();
-
-        // Sort wraps its input in a Project that materializes the sort
-        // keys. The fold from Filter+NodeScan to RangeScan happens
+        // The top-k reads its input through a Project that materializes the
+        // sort keys. The fold from Filter+NodeScan to RangeScan happens
         // inside that Project.
         let project_op = after_sort
             .into_any()
             .downcast::<ProjectOperator>()
-            .expect("operator under Sort must be Project (Sort materializes sort keys)");
+            .expect("operator under the top-k must be Project (it materializes sort keys)");
         let (after_project, _projs, _types) = project_op.into_parts();
 
         let range_op = after_project
@@ -2102,14 +2097,14 @@ mod tests {
             .downcast::<RangeScanOperator>()
             .expect("operator under Project must be RangeScan (Filter folded into scan)");
 
-        // Core assertion of the test: with a Sort between the Limit and
-        // the range scan, LIMIT must NOT be pushed into the scan —
-        // doing so would let Sort observe a truncated input and lose
-        // the globally-smallest rows.
+        // Core assertion of the test: with a sort between the LIMIT and
+        // the range scan, LIMIT must NOT be pushed into the scan: doing so
+        // would let the top-k observe a truncated input and lose the
+        // globally-smallest rows.
         assert_eq!(
             range_op.limit(),
             None,
-            "Sort between Limit and RangeScan must block LIMIT pushdown"
+            "a sort between LIMIT and RangeScan must block LIMIT pushdown"
         );
 
         // Sanity: the planner cleared its scratch limit-hint after

@@ -327,7 +327,8 @@ impl super::Planner {
                 self.stored_edge_types(&expand.edge_types)?,
                 self.read_view(),
             )
-            .with_read_counter(self.read_counter());
+            .with_read_counter(self.read_counter())
+            .with_equal_across_kinds(self.equal_across_kinds());
             match hop_target {
                 Some(HopTarget::Column(target)) => {
                     if let Some(column) = input_columns.iter().position(|name| *name == target) {

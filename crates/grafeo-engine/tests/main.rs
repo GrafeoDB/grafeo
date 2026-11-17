@@ -306,6 +306,7 @@ mod query_warning_probe;
 mod query_warnings;
 mod raising_filter_placement;
 mod range_column_read;
+mod range_fold;
 mod range_temporal_rules;
 mod range_unwind_matches_range;
 mod raw_store_snapshots;

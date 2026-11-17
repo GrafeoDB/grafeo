@@ -46,6 +46,51 @@ fn size(count: i64) -> usize {
     usize::try_from(count.max(0)).unwrap_or(usize::MAX)
 }
 
+/// Calls `seen` with each row of `group` that `read` sees with at least one
+/// of the label ids, ascending and each once: the label bitmaps give the
+/// newest labels, tested a word of rows at a time, and the rows a label chain
+/// holds are read at the view instead. A group without a label chain reads
+/// its bitmaps alone, and a group without the labels nothing.
+fn for_each_row_with_labels(
+    group: &super::NodeGroup,
+    label_ids: &[u32],
+    read: Read,
+    seen: impl FnMut(usize),
+) {
+    let changed = group.label_updates.rows();
+    // One label and no label chain, the common case: the rows of its bitmap
+    // `read` sees are the answer, ascending and once.
+    if changed.is_none()
+        && let [label] = label_ids
+    {
+        if let Some(rows) = group.labels.get(label) {
+            group.versions.for_each_visible(rows, read, seen);
+        }
+        return;
+    }
+    // The rows the newest label bitmaps hold that `read` sees, but those a
+    // label chain holds, which are read at the view.
+    let mut rows = Vec::new();
+    for label_rows in label_ids.iter().filter_map(|label| group.labels.get(label)) {
+        group.versions.for_each_visible(label_rows, read, |row| {
+            if changed.as_ref().is_none_or(|changed| !changed.get(row)) {
+                rows.push(row);
+            }
+        });
+    }
+    if let Some(changed) = &changed {
+        rows.extend(changed.rows().filter(|row| {
+            group.version(*row).visible(read)
+                && label_ids
+                    .iter()
+                    .any(|label| group.has_label_at(*row, *label, read))
+        }));
+    }
+    rows.sort_unstable();
+    rows.dedup();
+    rows.into_iter().for_each(seen);
+}
+
 /// One way of a hop an intersection reads.
 struct HopSide<'a> {
     adjacency: &'a Adjacency,
@@ -187,40 +232,40 @@ impl Inner {
         let mut ids = Vec::new();
         for (index, group) in &self.nodes {
             let base = index * ROWS_PER_GROUP;
-            let changed = group.label_updates.rows();
-            // One label and no label chain, the common case: the rows of
-            // its bitmap `read` sees are the answer, ascending and once.
-            if changed.is_none()
-                && let [label] = label_ids
-            {
-                if let Some(rows) = group.labels.get(label) {
-                    group.versions.for_each_visible(rows, read, |row| {
-                        ids.push(NodeId::new(base + row as u64));
-                    });
+            for_each_row_with_labels(group, label_ids, read, |row| {
+                ids.push(NodeId::new(base + row as u64));
+            });
+        }
+        ids
+    }
+
+    /// The nodes `read` sees with label `label` whose `property` lies within
+    /// the bounds, ascending: only the label's rows, selected as
+    /// [`nodes_with_labels_at`](Self::nodes_with_labels_at) selects them, each
+    /// value read at the view (a chained row's too, and a cold chunk's
+    /// through its cold read).
+    fn nodes_with_label_in_range_at(
+        &self,
+        label: u32,
+        property: &str,
+        range: &crate::graph::ValueRange,
+        read: Read,
+    ) -> Vec<NodeId> {
+        let Some(key) = self.keys.get_id(property) else {
+            return Vec::new();
+        };
+        let mut ids = Vec::new();
+        for (index, group) in &self.nodes {
+            let base = index * ROWS_PER_GROUP;
+            for_each_row_with_labels(group, &[label], read, |row| {
+                if group
+                    .columns
+                    .get_at(key, row, read)
+                    .is_some_and(|value| range.contains(&value))
+                {
+                    ids.push(NodeId::new(base + row as u64));
                 }
-                continue;
-            }
-            // The rows the newest label bitmaps hold that `read` sees, but
-            // those a label chain holds, which are read at the view.
-            let mut rows = Vec::new();
-            for label_rows in label_ids.iter().filter_map(|label| group.labels.get(label)) {
-                group.versions.for_each_visible(label_rows, read, |row| {
-                    if changed.as_ref().is_none_or(|changed| !changed.get(row)) {
-                        rows.push(row);
-                    }
-                });
-            }
-            if let Some(changed) = &changed {
-                rows.extend(changed.rows().filter(|row| {
-                    group.version(*row).visible(read)
-                        && label_ids
-                            .iter()
-                            .any(|label| group.has_label_at(*row, *label, read))
-                }));
-            }
-            rows.sort_unstable();
-            rows.dedup();
-            ids.extend(rows.into_iter().map(|row| NodeId::new(base + row as u64)));
+            });
         }
         ids
     }
@@ -309,7 +354,69 @@ impl Inner {
         })
     }
 
-    /// Every node row `read` sees whose `property` lies within the bounds.
+    /// Calls `visit` with the values of `read_keys` of each node `read` sees
+    /// with label `label` whose `property` lies within the bounds, ascending,
+    /// until it breaks: the rows of
+    /// [`nodes_with_label_in_range_at`](Self::nodes_with_label_in_range_at),
+    /// each key's column looked up once per group and each value read at the
+    /// view, a key that is `property` given the value the range read.
+    fn visit_label_range_at(
+        &self,
+        label: u32,
+        property: &str,
+        range: &crate::graph::ValueRange,
+        read_keys: &[&str],
+        read: Read,
+        visit: &mut dyn FnMut(&[Option<Value>]) -> std::ops::ControlFlow<()>,
+    ) {
+        use grafeo_common::work::{Work, count};
+        let Some(key) = self.keys.get_id(property) else {
+            return;
+        };
+        let keys: Vec<Option<u32>> = read_keys.iter().map(|key| self.keys.get_id(key)).collect();
+        let mut values: Vec<Option<Value>> = Vec::with_capacity(keys.len());
+        let mut stopped = false;
+        for group in self.nodes.values() {
+            // A group without the range's column holds no row in range.
+            let Some(column) = group.columns.column(key) else {
+                continue;
+            };
+            let columns: Vec<Option<&super::column::Column>> = keys
+                .iter()
+                .map(|read_key| read_key.and_then(|read_key| group.columns.column(read_key)))
+                .collect();
+            for_each_row_with_labels(group, &[label], read, |row| {
+                if stopped {
+                    return;
+                }
+                count(Work::ColumnRead, 1);
+                let Some(value) = column.value_at(row, read) else {
+                    return;
+                };
+                if !range.contains(&value) {
+                    return;
+                }
+                values.clear();
+                for (read_key, read_column) in keys.iter().zip(&columns) {
+                    values.push(if *read_key == Some(key) {
+                        Some(value.clone())
+                    } else {
+                        read_column.and_then(|read_column| {
+                            count(Work::ColumnRead, 1);
+                            read_column.value_at(row, read)
+                        })
+                    });
+                }
+                stopped = visit(&values).is_break();
+            });
+            if stopped {
+                return;
+            }
+        }
+    }
+
+    /// Every node row `read` sees whose `property` lies within the bounds,
+    /// ascending, the rows tested a word at a time.
     fn nodes_in_range_at(
         &self,
         property: &str,
@@ -321,13 +428,20 @@ impl Inner {
         let Some(key) = self.keys.get_id(property) else {
             return Vec::new();
         };
-        self.node_rows(|_, group, row| {
-            group.version(row).visible(read)
-                && group
+        let mut ids = Vec::new();
+        for (index, group) in &self.nodes {
+            let base = index * ROWS_PER_GROUP;
+            group.versions.for_each_visible_row(read, |row| {
+                if group
                     .columns
                     .get_at(key, row, read)
                     .is_some_and(|value| range.contains(&value))
-        })
+                {
+                    ids.push(NodeId::new(base + row as u64));
+                }
+            });
+        }
+        ids
     }
 
     /// Every node row, ascending, that `keep` accepts.
@@ -1725,6 +1839,35 @@ impl GraphStore for RowGroupStore {
             .inner
             .read()
             .nodes_in_range_at(property, range, Read::view(view)))
+    }
+
+    fn find_nodes_with_label_in_range(
+        &self,
+        label: &str,
+        property: &str,
+        range: &crate::graph::ValueRange,
+        view: ReadView,
+    ) -> Result<Vec<NodeId>> {
+        let inner = self.inner.read();
+        Ok(inner.label_id(label).map_or_else(Vec::new, |label| {
+            inner.nodes_with_label_in_range_at(label, property, range, Read::view(view))
+        }))
+    }
+
+    fn visit_nodes_with_label_in_range(
+        &self,
+        label: &str,
+        property: &str,
+        range: &crate::graph::ValueRange,
+        read: &[&str],
+        view: ReadView,
+        visit: &mut dyn FnMut(&[Option<Value>]) -> std::ops::ControlFlow<()>,
+    ) -> Result<()> {
+        let inner = self.inner.read();
+        if let Some(label) = inner.label_id(label) {
+            inner.visit_label_range_at(label, property, range, read, Read::view(view), visit);
+        }
+        Ok(())
     }
 
     fn node_property_might_match(

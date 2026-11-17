@@ -297,8 +297,8 @@
     },
     "changed pm_two_hop_top10": {
       "adjacency_reads": 10729,
-      "allocated_bytes": 25532021,
-      "allocations": 72041,
+      "allocated_bytes": 25105725,
+      "allocations": 72013,
       "chunks_built": 2,
       "column_reads": 10993,
       "columns_copied": 2006,
@@ -310,7 +310,7 @@
       "stamped_reads": 96603,
       "value_compares": 1122,
       "value_hashes": 993,
-      "visibility_tests": 374329
+      "visibility_tests": 364329
     },
     "changed scan_aggregate": {
       "allocated_bytes": 2044988,
@@ -345,52 +345,50 @@
       "visibility_tests": 8036
     },
     "changed scan_filter": {
-      "allocated_bytes": 7996294,
-      "allocations": 5373,
-      "column_reads": 208040,
+      "allocated_bytes": 1303686,
+      "allocations": 5243,
+      "column_reads": 204019,
       "plan_cache_hits": 1,
       "plans_built": 1,
       "rowgroup_lookups": 5019,
       "stamped_reads": 8142,
       "string_clones": 5019,
-      "visibility_tests": 408967
+      "visibility_tests": 204946
     },
     "changed scan_filter_avg": {
-      "allocated_bytes": 26772052,
-      "allocations": 1408,
+      "allocated_bytes": 6237,
+      "allocations": 138,
       "chunks_built": 1,
-      "column_reads": 302890,
-      "deadline_checks": 49,
+      "column_reads": 199000,
+      "deadline_checks": 98,
       "plan_cache_hits": 1,
       "plans_built": 1,
-      "rowgroup_lookups": 99869,
       "rows_built": 1,
-      "stamped_reads": 102952,
-      "visibility_tests": 503817
+      "stamped_reads": 3124,
+      "visibility_tests": 199927
     },
     "changed scan_filter_avg_sql": {
-      "allocated_bytes": 21972662,
-      "allocations": 1272,
+      "allocated_bytes": 7165,
+      "allocations": 148,
       "chunks_built": 1,
-      "column_reads": 302890,
-      "deadline_checks": 49,
+      "column_reads": 199000,
+      "deadline_checks": 98,
       "plan_cache_hits": 1,
       "plans_built": 1,
-      "rowgroup_lookups": 99869,
       "rows_built": 1,
-      "stamped_reads": 102952,
-      "visibility_tests": 503817
+      "stamped_reads": 3124,
+      "visibility_tests": 199927
     },
     "changed scan_filter_sql": {
-      "allocated_bytes": 7996519,
-      "allocations": 5375,
-      "column_reads": 208040,
+      "allocated_bytes": 1303911,
+      "allocations": 5245,
+      "column_reads": 204019,
       "plan_cache_hits": 1,
       "plans_built": 1,
       "rowgroup_lookups": 5019,
       "stamped_reads": 8142,
       "string_clones": 5019,
-      "visibility_tests": 408967
+      "visibility_tests": 204946
     },
     "changed scan_label": {
       "allocated_bytes": 47064915,
@@ -415,10 +413,10 @@
       "visibility_tests": 398927
     },
     "changed scan_order_limit": {
-      "allocated_bytes": 28944671,
-      "allocations": 51703,
+      "allocated_bytes": 21334559,
+      "allocations": 51570,
       "chunks_built": 1,
-      "column_reads": 352784,
+      "column_reads": 348763,
       "columns_copied": 60,
       "deadline_checks": 25,
       "plan_cache_hits": 1,
@@ -428,13 +426,13 @@
       "stamped_reads": 152833,
       "string_clones": 50337,
       "value_compares": 51270,
-      "visibility_tests": 553711
+      "visibility_tests": 349690
     },
     "changed scan_order_limit_sql": {
-      "allocated_bytes": 25924780,
-      "allocations": 51439,
+      "allocated_bytes": 18314668,
+      "allocations": 51306,
       "chunks_built": 1,
-      "column_reads": 302923,
+      "column_reads": 298902,
       "columns_copied": 20,
       "deadline_checks": 25,
       "plan_cache_hits": 1,
@@ -444,7 +442,7 @@
       "stamped_reads": 102990,
       "string_clones": 50149,
       "value_compares": 51270,
-      "visibility_tests": 503850
+      "visibility_tests": 299829
     },
     "changed sem_trail_self_loop": {
       "allocated_bytes": 21902,
@@ -750,8 +748,8 @@
     },
     "loaded pm_two_hop_top10": {
       "adjacency_reads": 10732,
-      "allocated_bytes": 25710623,
-      "allocations": 73354,
+      "allocated_bytes": 25284327,
+      "allocations": 73326,
       "chunks_built": 2,
       "column_reads": 11000,
       "columns_copied": 2020,
@@ -763,7 +761,7 @@
       "rows_built": 1010,
       "value_compares": 1128,
       "value_hashes": 1000,
-      "visibility_tests": 375575
+      "visibility_tests": 365575
     },
     "loaded scan_aggregate": {
       "allocated_bytes": 2076781,
@@ -800,52 +798,50 @@
       "visibility_tests": 8036
     },
     "loaded scan_filter": {
-      "allocated_bytes": 8017891,
-      "allocations": 5649,
-      "column_reads": 209067,
+      "allocated_bytes": 1326067,
+      "allocations": 5519,
+      "column_reads": 205046,
       "parses": 1,
       "plan_cache_misses": 2,
       "plans_built": 1,
       "rowgroup_lookups": 5046,
       "string_clones": 5046,
-      "visibility_tests": 212193
+      "visibility_tests": 8172
     },
     "loaded scan_filter_avg": {
-      "allocated_bytes": 26827025,
-      "allocations": 1704,
+      "allocated_bytes": 30578,
+      "allocations": 434,
       "chunks_built": 1,
-      "column_reads": 304121,
-      "deadline_checks": 49,
+      "column_reads": 200000,
+      "deadline_checks": 98,
       "parses": 1,
       "plan_cache_misses": 2,
       "plans_built": 1,
-      "rowgroup_lookups": 100100,
       "rows_built": 1,
-      "visibility_tests": 307247
+      "visibility_tests": 3126
     },
     "loaded scan_filter_avg_sql": {
-      "allocated_bytes": 22020111,
-      "allocations": 1601,
+      "allocated_bytes": 35070,
+      "allocations": 477,
       "chunks_built": 1,
-      "column_reads": 304121,
-      "deadline_checks": 49,
+      "column_reads": 200000,
+      "deadline_checks": 98,
       "parses": 1,
       "plan_cache_misses": 2,
       "plans_built": 1,
-      "rowgroup_lookups": 100100,
       "rows_built": 1,
-      "visibility_tests": 307247
+      "visibility_tests": 3126
     },
     "loaded scan_filter_sql": {
-      "allocated_bytes": 8019362,
-      "allocations": 5670,
-      "column_reads": 209067,
+      "allocated_bytes": 1327538,
+      "allocations": 5540,
+      "column_reads": 205046,
       "parses": 1,
       "plan_cache_misses": 2,
       "plans_built": 1,
       "rowgroup_lookups": 5046,
       "string_clones": 5046,
-      "visibility_tests": 212193
+      "visibility_tests": 8172
     },
     "loaded scan_label": {
       "allocated_bytes": 47229448,
@@ -870,10 +866,10 @@
       "visibility_tests": 203126
     },
     "loaded scan_order_limit": {
-      "allocated_bytes": 29055570,
-      "allocations": 52284,
+      "allocated_bytes": 21446242,
+      "allocations": 52151,
       "chunks_built": 1,
-      "column_reads": 354492,
+      "column_reads": 350471,
       "columns_copied": 60,
       "deadline_checks": 25,
       "parses": 1,
@@ -883,13 +879,13 @@
       "rows_built": 20,
       "string_clones": 50575,
       "value_compares": 51508,
-      "visibility_tests": 357618
+      "visibility_tests": 153597
     },
     "loaded scan_order_limit_sql": {
-      "allocated_bytes": 26025350,
-      "allocations": 52040,
+      "allocated_bytes": 18416022,
+      "allocations": 51907,
       "chunks_built": 1,
-      "column_reads": 304395,
+      "column_reads": 300374,
       "columns_copied": 20,
       "deadline_checks": 25,
       "parses": 1,
@@ -899,7 +895,7 @@
       "rows_built": 20,
       "string_clones": 50386,
       "value_compares": 51508,
-      "visibility_tests": 307521
+      "visibility_tests": 103500
     },
     "loaded sem_trail_self_loop": {
       "allocated_bytes": 67569,

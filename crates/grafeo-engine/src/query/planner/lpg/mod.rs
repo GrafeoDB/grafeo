@@ -155,14 +155,6 @@ use crate::query::planner::{
 };
 use crate::transaction::TransactionManager;
 
-/// Range bounds for property-based range queries.
-struct RangeBounds<'a> {
-    min: Option<&'a Value>,
-    max: Option<&'a Value>,
-    min_inclusive: bool,
-    max_inclusive: bool,
-}
-
 /// How the planned query's rows reach the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Delivery {

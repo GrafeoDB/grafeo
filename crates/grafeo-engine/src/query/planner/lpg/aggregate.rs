@@ -44,6 +44,95 @@ impl super::Planner {
         Some((Box::new(operator), columns))
     }
 
+    /// `count(*)`, `count(n)`, and `count`, `sum`, `avg`, `min` and `max` of
+    /// properties of `n`, none distinct, with no grouping and no `HAVING`, over
+    /// a range filter on a scan of one label (`MATCH (n:L) WHERE n.k > $v
+    /// RETURN count(*), avg(n.k)`), also through a projection that only names
+    /// properties of `n` (SQL/PGQ's `COLUMNS (n.k AS len)`): the range's
+    /// values folded in one store call (see `RangeFoldOperator`), without the
+    /// range scan's node list or a second read of each value. `None` for any
+    /// other aggregate, or with the rule (or the range scan's) off.
+    fn plan_range_fold(&self, agg: &AggregateOp) -> Option<(Box<dyn Operator>, Vec<String>)> {
+        use crate::query::optimizer::PlannerRule;
+        if !(self.rules.has(PlannerRule::RangeFold) && self.rules.has(PlannerRule::IndexRange)) {
+            return None;
+        }
+        let shape = agg.range_fold_shape()?;
+        let (property, range) = self.filter_range(&shape.filter.predicate, shape.variable)?;
+
+        let mut read: Vec<String> = Vec::new();
+        let aggregates: Vec<PhysicalAggregateExpr> = agg
+            .aggregates
+            .iter()
+            .zip(&shape.reads)
+            .map(|(aggregate, property)| {
+                let column = property.map(|property| {
+                    read.iter()
+                        .position(|known| known == property)
+                        .unwrap_or_else(|| {
+                            read.push(property.to_string());
+                            read.len() - 1
+                        })
+                });
+                // A count of the rows reads no value, as `count(*)` does.
+                let function = match (aggregate.function, column) {
+                    (LogicalAggregateFunction::CountNonNull, None) => {
+                        LogicalAggregateFunction::Count
+                    }
+                    (function, _) => function,
+                };
+                PhysicalAggregateExpr {
+                    function: convert_aggregate_function(function),
+                    column,
+                    column2: None,
+                    distinct: false,
+                    alias: aggregate.alias.clone(),
+                    percentile: None,
+                    separator: None,
+                    rdf_literals: false,
+                    temporal: self.session_context.temporal_comparison,
+                }
+            })
+            .collect();
+        let columns: Vec<String> = agg
+            .aggregates
+            .iter()
+            .map(|aggregate| {
+                aggregate.alias.clone().unwrap_or_else(|| {
+                    crate::query::planner::common::aggregate_column_name(aggregate)
+                })
+            })
+            .collect();
+        for column in &columns {
+            self.scalar_columns.borrow_mut().insert(column.clone());
+        }
+        // PROFILE names what the fold stands in for.
+        let filter = match agg.input.as_ref() {
+            LogicalOperator::Project(project) => {
+                self.record_absorbed_scan_entry("Project", &agg.input);
+                &project.input
+            }
+            LogicalOperator::Return(project) => {
+                self.record_absorbed_scan_entry("Return", &agg.input);
+                &project.input
+            }
+            _ => &agg.input,
+        };
+        self.record_absorbed_scan_entry("Filter", filter);
+        self.record_absorbed_scan_entry("NodeScan", &shape.filter.input);
+        let operator = grafeo_core::execution::operators::RangeFoldOperator::new(
+            Arc::clone(&self.store) as Arc<dyn GraphStore>,
+            shape.label.to_string(),
+            property,
+            range,
+            read,
+            aggregates,
+            self.read_view(),
+        )
+        .with_read_counter(self.read_counter());
+        Some((Box::new(operator), columns))
+    }
+
     pub(super) fn plan_aggregate(
         &self,
         agg: &AggregateOp,
@@ -91,6 +180,9 @@ impl super::Planner {
 
         if let Some(counted) = self.plan_label_count(agg) {
             return Ok(counted);
+        }
+        if let Some(folded) = self.plan_range_fold(agg) {
+            return Ok(folded);
         }
 
         // An aggregate that comes first (`RETURN count(*)`) aggregates the

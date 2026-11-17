@@ -51,6 +51,10 @@ pub enum PlannerRule {
     IndexLookup,
     /// A range filter on a property reads the nodes in that range.
     IndexRange,
+    /// An aggregate without grouping over a label's range (with `IndexRange`) folds the range's
+    /// values in one store call, without an id list or a second read; off, the range scan feeds
+    /// the aggregate.
+    RangeFold,
     /// A filter on an indexed property, over a scan per input row, looks the
     /// key up per row.
     KeySeek,
@@ -74,7 +78,7 @@ pub enum PlannerRule {
 
 impl PlannerRule {
     /// Every rule.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::JoinOrder,
         Self::SoughtEnd,
         Self::FactorizedExecution,
@@ -85,6 +89,7 @@ impl PlannerRule {
         Self::IntersectExpand,
         Self::IndexLookup,
         Self::IndexRange,
+        Self::RangeFold,
         Self::KeySeek,
         Self::IdSeek,
         Self::ZoneMaps,

@@ -952,7 +952,7 @@ impl Column {
     /// The value at `row` as `read` sees it. A cold column has no update
     /// chains (a write thaws it), so every reader reads its one value, from
     /// the chunk's point view where it has one.
-    fn value_at(&self, row: usize, read: Read) -> Option<Value> {
+    pub(super) fn value_at(&self, row: usize, read: Read) -> Option<Value> {
         match self.hot.get() {
             Some(hot) => hot.get_at(row, read),
             None => self.get(row),
@@ -1645,6 +1645,11 @@ impl Columns {
             .hot
             .wrapping_add(hot.counted_bytes().wrapping_sub(held));
         taken
+    }
+
+    /// The column of key `key`, for reads of many rows without a lookup each.
+    pub(super) fn column(&self, key: u32) -> Option<&Column> {
+        self.by_key.get(&key)
     }
 
     /// The value of key `key` at `row` as `read` sees it.

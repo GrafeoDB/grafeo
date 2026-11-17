@@ -923,6 +923,18 @@ fn annotate_hints(
         annotate_hints(&mut child, store, rules, writes, after_a_write);
         child
     });
+    // An aggregate over a range the scan reads folds the range, as the
+    // planner plans it (`plan_range_fold`).
+    if let LogicalOperator::Aggregate(aggregate) = op
+        && rules.has(crate::query::optimizer::PlannerRule::RangeFold)
+        && let Some(filter) = aggregate.range_fold_filter_mut()
+        && let Some(crate::query::plan::PushdownHint::RangeScan { property }) =
+            &filter.pushdown_hint
+    {
+        filter.pushdown_hint = Some(crate::query::plan::PushdownHint::RangeFold {
+            property: property.clone(),
+        });
+    }
 }
 
 /// The property whose index `merge` looks its node up through: the first of

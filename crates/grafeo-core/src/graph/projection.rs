@@ -571,6 +571,42 @@ impl GraphStore for GraphProjection {
         self.projected(self.inner.find_nodes_in_range(property, range, view)?, view)
     }
 
+    fn find_nodes_with_label_in_range(
+        &self,
+        label: &str,
+        property: &str,
+        range: &crate::graph::ValueRange,
+        view: ReadView,
+    ) -> Result<Vec<NodeId>> {
+        let ids = self
+            .inner
+            .find_nodes_with_label_in_range(label, property, range, view)?;
+        if self.label_is_projected(label) {
+            return Ok(ids);
+        }
+        self.projected(ids, view)
+    }
+
+    fn visit_nodes_with_label_in_range(
+        &self,
+        label: &str,
+        property: &str,
+        range: &crate::graph::ValueRange,
+        read: &[&str],
+        view: ReadView,
+        visit: &mut dyn FnMut(&[Option<Value>]) -> std::ops::ControlFlow<()>,
+    ) -> Result<()> {
+        // Every node of a projected label is the projection's, values and all.
+        if self.label_is_projected(label) {
+            return self
+                .inner
+                .visit_nodes_with_label_in_range(label, property, range, read, view, visit);
+        }
+        crate::graph::traits::visit_label_range_by_id(
+            self, label, property, range, read, view, visit,
+        )
+    }
+
     fn node_property_might_match(
         &self,
         property: &PropertyKey,

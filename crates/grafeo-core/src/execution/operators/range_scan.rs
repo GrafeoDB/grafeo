@@ -23,21 +23,22 @@
 //!
 //! The operator materializes the lookup into a `Vec<NodeId>` on the first
 //! `next()` call, then chunks. The optional limit set via
-//! [`with_limit`](RangeScanOperator::with_limit) bounds what it keeps after
-//! the label filter. Streaming chunk-by-chunk materialization needs a
-//! cursor-based API on the store.
+//! [`with_limit`](RangeScanOperator::with_limit) bounds what it keeps.
+//! Streaming chunk-by-chunk materialization needs a cursor-based API on the
+//! store.
 //!
 //! ## Label and MVCC filtering
 //!
 //! The operator absorbs both filters: the label through
-//! [`with_label_filter`](RangeScanOperator::with_label_filter), visibility
-//! through the view it reads at, so the store's range lookup returns only
-//! the nodes the view sees.
+//! [`with_label_filter`](RangeScanOperator::with_label_filter), which the
+//! store's lookup takes
+//! ([`find_nodes_with_label_in_range`](crate::graph::GraphStore::find_nodes_with_label_in_range)),
+//! visibility through the view it reads at, so the store returns only the
+//! nodes of the label the view sees.
 
 use std::sync::Arc;
 
 use grafeo_common::types::{LogicalType, NodeId, ReadView};
-use grafeo_common::utils::hash::FxHashSet;
 
 use super::{Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
@@ -93,8 +94,8 @@ impl RangeScanOperator {
         }
     }
 
-    /// Counts the node IDs the range index yields in `reads`, before the
-    /// label filter.
+    /// Counts the node IDs the store's range lookup returns in `reads` (of
+    /// the label, with one), before the limit.
     #[must_use]
     pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
         self.reads = Some(reads);
@@ -118,11 +119,8 @@ impl RangeScanOperator {
         self.limit
     }
 
-    /// Restricts the result to nodes carrying `label`.
-    ///
-    /// Applied during materialization by intersecting the iterator's
-    /// output with the nodes of the label (as the view sees them, with
-    /// one).
+    /// Restricts the result to nodes carrying `label` (as the view sees
+    /// them): the store reads only the label's rows.
     #[must_use]
     pub fn with_label_filter(mut self, label: impl Into<String>) -> Self {
         self.label_filter = Some(label.into());
@@ -134,43 +132,21 @@ impl RangeScanOperator {
             return Ok(());
         }
 
-        // Pre-compute the label set once (avoids repeated lookups in the
-        // hot path).
-        let label_set: Option<FxHashSet<NodeId>> = match self.label_filter.as_ref() {
-            Some(label) => Some(
-                self.store
-                    .nodes_by_label(label, self.view)?
-                    .into_iter()
-                    .collect(),
-            ),
-            None => None,
+        let mut collected = match self.label_filter.as_ref() {
+            Some(label) => self.store.find_nodes_with_label_in_range(
+                label,
+                &self.property,
+                &self.range,
+                self.view,
+            )?,
+            None => self
+                .store
+                .find_nodes_in_range(&self.property, &self.range, self.view)?,
         };
-
-        let iter = self
-            .store
-            .find_nodes_in_range(&self.property, &self.range, self.view)?;
-
-        // Filter inline by label and stop only after `limit` matches
-        // *survive* the filter. Applying limit before filtering would
-        // under-return rows when early range hits are filtered out.
-        let mut collected: Vec<NodeId> = Vec::new();
-        let mut read = 0;
-        for id in iter {
-            read += 1;
-            if let Some(set) = label_set.as_ref()
-                && !set.contains(&id)
-            {
-                continue;
-            }
-            collected.push(id);
-            if let Some(n) = self.limit
-                && collected.len() >= n
-            {
-                break;
-            }
+        super::read_counter::count(self.reads.as_deref(), collected.len());
+        if let Some(n) = self.limit {
+            collected.truncate(n);
         }
-
-        super::read_counter::count(self.reads.as_deref(), read);
         self.materialized = Some(collected);
         Ok(())
     }

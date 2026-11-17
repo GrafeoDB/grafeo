@@ -50,6 +50,7 @@ mod node_seek;
 mod parameter_scan;
 mod project;
 pub mod push;
+mod range_fold;
 mod range_scan;
 mod rdf_path;
 mod read_counter;
@@ -130,6 +131,7 @@ pub use push::{
 };
 #[cfg(feature = "spill")]
 pub use push::{SpillableAggregatePushOperator, SpillableSortPushOperator};
+pub use range_fold::RangeFoldOperator;
 pub use range_scan::RangeScanOperator;
 pub use rdf_path::{PathStep, RdfPathGraph};
 #[cfg(feature = "triple-store")]

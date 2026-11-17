@@ -1005,6 +1005,53 @@ pub trait GraphStore: Send + Sync {
         Ok(found)
     }
 
+    /// The nodes `view` sees with `label` whose `property` lies within
+    /// `range`, by ascending id: [`find_nodes_in_range`](Self::find_nodes_in_range)
+    /// limited to the label's nodes. A store that walks only the label's rows
+    /// overrides it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn find_nodes_with_label_in_range(
+        &self,
+        label: &str,
+        property: &str,
+        range: &ValueRange,
+        view: ReadView,
+    ) -> Result<Vec<NodeId>> {
+        let mut found = Vec::new();
+        for id in self.nodes_by_label(label, view)? {
+            if let Some(value) = self.node_property(id, property, view)?
+                && range.contains(&value)
+            {
+                found.push(id);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Calls `visit` with the values of `read` (each `None` where the node has
+    /// none) of each node [`find_nodes_with_label_in_range`](Self::find_nodes_with_label_in_range)
+    /// finds, in its order, until `visit` breaks: what an aggregate over a
+    /// label's range reads, without a list of the nodes. A store that reads
+    /// the values beside the range's own overrides it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn visit_nodes_with_label_in_range(
+        &self,
+        label: &str,
+        property: &str,
+        range: &ValueRange,
+        read: &[&str],
+        view: ReadView,
+        visit: &mut dyn FnMut(&[Option<Value>]) -> std::ops::ControlFlow<()>,
+    ) -> Result<()> {
+        visit_label_range_by_id(self, label, property, range, read, view, visit)
+    }
+
     /// Whether a node's `property` may meet `op value` for some view: `false`
     /// lets the planner skip a scan that finds nothing. Not an answer: `true`
     /// is always correct.
@@ -1237,6 +1284,30 @@ fn unsupported(what: &str) -> grafeo_common::utils::error::Error {
     grafeo_common::utils::error::Error::from(grafeo_common::utils::error::QueryError::unsupported(
         format!("this store does not support {what}"),
     ))
+}
+
+/// [`GraphStore::visit_nodes_with_label_in_range`] for any store: the nodes
+/// its labelled range finds, each value of `read` read by the node's id.
+pub(crate) fn visit_label_range_by_id<S: GraphStore + ?Sized>(
+    store: &S,
+    label: &str,
+    property: &str,
+    range: &ValueRange,
+    read: &[&str],
+    view: ReadView,
+    visit: &mut dyn FnMut(&[Option<Value>]) -> std::ops::ControlFlow<()>,
+) -> Result<()> {
+    let mut values = Vec::with_capacity(read.len());
+    for id in store.find_nodes_with_label_in_range(label, property, range, view)? {
+        values.clear();
+        for key in read {
+            values.push(store.node_property(id, key, view)?);
+        }
+        if visit(&values).is_break() {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// The distance from `query` of each vector in `property` of the nodes

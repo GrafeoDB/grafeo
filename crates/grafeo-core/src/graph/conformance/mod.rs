@@ -1380,20 +1380,17 @@ pub(crate) fn paths_at<S: Store + ?Sized>(
             })
             .map(|(id, _)| *id)
             .collect();
+        let range = crate::graph::ValueRange::new(
+            min.as_ref(),
+            max.as_ref(),
+            min_inclusive,
+            max_inclusive,
+            crate::execution::operators::value_utils::AcrossKinds::Apart,
+        );
         let what = format!("find_nodes_in_range(age, {min:?}, {max:?})");
         let found = id_set(
             &ok(
-                store.find_nodes_in_range(
-                    "age",
-                    &crate::graph::ValueRange::new(
-                        min.as_ref(),
-                        max.as_ref(),
-                        min_inclusive,
-                        max_inclusive,
-                        crate::execution::operators::value_utils::AcrossKinds::Apart,
-                    ),
-                    view,
-                ),
+                store.find_nodes_in_range("age", &range, view),
                 "find_nodes_in_range",
             ),
             &what,
@@ -1401,6 +1398,25 @@ pub(crate) fn paths_at<S: Store + ?Sized>(
         );
         if found != wanted {
             problems.push(format!("{what} is {found:?}, expected {wanted:?}"));
+        }
+        // The same range among each label's nodes.
+        for label in &label_names {
+            let what = format!("find_nodes_with_label_in_range({label}, age, {min:?}, {max:?})");
+            let found = id_set(
+                &ok(
+                    store.find_nodes_with_label_in_range(label, "age", &range, view),
+                    "find_nodes_with_label_in_range",
+                ),
+                &what,
+                &mut problems,
+            );
+            let wanted: BTreeSet<u64> = wanted
+                .intersection(&with_any(&[label.as_str()]))
+                .copied()
+                .collect();
+            if found != wanted {
+                problems.push(format!("{what} is {found:?}, expected {wanted:?}"));
+            }
         }
     }
 

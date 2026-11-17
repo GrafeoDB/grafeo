@@ -12,6 +12,8 @@ Performance and memory release, in progress: this section lists what has landed 
 - **A SQL/PGQ hop finds a far end its key pins by that key**: when the key's property holds values of one kind only, as GQL and Cypher already did; graph-bench's SQL/PGQ common friends takes 1.0 ms instead of 20 (medium). A property that holds values of two kinds keeps the plain expand, so a reached value of another kind still raises 22G04.
 - **Weakly connected components read each edge once**: `connected_components` and its procedure read every edge from its source only, where they read each one from both ends; graph-bench's Graphalytics WCC takes 11 ms instead of 21 (medium).
 - **A call with an empty parameter map reuses its cached plan without parsing**: `execute_with_params`, `execute_cypher_with_params` and `execute_sql_with_params` with an empty map (and a binding's call with `{}`) find the statement's plan before parsing it, as a call without a map does; before, every such call parsed and translated the statement again.
+- **A range filter on a label reads only that label's nodes**: `MATCH (n:L) WHERE n.p > $v` no longer visits every node in the database to find the label's; graph-bench's filtered comment scan takes 23 ms instead of 38 (medium), and its order plus limit 14 ms instead of 18.
+- **An aggregate over a label's range reads each value once**: `MATCH (n:L) WHERE n.p > $v RETURN count(*), avg(n.p)` and its SQL/PGQ twin fold the values in range in one pass, with the same answers; graph-bench's filter plus average takes 7.3 ms instead of 18.5 (medium).
 
 ### Fixed
 

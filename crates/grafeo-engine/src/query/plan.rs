@@ -1865,6 +1865,23 @@ impl LogicalOperator {
                     );
                     return;
                 }
+                // A range the aggregate folds in one store call.
+                if let Some(shape) = op.range_fold_shape()
+                    && matches!(
+                        shape.filter.pushdown_hint,
+                        Some(PushdownHint::RangeFold { .. })
+                    )
+                {
+                    let _ = writeln!(
+                        out,
+                        "{indent}RangeFold ({var}:{label}, aggs: [{aggs}]){after}",
+                        var = shape.variable,
+                        label = shape.label,
+                        aggs = aggs.join(", "),
+                    );
+                    op.input.fmt_tree(out, depth + 1);
+                    return;
+                }
                 let _ = writeln!(
                     out,
                     "{indent}Aggregate (group: [{groups}], aggs: [{aggs}]){after}",
@@ -2221,6 +2238,7 @@ fn hint_text(hint: &PushdownHint) -> String {
         }
         PushdownHint::KeyColumn { property } => format!(" [key column: {property}]"),
         PushdownHint::RangeScan { property } => format!(" [range: {property}]"),
+        PushdownHint::RangeFold { property } => format!(" [range fold: {property}]"),
         PushdownHint::LabelFirst => " [label-first]".to_string(),
         PushdownHint::LabelUnion { labels } => format!(" [labels: {}]", labels.join("|")),
         PushdownHint::IdSeek => " [seek: id]".to_string(),
@@ -2575,6 +2593,156 @@ impl AggregateOp {
             && self.aggregates.iter().all(counts_nodes))
         .then_some(label.as_str())
     }
+
+    /// The shape a range fold reads this aggregate as: `count(*)`, `count(n)`,
+    /// and `count`, `sum`, `avg`, `min` and `max` of properties of `n`, none
+    /// distinct, with no grouping and no `HAVING`, over a filter on a scan of
+    /// one label with no input, also through a projection that only names
+    /// properties of `n` (SQL/PGQ's `COLUMNS (n.k AS len)`). Whether the
+    /// filter is a range the scan can read is the planner's to say.
+    #[must_use]
+    pub fn range_fold_shape(&self) -> Option<RangeFoldShape<'_>> {
+        // Every aggregate one the fold takes, checked before anything is
+        // allocated: most aggregates are not.
+        let folds = |aggregate: &AggregateExpr| {
+            !aggregate.distinct
+                && aggregate.expression2.is_none()
+                && matches!(
+                    aggregate.function,
+                    AggregateFunction::Count
+                        | AggregateFunction::CountNonNull
+                        | AggregateFunction::Sum
+                        | AggregateFunction::Avg
+                        | AggregateFunction::Min
+                        | AggregateFunction::Max
+                )
+        };
+        if !self.group_by.is_empty()
+            || self.having.is_some()
+            || self.aggregates.is_empty()
+            || !self.aggregates.iter().all(folds)
+        {
+            return None;
+        }
+        // A projection between (SQL/PGQ's `COLUMNS`) may only name properties
+        // of the scanned node.
+        let below = match self.input.as_ref() {
+            LogicalOperator::Project(project) if !project.pass_through_input => {
+                project.input.as_ref()
+            }
+            LogicalOperator::Return(project) if !project.distinct => project.input.as_ref(),
+            other => other,
+        };
+        let LogicalOperator::Filter(filter) = below else {
+            return None;
+        };
+        let LogicalOperator::NodeScan(scan) = filter.input.as_ref() else {
+            return None;
+        };
+        let (Some(label), None) = (&scan.label, &scan.input) else {
+            return None;
+        };
+        // Its items as (expression, alias), read once the shape is the fold's.
+        let projection: Option<Vec<(&LogicalExpression, Option<&String>)>> =
+            match self.input.as_ref() {
+                LogicalOperator::Project(project) => Some(
+                    project
+                        .projections
+                        .iter()
+                        .map(|item| (&item.expression, item.alias.as_ref()))
+                        .collect(),
+                ),
+                LogicalOperator::Return(project) => Some(
+                    project
+                        .items
+                        .iter()
+                        .map(|item| (&item.expression, item.alias.as_ref()))
+                        .collect(),
+                ),
+                _ => None,
+            };
+        let named: Vec<(&str, &str)> = match &projection {
+            Some(items) => items
+                .iter()
+                .map(|(expression, alias)| match (expression, alias) {
+                    (LogicalExpression::Property { variable, property }, Some(alias))
+                        if *variable == scan.variable =>
+                    {
+                        Some((alias.as_str(), property.as_str()))
+                    }
+                    _ => None,
+                })
+                .collect::<Option<_>>()?,
+            None => Vec::new(),
+        };
+        let mut reads = Vec::with_capacity(self.aggregates.len());
+        for aggregate in &self.aggregates {
+            let counts = matches!(
+                aggregate.function,
+                AggregateFunction::Count | AggregateFunction::CountNonNull
+            );
+            let read = match &aggregate.expression {
+                None if aggregate.function == AggregateFunction::Count => Some(None),
+                // The scanned node is never null: its count counts the rows.
+                Some(LogicalExpression::Variable(variable))
+                    if counts && projection.is_none() && *variable == scan.variable =>
+                {
+                    Some(None)
+                }
+                Some(LogicalExpression::Property { variable, property })
+                    if projection.is_none() && *variable == scan.variable =>
+                {
+                    Some(Some(property.as_str()))
+                }
+                Some(LogicalExpression::Variable(alias)) if projection.is_some() => named
+                    .iter()
+                    .find(|(name, _)| name == alias)
+                    .map(|(_, property)| Some(*property)),
+                _ => None,
+            };
+            reads.push(read?);
+        }
+        Some(RangeFoldShape {
+            filter,
+            variable: &scan.variable,
+            label,
+            reads,
+            through_projection: projection.is_some(),
+        })
+    }
+
+    /// The filter of the aggregate's [range fold shape](Self::range_fold_shape),
+    /// for the hint `EXPLAIN` shows on it.
+    pub(crate) fn range_fold_filter_mut(&mut self) -> Option<&mut FilterOp> {
+        self.range_fold_shape()?;
+        let below = match self.input.as_mut() {
+            LogicalOperator::Project(project) => project.input.as_mut(),
+            LogicalOperator::Return(project) => project.input.as_mut(),
+            other => other,
+        };
+        match below {
+            LogicalOperator::Filter(filter) => Some(filter),
+            _ => None,
+        }
+    }
+}
+
+/// What a range fold reads an aggregate as (see
+/// [`AggregateOp::range_fold_shape`]).
+#[derive(Debug)]
+pub struct RangeFoldShape<'a> {
+    /// The filter whose range the fold reads.
+    pub filter: &'a FilterOp,
+    /// The scanned node.
+    pub variable: &'a str,
+    /// The scanned label.
+    pub label: &'a str,
+    /// The property each aggregate reads, in order: `None` for a count of the
+    /// rows.
+    pub reads: Vec<Option<&'a str>>,
+    /// Whether a projection that names properties stands between the
+    /// aggregate and the filter.
+    pub through_projection: bool,
 }
 
 /// Whether a horizontal aggregate operates on edges or nodes.
@@ -2812,6 +2980,12 @@ pub enum PushdownHint {
     /// Range predicate resolved via a range/btree index.
     RangeScan {
         /// The indexed property name.
+        property: String,
+    },
+    /// A range the aggregate over it folds in one store call (see
+    /// [`AggregateOp::range_fold_shape`]).
+    RangeFold {
+        /// The range's property.
         property: String,
     },
     /// No index available, but label narrows the scan before filtering.

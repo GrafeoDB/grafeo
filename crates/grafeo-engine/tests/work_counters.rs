@@ -141,26 +141,81 @@ fn a_scan_counts_what_it_reads_from_the_store() {
     );
 }
 
-/// Every visibility test counts, whichever path makes it: a label scan tests a word of rows at a
-/// time, and the range scan tests each node row of the store one at a time. `x > 2` over the five
-/// `:P` nodes: the range scan tests and reads all five rows, and its label filter scans the
-/// label's word once; `id(n)` reads nothing more.
+/// Every visibility test counts, whichever path makes it, and a scan tests a word of rows at a
+/// time. Five `:P` nodes and three `:Q` nodes, written by one statement, so their word reads alike:
+/// - a label scan returning `id(n)` tests the word once and reads no column;
+/// - a range scan with a label tests the label's word once and reads the label's five values,
+///   not the `:Q` nodes' (`id(n)` reads nothing more);
+/// - a range scan without one walks the store's vector of 2,048 rows as its 32 words, each tested
+///   once, and reads all eight values.
 #[cfg(grafeo_work_counters)]
 #[test]
 fn every_visibility_test_counts_whichever_path_makes_it() {
     use grafeo_common::work::Work;
-    let db = people();
+    let db = GrafeoDB::new_in_memory();
+    db.execute(concat!(
+        "INSERT (:P {x: 1}), (:P {x: 2}), (:P {x: 3}), (:P {x: 4}), (:P {x: 5}), ",
+        "(:Q {x: 1}), (:Q {x: 2}), (:Q {x: 3})"
+    ))
+    .unwrap();
     let label = work_of(&db, "MATCH (n:P) RETURN id(n)");
     assert_eq!(label.get(Work::VisibilityTest), 1, "{}", label.describe());
     assert_eq!(label.get(Work::ColumnRead), 0, "{}", label.describe());
     let range = work_of(&db, "MATCH (n:P) WHERE n.x > 2 RETURN id(n)");
-    assert_eq!(
-        range.get(Work::VisibilityTest),
-        5 + 1,
-        "{}",
-        range.describe()
-    );
+    assert_eq!(range.get(Work::VisibilityTest), 1, "{}", range.describe());
     assert_eq!(range.get(Work::ColumnRead), 5, "{}", range.describe());
+    let unlabelled = work_of(&db, "MATCH (n) WHERE n.x > 2 RETURN id(n)");
+    assert_eq!(
+        unlabelled.get(Work::VisibilityTest),
+        32,
+        "{}",
+        unlabelled.describe()
+    );
+    assert_eq!(
+        unlabelled.get(Work::ColumnRead),
+        8,
+        "{}",
+        unlabelled.describe()
+    );
+}
+
+/// An aggregate over a label's range folds the range in one store call: the five `:P` rows'
+/// values of `x` read once each (the average takes the value the range read), the label's word
+/// tested once, and no node read again by id. With the fold off, the range scan's three nodes in
+/// range are each looked up again and read again by the aggregate.
+#[cfg(grafeo_work_counters)]
+#[test]
+fn a_range_fold_reads_no_node_by_id() {
+    use grafeo_common::work::Work;
+    use grafeo_engine::query::optimizer::{PlannerRule, PlannerRules};
+    let db = GrafeoDB::new_in_memory();
+    db.execute(concat!(
+        "INSERT (:P {x: 1}), (:P {x: 2}), (:P {x: 3}), (:P {x: 4}), (:P {x: 5}), ",
+        "(:Q {x: 1}), (:Q {x: 2}), (:Q {x: 3})"
+    ))
+    .unwrap();
+    let query = "MATCH (n:P) WHERE n.x > 2 RETURN count(*), avg(n.x)";
+    let folded = work_of(&db, query);
+    assert_eq!(folded.get(Work::RowGroupLookup), 0, "{}", folded.describe());
+    assert_eq!(folded.get(Work::ColumnRead), 5, "{}", folded.describe());
+    assert_eq!(folded.get(Work::VisibilityTest), 1, "{}", folded.describe());
+    let mut session = db.session();
+    session.set_planner_rules(PlannerRules::all().with(PlannerRule::RangeFold, false));
+    let _ = grafeo_common::work::take();
+    session.execute(query).unwrap();
+    let scanned = grafeo_common::work::take();
+    assert_eq!(
+        scanned.get(Work::RowGroupLookup),
+        3,
+        "{}",
+        scanned.describe()
+    );
+    assert_eq!(
+        scanned.get(Work::ColumnRead),
+        5 + 3,
+        "{}",
+        scanned.describe()
+    );
 }
 
 /// A hop reads one adjacency list per source node.

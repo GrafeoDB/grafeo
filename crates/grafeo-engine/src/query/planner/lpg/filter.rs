@@ -46,7 +46,7 @@ use grafeo_core::graph::rowgroup::KeyColumnQuery;
 use super::{
     Arc, BinaryOp, EmptyOperator, Error, ExpressionPredicate, FilterOp, FilterOperator, GraphStore,
     HashJoinOperator, HashMap, LogicalExpression, LogicalOperator, NodeListOperator, NodeScanOp,
-    Operator, PhysicalJoinType, RangeBounds, RangeScanOperator, Result, UnaryOp, Value,
+    Operator, PhysicalJoinType, RangeScanOperator, Result, UnaryOp, Value,
 };
 use crate::query::plan::PushdownHint;
 #[cfg(feature = "vector-index")]
@@ -1217,55 +1217,63 @@ impl super::Planner {
             _ => return Ok(None),
         };
 
-        // Try to extract BETWEEN pattern first (more efficient)
+        let Some((property, range)) = self.filter_range(&filter.predicate, &scan_variable) else {
+            return Ok(None);
+        };
+        self.record_absorbed_scan_entry("NodeScan", &filter.input);
+        self.plan_range_filter(&scan_variable, &scan_label, &property, range)
+    }
+
+    /// The property a filter over a scan of `scan_variable` bounds, and the
+    /// range it bounds it to, when the range scan can read it: a `BETWEEN`
+    /// pattern (`n.age >= 30 AND n.age <= 50`) first, then one comparison
+    /// (`n.age > 30`), on a column that orders as the query compares. `None`
+    /// otherwise. The range scan and the range fold read a filter so.
+    pub(super) fn filter_range(
+        &self,
+        predicate: &LogicalExpression,
+        scan_variable: &str,
+    ) -> Option<(String, grafeo_core::graph::ValueRange)> {
         if let Some((variable, property, min, max, min_inc, max_inc)) =
-            Self::extract_between_predicate(&filter.predicate)
+            Self::extract_between_predicate(predicate)
             && variable == scan_variable
             && self.store_column_orders_like_query(true, &property, &min)
             && self.store_column_orders_like_query(true, &property, &max)
         {
-            self.record_absorbed_scan_entry("NodeScan", &filter.input);
-            return self.plan_range_filter(
-                &scan_variable,
-                &scan_label,
-                &property,
-                RangeBounds {
-                    min: Some(&min),
-                    max: Some(&max),
-                    min_inclusive: min_inc,
-                    max_inclusive: max_inc,
-                },
-            );
+            let range = self.value_range(Some(&min), Some(&max), min_inc, max_inc);
+            return Some((property, range));
         }
-
-        // Try to extract simple range predicate
-        if let Some((variable, property, op, value)) =
-            Self::extract_range_predicate(&filter.predicate)
-            && variable == scan_variable
-            && self.store_column_orders_like_query(true, &property, &value)
+        let (variable, property, op, value) = Self::extract_range_predicate(predicate)?;
+        if variable != scan_variable
+            || !self.store_column_orders_like_query(true, &property, &value)
         {
-            let (min, max, min_inc, max_inc) = match op {
-                BinaryOp::Lt => (None, Some(value), false, false),
-                BinaryOp::Le => (None, Some(value), false, true),
-                BinaryOp::Gt => (Some(value), None, false, false),
-                BinaryOp::Ge => (Some(value), None, true, false),
-                _ => return Ok(None),
-            };
-            self.record_absorbed_scan_entry("NodeScan", &filter.input);
-            return self.plan_range_filter(
-                &scan_variable,
-                &scan_label,
-                &property,
-                RangeBounds {
-                    min: min.as_ref(),
-                    max: max.as_ref(),
-                    min_inclusive: min_inc,
-                    max_inclusive: max_inc,
-                },
-            );
+            return None;
         }
+        let range = match op {
+            BinaryOp::Lt => self.value_range(None, Some(&value), false, false),
+            BinaryOp::Le => self.value_range(None, Some(&value), false, true),
+            BinaryOp::Gt => self.value_range(Some(&value), None, false, false),
+            BinaryOp::Ge => self.value_range(Some(&value), None, true, false),
+            _ => return None,
+        };
+        Some((property, range))
+    }
 
-        Ok(None)
+    /// The range between `min` and `max` under the statement's rule for two
+    /// kinds: ISO GQL orders them, openCypher does not.
+    fn value_range(
+        &self,
+        min: Option<&Value>,
+        max: Option<&Value>,
+        min_inclusive: bool,
+        max_inclusive: bool,
+    ) -> grafeo_core::graph::ValueRange {
+        let across_kinds = if self.session_context.language.follows_opencypher() {
+            grafeo_core::execution::operators::value_utils::AcrossKinds::Apart
+        } else {
+            grafeo_core::execution::operators::value_utils::AcrossKinds::Ordered
+        };
+        grafeo_core::graph::ValueRange::new(min, max, min_inclusive, max_inclusive, across_kinds)
     }
 
     /// The nodes an index lookup finds that `=` may find equal to `value`
@@ -1514,21 +1522,8 @@ impl super::Planner {
         scan_variable: &str,
         scan_label: &Option<String>,
         property: &str,
-        bounds: RangeBounds<'_>,
+        range: grafeo_core::graph::ValueRange,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
-        // The statement's rule for two kinds: ISO GQL orders them, openCypher does not.
-        let across_kinds = if self.session_context.language.follows_opencypher() {
-            grafeo_core::execution::operators::value_utils::AcrossKinds::Apart
-        } else {
-            grafeo_core::execution::operators::value_utils::AcrossKinds::Ordered
-        };
-        let range = grafeo_core::graph::ValueRange::new(
-            bounds.min,
-            bounds.max,
-            bounds.min_inclusive,
-            bounds.max_inclusive,
-            across_kinds,
-        );
         let mut op = RangeScanOperator::new(
             Arc::clone(&self.store),
             property.to_string(),

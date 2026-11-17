@@ -1489,6 +1489,11 @@ impl GrafeoDB {
     /// go through the same path, and to the WAL, as before it, and open
     /// transactions keep their snapshots and their changes.
     ///
+    /// It also empties the shared plan cache, whose plans keep the literals
+    /// of their statements' text, so a value written or matched by a literal
+    /// and deleted since leaves memory with it (#712); a session's own
+    /// prepared plans go when the session does.
+    ///
     /// # Errors
     ///
     /// The errors of [`wal_checkpoint()`](Self::wal_checkpoint): a failed
@@ -1501,6 +1506,7 @@ impl GrafeoDB {
         let started = grafeo_common::clock::Instant::now();
         let checkpointed = self.checkpoint_now()?;
         let versions_collected = u64::try_from(self.collect_garbage()).unwrap_or(u64::MAX);
+        self.clear_plan_cache();
         let rows_compressed = match self.root_store() {
             Some(store) => store.compress()?.rows,
             None => 0,
@@ -3008,6 +3014,9 @@ impl GrafeoDB {
         if !*is_open {
             return Ok(());
         }
+
+        // The cached plans keep their statements' literals (#712).
+        self.clear_plan_cache();
 
         // A closed handle still reads its spilled columns, but spills no
         // more: once the lock is released, `<file>.spill/cache/` belongs to

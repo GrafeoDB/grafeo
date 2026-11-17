@@ -330,6 +330,9 @@ struct Case {
     setup: fn(&GrafeoDB),
     write: fn(&GrafeoDB, &Marker),
     delete: fn(&GrafeoDB, &Marker),
+    /// The write rolls its values back: it takes the positive control itself, before the
+    /// rollback, and nothing holds the values after it.
+    rolls_back: bool,
 }
 
 impl Case {
@@ -342,6 +345,7 @@ impl Case {
             setup: |_| {},
             write: write_texts,
             delete: delete_items,
+            rolls_back: false,
         }
     }
 }
@@ -485,7 +489,7 @@ fn counts(case: &Case) -> Counts {
     (case.write)(&db, &marker);
     counts.written = heap::copies(needle);
     assert!(
-        counts.written > 0,
+        counts.written > 0 || case.rolls_back,
         "the positive control: the scan finds the written values"
     );
     (case.delete)(&db, &marker);
@@ -781,99 +785,64 @@ fn a_binary_quantized_vector_index_frees_deleted_vectors() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// In memory after compact(): the shapes that keep a deleted value (expected failures).
+// In memory after compact(): the reporter's scenario and its shapes, then the ones that still
+// keep a deleted value (expected failures).
 // ---------------------------------------------------------------------------------------------
 
-/// The reporter's scenario: the deleted texts are the column's largest, and the column's bound
-/// keeps the largest after `compact()`.
+/// The reporter's scenario: the deleted texts are the column's largest, which the column's bound
+/// kept until it named rows instead of holding values.
 #[test]
 fn deleted_texts_are_freed_by_compact() {
-    xfail(
-        "#712: after the delete and compact(), Grafeo holds no deleted value in memory",
-        "#712",
-        || {
-            compact_frees(&Case::text(Open::File, 1000));
-        },
-    );
+    compact_frees(&Case::text(Open::File, 1000));
 }
 
 /// The same in a database without a file.
 #[test]
 fn deleted_texts_are_freed_by_compact_in_memory() {
-    xfail(
-        "#712: after the delete and compact(), Grafeo holds no deleted value in memory",
-        "#712",
-        || {
-            compact_frees(&Case::text(Open::InMemory, 100));
-        },
-    );
+    compact_frees(&Case::text(Open::InMemory, 100));
 }
 
 /// The same in an encrypted database: what it holds in memory is not encrypted.
 #[cfg(feature = "encryption")]
 #[test]
 fn deleted_texts_are_freed_by_compact_when_encrypted() {
-    xfail(
-        "#712: after the delete and compact(), Grafeo holds no deleted value in memory",
-        "#712",
-        || {
-            compact_frees(&Case::text(Open::Encrypted, 100));
-        },
-    );
+    compact_frees(&Case::text(Open::Encrypted, 100));
 }
 
 /// A text inside a list.
 #[test]
 fn a_deleted_list_is_freed_by_compact() {
-    xfail(
-        "#712: after the delete and compact(), Grafeo holds no deleted value in memory",
-        "#712",
-        || compact_frees(&list()),
-    );
+    compact_frees(&list());
 }
 
 /// A text inside a map.
 #[test]
 fn a_deleted_map_is_freed_by_compact() {
-    xfail(
-        "#712: after the delete and compact(), Grafeo holds no deleted value in memory",
-        "#712",
-        || compact_frees(&map()),
-    );
+    compact_frees(&map());
 }
 
-/// An insert rolled back: never committed, yet the column's bound took it in.
+/// An insert rolled back: never committed, so nothing holds its values once the rollback
+/// returns, the column's bound included (it names rows and owns no value).
 #[test]
 fn a_rolled_back_text_is_freed() {
-    xfail(
-        "#712: after the delete and compact(), Grafeo holds no deleted value in memory",
-        "#712",
-        || compact_frees(&rolled_back()),
-    );
+    let counts = counts(&rolled_back());
+    assert_eq!(counts.written, 0, "after the rollback: {counts:?}");
+    assert_eq!(counts.compacted, 0, "after compact(): {counts:?}");
 }
 
-/// Texts written as literals: the plan cache keeps each statement's text and literals.
+/// Texts written as literals: the plan cache keeps each statement's text and literals, and
+/// `compact()` empties it.
 #[test]
 fn texts_written_as_literals_are_freed_by_compact() {
-    xfail(
-        "#712: after the delete and compact(), Grafeo holds no deleted value in memory",
-        "#712",
-        || compact_frees(&literal_insert()),
-    );
+    compact_frees(&literal_insert());
 }
 
-/// A scalar-quantized index below its training threshold keeps every vector as a training
-/// sample, and a delete does not take it out.
+/// A scalar-quantized index below its training threshold keeps its training samples as ids,
+/// so a deleted vector is freed with its entry and never trains the quantizer.
 #[cfg(feature = "vector-index")]
 #[test]
 fn a_scalar_quantized_vector_index_frees_deleted_vectors() {
-    xfail(
-        "#712: after the delete and compact(), Grafeo holds no deleted value in memory",
-        "#712",
-        || {
-            compact_frees(&vector_index(Some("scalar")));
-        },
-    );
+    compact_frees(&vector_index(Some("scalar")));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1041,9 +1010,14 @@ fn rolled_back() -> Case {
                     )
                     .expect("the insert");
             }
+            assert!(
+                heap::copies(&marker.bytes[..marker.len]) > 0,
+                "the positive control: the scan finds the values before the rollback"
+            );
             session.rollback().expect("ROLLBACK");
         },
         delete: |_, _| {},
+        rolls_back: true,
         ..Case::text(Open::File, 100)
     }
 }

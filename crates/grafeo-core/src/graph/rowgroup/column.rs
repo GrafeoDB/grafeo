@@ -95,6 +95,28 @@ impl Data {
         }
     }
 
+    /// Calls `read` with the value at `row`, which the column holds; a value
+    /// of a column of any values is lent, not copied.
+    fn with_value<R>(&self, row: usize, read: impl FnOnce(&Value) -> R) -> R {
+        match self {
+            Self::Values(values) => read(values.at(row)),
+            _ => read(&self.get(row)),
+        }
+    }
+
+    /// How the value at `a` orders against the value at `b`, both held, as
+    /// [`compare_for_range`](super::read::compare_for_range) orders them: in
+    /// place, without making either a [`Value`].
+    fn compare_rows(&self, a: usize, b: usize) -> Option<std::cmp::Ordering> {
+        match self {
+            Self::Int64(values) => Some(values.at(a).cmp(values.at(b))),
+            Self::Float64(values) => values.at(a).partial_cmp(values.at(b)),
+            Self::Bool(bits) => Some(bits.get(a).cmp(&bits.get(b))),
+            Self::String(values) => Some(values.at(a).cmp(values.at(b))),
+            Self::Values(values) => super::read::compare_for_range(values.at(a), values.at(b)),
+        }
+    }
+
     /// Frees what `row` holds on the heap.
     fn reset(&mut self, row: usize) {
         match self {
@@ -165,89 +187,107 @@ struct Hot {
     /// What rows held before the writes some readers must not see: a
     /// column with update chains is hot (a write thaws a cold column).
     updates: Updates<Option<Value>>,
-    /// The least and the greatest value the column held since it became
-    /// hot: a zone map of every version a reader may still see.
+    /// The rows of the least and the greatest value: a zone map of every
+    /// version a reader may still see, which holds no value of its own.
     bound: Bound,
 }
 
-/// The values a hot column held, as a range that only widens (a value
-/// taken out leaves it as it is, so it covers the kept versions too): a
-/// zone map the planner prunes filters with.
-#[derive(Debug, Clone, Default)]
+/// What the values of a hot column, in every version a reader may still
+/// see, lie between: a zone map the planner prunes filters with. It names
+/// the rows that hold the least and the greatest value and owns no value
+/// (#712), so a value taken out or rolled back is not kept by the bound. A
+/// side whose row is written with a value less extreme there, or taken
+/// out, goes stale (`None`) and prunes nothing, while the other side still
+/// prunes its half; a collect that leaves no kept version rebuilds it from
+/// the live values.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum Bound {
     /// No value yet.
     #[default]
     Empty,
-    /// Every value lies between these.
-    Range { min: Value, max: Value },
+    /// The rows of the least and the greatest value, each `None` once
+    /// stale: later values do not narrow a stale side.
+    Range {
+        min: Option<usize>,
+        max: Option<usize>,
+    },
     /// Values that do not order against each other: anything may match.
     Any,
 }
 
 impl Bound {
-    /// The heap bytes the kept least and greatest values hold.
-    fn payload_bytes(&self) -> usize {
-        match self {
-            Self::Range { min, max } => min.estimated_size_bytes() + max.estimated_size_bytes(),
-            Self::Empty | Self::Any => 0,
-        }
-    }
-
-    /// Takes `value` in.
-    fn widen(&mut self, value: &Value) {
+    /// `self` with the value of `row` in `data`, which holds it, taken in;
+    /// `self` names no row whose value the write replaced unless
+    /// [`written`](Self::written) kept it.
+    fn widened(self, data: &Data, row: usize) -> Self {
         use std::cmp::Ordering;
-
-        match self {
-            Self::Any => {}
-            Self::Empty => {
-                *self = Self::Range {
-                    min: value.clone(),
-                    max: value.clone(),
-                };
-            }
-            Self::Range { min, max } => {
-                match (
-                    super::read::compare_for_range(value, min),
-                    super::read::compare_for_range(value, max),
-                ) {
-                    (Some(below), Some(above)) => {
-                        if below == Ordering::Less {
-                            *min = value.clone();
-                        }
-                        if above == Ordering::Greater {
-                            *max = value.clone();
-                        }
-                    }
-                    _ => *self = Self::Any,
-                }
-            }
-        }
-    }
-
-    /// Whether a value of the column may meet `value` by `op`.
-    fn might_match(&self, op: crate::graph::lpg::CompareOp, value: &Value) -> bool {
-        use std::cmp::Ordering;
-
-        use crate::graph::lpg::CompareOp;
 
         let (min, max) = match self {
-            Self::Empty => return false,
-            Self::Any => return true,
+            Self::Any => return self,
+            Self::Empty => {
+                return Self::Range {
+                    min: Some(row),
+                    max: Some(row),
+                };
+            }
             Self::Range { min, max } => (min, max),
         };
-        let (Some(to_min), Some(to_max)) = (
-            super::read::compare_for_range(value, min),
-            super::read::compare_for_range(value, max),
-        ) else {
-            return true;
+        // A side the value does not order against: anything may match.
+        let side = |witness: Option<usize>, moves: Ordering| match witness {
+            None => Some(None),
+            Some(witness) => data
+                .compare_rows(row, witness)
+                .map(|order| Some(if order == moves { row } else { witness })),
         };
-        match op {
-            CompareOp::Eq => to_min != Ordering::Less && to_max != Ordering::Greater,
-            CompareOp::Ne => !(to_min == Ordering::Equal && to_max == Ordering::Equal),
-            CompareOp::Lt => to_min == Ordering::Greater,
-            CompareOp::Le => to_min != Ordering::Less,
-            CompareOp::Gt => to_max == Ordering::Less,
-            CompareOp::Ge => to_max != Ordering::Greater,
+        match (side(min, Ordering::Less), side(max, Ordering::Greater)) {
+            (Some(min), Some(max)) => Self::Range { min, max },
+            _ => Self::Any,
+        }
+    }
+
+    /// What is left of `self` once `value` replaces the value of `row` in
+    /// `data`, read before the write: a side whose row it is stays when the
+    /// value is at least as extreme there (the one it replaces lies inside
+    /// the new range), and goes stale otherwise; a row that is both sides
+    /// keeps them only with an equal value, as other rows and readers may
+    /// still hold the old one.
+    fn written(self, data: &Data, row: usize, value: &Value) -> Self {
+        use std::cmp::Ordering;
+
+        let Self::Range { min, max } = self else {
+            return self;
+        };
+        let (on_min, on_max) = (min == Some(row), max == Some(row));
+        if !on_min && !on_max {
+            return self;
+        }
+        let order = data.with_value(row, |old| super::read::compare_for_range(value, old));
+        let keeps = |moves: Ordering| matches!(order, Some(order) if order == moves || order == Ordering::Equal);
+        if on_min && on_max {
+            return if order == Some(Ordering::Equal) {
+                self
+            } else {
+                Self::Range {
+                    min: None,
+                    max: None,
+                }
+            };
+        }
+        Self::Range {
+            min: min.filter(|_| !on_min || keeps(Ordering::Less)),
+            max: max.filter(|_| !on_max || keeps(Ordering::Greater)),
+        }
+    }
+
+    /// What is left of `self` once the value of `row` is taken out: a side
+    /// whose row it is goes stale.
+    fn taken(self, row: usize) -> Self {
+        match self {
+            Self::Range { min, max } => Self::Range {
+                min: min.filter(|&witness| witness != row),
+                max: max.filter(|&witness| witness != row),
+            },
+            Self::Empty | Self::Any => self,
         }
     }
 }
@@ -263,23 +303,98 @@ fn value_holds_only_kind(
             || crate::execution::operators::value_utils::ValueKinds::of(value) == kind)
 }
 
-/// Whether every value a hot column's `bound` covers is of `kind`'s kind or a
-/// null: `None` when the bound saw values that do not order, which says
-/// nothing about the kinds.
+/// Whether every value a hot column's bound covers is of `kind`'s kind or a
+/// null: `None` when the bound saw values that do not order, or a side is
+/// stale, which says nothing about the kinds.
 fn bound_holds_only_kind(
-    bound: &Bound,
+    hot: &Hot,
     kind: crate::execution::operators::value_utils::ValueKinds,
 ) -> Option<bool> {
-    match bound {
+    match hot.bound {
         Bound::Empty => Some(true),
-        Bound::Any => None,
-        Bound::Range { min, max } => {
-            Some(value_holds_only_kind(min, kind) && value_holds_only_kind(max, kind))
-        }
+        Bound::Range {
+            min: Some(min),
+            max: Some(max),
+        } => Some(
+            hot.data
+                .with_value(min, |min| value_holds_only_kind(min, kind))
+                && hot
+                    .data
+                    .with_value(max, |max| value_holds_only_kind(max, kind)),
+        ),
+        Bound::Range { .. } | Bound::Any => None,
     }
 }
 
 impl Hot {
+    /// The least and the greatest value the bound covers, when it is a
+    /// range with no stale side.
+    fn bound_range(&self) -> Option<(Value, Value)> {
+        match self.bound {
+            Bound::Range {
+                min: Some(min),
+                max: Some(max),
+            } => Some((self.data.get(min), self.data.get(max))),
+            Bound::Empty | Bound::Range { .. } | Bound::Any => None,
+        }
+    }
+
+    /// Whether a value the bound covers may meet `value` by `op`: a stale
+    /// side bounds nothing.
+    fn might_match(&self, op: crate::graph::lpg::CompareOp, value: &Value) -> bool {
+        use std::cmp::Ordering;
+
+        use crate::graph::lpg::CompareOp;
+
+        let (min, max) = match self.bound {
+            Bound::Empty => return false,
+            Bound::Any => return true,
+            Bound::Range { min, max } => (min, max),
+        };
+        // How `value` orders against a live side; `Err` when it does not.
+        let side = |witness: Option<usize>| match witness {
+            None => Ok(None),
+            Some(witness) => self
+                .data
+                .with_value(witness, |bound| {
+                    super::read::compare_for_range(value, bound)
+                })
+                .map(Some)
+                .ok_or(()),
+        };
+        let (Ok(to_min), Ok(to_max)) = (side(min), side(max)) else {
+            return true;
+        };
+        // Whether the side, when live, allows the match.
+        let at_min = |allows: fn(Ordering) -> bool| to_min.is_none_or(allows);
+        let at_max = |allows: fn(Ordering) -> bool| to_max.is_none_or(allows);
+        match op {
+            CompareOp::Eq => {
+                at_min(|order| order != Ordering::Less)
+                    && at_max(|order| order != Ordering::Greater)
+            }
+            CompareOp::Ne => !(to_min == Some(Ordering::Equal) && to_max == Some(Ordering::Equal)),
+            CompareOp::Lt => at_min(|order| order == Ordering::Greater),
+            CompareOp::Le => at_min(|order| order != Ordering::Less),
+            CompareOp::Gt => at_max(|order| order == Ordering::Less),
+            CompareOp::Ge => at_max(|order| order != Ordering::Greater),
+        }
+    }
+
+    /// Builds a bound with a stale side anew from the live values, once no
+    /// version is kept that a reader could see instead: the live side comes
+    /// out as it was (its row holds the extreme of the live values).
+    fn rebuild_stale_bound(&mut self) {
+        let stale =
+            matches!(self.bound, Bound::Range { min, max } if min.is_none() || max.is_none());
+        if stale && self.updates.is_empty() {
+            self.bound = self
+                .present
+                .rows()
+                .fold(Bound::Empty, |bound, row| bound.widened(&self.data, row));
+        }
+    }
+
     /// The value at `row`, if it has one.
     fn get(&self, row: usize) -> Option<Value> {
         self.present.get(row).then(|| self.data.get(row))
@@ -295,7 +410,9 @@ impl Hot {
     /// [`Data::payload_at`]), which the caller measured: each value is
     /// measured once.
     fn set_replacing(&mut self, row: usize, value: &Value, replaced: usize) {
-        self.bound.widen(value);
+        if self.present.get(row) {
+            self.bound = self.bound.written(&self.data, row, value);
+        }
         if self.data.put(row, value) {
             self.payload = super::sub_count(self.payload + self.data.payload_at(row), replaced);
         } else {
@@ -318,6 +435,7 @@ impl Hot {
             self.payload = super::sub_count(self.payload + self.data.payload_at(row), replaced);
         }
         self.present.set(row);
+        self.bound = self.bound.widened(&self.data, row);
     }
 
     /// Takes the value at `row` out, if it has one.
@@ -330,6 +448,7 @@ impl Hot {
     /// which the caller measured.
     fn take_replacing(&mut self, row: usize, replaced: usize) -> Option<Value> {
         let value = self.get(row)?;
+        self.bound = self.bound.taken(row);
         self.present.clear(row);
         self.payload = super::sub_count(self.payload, replaced);
         self.data.reset(row);
@@ -360,23 +479,17 @@ impl Hot {
         }
     }
 
-    /// The heap bytes of its presence bits, its values and what they hold,
-    /// with its bounds' values (the update chains are counted with the
-    /// versions): a walk of every value, for the oracle.
+    /// The heap bytes of its presence bits, its values and what they hold
+    /// (the update chains are counted with the versions): a walk of every
+    /// value, for the oracle.
     fn heap_bytes(&self) -> usize {
-        self.present.heap_bytes()
-            + self.data.heap_bytes()
-            + self.data.payload_bytes()
-            + self.bound.payload_bytes()
+        self.present.heap_bytes() + self.data.heap_bytes() + self.data.payload_bytes()
     }
 
     /// [`heap_bytes`](Self::heap_bytes) from what the column keeps as its
     /// values change: a few loads.
     fn counted_bytes(&self) -> usize {
-        self.present.heap_bytes()
-            + self.data.heap_bytes()
-            + self.payload
-            + self.bound.payload_bytes()
+        self.present.heap_bytes() + self.data.heap_bytes() + self.payload
     }
 
     /// The decoded values of `chunks`.
@@ -481,7 +594,6 @@ pub(super) fn decoded_size(first_row: usize, values: &[(u32, Value)]) -> usize {
     let mut data = Growth::default();
     let mut present = Growth::default();
     let mut payload = 0;
-    let mut bound = Bound::Empty;
     // A typed column's values start at the vector of its first row with a
     // value (see [`GroupRows::put`]): a put past the end fills to the row,
     // then pushes it.
@@ -494,7 +606,6 @@ pub(super) fn decoded_size(first_row: usize, values: &[(u32, Value)]) -> usize {
     };
     for (index, (offset, value)) in values.iter().enumerate() {
         let row = first_row + *offset as usize;
-        bound.widen(value);
         let this = kind_of(value);
         let current = match kind {
             None => this,
@@ -534,7 +645,7 @@ pub(super) fn decoded_size(first_row: usize, values: &[(u32, Value)]) -> usize {
         Some(Kind::Any) => std::mem::size_of::<Value>(),
         None => 0,
     };
-    present.cap * std::mem::size_of::<u64>() + data.cap * slot + payload + bound.payload_bytes()
+    present.cap * std::mem::size_of::<u64>() + data.cap * slot + payload
 }
 
 /// The heap bytes of a cold column's chunk list and point views, besides
@@ -609,13 +720,10 @@ impl<'a> HotRows<'a> {
     /// Whether a value the column held in any version a reader may see may equal one of `sorted`,
     /// integers: one search of a long list, by the column's bounds.
     pub(super) fn might_hold_an_integer_of(&self, sorted: &[i64]) -> bool {
-        match &self.0.bound {
-            Bound::Range {
-                min: Value::Int64(min),
-                max: Value::Int64(max),
-            } => sorted
-                .get(sorted.partition_point(|target| target < min))
-                .is_some_and(|target| target <= max),
+        match self.0.bound_range() {
+            Some((Value::Int64(min), Value::Int64(max))) => sorted
+                .get(sorted.partition_point(|target| *target < min))
+                .is_some_and(|target| *target <= max),
             _ => sorted
                 .iter()
                 .any(|target| self.might_equal(&Value::Int64(*target))),
@@ -624,13 +732,10 @@ impl<'a> HotRows<'a> {
 
     /// [`might_hold_an_integer_of`](Self::might_hold_an_integer_of), of strings.
     pub(super) fn might_hold_a_string_of(&self, sorted: &[ArcStr]) -> bool {
-        match &self.0.bound {
-            Bound::Range {
-                min: Value::String(min),
-                max: Value::String(max),
-            } => sorted
-                .get(sorted.partition_point(|target| target < min))
-                .is_some_and(|target| target <= max),
+        match self.0.bound_range() {
+            Some((Value::String(min), Value::String(max))) => sorted
+                .get(sorted.partition_point(|target| *target < min))
+                .is_some_and(|target| *target <= max),
             _ => sorted
                 .iter()
                 .any(|target| self.might_equal(&Value::String(target.clone()))),
@@ -640,9 +745,7 @@ impl<'a> HotRows<'a> {
     /// Whether a value the column held in any version a reader may see may equal `value`, of the
     /// kind of the column's values.
     pub(super) fn might_equal(&self, value: &Value) -> bool {
-        self.0
-            .bound
-            .might_match(crate::graph::lpg::CompareOp::Eq, value)
+        self.0.might_match(crate::graph::lpg::CompareOp::Eq, value)
     }
 }
 
@@ -1565,12 +1668,12 @@ impl Columns {
     ) -> Option<bool> {
         let column = self.by_key.get(&key)?;
         if let Some(hot) = column.hot.get() {
-            return Some(hot.bound.might_match(op, value));
+            return Some(hot.might_match(op, value));
         }
         // Under the chunks' lock: a thaw publishes the hot form first.
         let cold = column.cold.lock();
         Some(match column.hot.get() {
-            Some(hot) => hot.bound.might_match(op, value),
+            Some(hot) => hot.might_match(op, value),
             None => !cold.is_empty(),
         })
     }
@@ -1588,12 +1691,12 @@ impl Columns {
             return Some(true);
         };
         if let Some(hot) = column.hot.get() {
-            return bound_holds_only_kind(&hot.bound, kind);
+            return bound_holds_only_kind(hot, kind);
         }
         // Under the chunks' lock: a thaw publishes the hot form first.
         let cold = column.cold.lock();
         if let Some(hot) = column.hot.get() {
-            return bound_holds_only_kind(&hot.bound, kind);
+            return bound_holds_only_kind(hot, kind);
         }
         for chunk in cold.iter() {
             let zone = read_zone_map(&chunk.bytes, chunk.codec, chunk.row_count).ok()??;
@@ -1748,6 +1851,9 @@ impl Columns {
                 let (_, after) = column.hot_counted();
                 self.counted.moved(before, after);
             }
+            if let Some(hot) = column.hot.get_mut() {
+                hot.rebuild_stale_bound();
+            }
         }
         dropped
     }
@@ -1764,6 +1870,9 @@ impl Columns {
                 dropped += column.updates_mut().collect_vector(vector, horizon);
                 let (_, after) = column.hot_counted();
                 self.counted.moved(before, after);
+            }
+            if let Some(hot) = column.hot.get_mut() {
+                hot.rebuild_stale_bound();
             }
         }
         dropped
@@ -2402,5 +2511,251 @@ mod tests {
             Some(Value::Null),
             "a null is a value the row holds"
         );
+    }
+
+    /// The values of `key` every row shows to `read`, in row order.
+    fn visible(columns: &Columns, key: u32, read: super::Read) -> Vec<Value> {
+        (0..8)
+            .filter_map(|row| columns.get_at(key, row, read))
+            .collect()
+    }
+
+    /// A filter by any operator and probe never skips the column while a value `read` sees
+    /// meets it: the bound covers every version a reader may still see.
+    fn assert_no_wrong_prune(
+        columns: &Columns,
+        key: u32,
+        read: super::Read,
+        probes: &[Value],
+        step: &str,
+    ) {
+        use std::cmp::Ordering;
+
+        use crate::graph::lpg::CompareOp;
+        use crate::graph::traits::compare_for_range;
+
+        let values = visible(columns, key, read);
+        for probe in probes {
+            for op in [
+                CompareOp::Eq,
+                CompareOp::Ne,
+                CompareOp::Lt,
+                CompareOp::Le,
+                CompareOp::Gt,
+                CompareOp::Ge,
+            ] {
+                let meets = values.iter().any(|value| {
+                    compare_for_range(value, probe).is_some_and(|order| match op {
+                        CompareOp::Eq => order == Ordering::Equal,
+                        CompareOp::Ne => order != Ordering::Equal,
+                        CompareOp::Lt => order == Ordering::Less,
+                        CompareOp::Le => order != Ordering::Greater,
+                        CompareOp::Gt => order == Ordering::Greater,
+                        CompareOp::Ge => order != Ordering::Less,
+                    })
+                });
+                if meets {
+                    assert_eq!(
+                        columns.might_match(key, op, probe),
+                        Some(true),
+                        "{step}: {read:?} sees {values:?}, one meets {op:?} {probe:?}, \
+                         and the bound pruned the column"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The live least and greatest value of key 0, and what the bound says they are.
+    fn live_and_bound(columns: &Columns) -> (Option<(Value, Value)>, Option<(Value, Value)>) {
+        use crate::graph::traits::compare_for_range;
+
+        let mut live = visible(columns, 0, super::Read::At(u64::MAX >> 2));
+        live.sort_by(|a, b| compare_for_range(a, b).expect("one kind"));
+        let live = live.first().cloned().zip(live.last().cloned());
+        let hot = columns.by_key[&0].hot();
+        (live, hot.bound_range())
+    }
+
+    /// The bound of a hot column owns no value (#712): after an overwrite, a removal, a rollback
+    /// and a collapse of each extreme, with a reader of an older snapshot open, a filter never
+    /// skips the column while a version some reader sees meets it; once the kept versions are
+    /// collected, the bound is the live least and greatest value, so it holds no copy of a
+    /// deleted or rolled-back one. Run for integers and for strings.
+    #[test]
+    fn the_bound_covers_every_visible_version_and_then_only_the_live_values() {
+        /// The stamp of transaction `id`'s pending writes.
+        fn pending(id: u64) -> u64 {
+            super::super::PENDING | id
+        }
+
+        let families: [(&str, fn(i64) -> Value); 2] = [
+            ("integers", Value::Int64),
+            ("strings", |rank| Value::from(format!("v{rank:03}"))),
+        ];
+        for (family, make) in families {
+            let mut columns = Columns::default();
+            // Rows 0..8 hold 10, 20, ..., 80, written with no reader to keep anything for.
+            for (row, rank) in (0..8).zip((10..=80).step_by(10)) {
+                columns.write(0, row, Some(&make(rank)), None);
+            }
+            let probes: Vec<Value> = (0..=20).map(|rank| make(rank * 5)).collect();
+            let old = super::Read::At(3);
+            let check = |columns: &Columns, now: u64, step: &str| {
+                let step = format!("{family}, {step}");
+                assert_no_wrong_prune(columns, 0, old, &probes, &step);
+                assert_no_wrong_prune(columns, 0, super::Read::At(now), &probes, &step);
+            };
+            check(&columns, 3, "written");
+
+            // The greatest value (80, row 7) is overwritten with 45 and committed at 4.
+            columns.write(0, 7, Some(&make(45)), Some((pending(19), 3)));
+            columns.stamp(0, 7, pending(19), 4);
+            check(&columns, 4, "the greatest overwritten");
+
+            // The least value (10, row 0) is taken out and committed at 5.
+            columns.write(0, 0, None, Some((pending(21), 4)));
+            columns.stamp(0, 0, pending(21), 5);
+            check(&columns, 5, "the least taken out");
+
+            // A new greatest (99, row 3) is written and rolled back.
+            columns.write(0, 3, Some(&make(99)), Some((pending(22), 5)));
+            assert!(columns.undo(0, 3, pending(22)), "the rollback");
+            check(&columns, 5, "a new greatest rolled back");
+
+            // A new least (5, row 4) is committed at 6, then overwritten with 50 at 7.
+            columns.write(0, 4, Some(&make(5)), Some((pending(23), 5)));
+            columns.stamp(0, 4, pending(23), 6);
+            columns.write(0, 4, Some(&make(50)), Some((pending(24), 6)));
+            columns.stamp(0, 4, pending(24), 7);
+            check(&columns, 7, "a new least, then overwritten");
+
+            // The old reader ends; every kept version is collected.
+            columns.collect(8);
+            check(&columns, 8, "collected");
+            let (live, bound) = live_and_bound(&columns);
+            assert_eq!(bound, live, "{family}: the bound once nothing is kept");
+
+            // The row holding the greatest (70, row 6) is deleted and collapsed.
+            columns.clear_row(6);
+            columns.collect(9);
+            check(&columns, 9, "the greatest's row collapsed");
+            let (live, bound) = live_and_bound(&columns);
+            assert_eq!(
+                live,
+                Some((make(20), make(60))),
+                "{family}: the live values"
+            );
+            assert_eq!(bound, live, "{family}: the bound once the row is gone");
+        }
+    }
+
+    /// A write to the row of the greatest value that leaves it at least the greatest, or to the
+    /// row of the least that leaves it at least the least, keeps the bound (a counter or a
+    /// timestamp that only grows): the value it replaced lies inside the new range, and the
+    /// bound still owns none. A write that moves an extreme inward makes it stale. A row that
+    /// is both the least and the greatest keeps it only with a value equal to both.
+    #[test]
+    fn a_witness_written_with_a_value_still_as_extreme_keeps_the_bound() {
+        use crate::graph::lpg::CompareOp;
+
+        fn pending(id: u64) -> u64 {
+            super::super::PENDING | id
+        }
+        let families: [(&str, fn(i64) -> Value); 2] = [
+            ("integers", Value::Int64),
+            ("strings", |rank| Value::from(format!("v{rank:03}"))),
+        ];
+        for (family, make) in families {
+            let mut columns = Columns::default();
+            for (row, rank) in (0..4).zip((10..=40).step_by(10)) {
+                columns.write(0, row, Some(&make(rank)), None);
+            }
+            let probes: Vec<Value> = (0..=20).map(|rank| make(rank * 5)).collect();
+            let bound = |columns: &Columns, key: u32| columns.by_key[&key].hot().bound_range();
+
+            // The greatest (40, row 3) grows to 45: the reader at 3 still sees 40, inside.
+            columns.write(0, 3, Some(&make(45)), Some((pending(31), 3)));
+            columns.stamp(0, 3, pending(31), 4);
+            assert_eq!(
+                bound(&columns, 0),
+                Some((make(10), make(45))),
+                "{family}: the greatest grew"
+            );
+            assert_no_wrong_prune(&columns, 0, super::Read::At(3), &probes, family);
+            assert_no_wrong_prune(&columns, 0, super::Read::At(4), &probes, family);
+
+            // The least (10, row 0) falls to 5.
+            columns.write(0, 0, Some(&make(5)), Some((pending(32), 4)));
+            columns.stamp(0, 0, pending(32), 5);
+            assert_eq!(
+                bound(&columns, 0),
+                Some((make(5), make(45))),
+                "{family}: the least fell"
+            );
+
+            // The greatest written again with the same value.
+            columns.write(0, 3, Some(&make(45)), Some((pending(33), 5)));
+            columns.stamp(0, 3, pending(33), 6);
+            assert_eq!(
+                bound(&columns, 0),
+                Some((make(5), make(45))),
+                "{family}: the greatest written with itself"
+            );
+
+            // The greatest moves inward: that side is stale, so nothing a reader sees is
+            // pruned, while the live least side still prunes below 5.
+            columns.write(0, 3, Some(&make(44)), Some((pending(34), 6)));
+            columns.stamp(0, 3, pending(34), 7);
+            assert_eq!(
+                bound(&columns, 0),
+                None,
+                "{family}: the greatest moved inward"
+            );
+            assert_no_wrong_prune(&columns, 0, super::Read::At(6), &probes, family);
+            assert_no_wrong_prune(&columns, 0, super::Read::At(7), &probes, family);
+            assert_eq!(
+                columns.might_match(0, CompareOp::Lt, &make(5)),
+                Some(false),
+                "{family}: the live least side prunes"
+            );
+            assert_eq!(
+                columns.might_match(0, CompareOp::Gt, &make(100)),
+                Some(true),
+                "{family}: the stale greatest side bounds nothing"
+            );
+            columns.collect(8);
+            assert_eq!(
+                bound(&columns, 0),
+                Some((make(5), make(44))),
+                "{family}: the stale side rebuilt"
+            );
+
+            // A column of one row: the row is both sides, so only an equal value keeps the
+            // bound, and a greater or a smaller one makes it stale. A reader at the epoch
+            // before each write sees the value the write replaced, which is never pruned.
+            columns.write(1, 0, Some(&make(10)), None);
+            let steps = [
+                ("an equal", 10, true),
+                ("a greater", 11, false),
+                ("a smaller", 9, false),
+            ];
+            for ((step, rank, keeps), epoch) in steps.into_iter().zip(8..) {
+                columns.collect(epoch);
+                assert!(
+                    bound(&columns, 1).is_some(),
+                    "{family}: one row, before {step} value"
+                );
+                columns.write(1, 0, Some(&make(rank)), Some((pending(40 + epoch), epoch)));
+                columns.stamp(1, 0, pending(40 + epoch), epoch + 1);
+                assert_eq!(
+                    bound(&columns, 1).is_some(),
+                    keeps,
+                    "{family}: one row written with {step} value"
+                );
+                assert_no_wrong_prune(&columns, 1, super::Read::At(epoch), &probes, family);
+                assert_no_wrong_prune(&columns, 1, super::Read::At(epoch + 1), &probes, family);
+            }
+        }
     }
 }

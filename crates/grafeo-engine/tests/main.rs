@@ -99,6 +99,7 @@ mod coverage_project;
 mod coverage_schema_ddl;
 mod coverage_session;
 mod crash_injection_single_file;
+mod create_or_replace_graph;
 mod csv_loader;
 mod cyclic_patterns;
 mod cypher_string_plus;

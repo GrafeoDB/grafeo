@@ -3677,4 +3677,17 @@ for case_id, query in [
 ]:
     case(case_id, query, GQL, "listed_type")
 
+# EQ: CREATE OR REPLACE GRAPH (ISO 12.4) replaces a graph in one change (it was a syntax error):
+#     the replaced graph is empty (EQ5); EQ6 is cleanup, returning the session to the default graph
+#     for the cases after it
+for case_id, query in [
+    ("EQ1", "CREATE GRAPH replaced"),
+    ("EQ2", "USE GRAPH replaced"),
+    ("EQ3", "INSERT (:Person {name: 'Beatrix'})"),
+    ("EQ4", "CREATE OR REPLACE GRAPH replaced"),
+    ("EQ5", "MATCH (n) RETURN count(n) AS c"),
+    ("EQ6", "USE GRAPH default"),
+]:
+    case(case_id, query, GQL, "empty")
+
 # fmt: on

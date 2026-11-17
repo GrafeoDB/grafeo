@@ -2,6 +2,14 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.6.4] - Unreleased
+
+Performance and memory release, in progress: this section lists what has landed so far.
+
+### Added
+
+- **`CREATE OR REPLACE GRAPH` replaces a graph in one statement** (ISO/IEC 39075 12.4): an existing graph of the name is dropped and the new one created in one change, so a failure or a crash leaves the old graph or the new one; it was a syntax error. It is refused while another open transaction has changes in the graph, as `DROP GRAPH` is, and for a copy of itself (`AS COPY OF` or `LIKE` the same graph); a session using the graph keeps using it.
+
 ## [0.6.3] - 2026-11-15
 
 SPARQL transactions release: SPARQL in a transaction reads one snapshot, conflicting updates fail at commit and graph operations run inside transactions; the plan cache, the per-query memory limit and path searches are bounded. Results that change on upgrade: a statement over the per-query memory limit fails with `GRAFEO-S001` in builds with disk spilling, a path search over its budget fails with `GRAFEO-S001` instead of `GRAFEO-Q006`, the second of two transactions that write one SPARQL triple, one of them deleting it, fails with `GRAFEO-T001`, SPARQL at a viewing epoch fails with `GRAFEO-Q004`, a standalone type that a graph type lists keeps applying in the default graph, `CLEAR GRAPH` of a missing graph fails unless `SILENT`, a SPARQL `MINUS` after another one or after a sub-SELECT removes its solutions, a time-travel read before a snapshot import or restore fails with `GRAFEO-V001`, a MERGE of a pattern another open transaction is creating now fails with the retryable `GRAFEO-T001` instead of creating a duplicate (the application retries the statement or the transaction), and reported RDF memory rises to what the store holds, so an RDF database near its memory limit reaches it sooner. Building from source needs Rust 1.100 or later.

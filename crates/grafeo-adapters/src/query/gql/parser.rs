@@ -7289,27 +7289,29 @@ impl<'a> Parser<'a> {
     /// but false for `CREATE GRAPH TYPE <name>` (which is schema DDL).
     fn peek_is_graph_instance_keyword(&mut self) -> bool {
         let pk = self.peek_kind();
-        if pk != TokenKind::Identifier {
-            return false;
+        let peeked_token = self
+            .peeked
+            .as_ref()
+            .expect("peek_kind guarantees peeked is Some");
+        // The tokens after the peeked one, read by a temporary lexer.
+        let mut rest = Lexer::new(&self.source[peeked_token.span.end..]);
+        let is_word = |token: &Token, word: &str| {
+            token.kind == TokenKind::Identifier && token.text.eq_ignore_ascii_case(word)
+        };
+        let first = if pk == TokenKind::Or {
+            // CREATE OR REPLACE [PROPERTY] GRAPH ...
+            if !is_word(&rest.next_token(), "REPLACE") {
+                return false;
+            }
+            rest.next_token()
+        } else {
+            peeked_token.clone()
+        };
+        if is_word(&first, "PROPERTY") {
+            return true; // CREATE [OR REPLACE] PROPERTY GRAPH ...
         }
-        let text = self.peek_text_upper();
-        if text == "PROPERTY" {
-            return true; // CREATE PROPERTY GRAPH ...
-        }
-        if text == "GRAPH" {
-            // Need to check the token after GRAPH. If it's TYPE, this is GRAPH TYPE (schema).
-            // Use a temporary lexer to peek 2 tokens ahead from the current source position.
-            let peeked_token = self
-                .peeked
-                .as_ref()
-                .expect("peek_kind guarantees peeked is Some");
-            let remaining = &self.source[peeked_token.span.end..];
-            let mut temp_lexer = Lexer::new(remaining);
-            let next_after_graph = temp_lexer.next_token();
-            // If it's TYPE, this is CREATE GRAPH TYPE, not a graph instance
-            return next_after_graph.kind != TokenKind::Type;
-        }
-        false
+        // GRAPH followed by TYPE is CREATE GRAPH TYPE, a schema statement.
+        is_word(&first, "GRAPH") && rest.next_token().kind != TokenKind::Type
     }
 
     /// Parses `CREATE [OR REPLACE] PROCEDURE name(params) RETURNS (cols) AS { body }`.
@@ -7422,9 +7424,10 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parses `CREATE [PROPERTY] GRAPH [IF NOT EXISTS] <name>`.
+    /// Parses `CREATE [OR REPLACE] [PROPERTY] GRAPH [IF NOT EXISTS] <name>`.
     fn parse_create_graph(&mut self) -> Result<SessionCommand> {
         self.expect(TokenKind::Create)?;
+        let or_replace = self.try_parse_or_replace();
 
         // Skip optional PROPERTY keyword
         if self.is_identifier() && self.get_identifier_name().eq_ignore_ascii_case("PROPERTY") {
@@ -7449,6 +7452,10 @@ impl<'a> Parser<'a> {
         } else {
             false
         };
+        // ISO/IEC 39075 12.4: OR REPLACE and IF NOT EXISTS exclude each other.
+        if or_replace && if_not_exists {
+            return Err(self.error("OR REPLACE and IF NOT EXISTS cannot both be given"));
+        }
 
         // Parse graph name
         if !self.is_identifier() {
@@ -7549,6 +7556,7 @@ impl<'a> Parser<'a> {
 
         Ok(SessionCommand::CreateGraph {
             name,
+            or_replace,
             if_not_exists,
             typed,
             like_graph,
@@ -10390,6 +10398,68 @@ mod tests {
         } else {
             panic!("Expected CreateGraph session command");
         }
+    }
+
+    /// `CREATE OR REPLACE [PROPERTY] GRAPH` (ISO/IEC 39075 12.4), in each form `CREATE GRAPH`
+    /// takes, and the graph type statement it must not swallow.
+    #[test]
+    fn test_parse_create_or_replace_graph() {
+        for (query, name, typed, copy_of) in [
+            ("CREATE OR REPLACE GRAPH g80", "g80", None, None),
+            ("CREATE OR REPLACE GRAPH `g80`", "g80", None, None),
+            ("CREATE OR REPLACE PROPERTY GRAPH g80", "g80", None, None),
+            (
+                "CREATE OR REPLACE GRAPH g80 TYPED social",
+                "g80",
+                Some("social"),
+                None,
+            ),
+            (
+                "CREATE OR REPLACE GRAPH g80 AS COPY OF src",
+                "g80",
+                None,
+                Some("src"),
+            ),
+        ] {
+            let statement = Parser::new(query)
+                .parse()
+                .unwrap_or_else(|error| panic!("{query}: {error:?}"));
+            let Statement::SessionCommand(SessionCommand::CreateGraph {
+                name: parsed,
+                or_replace,
+                if_not_exists,
+                typed: parsed_type,
+                copy_of: parsed_copy,
+                ..
+            }) = statement
+            else {
+                panic!("{query}: expected CreateGraph, got {statement:?}");
+            };
+            assert_eq!(parsed, name, "{query}");
+            assert!(or_replace, "{query}");
+            assert!(!if_not_exists, "{query}");
+            assert_eq!(parsed_type.as_deref(), typed, "{query}");
+            assert_eq!(parsed_copy.as_deref(), copy_of, "{query}");
+        }
+        let Ok(Statement::SessionCommand(SessionCommand::CreateGraph { or_replace, .. })) =
+            Parser::new("CREATE GRAPH g80").parse()
+        else {
+            panic!("CREATE GRAPH parses");
+        };
+        assert!(!or_replace, "plain CREATE GRAPH does not replace");
+        assert!(
+            matches!(
+                Parser::new("CREATE OR REPLACE GRAPH TYPE social (NODE TYPE Person)").parse(),
+                Ok(Statement::Schema(_))
+            ),
+            "CREATE OR REPLACE GRAPH TYPE stays a graph type statement"
+        );
+        // ISO 12.4: OR REPLACE and IF NOT EXISTS exclude each other.
+        assert!(
+            Parser::new("CREATE OR REPLACE GRAPH IF NOT EXISTS g80")
+                .parse()
+                .is_err()
+        );
     }
 
     #[test]

@@ -1446,6 +1446,7 @@ impl Session {
         match cmd {
             SessionCommand::CreateGraph {
                 name,
+                or_replace,
                 if_not_exists,
                 typed,
                 like_graph,
@@ -1462,8 +1463,18 @@ impl Session {
                     )));
                 }
                 let storage_key = self.effective_graph_key(&name);
-                let held = self.hold_for_standalone(false)?;
+                // A replace drops the graph first, so it holds as a drop does.
+                let held = self.hold_for_standalone(or_replace)?;
                 self.refuse_name_claimed("graph", &storage_key)?;
+                if or_replace
+                    && let Some(src) = like_graph.as_ref().or(copy_of.as_ref())
+                    && self.effective_graph_key(src) == storage_key
+                {
+                    return Err(Error::from(QueryError::new(
+                        QueryErrorKind::Semantic,
+                        format!("Graph '{name}' cannot be replaced by a copy of itself"),
+                    )));
+                }
                 // Its copy is logged and applied with the graph's creation, as one group of
                 // its own, which no transaction can take back.
                 if copy_of.is_some() && self.in_transaction() {
@@ -1496,16 +1507,31 @@ impl Session {
                     }
                 }
 
+                let mut change = crate::transaction::StandaloneChange::new();
                 if self.named_graph(&storage_key).is_some() {
                     if if_not_exists {
                         return Ok(QueryResult::empty());
                     }
-                    return Err(Error::from(QueryError::new(
-                        QueryErrorKind::Semantic,
-                        format!("Graph '{name}' already exists"),
-                    )));
+                    if !or_replace {
+                        return Err(Error::from(QueryError::new(
+                            QueryErrorKind::Semantic,
+                            format!("Graph '{name}' already exists"),
+                        )));
+                    }
+                    // ISO/IEC 39075 12.4: the old graph goes in the same change as the new one
+                    // comes, so a failure or a crash leaves one of them.
+                    if !self.in_transaction() {
+                        crate::database::standalone::refuse_drop_with_open_changes(
+                            &self.transaction_manager,
+                            &held,
+                            &storage_key,
+                        )?;
+                    }
+                    self.drop_names_only_graph_had(&mut change, &storage_key);
+                    change.push(StandaloneOp::DropGraph {
+                        name: storage_key.clone(),
+                    });
                 }
-                let mut change = crate::transaction::StandaloneChange::new();
                 change.push(StandaloneOp::CreateGraph {
                     name: storage_key.clone(),
                 });

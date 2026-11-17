@@ -166,6 +166,39 @@ tests:
       rows:
         - [http://ex.org/gus]
 
+  - name: alternative_path_both_match_same_object_counts_twice
+    # SPARQL 1.1 18.4 translates P|Q to a Union, a bag: a pair linked by both predicates is two solutions
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> .
+          <http://ex.org/alix> <http://ex.org/likes> <http://ex.org/gus> .
+        }
+    query: |
+      SELECT ?person WHERE {
+        <http://ex.org/alix> (<http://ex.org/knows>|<http://ex.org/likes>) ?person
+      }
+    expect:
+      rows:
+        - [http://ex.org/gus]
+        - [http://ex.org/gus]
+
+  - name: alternative_path_both_ends_bound_counts_twice
+    # With both ends bound the alternative is still a Union, not an existence check: two solutions
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> .
+          <http://ex.org/alix> <http://ex.org/likes> <http://ex.org/gus> .
+        }
+    query: |
+      SELECT (COUNT(*) AS ?n) WHERE {
+        <http://ex.org/alix> (<http://ex.org/knows>|<http://ex.org/likes>) <http://ex.org/gus>
+      }
+    expect:
+      rows:
+        - [2]
+
   # ---------------------------------------------------------------------------
   # 9.4  Zero-or-More Path (*)
   # ---------------------------------------------------------------------------

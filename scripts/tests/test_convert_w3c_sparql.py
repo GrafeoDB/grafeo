@@ -10,6 +10,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import convert_w3c_sparql as converter  # noqa: E402
@@ -115,12 +117,12 @@ FILES = {
 }
 
 
-def convert(tmp_path: Path) -> converter.Converted:
+def convert(tmp_path: Path, known: dict | None = None) -> converter.Converted:
     suite = tmp_path / "fixture"
     suite.mkdir(parents=True, exist_ok=True)
     for name, text in FILES.items():
         (suite / name).write_text(text, encoding="utf-8", newline="\n")
-    return converter.convert_manifest(suite / "manifest.ttl")
+    return converter.convert_manifest(suite / "manifest.ttl", known)
 
 
 def case(converted: converter.Converted, name: str) -> converter.Case:
@@ -208,3 +210,48 @@ def test_the_same_graph_written_in_another_order_gives_the_same_lines(tmp_path):
         (tmp_path / name).write_text(text, encoding="utf-8", newline="\n")
     first, second = (converter.ntriples([tmp_path / name]) for name in written)
     assert first == second
+
+
+def test_known_failures_become_strict_xfails_or_are_left_out(tmp_path):
+    known = {
+        "ask": {"issue": "fix in 0.6.4", "note": "why it fails"},
+        "empty": {
+            "reason": "spec-disagreement",
+            "note": "the suite writes it otherwise",
+        },
+    }
+    converted = convert(tmp_path, known)
+    assert case(converted, "ask").xfail == (
+        "W3C SPARQL 1.1 fixture/ask",
+        "fix in 0.6.4",
+    )
+    assert "empty" not in [c.name for c in converted.cases]
+    assert (
+        "empty",
+        "spec-disagreement: the suite writes it otherwise",
+    ) in converted.left_out
+    text = converter.generate_gtest(converted, "fixture", "Fixture")
+    xfail = '    xfail:{0}      spec: "W3C SPARQL 1.1 fixture/ask"{0}      issue: fix in 0.6.4{0}'
+    assert "  - name: ask" + chr(10) + xfail.format(chr(10)) in text
+
+
+def test_a_stale_or_malformed_known_failure_stops_the_conversion(tmp_path):
+    # `named` is left out for its named graphs, so an entry for it is stale
+    for known in ({"named": {"issue": "#1"}}, {"ask": {"note": "no issue"}}):
+        with pytest.raises(ValueError):
+            convert(tmp_path, known)
+
+
+def test_the_header_names_the_source_commit_and_the_licence(tmp_path):
+    text = converter.generate_gtest(convert(tmp_path), "fixture", "Fixture")
+    assert "# Source: https://github.com/w3c/rdf-tests at an unknown commit" in text
+    assert "2008/04-testsuite-copyright.html" in text
+
+
+def test_titles_lose_their_double_dash_separators():
+    assert converter.comment_title("(pp21) Diamond --\n  :p+") == "(pp21) Diamond: :p+"
+
+
+def test_leading_tabs_become_spaces_and_inner_tabs_stay():
+    tab = chr(9)
+    assert converter.indented(tab + " ?s ?p" + tab + "?o") == "     ?s ?p" + tab + "?o"

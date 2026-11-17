@@ -1,0 +1,49 @@
+# W3C SPARQL 1.1 Test Suite: Service
+# Generated from the W3C manifest by scripts/convert_w3c_sparql.py
+# Source: https://github.com/w3c/rdf-tests at 7b5afb91857a9c282c03d2e45d3f76485797c901
+# Copyright W3C (MIT, ERCIM, Keio, Beihang), used under the W3C test suite
+# licences: https://www.w3.org/Consortium/Legal/2008/04-testsuite-copyright.html
+# Not converted:
+#   service1: federated service data
+#   service2: federated service data
+#   service3: federated service data
+#   service4a: federated service data
+#   service5: requires FederatedServiceVariables
+#   service6: federated service data
+
+meta:
+  language: sparql
+  model: rdf
+  section: "w3c.service"
+  title: W3C Service
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # SERVICE test 7
+  - name: service7
+    xfail:
+      spec: "W3C SPARQL 1.1 service/service7"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/name> "Alan" .
+          <http://example.org/b> <http://xmlns.com/foaf/0.1/name> "Bob" .
+        }
+    query: |
+      # invalid URI for a SERVICE with SILENT
+
+      PREFIX : <http://example.org/>
+
+      SELECT ?s ?o1 ?o2
+      {
+        ?s ?p ?o1 .
+        SERVICE SILENT <http://invalid.endpoint.org/sparql> {
+          ?s ?p2 ?o2 }
+      }
+    expect:
+      terms:
+        - ['<http://example.org/a>', '"Alan"', null]
+        - ['<http://example.org/b>', '"Bob"', null]

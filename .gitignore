@@ -97,5 +97,8 @@ cargo-timing*.html
 # we want to guard against; otherwise local artefacts.
 *.proptest-regressions
 
+# The W3C rdf-tests checkout the SPARQL converter reads (only its output is kept)
+tests/spec/rdf/sparql/w3c/rdf-tests/
+
 # ── Documentation (auto-generated) ───────────────────────────────────
 site/

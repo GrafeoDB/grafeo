@@ -1,33 +1,59 @@
-# W3C SPARQL Test Suite: Known Failures
+# W3C SPARQL 1.1 cases Grafeo does not pass, read by scripts/convert_w3c_sparql.py.
 #
-# Categories:
-#   "unimplemented" - Feature not yet supported in Grafeo
-#   "spec-disagreement" - Intentional deviation from W3C spec
-#   "known-bug" - Known issue, tracked in GitHub issues
+# Tables are sections (the manifest's folder name), keys are case names as the
+# generated .gtest names them. An entry is one of:
 #
-# Format: "test-name" = { reason = "category", note = "explanation" }
-# Remove entries as features are implemented to track progress.
+#   "case" = { issue = "#N" or "fix in X.Y.Z", note = "..." }
+#       The case becomes a strict expected failure (`xfail:`) held against its
+#       W3C test. Remove the entry when the issue is fixed: the case then fails
+#       the run until it does.
+#
+#   "case" = { reason = "spec-disagreement", note = "..." }
+#       The case is left out, with the note in the file's header: no fix of
+#       Grafeo can pass it as written.
+#
+# An entry that names no converted case stops the conversion.
 
-[sparql11.service]
-# SPARQL federation (SERVICE keyword) not yet implemented
-"service01" = { reason = "unimplemented", note = "SPARQL 1.1 Federation not implemented" }
-"service02" = { reason = "unimplemented", note = "SPARQL 1.1 Federation not implemented" }
-"service03" = { reason = "unimplemented", note = "SPARQL 1.1 Federation not implemented" }
-"service04a" = { reason = "unimplemented", note = "SPARQL 1.1 Federation not implemented" }
-"service05" = { reason = "unimplemented", note = "SPARQL 1.1 Federation not implemented" }
+[aggregates]
+"agg_avg_02" = { reason = "spec-disagreement", note = "the result writes the computed decimal 2 in its XSD 1.0 canonical form 2.0; Grafeo writes the XSD 1.1 canonical form 2" }
+"agg_err_02" = { reason = "spec-disagreement", note = "the result writes the computed decimal 2 in its XSD 1.0 canonical form 2.0; Grafeo writes the XSD 1.1 canonical form 2" }
+"agg_count_rows_distinct" = { issue = "fix in 0.6.4", note = "COUNT(DISTINCT *) counts 0" }
+"agg_multiple_having" = { issue = "fix in 0.6.5", note = "HAVING with two constraints does not parse" }
+"agg_avg_distinct" = { reason = "spec-disagreement", note = "the result writes the double 1.05E3 as 1050; exact terms compare lexical forms" }
+"agg_sum_distinct" = { reason = "spec-disagreement", note = "the result writes the double 2.1E3 as 2100; exact terms compare lexical forms" }
 
-[sparql11.entailment]
-# RDFS/OWL entailment regimes not implemented
-"*" = { reason = "unimplemented", note = "Entailment regimes not supported" }
+[bindings]
+"values_group_order_by" = { issue = "fix in 0.6.4", note = "ORDER BY an expression adds a column" }
 
-[sparql11.http-rdf-update]
-# HTTP-based SPARQL Update protocol not applicable to embedded DB
-"*" = { reason = "unimplemented", note = "HTTP protocol tests not applicable" }
+[cast]
+"cast_decimal" = { reason = "spec-disagreement", note = "the result writes the computed decimal 1 in its XSD 1.0 canonical form 1.0; Grafeo writes the XSD 1.1 canonical form 1" }
+"cast_double" = { reason = "spec-disagreement", note = "the result keeps each input's lexical form (1, 1.0, 1E0) for a cast double; exact terms compare lexical forms" }
+"cast_float" = { reason = "spec-disagreement", note = "the result keeps each input's lexical form (1, 1.0, 1E0) for a cast float; exact terms compare lexical forms" }
+"cast_string" = { issue = "fix in 0.6.4", note = "xsd:string() of a float or double uses exponent notation (1.25E0 for 1.25)" }
 
-[sparql11.protocol]
-# SPARQL Protocol (HTTP) not applicable to embedded DB
-"*" = { reason = "unimplemented", note = "HTTP protocol tests not applicable" }
+["csv-tsv-res"]
+"tsv03" = { reason = "spec-disagreement", note = "the TSV result writes the stored 1.0E6 as 1.0e6; exact terms compare lexical forms" }
 
-[sparql11.service-description]
-# Service description not applicable to embedded DB
-"*" = { reason = "unimplemented", note = "Service description not applicable" }
+[functions]
+"coalesce01" = { reason = "spec-disagreement", note = "the result writes the computed decimal 2 in its XSD 1.0 canonical form 2.0; Grafeo writes the XSD 1.1 canonical form 2" }
+"plus_1_corrected" = { reason = "spec-disagreement", note = "the result writes the computed decimal 3 in its XSD 1.0 canonical form 3.0; Grafeo writes the XSD 1.1 canonical form 3" }
+"iri01" = { issue = "fix in 0.6.5", note = "IRI() and URI() ignore BASE" }
+"iri02" = { issue = "fix in 0.6.5", note = "IRI() and URI() ignore BASE" }
+
+[negation]
+"full_minuend" = { issue = "fix in 0.6.4", note = "MINUS with shared variables only from an OPTIONAL keeps the wrong rows" }
+"partial_minuend" = { issue = "fix in 0.6.4", note = "MINUS with shared variables only from an OPTIONAL keeps the wrong rows" }
+
+["project-expression"]
+"projexp03" = { issue = "fix in 0.6.4", note = "a projection expression cannot use an earlier alias" }
+
+["property-path"]
+"pp01" = { issue = "fix in 0.6.4", note = "SELECT * returns the hidden variables of a path" }
+"pp03" = { issue = "fix in 0.6.4", note = "SELECT * returns the hidden variables of a path" }
+"pp09" = { issue = "fix in 0.6.4", note = "SELECT * returns the hidden variables of a path" }
+"pp10" = { issue = "fix in 0.6.4", note = "SELECT * returns the hidden variables of a path" }
+"pp11" = { issue = "fix in 0.6.4", note = "SELECT * returns the hidden variables of a path" }
+"pp37" = { issue = "fix in 0.6.5", note = "nested quantified paths are refused" }
+
+[service]
+"service7" = { issue = "fix in 0.6.5", note = "SERVICE SILENT is refused instead of answering" }

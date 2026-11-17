@@ -1,0 +1,604 @@
+# W3C SPARQL 1.1 Test Suite: Property Path
+# Generated from the W3C manifest by scripts/convert_w3c_sparql.py
+# Source: https://github.com/w3c/rdf-tests at 7b5afb91857a9c282c03d2e45d3f76485797c901
+# Copyright W3C (MIT, ERCIM, Keio, Beihang), used under the W3C test suite
+# licences: https://www.w3.org/Consortium/Legal/2008/04-testsuite-copyright.html
+# Not converted:
+#   pp06: named graphs (qt:graphData)
+#   pp07: named graphs (qt:graphData)
+#   pp34: named graphs (qt:graphData)
+#   pp35: named graphs (qt:graphData)
+
+meta:
+  language: sparql
+  model: rdf
+  section: "w3c.property-path"
+  title: W3C Property Path
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # (pp01) Simple path
+  - name: pp01
+    xfail:
+      spec: "W3C SPARQL 1.1 property-path/pp01"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p1> <http://www.example.org/instance#b> .
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p3> <http://www.example.org/instance#c> .
+          <http://www.example.org/instance#b> <http://www.example.org/schema#p2> <http://www.example.org/instance#a> .
+        }
+    query: |
+      prefix ex:	<http://www.example.org/schema#>
+      prefix in:	<http://www.example.org/instance#>
+
+      select * where {
+      in:a ex:p1/ex:p2/ex:p3 ?x
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/instance#c>']
+
+  # (pp02) Star path
+  - name: pp02
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p1> <http://www.example.org/instance#b> .
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p3> <http://www.example.org/instance#c> .
+          <http://www.example.org/instance#b> <http://www.example.org/schema#p2> <http://www.example.org/instance#a> .
+        }
+    query: |
+      prefix ex:	<http://www.example.org/schema#>
+      prefix in:	<http://www.example.org/instance#>
+
+      select * where {
+      in:a (ex:p1/ex:p2/ex:p3)* ?x
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/instance#a>']
+        - ['<http://www.example.org/instance#c>']
+
+  # (pp03) Simple path with loop
+  - name: pp03
+    xfail:
+      spec: "W3C SPARQL 1.1 property-path/pp03"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p1> <http://www.example.org/instance#b> .
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p3> <http://www.example.org/instance#b> .
+          <http://www.example.org/instance#b> <http://www.example.org/schema#p2> <http://www.example.org/instance#a> .
+          <http://www.example.org/instance#b> <http://www.example.org/schema#p4> <http://www.example.org/instance#a> .
+        }
+    query: |
+      prefix ex:	<http://www.example.org/schema#>
+      prefix in:	<http://www.example.org/instance#>
+
+      select * where {
+      in:a ex:p1/ex:p2/ex:p3/ex:p4 ?x
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/instance#a>']
+
+  # (pp08) Reverse path
+  - name: pp08
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p> <http://www.example.org/instance#b> .
+        }
+    query: |
+      prefix ex:	<http://www.example.org/schema#>
+      prefix in:	<http://www.example.org/instance#>
+
+      ask {
+      in:b ^ex:p in:a
+      }
+    expect:
+      rows:
+        - [true]
+
+  # (pp09) Reverse sequence path
+  - name: pp09
+    xfail:
+      spec: "W3C SPARQL 1.1 property-path/pp09"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p1> <http://www.example.org/instance#b> .
+          <http://www.example.org/instance#b> <http://www.example.org/schema#p2> <http://www.example.org/instance#c> .
+        }
+    query: |
+      prefix ex:	<http://www.example.org/schema#>
+      prefix in:	<http://www.example.org/instance#>
+
+      select  * where {
+      in:c ^(ex:p1/ex:p2) ?x
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/instance#a>']
+
+  # (pp10) Path with negation
+  - name: pp10
+    xfail:
+      spec: "W3C SPARQL 1.1 property-path/pp10"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p1> <http://www.example.org/instance#b> .
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p2> <http://www.example.org/instance#c> .
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p3> <http://www.example.org/instance#d> .
+        }
+    query: |
+      prefix ex:	<http://www.example.org/schema#>
+      prefix in:	<http://www.example.org/instance#>
+
+      select * where {
+      in:a !(ex:p1|ex:p2) ?x
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/instance#d>']
+
+  # (pp11) Simple path and two paths to same target node
+  - name: pp11
+    xfail:
+      spec: "W3C SPARQL 1.1 property-path/pp11"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p1> <http://www.example.org/instance#b> .
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p1> <http://www.example.org/instance#d> .
+          <http://www.example.org/instance#b> <http://www.example.org/schema#p2> <http://www.example.org/instance#c> .
+          <http://www.example.org/instance#d> <http://www.example.org/schema#p2> <http://www.example.org/instance#c> .
+        }
+    query: |
+      prefix ex:	<http://www.example.org/schema#>
+      prefix in:	<http://www.example.org/instance#>
+
+      select * where {
+      in:a ex:p1/ex:p2 ?x
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/instance#c>']
+        - ['<http://www.example.org/instance#c>']
+
+  # (pp12) Variable length path and two paths to same target node
+  - name: pp12
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p1> <http://www.example.org/instance#b> .
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p1> <http://www.example.org/instance#d> .
+          <http://www.example.org/instance#b> <http://www.example.org/schema#p2> <http://www.example.org/instance#c> .
+          <http://www.example.org/instance#d> <http://www.example.org/schema#p2> <http://www.example.org/instance#c> .
+        }
+    query: |
+      prefix ex:	<http://www.example.org/schema#>
+      prefix in:	<http://www.example.org/instance#>
+
+      select * where {
+      in:a (ex:p1/ex:p2)+ ?x
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/instance#c>']
+
+  # (pp14) Star path over foaf:knows
+  - name: pp14
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/knows> <http://example.org/b> .
+          <http://example.org/b> <http://xmlns.com/foaf/0.1/knows> <http://example.org/c> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+
+      SELECT *
+      WHERE { ?X foaf:knows* ?Y }
+      ORDER BY ?X ?Y
+    expect:
+      terms:
+        - ['<http://example.org/a>', '<http://example.org/a>']
+        - ['<http://example.org/a>', '<http://example.org/b>']
+        - ['<http://example.org/a>', '<http://example.org/c>']
+        - ['<http://example.org/b>', '<http://example.org/b>']
+        - ['<http://example.org/b>', '<http://example.org/c>']
+        - ['<http://example.org/c>', '<http://example.org/c>']
+
+  # (pp16) Duplicate paths and cycles through foaf:knows*
+  - name: pp16
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/homepage> <http://example.org/h> .
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/knows> <http://example.org/b> .
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/knows> <http://example.org/c> .
+          <http://example.org/b> <http://xmlns.com/foaf/0.1/knows> <http://example.org/c> .
+          <http://example.org/d> <http://xmlns.com/foaf/0.1/knows> <http://example.org/e> .
+          <http://example.org/e> <http://xmlns.com/foaf/0.1/knows> <http://example.org/f> .
+          <http://example.org/f> <http://xmlns.com/foaf/0.1/knows> <http://example.org/e> .
+          <http://example.org/f> <http://xmlns.com/foaf/0.1/name> "test" .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+
+      SELECT *
+      WHERE { ?X foaf:knows* ?Y }
+      ORDER BY ?X ?Y
+    expect:
+      terms:
+        - ['<http://example.org/a>', '<http://example.org/a>']
+        - ['<http://example.org/a>', '<http://example.org/b>']
+        - ['<http://example.org/a>', '<http://example.org/c>']
+        - ['<http://example.org/b>', '<http://example.org/b>']
+        - ['<http://example.org/b>', '<http://example.org/c>']
+        - ['<http://example.org/c>', '<http://example.org/c>']
+        - ['<http://example.org/d>', '<http://example.org/d>']
+        - ['<http://example.org/d>', '<http://example.org/e>']
+        - ['<http://example.org/d>', '<http://example.org/f>']
+        - ['<http://example.org/e>', '<http://example.org/e>']
+        - ['<http://example.org/e>', '<http://example.org/f>']
+        - ['<http://example.org/f>', '<http://example.org/e>']
+        - ['<http://example.org/f>', '<http://example.org/f>']
+        - ['<http://example.org/h>', '<http://example.org/h>']
+        - ['"test"', '"test"']
+
+  # (pp21) Diamond: :p+
+  - name: pp21
+    setup:
+      - |
+        INSERT DATA {
+          <http://example/a> <http://example/p> <http://example/b> .
+          <http://example/a> <http://example/p> <http://example/c> .
+          <http://example/b> <http://example/p> <http://example/z> .
+          <http://example/c> <http://example/p> <http://example/z> .
+        }
+    query: |
+      prefix : <http://example/>
+
+      select * where {
+          :a :p+ ?z
+      }
+    expect:
+      terms:
+        - ['<http://example/b>']
+        - ['<http://example/c>']
+        - ['<http://example/z>']
+
+  # (pp23) Diamond, with tail: :p+
+  - name: pp23
+    setup:
+      - |
+        INSERT DATA {
+          <http://example/a> <http://example/p> <http://example/b> .
+          <http://example/a> <http://example/p> <http://example/c> .
+          <http://example/b> <http://example/p> <http://example/z> .
+          <http://example/c> <http://example/p> <http://example/z> .
+          <http://example/z> <http://example/p> <http://example/X> .
+        }
+    query: |
+      prefix : <http://example/>
+
+      select * where {
+          :a :p+ ?z
+      }
+    expect:
+      terms:
+        - ['<http://example/b>']
+        - ['<http://example/c>']
+        - ['<http://example/X>']
+        - ['<http://example/z>']
+
+  # (pp25) Diamond, with loop: :p+
+  - name: pp25
+    setup:
+      - |
+        INSERT DATA {
+          <http://example/a> <http://example/p> <http://example/b> .
+          <http://example/a> <http://example/p> <http://example/c> .
+          <http://example/b> <http://example/p> <http://example/z> .
+          <http://example/c> <http://example/p> <http://example/c> .
+          <http://example/c> <http://example/p> <http://example/z> .
+        }
+    query: |
+      prefix : <http://example/>
+
+      select * where {
+          :a :p+ ?z
+      }
+    expect:
+      terms:
+        - ['<http://example/c>']
+        - ['<http://example/z>']
+        - ['<http://example/b>']
+
+  # (pp28a) Diamond, with loop: (:p/:p)?
+  - name: pp28a
+    setup:
+      - |
+        INSERT DATA {
+          <http://example/a> <http://example/p> <http://example/b> .
+          <http://example/a> <http://example/p> <http://example/c> .
+          <http://example/b> <http://example/p> <http://example/z> .
+          <http://example/c> <http://example/p> <http://example/c> .
+          <http://example/c> <http://example/p> <http://example/z> .
+        }
+    query: |
+      prefix : <http://example/>
+
+      select * where {
+          :a (:p/:p)? ?t
+      }
+    expect:
+      terms:
+        - ['<http://example/a>']
+        - ['<http://example/c>']
+        - ['<http://example/z>']
+
+  # (pp30) Operator precedence 1
+  - name: pp30
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/a> <http://www.example.org/p1> <http://www.example.org/b> .
+          <http://www.example.org/a> <http://www.example.org/p1> <http://www.example.org/e> .
+          <http://www.example.org/a> <http://www.example.org/p2> <http://www.example.org/d> .
+          <http://www.example.org/b> <http://www.example.org/p4> <http://www.example.org/c> .
+          <http://www.example.org/d> <http://www.example.org/p3> <http://www.example.org/c> .
+        }
+    query: |
+      prefix :  <http://www.example.org/>
+      select ?t
+      where {
+        :a :p1|:p2/:p3|:p4 ?t
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/b>']
+        - ['<http://www.example.org/c>']
+        - ['<http://www.example.org/e>']
+
+  # (pp31) Operator precedence 2
+  - name: pp31
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/a> <http://www.example.org/p1> <http://www.example.org/b> .
+          <http://www.example.org/a> <http://www.example.org/p1> <http://www.example.org/e> .
+          <http://www.example.org/a> <http://www.example.org/p2> <http://www.example.org/d> .
+          <http://www.example.org/b> <http://www.example.org/p4> <http://www.example.org/c> .
+          <http://www.example.org/d> <http://www.example.org/p3> <http://www.example.org/c> .
+        }
+    query: |
+      prefix :  <http://www.example.org/>
+      select ?t
+      where {
+        :a (:p1|:p2)/(:p3|:p4) ?t
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/c>']
+        - ['<http://www.example.org/c>']
+
+  # (pp32) Operator precedence 3
+  - name: pp32
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/a> <http://www.example.org/p0> <http://www.example.org/c> .
+          <http://www.example.org/a> <http://www.example.org/p3> <http://www.example.org/b> .
+          <http://www.example.org/c> <http://www.example.org/p2> <http://www.example.org/f> .
+          <http://www.example.org/c> <http://www.example.org/p3> <http://www.example.org/g> .
+          <http://www.example.org/d> <http://www.example.org/p1> <http://www.example.org/a> .
+          <http://www.example.org/d> <http://www.example.org/p2> <http://www.example.org/e> .
+        }
+    query: |
+      prefix :  <http://www.example.org/>
+      select ?t
+      where {
+        :a :p0|^:p1/:p2|:p3 ?t
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/c>']
+        - ['<http://www.example.org/e>']
+        - ['<http://www.example.org/b>']
+
+  # (pp33) Operator precedence 4
+  - name: pp33
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/a> <http://www.example.org/p0> <http://www.example.org/c> .
+          <http://www.example.org/a> <http://www.example.org/p3> <http://www.example.org/b> .
+          <http://www.example.org/c> <http://www.example.org/p2> <http://www.example.org/f> .
+          <http://www.example.org/c> <http://www.example.org/p3> <http://www.example.org/g> .
+          <http://www.example.org/d> <http://www.example.org/p1> <http://www.example.org/a> .
+          <http://www.example.org/d> <http://www.example.org/p2> <http://www.example.org/e> .
+        }
+    query: |
+      prefix :  <http://www.example.org/>
+      select ?t
+      where {
+        :a (:p0|^:p1)/:p2|:p3 ?t
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/e>']
+        - ['<http://www.example.org/f>']
+        - ['<http://www.example.org/b>']
+
+  # (pp36) Arbitrary path with bound endpoints
+  - name: pp36
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a0> <http://example.org/p> <http://example.org/a1> .
+          <http://example.org/a0> <http://example.org/p> <http://example.org/a2> .
+          <http://example.org/a1> <http://example.org/p> <http://example.org/a0> .
+          <http://example.org/a1> <http://example.org/p> <http://example.org/a2> .
+          <http://example.org/a2> <http://example.org/p> <http://example.org/a0> .
+          <http://example.org/a2> <http://example.org/p> <http://example.org/a1> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT * WHERE { :a0 (:p)* :a1 }
+    expect:
+      terms:
+        - []
+
+  # (pp37) Nested (*)*
+  - name: pp37
+    xfail:
+      spec: "W3C SPARQL 1.1 property-path/pp37"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/A0> <http://example.org/P> <http://example.org/A1> .
+          <http://example.org/A0> <http://example.org/P> <http://example.org/A2> .
+          <http://example.org/A1> <http://example.org/P> <http://example.org/A0> .
+          <http://example.org/A1> <http://example.org/P> <http://example.org/A2> .
+          <http://example.org/A2> <http://example.org/P> <http://example.org/A0> .
+          <http://example.org/A2> <http://example.org/P> <http://example.org/A1> .
+        }
+    query: |
+      prefix : <http://example.org/>
+      select ?X where { :A0 ((:P)*)* ?X }
+      order by ?X
+    expect:
+      terms:
+        - ['<http://example.org/A0>']
+        - ['<http://example.org/A1>']
+        - ['<http://example.org/A2>']
+
+  # ZeroOrX property paths should only return terms in the graph and not also terms defined in the query
+  - name: values_and_path
+    query: |
+      SELECT * WHERE {
+         VALUES ?v { 1 }
+         ?v <http://example.com/p>? ?v
+      }
+    expect:
+      empty: true
+
+  # Negated Property Set with inverse properties
+  - name: nps_inverse
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/sd> <http://example.org/pd> <http://example.org/od> .
+          <http://example.org/sr> <http://example.org/pr> <http://example.org/or> .
+        }
+    query: |
+      PREFIX ex: <http://example.org/>
+      SELECT ?s ?o WHERE {
+        ?s !^ex:pr ?o
+      }
+    expect:
+      terms:
+        - ['<http://example.org/od>', '<http://example.org/sd>']
+
+  # Negated Property Set with both direct and inverse properties
+  - name: nps_direct_and_inverse
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/sd> <http://example.org/pd> <http://example.org/od> .
+          <http://example.org/sr> <http://example.org/pr> <http://example.org/or> .
+        }
+    query: |
+      PREFIX ex: <http://example.org/>
+      SELECT ?s ?o WHERE {
+        ?s !(ex:pd|^ex:pr) ?o
+      }
+    expect:
+      terms:
+        - ['<http://example.org/od>', '<http://example.org/sd>']
+        - ['<http://example.org/sr>', '<http://example.org/or>']
+
+  # Negated Property Set with the rdf:type property written using 'a'
+  - name: nps_a
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/sa> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.org/oa> .
+          <http://example.org/sp> <http://example.org/p> <http://example.org/op> .
+        }
+    query: |
+      PREFIX ex: <http://example.org/>
+      SELECT ?s ?o WHERE {
+        ?s !a ?o
+      }
+    expect:
+      terms:
+        - ['<http://example.org/sp>', '<http://example.org/op>']
+
+  # Negated Property Set with the inverse rdf:type property written using '^a'
+  - name: nps_a_inverse
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/sa> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.org/oa> .
+          <http://example.org/sp> <http://example.org/p> <http://example.org/op> .
+        }
+    query: |
+      PREFIX ex: <http://example.org/>
+      SELECT ?s ?o WHERE {
+        ?s !^a ?o
+      }
+    expect:
+      terms:
+        - ['<http://example.org/op>', '<http://example.org/sp>']
+
+  # * with start being a constant on the empty dataset
+  - name: zero_or_more_set_start
+    query: |
+      PREFIX : <http://example/>
+      SELECT ?s WHERE { ?s :p* :o }
+    expect:
+      terms:
+        - ['<http://example/o>']
+
+  # * with end being a constant on the empty dataset
+  - name: zero_or_more_set_end
+    query: |
+      PREFIX : <http://example/>
+      SELECT ?o WHERE { :s :p* ?o }
+    expect:
+      terms:
+        - ['<http://example/s>']
+
+  # ? with start being a constant on the empty dataset
+  - name: zero_or_one_set_start
+    query: |
+      PREFIX : <http://example/>
+      SELECT ?s WHERE { ?s :p? :o }
+    expect:
+      terms:
+        - ['<http://example/o>']
+
+  # ? with end being a constant on the empty dataset
+  - name: zero_or_one_set_end
+    query: |
+      PREFIX : <http://example/>
+      SELECT ?o WHERE { :s :p? ?o }
+    expect:
+      terms:
+        - ['<http://example/s>']

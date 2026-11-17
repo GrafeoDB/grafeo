@@ -1,0 +1,112 @@
+# W3C SPARQL 1.1 Test Suite: Grouping
+# Generated from the W3C manifest by scripts/convert_w3c_sparql.py
+# Source: https://github.com/w3c/rdf-tests at 7b5afb91857a9c282c03d2e45d3f76485797c901
+# Copyright W3C (MIT, ERCIM, Keio, Beihang), used under the W3C test suite
+# licences: https://www.w3.org/Consortium/Legal/2008/04-testsuite-copyright.html
+# Not converted:
+#   group06: NegativeSyntaxTest11: not a query evaluation test
+#   group07: NegativeSyntaxTest11: not a query evaluation test
+
+meta:
+  language: sparql
+  model: rdf
+  section: "w3c.grouping"
+  title: W3C Grouping
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # Group-1
+  - name: group01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example/s1> <http://example/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/s1> <http://example/q> "9"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/s2> <http://example/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example/>
+
+      SELECT ?s
+      {
+        ?s :p ?v .
+      }
+      GROUP BY ?s
+    expect:
+      terms:
+        - ['<http://example/s1>']
+        - ['<http://example/s2>']
+
+  # Group-3
+  - name: group03
+    setup:
+      - |
+        INSERT DATA {
+          <http://example/s1> <http://example/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/s1> <http://example/q> "9"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/s2> <http://example/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example/>
+
+      SELECT ?w (SAMPLE(?v) AS ?S)
+      {
+        ?s :p ?v .
+        OPTIONAL { ?s :q ?w }
+      }
+      GROUP BY ?w
+    expect:
+      terms:
+        - ['"9"^^<http://www.w3.org/2001/XMLSchema#integer>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - [null, '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # Group-4
+  - name: group04
+    setup:
+      - |
+        INSERT DATA {
+          <http://example/s1> <http://example/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/s1> <http://example/q> "9"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/s2> <http://example/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX :        <http://example/>
+      PREFIX xsd:     <http://www.w3.org/2001/XMLSchema#>
+
+      SELECT ?X (SAMPLE(?v) AS ?S)
+      {
+        ?s :p ?v .
+        OPTIONAL { ?s :q ?w }
+      }
+      GROUP BY (COALESCE(?w, "1605-11-05"^^xsd:date) AS ?X)
+    expect:
+      terms:
+        - ['"1605-11-05"^^<http://www.w3.org/2001/XMLSchema#date>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"9"^^<http://www.w3.org/2001/XMLSchema#integer>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # Group-5
+  - name: group05
+    setup:
+      - |
+        INSERT DATA {
+          <http://example/s1> <http://example/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/s1> <http://example/q> "9"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/s2> <http://example/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/s3> <http://example/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example/>
+
+      SELECT ?s ?w
+      {
+        ?s :p ?v .
+        OPTIONAL { ?s :q ?w }
+      }
+      GROUP BY ?s ?w
+    expect:
+      terms:
+        - ['<http://example/s1>', '"9"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example/s2>', null]
+        - ['<http://example/s3>', null]

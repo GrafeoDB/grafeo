@@ -1,0 +1,268 @@
+# W3C SPARQL 1.1 Test Suite: Cast
+# Generated from the W3C manifest by scripts/convert_w3c_sparql.py
+# Source: https://github.com/w3c/rdf-tests at 7b5afb91857a9c282c03d2e45d3f76485797c901
+# Copyright W3C (MIT, ERCIM, Keio, Beihang), used under the W3C test suite
+# licences: https://www.w3.org/Consortium/Legal/2008/04-testsuite-copyright.html
+# Not converted:
+#   cast-float: spec-disagreement: the result keeps each input's lexical form (1, 1.0, 1E0) for a cast float; exact terms compare lexical forms
+#   cast-double: spec-disagreement: the result keeps each input's lexical form (1, 1.0, 1E0) for a cast double; exact terms compare lexical forms
+#   cast-decimal: spec-disagreement: the result writes the computed decimal 1 in its XSD 1.0 canonical form 1.0; Grafeo writes the XSD 1.1 canonical form 1
+
+meta:
+  language: sparql
+  model: rdf
+  section: "w3c.cast"
+  title: W3C Cast
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # xsd:boolean cast
+  - name: cast_bool
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/b01> <http://example.org/p> "true"^^<http://www.w3.org/2001/XMLSchema#boolean> .
+          <http://example.org/b02> <http://example.org/p> "false"^^<http://www.w3.org/2001/XMLSchema#boolean> .
+          <http://example.org/b03> <http://example.org/p> "0"^^<http://www.w3.org/2001/XMLSchema#boolean> .
+          <http://example.org/n01> <http://example.org/p> "0"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n02> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n03> <http://example.org/p> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n04> <http://example.org/p> "0.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n05> <http://example.org/p> "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n06> <http://example.org/p> "-1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n07> <http://example.org/p> "0E1"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://example.org/n08> <http://example.org/p> "1E0"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://example.org/n09> <http://example.org/p> "0E1"^^<http://www.w3.org/2001/XMLSchema#float> .
+          <http://example.org/n10> <http://example.org/p> "1E0"^^<http://www.w3.org/2001/XMLSchema#float> .
+          <http://example.org/n11> <http://example.org/p> "1.25"^^<http://www.w3.org/2001/XMLSchema#float> .
+          <http://example.org/n12> <http://example.org/p> "-7.875"^^<http://www.w3.org/2001/XMLSchema#float> .
+          <http://example.org/n13> <http://example.org/p> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n14> <http://example.org/p> "-2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s01> <http://example.org/p> <http://example.org/z> .
+          <http://example.org/s02> <http://example.org/p> "string" .
+          <http://example.org/s03> <http://example.org/p> "-10.2E3" .
+          <http://example.org/s04> <http://example.org/p> "+33.3300" .
+          <http://example.org/s05> <http://example.org/p> "0.0" .
+          <http://example.org/s06> <http://example.org/p> "0" .
+          <http://example.org/s07> <http://example.org/p> "0E1" .
+          <http://example.org/s08> <http://example.org/p> "1.5" .
+          <http://example.org/s09> <http://example.org/p> "1" .
+          <http://example.org/s10> <http://example.org/p> "1E0" .
+          <http://example.org/s11> <http://example.org/p> "13" .
+          <http://example.org/s12> <http://example.org/p> "2002-10-10T17:00:00Z" .
+          <http://example.org/s13> <http://example.org/p> "false" .
+          <http://example.org/s14> <http://example.org/p> "true" .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT
+          ?a
+          ?v
+          (xsd:boolean(?v) AS ?boolean)
+      WHERE {
+          ?a :p ?v .
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s01>', '<http://example.org/z>', null]
+        - ['<http://example.org/s02>', '"string"', null]
+        - ['<http://example.org/s03>', '"-10.2E3"', null]
+        - ['<http://example.org/s04>', '"+33.3300"', null]
+        - ['<http://example.org/s05>', '"0.0"', null]
+        - ['<http://example.org/s06>', '"0"', '"false"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['<http://example.org/s07>', '"0E1"', null]
+        - ['<http://example.org/s08>', '"1.5"', null]
+        - ['<http://example.org/s09>', '"1"', '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['<http://example.org/s10>', '"1E0"', null]
+        - ['<http://example.org/s11>', '"13"', null]
+        - ['<http://example.org/s12>', '"2002-10-10T17:00:00Z"', null]
+        - ['<http://example.org/s13>', '"false"', '"false"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['<http://example.org/s14>', '"true"', '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['<http://example.org/b01>', '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>', '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['<http://example.org/b02>', '"false"^^<http://www.w3.org/2001/XMLSchema#boolean>', '"false"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['<http://example.org/b03>', '"0"^^<http://www.w3.org/2001/XMLSchema#boolean>', '"false"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['<http://example.org/n01>', '"0"^^<http://www.w3.org/2001/XMLSchema#integer>', '"false"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['<http://example.org/n02>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['<http://example.org/n03>', '"-1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['<http://example.org/n04>', '"0.0"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"false"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['<http://example.org/n05>', '"1.0"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['<http://example.org/n06>', '"-1.0"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['<http://example.org/n07>', '"0E1"^^<http://www.w3.org/2001/XMLSchema#double>', '"false"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['<http://example.org/n08>', '"1E0"^^<http://www.w3.org/2001/XMLSchema#double>', '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['<http://example.org/n09>', '"0E1"^^<http://www.w3.org/2001/XMLSchema#float>', '"false"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['<http://example.org/n10>', '"1E0"^^<http://www.w3.org/2001/XMLSchema#float>', '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['<http://example.org/n11>', '"1.25"^^<http://www.w3.org/2001/XMLSchema#float>', '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['<http://example.org/n12>', '"-7.875"^^<http://www.w3.org/2001/XMLSchema#float>', '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['<http://example.org/n13>', '"2.5"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['<http://example.org/n14>', '"-2.5"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+
+  # xsd:integer cast
+  - name: cast_int
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/b01> <http://example.org/p> "true"^^<http://www.w3.org/2001/XMLSchema#boolean> .
+          <http://example.org/b02> <http://example.org/p> "false"^^<http://www.w3.org/2001/XMLSchema#boolean> .
+          <http://example.org/b03> <http://example.org/p> "0"^^<http://www.w3.org/2001/XMLSchema#boolean> .
+          <http://example.org/n01> <http://example.org/p> "0"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n02> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n03> <http://example.org/p> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n04> <http://example.org/p> "0.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n05> <http://example.org/p> "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n06> <http://example.org/p> "-1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n07> <http://example.org/p> "0E1"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://example.org/n08> <http://example.org/p> "1E0"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://example.org/n09> <http://example.org/p> "0E1"^^<http://www.w3.org/2001/XMLSchema#float> .
+          <http://example.org/n10> <http://example.org/p> "1E0"^^<http://www.w3.org/2001/XMLSchema#float> .
+          <http://example.org/n11> <http://example.org/p> "1.25"^^<http://www.w3.org/2001/XMLSchema#float> .
+          <http://example.org/n12> <http://example.org/p> "-7.875"^^<http://www.w3.org/2001/XMLSchema#float> .
+          <http://example.org/n13> <http://example.org/p> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n14> <http://example.org/p> "-2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s01> <http://example.org/p> <http://example.org/z> .
+          <http://example.org/s02> <http://example.org/p> "string" .
+          <http://example.org/s03> <http://example.org/p> "-10.2E3" .
+          <http://example.org/s04> <http://example.org/p> "+33.3300" .
+          <http://example.org/s05> <http://example.org/p> "0.0" .
+          <http://example.org/s06> <http://example.org/p> "0" .
+          <http://example.org/s07> <http://example.org/p> "0E1" .
+          <http://example.org/s08> <http://example.org/p> "1.5" .
+          <http://example.org/s09> <http://example.org/p> "1" .
+          <http://example.org/s10> <http://example.org/p> "1E0" .
+          <http://example.org/s11> <http://example.org/p> "13" .
+          <http://example.org/s12> <http://example.org/p> "2002-10-10T17:00:00Z" .
+          <http://example.org/s13> <http://example.org/p> "false" .
+          <http://example.org/s14> <http://example.org/p> "true" .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT
+          ?a
+          ?v
+          (xsd:integer(?v) AS ?integer)
+      WHERE {
+          ?a :p ?v .
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s01>', '<http://example.org/z>', null]
+        - ['<http://example.org/s02>', '"string"', null]
+        - ['<http://example.org/s03>', '"-10.2E3"', null]
+        - ['<http://example.org/s04>', '"+33.3300"', null]
+        - ['<http://example.org/s05>', '"0.0"', null]
+        - ['<http://example.org/s06>', '"0"', '"0"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/s07>', '"0E1"', null]
+        - ['<http://example.org/s08>', '"1.5"', null]
+        - ['<http://example.org/s09>', '"1"', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/s10>', '"1E0"', null]
+        - ['<http://example.org/s11>', '"13"', '"13"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/s12>', '"2002-10-10T17:00:00Z"', null]
+        - ['<http://example.org/s13>', '"false"', null]
+        - ['<http://example.org/s14>', '"true"', null]
+        - ['<http://example.org/b01>', '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/b02>', '"false"^^<http://www.w3.org/2001/XMLSchema#boolean>', '"0"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/b03>', '"0"^^<http://www.w3.org/2001/XMLSchema#boolean>', '"0"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/n01>', '"0"^^<http://www.w3.org/2001/XMLSchema#integer>', '"0"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/n02>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/n03>', '"-1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"-1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/n04>', '"0.0"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"0"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/n05>', '"1.0"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/n06>', '"-1.0"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"-1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/n07>', '"0E1"^^<http://www.w3.org/2001/XMLSchema#double>', '"0"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/n08>', '"1E0"^^<http://www.w3.org/2001/XMLSchema#double>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/n09>', '"0E1"^^<http://www.w3.org/2001/XMLSchema#float>', '"0"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/n10>', '"1E0"^^<http://www.w3.org/2001/XMLSchema#float>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/n11>', '"1.25"^^<http://www.w3.org/2001/XMLSchema#float>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/n12>', '"-7.875"^^<http://www.w3.org/2001/XMLSchema#float>', '"-7"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/n13>', '"2.5"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/n14>', '"-2.5"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"-2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # xsd:string cast
+  - name: cast_string
+    xfail:
+      spec: "W3C SPARQL 1.1 cast/cast-string"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/b01> <http://example.org/p> "true"^^<http://www.w3.org/2001/XMLSchema#boolean> .
+          <http://example.org/b02> <http://example.org/p> "false"^^<http://www.w3.org/2001/XMLSchema#boolean> .
+          <http://example.org/b03> <http://example.org/p> "0"^^<http://www.w3.org/2001/XMLSchema#boolean> .
+          <http://example.org/n01> <http://example.org/p> "0"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n02> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n03> <http://example.org/p> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n04> <http://example.org/p> "0.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n05> <http://example.org/p> "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n06> <http://example.org/p> "-1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n07> <http://example.org/p> "0E1"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://example.org/n08> <http://example.org/p> "1E0"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://example.org/n09> <http://example.org/p> "0E1"^^<http://www.w3.org/2001/XMLSchema#float> .
+          <http://example.org/n10> <http://example.org/p> "1E0"^^<http://www.w3.org/2001/XMLSchema#float> .
+          <http://example.org/n11> <http://example.org/p> "1.25"^^<http://www.w3.org/2001/XMLSchema#float> .
+          <http://example.org/n12> <http://example.org/p> "-7.875"^^<http://www.w3.org/2001/XMLSchema#float> .
+          <http://example.org/n13> <http://example.org/p> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n14> <http://example.org/p> "-2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s01> <http://example.org/p> <http://example.org/z> .
+          <http://example.org/s02> <http://example.org/p> "string" .
+          <http://example.org/s03> <http://example.org/p> "-10.2E3" .
+          <http://example.org/s04> <http://example.org/p> "+33.3300" .
+          <http://example.org/s05> <http://example.org/p> "0.0" .
+          <http://example.org/s06> <http://example.org/p> "0" .
+          <http://example.org/s07> <http://example.org/p> "0E1" .
+          <http://example.org/s08> <http://example.org/p> "1.5" .
+          <http://example.org/s09> <http://example.org/p> "1" .
+          <http://example.org/s10> <http://example.org/p> "1E0" .
+          <http://example.org/s11> <http://example.org/p> "13" .
+          <http://example.org/s12> <http://example.org/p> "2002-10-10T17:00:00Z" .
+          <http://example.org/s13> <http://example.org/p> "false" .
+          <http://example.org/s14> <http://example.org/p> "true" .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT
+          ?a
+          ?v
+          (xsd:string(?v) AS ?string)
+      WHERE {
+          ?a :p ?v .
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s01>', '<http://example.org/z>', '"http://example.org/z"']
+        - ['<http://example.org/s02>', '"string"', '"string"']
+        - ['<http://example.org/s03>', '"-10.2E3"', '"-10.2E3"']
+        - ['<http://example.org/s04>', '"+33.3300"', '"+33.3300"']
+        - ['<http://example.org/s05>', '"0.0"', '"0.0"']
+        - ['<http://example.org/s06>', '"0"', '"0"']
+        - ['<http://example.org/s07>', '"0E1"', '"0E1"']
+        - ['<http://example.org/s08>', '"1.5"', '"1.5"']
+        - ['<http://example.org/s09>', '"1"', '"1"']
+        - ['<http://example.org/s10>', '"1E0"', '"1E0"']
+        - ['<http://example.org/s11>', '"13"', '"13"']
+        - ['<http://example.org/s12>', '"2002-10-10T17:00:00Z"', '"2002-10-10T17:00:00Z"']
+        - ['<http://example.org/s13>', '"false"', '"false"']
+        - ['<http://example.org/s14>', '"true"', '"true"']
+        - ['<http://example.org/b01>', '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>', '"true"']
+        - ['<http://example.org/b02>', '"false"^^<http://www.w3.org/2001/XMLSchema#boolean>', '"false"']
+        - ['<http://example.org/b03>', '"0"^^<http://www.w3.org/2001/XMLSchema#boolean>', '"false"']
+        - ['<http://example.org/n01>', '"0"^^<http://www.w3.org/2001/XMLSchema#integer>', '"0"']
+        - ['<http://example.org/n02>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"1"']
+        - ['<http://example.org/n03>', '"-1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"-1"']
+        - ['<http://example.org/n04>', '"0.0"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"0"']
+        - ['<http://example.org/n05>', '"1.0"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"1"']
+        - ['<http://example.org/n06>', '"-1.0"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"-1"']
+        - ['<http://example.org/n07>', '"0E1"^^<http://www.w3.org/2001/XMLSchema#double>', '"0"']
+        - ['<http://example.org/n08>', '"1E0"^^<http://www.w3.org/2001/XMLSchema#double>', '"1"']
+        - ['<http://example.org/n09>', '"0E1"^^<http://www.w3.org/2001/XMLSchema#float>', '"0"']
+        - ['<http://example.org/n10>', '"1E0"^^<http://www.w3.org/2001/XMLSchema#float>', '"1"']
+        - ['<http://example.org/n11>', '"1.25"^^<http://www.w3.org/2001/XMLSchema#float>', '"1.25"']
+        - ['<http://example.org/n12>', '"-7.875"^^<http://www.w3.org/2001/XMLSchema#float>', '"-7.875"']
+        - ['<http://example.org/n13>', '"2.5"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"2.5"']
+        - ['<http://example.org/n14>', '"-2.5"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"-2.5"']

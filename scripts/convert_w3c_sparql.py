@@ -16,6 +16,12 @@ tests, CSV format tests, entailment, graph results) is not written with a
 guessed expectation: it is left out and listed with its reason, in the file's
 header and on stderr.
 
+`tests/spec/rdf/sparql/w3c/known_failures.toml` lists, by section, the cases
+Grafeo does not pass: each becomes a strict `xfail:` naming its issue, or, for a
+case no fix of Grafeo can pass as written, is left out as a `spec-disagreement`.
+Each file's header names the rdf-tests commit it was generated from and the
+W3C licence.
+
 Usage:
     # Convert a single manifest
     uv run --with rdflib python scripts/convert_w3c_sparql.py \\
@@ -31,7 +37,9 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -78,19 +86,52 @@ class Case:
     query: str
     data: list[str]
     expect: list[str] = field(default_factory=list)
+    xfail: tuple[str, str] | None = None
 
 
 @dataclass
 class Converted:
-    """The converted cases of one manifest, and the tests left out with their reason."""
+    """The converted cases of one manifest, the tests left out with their reason, and
+    the suite's commit."""
 
     cases: list[Case]
     left_out: list[tuple[str, str]]
+    commit: str | None = None
+
+
+def suite_commit(manifest: Path) -> str | None:
+    """The commit of the rdf-tests checkout that holds the manifest, if it is one."""
+    result = subprocess.run(
+        ["git", "-C", str(manifest.parent), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stdout.strip() or None
+
+
+def load_known_failures(path: Path) -> dict[str, dict[str, dict[str, str]]]:
+    """The known failures by section (a manifest's folder name), then case name."""
+    if not path.exists():
+        return {}
+    with path.open("rb") as source:
+        return tomllib.load(source)
 
 
 def file_path(uri: object) -> Path:
     """The local path of a `file:` IRI, on Windows as well (`file:///C:/x` is `C:\\x`)."""
     return Path(url2pathname(urlparse(str(uri)).path))
+
+
+def indented(line: str) -> str:
+    """A query line with its leading tabs as spaces; a tab inside it may be in a literal."""
+    text = line.lstrip(" \t")
+    return line[: len(line) - len(text)].expandtabs(4) + text
+
+
+def comment_title(name: str) -> str:
+    """A test's name on one comment line, its ` -- ` separators written as `: `."""
+    return re.sub(r"\s+-{2,}\s+", ": ", " ".join(name.split()))
 
 
 def slug(text: str) -> str:
@@ -202,8 +243,17 @@ def why_left_out(graph: Graph, test: URIRef, action: object) -> str | None:
     return None
 
 
-def convert_manifest(manifest: Path) -> Converted:
-    """Convert every test of a manifest, in the order of its `mf:entries`."""
+def convert_manifest(
+    manifest: Path, known: dict[str, dict[str, str]] | None = None
+) -> Converted:
+    """Convert every test of a manifest, in the order of its `mf:entries`.
+
+    `known` is the section's known failures: a case listed with an `issue` becomes
+    an expected failure held against its W3C test; one listed as a
+    `spec-disagreement` is left out. An entry that names no converted case is an
+    error, so the list cannot go stale.
+    """
+    known = known or {}
     graph = Graph()
     graph.parse(manifest, format="turtle")
     entries = next(graph.objects(None, MF.entries), None)
@@ -223,6 +273,22 @@ def convert_manifest(manifest: Path) -> Converted:
         while name in names:
             name += "_"
         names.add(name)
+        entry = known.get(name)
+        xfail = None
+        if entry is not None:
+            if "issue" in entry:
+                xfail = (
+                    f"W3C SPARQL 1.1 {manifest.parent.name}/{label}",
+                    entry["issue"],
+                )
+            elif entry.get("reason") == "spec-disagreement" and entry.get("note"):
+                left_out.append((label, f"spec-disagreement: {entry['note']}"))
+                continue
+            else:
+                raise ValueError(
+                    f"known failure {name}: give an `issue`, or "
+                    '`reason = "spec-disagreement"` and a `note`'
+                )
         data = [file_path(d) for d in graph.objects(action, QT.data)]
         query = (
             file_path(graph.value(action, QT.query)).read_text(encoding="utf-8").strip()
@@ -230,20 +296,30 @@ def convert_manifest(manifest: Path) -> Converted:
         cases.append(
             Case(
                 name=name,
-                title=" ".join(str(graph.value(test, MF.name) or label).split()),
+                title=comment_title(str(graph.value(test, MF.name) or label)),
                 query=query,
                 data=ntriples(data) if data else [],
                 expect=expectation(file_path(graph.value(test, MF.result)), query),
+                xfail=xfail,
             )
         )
-    return Converted(cases, left_out)
+    stale = sorted(set(known) - names)
+    if stale:
+        raise ValueError(
+            f"known failures that name no converted case: {', '.join(stale)}"
+        )
+    return Converted(cases, left_out, suite_commit(manifest))
 
 
 def generate_gtest(converted: Converted, section: str, title: str) -> str:
     """The .gtest file for one converted manifest."""
+    commit = converted.commit or "an unknown commit"
     lines = [
         f"# W3C SPARQL 1.1 Test Suite: {title}",
         "# Generated from the W3C manifest by scripts/convert_w3c_sparql.py",
+        f"# Source: https://github.com/w3c/rdf-tests at {commit}",
+        "# Copyright W3C (MIT, ERCIM, Keio, Beihang), used under the W3C test suite",
+        "# licences: https://www.w3.org/Consortium/Legal/2008/04-testsuite-copyright.html",
     ]
     if converted.left_out:
         lines.append("# Not converted:")
@@ -262,22 +338,33 @@ def generate_gtest(converted: Converted, section: str, title: str) -> str:
     ]
     for case in converted.cases:
         lines += ["", f"  # {case.title}", f"  - name: {case.name}"]
+        if case.xfail:
+            spec, issue = case.xfail
+            lines += [
+                "    xfail:",
+                f"      spec: {json.dumps(spec)}",
+                f"      issue: {issue}",
+            ]
         if case.data:
             lines += ["    setup:", "      - |", "        INSERT DATA {"]
             lines += [f"          {triple}" for triple in case.data]
             lines += ["        }"]
         lines.append("    query: |")
-        lines += [f"      {line}".rstrip() for line in case.query.splitlines()]
+        lines += [
+            f"      {indented(line)}".rstrip() for line in case.query.splitlines()
+        ]
         lines.append("    expect:")
         lines += [f"      {line}" for line in case.expect]
     lines.append("")
     return "\n".join(lines)
 
 
-def write_gtest(manifest: Path, output: Path) -> None:
+def write_gtest(manifest: Path, output: Path, known_failures: Path) -> None:
     """Convert one manifest to one .gtest file and report what was left out."""
-    converted = convert_manifest(manifest)
     section = manifest.parent.name
+    converted = convert_manifest(
+        manifest, load_known_failures(known_failures).get(section)
+    )
     title = section.replace("-", " ").title()
     for label, reason in converted.left_out:
         print(f"    not converted: {label}: {reason}", file=sys.stderr)
@@ -300,10 +387,16 @@ def main() -> None:
     parser.add_argument(
         "--all", action="store_true", help="Convert all SPARQL 1.1 manifests"
     )
+    parser.add_argument(
+        "--known-failures",
+        type=Path,
+        default=Path("tests/spec/rdf/sparql/w3c/known_failures.toml"),
+        help="The expected failures and left-out cases, by section",
+    )
     args = parser.parse_args()
 
     if args.manifest and args.output:
-        write_gtest(args.manifest, args.output)
+        write_gtest(args.manifest, args.output, args.known_failures)
     elif args.all:
         w3c_dir = Path("tests/spec/rdf/sparql/w3c/rdf-tests/sparql/sparql11")
         if not w3c_dir.exists():
@@ -317,6 +410,7 @@ def main() -> None:
             write_gtest(
                 manifest,
                 Path("tests/spec/rdf/sparql/w3c") / f"{manifest.parent.name}.gtest",
+                args.known_failures,
             )
     else:
         parser.print_help()

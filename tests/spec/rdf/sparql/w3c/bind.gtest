@@ -1,0 +1,266 @@
+# W3C SPARQL 1.1 Test Suite: Bind
+# Generated from the W3C manifest by scripts/convert_w3c_sparql.py
+# Source: https://github.com/w3c/rdf-tests at 7b5afb91857a9c282c03d2e45d3f76485797c901
+# Copyright W3C (MIT, ERCIM, Keio, Beihang), used under the W3C test suite
+# licences: https://www.w3.org/Consortium/Legal/2008/04-testsuite-copyright.html
+
+meta:
+  language: sparql
+  model: rdf
+  section: "w3c.bind"
+  title: W3C Bind
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # bind01 - BIND
+  - name: bind01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s2> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s3> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s4> <http://example.org/p> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT ?z
+      {
+        ?s ?p ?o .
+        BIND(?o+10 AS ?z)
+      }
+    expect:
+      terms:
+        - ['"14"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"13"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"12"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"11"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # bind02 - BIND
+  - name: bind02
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s2> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s3> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s4> <http://example.org/p> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT ?o ?z ?z2
+      {
+        ?s ?p ?o .
+        BIND(?o+10 AS ?z)
+        BIND(?o+100 AS ?z2)
+      }
+    expect:
+      terms:
+        - ['"4"^^<http://www.w3.org/2001/XMLSchema#integer>', '"14"^^<http://www.w3.org/2001/XMLSchema#integer>', '"104"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"3"^^<http://www.w3.org/2001/XMLSchema#integer>', '"13"^^<http://www.w3.org/2001/XMLSchema#integer>', '"103"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"2"^^<http://www.w3.org/2001/XMLSchema#integer>', '"12"^^<http://www.w3.org/2001/XMLSchema#integer>', '"102"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"11"^^<http://www.w3.org/2001/XMLSchema#integer>', '"101"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # bind03 - BIND
+  - name: bind03
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s2> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s3> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s4> <http://example.org/p> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT ?z ?s1
+      {
+        ?s ?p ?o .
+        BIND(?o+1 AS ?z)
+        ?s1 ?p1 ?z
+      }
+    expect:
+      terms:
+        - ['"4"^^<http://www.w3.org/2001/XMLSchema#integer>', '<http://example.org/s4>']
+        - ['"3"^^<http://www.w3.org/2001/XMLSchema#integer>', '<http://example.org/s3>']
+        - ['"2"^^<http://www.w3.org/2001/XMLSchema#integer>', '<http://example.org/s2>']
+
+  # bind04 - BIND
+  - name: bind04
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s2> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s3> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s4> <http://example.org/p> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT *
+      {
+        ?s ?p ?o .
+        BIND(?nova AS ?z)
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s4>', '<http://example.org/p>', '"4"^^<http://www.w3.org/2001/XMLSchema#integer>', null]
+        - ['<http://example.org/s3>', '<http://example.org/p>', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>', null]
+        - ['<http://example.org/s2>', '<http://example.org/p>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>', null]
+        - ['<http://example.org/s1>', '<http://example.org/p>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', null]
+
+  # bind05 - BIND
+  - name: bind05
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s2> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s3> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s4> <http://example.org/p> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT ?s ?p ?o ?z
+      {
+        ?s ?p ?o .
+        BIND(?o+1 AS ?z)
+        FILTER(?z = 3 )
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s2>', '<http://example.org/p>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # bind06 - BIND
+  - name: bind06
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s2> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s3> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s4> <http://example.org/p> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT *
+      {
+        ?s ?p ?o .
+        BIND(?o+10 AS ?z)
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s4>', '<http://example.org/p>', '"4"^^<http://www.w3.org/2001/XMLSchema#integer>', '"14"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/s3>', '<http://example.org/p>', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>', '"13"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/s2>', '<http://example.org/p>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>', '"12"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/s1>', '<http://example.org/p>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"11"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # bind07 - BIND
+  - name: bind07
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s2> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s3> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s4> <http://example.org/p> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT ?s ?p ?o ?z
+      {
+        ?s ?p ?o .
+        { BIND(?o+1 AS ?z) } UNION { BIND(?o+2 AS ?z) }
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s4>', '<http://example.org/p>', '"4"^^<http://www.w3.org/2001/XMLSchema#integer>', null]
+        - ['<http://example.org/s4>', '<http://example.org/p>', '"4"^^<http://www.w3.org/2001/XMLSchema#integer>', null]
+        - ['<http://example.org/s3>', '<http://example.org/p>', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>', null]
+        - ['<http://example.org/s3>', '<http://example.org/p>', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>', null]
+        - ['<http://example.org/s2>', '<http://example.org/p>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>', null]
+        - ['<http://example.org/s2>', '<http://example.org/p>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>', null]
+        - ['<http://example.org/s1>', '<http://example.org/p>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', null]
+        - ['<http://example.org/s1>', '<http://example.org/p>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', null]
+
+  # bind08 - BIND
+  - name: bind08
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s2> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s3> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s4> <http://example.org/p> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT ?s ?p ?o ?z
+      {
+        ?s ?p ?o .
+        FILTER(?z = 3 )
+        BIND(?o+1 AS ?z)
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s2>', '<http://example.org/p>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # bind10 - BIND scoping - Variable in filter not in scope
+  - name: bind10
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s2> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s3> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s4> <http://example.org/p> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT ?s ?v ?z
+      {
+        # See also bind11.rq
+        BIND(4 AS ?z)
+        {
+          # ?z is not in-scope at the time of filter execution.
+          ?s :p ?v . FILTER(?v = ?z)
+        }
+      }
+    expect:
+      empty: true
+
+  # bind11 - BIND scoping - Variable in filter in scope
+  - name: bind11
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s2> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s3> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s4> <http://example.org/p> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT ?s ?v ?z
+      {
+        # See also bind10.rq
+        BIND(4 AS ?z)
+        # ?z is in scope at the time of filter execution.
+        ?s :p ?v .
+        FILTER(?v = ?z)
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s4>', '"4"^^<http://www.w3.org/2001/XMLSchema#integer>', '"4"^^<http://www.w3.org/2001/XMLSchema#integer>']

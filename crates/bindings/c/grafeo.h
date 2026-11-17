@@ -199,6 +199,13 @@ uint64_t    grafeo_result_labels_added(const GrafeoResult* result);
 uint64_t    grafeo_result_labels_removed(const GrafeoResult* result);
 const char* grafeo_result_nodes_json(const GrafeoResult* result);
 const char* grafeo_result_edges_json(const GrafeoResult* result);
+/* The column names as a JSON array of strings, also for a result without rows. */
+const char* grafeo_result_columns_json(const GrafeoResult* result);
+/* The type each cell was built with, as JSON (experimental, 0.6.4+):
+ * {"columns": [T...], "runs": [{"from": row, "columns": [T...]}...]}. An
+ * object in the rows is a node or an edge exactly where its type says
+ * "node" or "edge"; see the function's documentation for T. */
+const char* grafeo_result_types_json(const GrafeoResult* result);
 /* The warnings the statement raised, ordered by code: a deprecated form it
  * wrote or ran, or a notice (experimental, 0.6.2+). The code is a GQLSTATUS of
  * class 01 (for example "01X01"), the kind "deprecation" or "notice", and the

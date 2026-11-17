@@ -132,10 +132,6 @@ tests:
 
   # [6] Handle projected variables inside an expression which contains an aggregation expression
   - name: s6_handle_projected_variables_inside_an_expression_which_contains_an_aggregation_expression
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     query: |
       MATCH (me: Person)--(you: Person)
       WITH me.age AS age, you
@@ -148,10 +144,6 @@ tests:
 
   # [7] Handle projected property accesses inside an expression which contains an aggregation expression
   - name: s7_handle_projected_property_accesses_inside_an_expression_which_contains_an_aggregation_expression
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     query: |
       MATCH (me: Person)--(you: Person)
       WITH me.age AS age, me.age + count(you.age) AS agg

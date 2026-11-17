@@ -59,13 +59,6 @@ TEMPORAL_GAP = {
     "issue": "fix in 0.6.4",
     "reason": "temporals do not come back from this binding without loss",
 }
-# The bindings over grafeo-c take a result's columns from its first row, so a result
-# without rows has none; they skip a case whose table has no rows
-EMPTY_COLUMNS_GAP = {
-    "runners": ["go", "csharp", "dart"],
-    "issue": "fix in 0.6.4",
-    "reason": "the binding gives no column names for a result without rows",
-}
 TEMPORAL = re.compile(
     r"\b(?:date|datetime|localtime|localdatetime|time|duration)\s*(?:\(|\.\w)"
 )
@@ -302,8 +295,6 @@ def convert_scenario(scenario: gherkin.Scenario, graphs: dict[str, str]) -> list
                 case.expect.append("ordered: true")
             if "ignoring element order for lists" in text:
                 case.expect.append("unordered_lists: true")
-            if len(step.table) == 1:
-                case.runner_gap = EMPTY_COLUMNS_GAP
             case.expect += ["values: |"] + [
                 f"  {line}" for line in values_table(step.table)
             ]

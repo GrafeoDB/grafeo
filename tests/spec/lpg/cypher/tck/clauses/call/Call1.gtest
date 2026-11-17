@@ -61,10 +61,6 @@ tests:
     xfail:
       spec: "openCypher TCK 2024.3 Call1: [3] In-query call to procedure that takes no arguments and yields no results"
       issue: fix in 0.6.4
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup_gql:
       - "CREATE PROCEDURE `test.doNothing`() RETURNS () AS { UNWIND [] AS r FINISH }"
     query: |

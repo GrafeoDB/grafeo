@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -298,6 +299,22 @@ func TestExecuteGQL(t *testing.T) {
 	}
 	if len(result.Rows) != 2 {
 		t.Errorf("expected 2 rows, got %d", len(result.Rows))
+	}
+}
+
+// A result without rows still names its columns, in their order.
+func TestAnEmptyResultHasItsColumns(t *testing.T) {
+	db, err := OpenInMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	result, err := db.Execute("MATCH (n:Nobody) RETURN n.name AS name, 1 AS one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) != 0 || !reflect.DeepEqual(result.Columns, []string{"name", "one"}) {
+		t.Errorf("rows %v, columns %v", result.Rows, result.Columns)
 	}
 }
 

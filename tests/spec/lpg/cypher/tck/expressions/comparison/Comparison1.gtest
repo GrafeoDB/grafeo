@@ -60,10 +60,6 @@ tests:
 
   # [2] Number-typed float comparison
   - name: s2_number_typed_float_comparison
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE ({id: 0})
@@ -80,10 +76,6 @@ tests:
 
   # [3] Any-typed string comparison
   - name: s3_any_typed_string_comparison
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE ({id: 0})
@@ -463,10 +455,6 @@ tests:
 
   # [12] Handling inlined equality of large integer, non-equal values
   - name: s12_handling_inlined_equality_of_large_integer_non_equal_values
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE (:TheLabel {id: 4611686018427387905})
@@ -480,10 +468,6 @@ tests:
 
   # [13] Handling explicit equality of large integer, non-equal values
   - name: s13_handling_explicit_equality_of_large_integer_non_equal_values
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE (:TheLabel {id: 4611686018427387905})

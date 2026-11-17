@@ -43,10 +43,6 @@ tests:
 
   # [1] Match non-existent nodes returns empty
   - name: s1_match_non_existent_nodes_returns_empty
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     query: |
       MATCH (n)
       RETURN n

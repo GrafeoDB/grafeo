@@ -11,7 +11,7 @@ use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::future_into_py;
 
 use grafeo_common::storage::{SectionMemoryConfig, SectionType, TierOverride};
-use grafeo_common::types::{EdgeId, LogicalType, NodeId, Value};
+use grafeo_common::types::{EdgeId, NodeId, Value};
 use grafeo_engine::config::Config;
 use grafeo_engine::database::GrafeoDB;
 
@@ -155,8 +155,8 @@ pub struct AsyncQueryResult {
     #[pyo3(get)]
     columns: Vec<String>,
     rows: Vec<Vec<Value>>,
-    #[allow(dead_code)] // Stored for future typed access; currently only raw rows exposed
-    column_types: Vec<LogicalType>,
+    /// The type each cell was built with (see `cell_type`).
+    cell_types: grafeo_engine::database::CellTypes,
     nodes: Vec<PyNode>,
     edges: Vec<PyEdge>,
     warnings: Vec<grafeo_bindings_common::warning::Warning>,
@@ -175,6 +175,15 @@ impl AsyncQueryResult {
     /// Get all nodes from the result.
     fn nodes(&self) -> Vec<PyNode> {
         self.nodes.clone()
+    }
+
+    /// The type the value in `row` and `column` was built with (see
+    /// `QueryResult.cell_type`).
+    ///
+    /// Experimental, new in 0.6.4: it may change or be removed in any
+    /// release.
+    fn cell_type(&self, py: Python<'_>, row: usize, column: usize) -> PyResult<Py<PyAny>> {
+        crate::query::cell_type_py(py, &self.cell_types, row, column)
     }
 
     /// Get all edges from the result.
@@ -980,13 +989,13 @@ impl PyGrafeoDB {
                 |e| PyEdge::new(e.id, e.edge_type, e.source_id, e.target_id, e.properties),
             );
             let columns = std::mem::take(&mut result.columns);
-            let column_types = std::mem::take(&mut result.column_types);
+            let cell_types = result.cell_types();
             let warnings = grafeo_bindings_common::warning::of_result(&result);
             Python::attach(|py| crate::warning::raise(py, &warnings))?;
             Ok(AsyncQueryResult {
                 columns,
                 rows: result.into_rows(),
-                column_types,
+                cell_types,
                 nodes,
                 edges,
                 warnings,

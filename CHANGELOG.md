@@ -9,6 +9,8 @@ Performance and memory release, in progress: this section lists what has landed 
 ### Added
 
 - **`CREATE OR REPLACE GRAPH` replaces a graph in one statement** (ISO/IEC 39075 12.4): an existing graph of the name is dropped and the new one created in one change, so a failure or a crash leaves the old graph or the new one; it was a syntax error. It is refused while another open transaction has changes in the graph, as `DROP GRAPH` is, and for a copy of itself (`AS COPY OF` or `LIKE` the same graph); a session using the graph keeps using it.
+- **Results say where their nodes and edges are** (Experimental): `QueryResult::cell_type` and `QueryResult::cell_types`, the Python `cell_type`, the Node.js `cellType`, the `cellTypes` key of WASM `executeRaw*` results and the C `grafeo_result_types_json` give the type each value was built with. A map is a node or an edge exactly where its type says so.
+- **The openCypher TCK runs in every binding's spec tests**: 3,927 scenarios of openCypher 2024.3, converted by `scripts/convert_opencypher_tck.py`; the cases Grafeo does not pass yet are listed with their target release in `tests/spec/lpg/cypher/tck/known_failures.toml`.
 
 ### Changed
 
@@ -22,6 +24,9 @@ Performance and memory release, in progress: this section lists what has landed 
 - **A quantized vector index trains on live vectors only**: with scalar or product quantization, a vector deleted or replaced before the quantizer is trained no longer trains it or stays in memory until training; training waits until the configured number of live vectors is reached.
 - **`compact()` and `close()` empty the plan cache**: a deleted value that a statement named as a literal no longer stays in memory in the shared plan cache after `compact()` or `close()`.
 - **C#: a result stream that is never disposed is freed**: `ResultStream`, nodes, edges, results and open options are now released by their finalizer like the database, transaction, graph and time-travel handles, so a stream left undisposed no longer keeps its native stream and the database open.
+- **A map with the keys of a node is no longer taken for one**: `nodes()` and `edges()` in Python, Node.js, C#, Dart and C (`grafeo_result_nodes_json`, `grafeo_result_edges_json`) list the nodes and edges the engine returned, by type, so `RETURN {_id: 1, _labels: []}` no longer lists a node and an edge with a property named `_labels` is no longer listed as a node. C# and Dart now also list the nodes and edges inside returned lists, maps and paths.
+- **An item of `nodes(p)` keeps the node's id under `_id`**: a node with a property named `_id` or `_labels` gave that property there; the structural keys now win, as for a returned node, and `n._id` still reads the property.
+- **Go, C# and Dart report the columns of a result without rows**: they took the column names from the first row, so an empty result had none; the new C function `grafeo_result_columns_json` gives them for every result.
 
 ## [0.6.3] - 2026-11-15
 

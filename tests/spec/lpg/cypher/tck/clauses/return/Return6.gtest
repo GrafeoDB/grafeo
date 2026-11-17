@@ -119,10 +119,6 @@ tests:
     xfail:
       spec: "openCypher TCK 2024.3 Return6: [6] Handle aggregates inside non-aggregate expressions"
       issue: fix in 0.6.5
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     query: |
       MATCH (a {name: 'Andres'})<-[:FATHER]-(child)
       RETURN a.name, {foo: a.name='Andres', kids: collect(child.name)}
@@ -321,10 +317,6 @@ tests:
 
   # [18] Handle returned variables inside an expression which contains an aggregation expression
   - name: s18_handle_returned_variables_inside_an_expression_which_contains_an_aggregation_expression
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     query: |
       MATCH (me: Person)--(you: Person)
       WITH me.age AS age, you
@@ -336,10 +328,6 @@ tests:
 
   # [19] Handle returned property accesses inside an expression which contains an aggregation expression
   - name: s19_handle_returned_property_accesses_inside_an_expression_which_contains_an_aggregation_expression
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     query: |
       MATCH (me: Person)--(you: Person)
       RETURN me.age, me.age + count(you.age)

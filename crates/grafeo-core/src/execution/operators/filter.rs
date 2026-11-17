@@ -4366,26 +4366,8 @@ impl ExpressionPredicate {
                                     #[allow(clippy::cast_sign_loss)]
                                     let node_id = NodeId(*id as u64);
                                     if let Some(node) = self.resolve_node(node_id) {
-                                        let mut map = BTreeMap::new();
-                                        // reason: entity IDs stored as i64, standard encoding
-                                        #[allow(clippy::cast_possible_wrap)]
-                                        map.insert(
-                                            PropertyKey::new("_id"),
-                                            Value::Int64(node.id.as_u64() as i64),
-                                        );
-                                        let labels: Vec<Value> = node
-                                            .labels
-                                            .iter()
-                                            .map(|l| Value::String(l.clone()))
-                                            .collect();
-                                        map.insert(
-                                            PropertyKey::new("_labels"),
-                                            Value::List(labels.into()),
-                                        );
-                                        for (key, value) in &node.properties {
-                                            map.insert(key.clone(), value.clone());
-                                        }
-                                        Value::Map(Arc::new(map))
+                                        // The same record a returned node is.
+                                        super::project::node_to_map(&node)
                                     } else {
                                         n.clone()
                                     }

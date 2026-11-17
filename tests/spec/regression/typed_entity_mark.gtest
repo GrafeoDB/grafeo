@@ -1,0 +1,75 @@
+# Regression tests: nodes and edges are known by type, not by the keys of a map
+#
+# A result value is a node or a relationship where the type its cell was built
+# with says so. A map a query builds with the keys of a node (`_id`,
+# `_labels`) or of a relationship (`_id`, `_type`, `_source`, `_target`) is a
+# map, and a property whose name is a structural key of the other kind stays a
+# property. A node's own property named `_id` or `_labels` loses to the
+# structural key in the result (read it with `n._id`).
+#
+# Each case is an expected failure in every runner until the runner reads the
+# binding's cell types instead of the shape of a map.
+
+meta:
+  language: gql
+  model: lpg
+  section: regression
+  title: Typed node and relationship values
+  dataset: empty
+
+tests:
+
+  - name: a_map_with_the_keys_of_a_node_is_a_map
+    xfail:
+      spec: "a map value with keys _id and _labels is a map (typed result values)"
+      issue: fix in 0.6.4
+    query: "RETURN {_id: 1, _labels: []} AS m"
+    expect:
+      values: |
+        | m                     |
+        | {_id: 1, _labels: []} |
+
+  - name: a_map_with_the_keys_of_a_relationship_is_a_map
+    xfail:
+      spec: "a map value with keys _id, _type, _source and _target is a map (typed result values)"
+      issue: fix in 0.6.4
+    query: "RETURN {_id: 1, _type: 'K', _source: 1, _target: 2} AS m"
+    expect:
+      values: |
+        | m                                             |
+        | {_id: 1, _type: 'K', _source: 1, _target: 2} |
+
+  - name: structural_names_of_the_other_kind_are_properties
+    xfail:
+      spec: "a node keeps a property named _type, a relationship one named _labels (typed result values)"
+      issue: fix in 0.6.4
+    setup:
+      - "INSERT (:A {n: 1, _type: 'import'})-[:K {w: 7, _labels: ['L']}]->(:B {n: 2})"
+    query: "MATCH (a:A)-[r:K]->(b:B) RETURN a, r"
+    expect:
+      values: |
+        | a                          | r                         |
+        | (:A {n: 1, _type: 'import'}) | [:K {w: 7, _labels: ['L']}] |
+
+  - name: a_node_property_named_id_loses_to_the_id
+    setup:
+      - "INSERT (:A {n: 1, _id: 'x', _labels: 'y'})"
+    query: "MATCH (a:A) RETURN a, a._id AS id, a._labels AS labels"
+    expect:
+      values: |
+        | a            | id  | labels |
+        | (:A {n: 1}) | 'x' | 'y'    |
+
+  - name: nested_nodes_are_nodes_and_nested_maps_are_maps
+    xfail:
+      spec: "nodes inside a list, a map and a path are nodes; a map beside them is a map (typed result values)"
+      issue: fix in 0.6.4
+    setup:
+      - "INSERT (:A {n: 1})-[:K {w: 1}]->(:B {n: 2})"
+    query: |
+      MATCH p = (a:A)-[r:K]->(b:B)
+      RETURN [a, {_id: 9, _labels: ['A'], n: 9}] AS l, {real: b, fake: {_id: 8, _labels: []}} AS m, p
+    expect:
+      values: |
+        | l                                        | m                                                | p                                     |
+        | [(:A {n: 1}), {_id: 9, _labels: ['A'], n: 9}] | {real: (:B {n: 2}), fake: {_id: 8, _labels: []}} | <(:A {n: 1})-[:K {w: 1}]->(:B {n: 2})> |

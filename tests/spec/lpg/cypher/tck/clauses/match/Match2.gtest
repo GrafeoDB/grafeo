@@ -43,10 +43,6 @@ tests:
 
   # [1] Match non-existent relationships returns empty
   - name: s1_match_non_existent_relationships_returns_empty
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     query: |
       MATCH ()-[r]->()
       RETURN r
@@ -138,10 +134,6 @@ tests:
 
   # [7] Matching twice with conflicting relationship types on same relationship
   - name: s7_matching_twice_with_conflicting_relationship_types_on_same_relationship
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE ()-[:T]->()

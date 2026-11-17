@@ -163,6 +163,10 @@ internal static partial class NativeMethods
     [LibraryImport(LibName)]
     internal static partial ulong grafeo_result_labels_removed(ResultHandle result);
 
+    /// <summary>The column names as a JSON array, also without rows. Valid until grafeo_free_result.</summary>
+    [LibraryImport(LibName)]
+    internal static partial nint grafeo_result_columns_json(ResultHandle result);
+
     /// <summary>Get pre-extracted nodes as JSON. Valid until grafeo_free_result.</summary>
     [LibraryImport(LibName)]
     internal static partial nint grafeo_result_nodes_json(ResultHandle result);

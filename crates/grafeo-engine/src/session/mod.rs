@@ -2270,6 +2270,7 @@ impl Session {
         QueryResult {
             columns: vec!["status".into()],
             column_types: vec![grafeo_common::types::LogicalType::String],
+            type_runs: Vec::new(),
             rows: vec![vec![Value::from(message)]],
             execution_time_ms: None,
             rows_scanned: None,

@@ -1172,8 +1172,11 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
             var rowsScanned = (long)NativeMethods.grafeo_result_rows_scanned(resultPtr);
 
             var rows = ValueConverter.ParseRows(json);
-            var columns = ValueConverter.ExtractColumns(rows);
-            var (nodes, edges) = ValueConverter.ExtractEntities(rows);
+            var columns = ValueConverter.ParseStringArray(
+                Marshal.PtrToStringUTF8(NativeMethods.grafeo_result_columns_json(resultPtr)) ?? "[]");
+            var (nodes, edges) = ValueConverter.ParseEntities(
+                Marshal.PtrToStringUTF8(NativeMethods.grafeo_result_nodes_json(resultPtr)) ?? "[]",
+                Marshal.PtrToStringUTF8(NativeMethods.grafeo_result_edges_json(resultPtr)) ?? "[]");
 
             return new QueryResult(columns, rows, nodes, edges, executionTimeMs, rowsScanned)
             {

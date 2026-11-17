@@ -111,10 +111,6 @@ tests:
 
   # [4] Accept skip zero
   - name: s4_accept_skip_zero
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     query: |
       MATCH (n)
       WHERE 1 = 0

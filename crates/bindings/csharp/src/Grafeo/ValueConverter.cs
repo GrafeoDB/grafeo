@@ -164,15 +164,6 @@ internal static class ValueConverter
         return rows;
     }
 
-    /// <summary>Extract column names from the first row (or return empty).</summary>
-    internal static IReadOnlyList<string> ExtractColumns(
-        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
-    {
-        if (rows.Count == 0)
-            return Array.Empty<string>();
-        return rows[0].Keys.ToList();
-    }
-
     /// <summary>Parse a JSON object string into a dictionary.</summary>
     internal static IReadOnlyDictionary<string, object?> ParseObject(string json)
     {
@@ -350,71 +341,46 @@ internal static class ValueConverter
     // =========================================================================
 
     /// <summary>
-    /// Extract Node and Edge entities from query result rows.
-    /// Mirrors grafeo-bindings-common entity::extract_entities.
+    /// The nodes and edges of a result, read from <c>grafeo_result_nodes_json</c> and
+    /// <c>grafeo_result_edges_json</c>: the engine says by type which values are nodes and
+    /// edges, so a map with the keys of a node (<c>{_id: 1, _labels: []}</c>) is a map.
     /// </summary>
-    internal static (IReadOnlyList<Node> Nodes, IReadOnlyList<Edge> Edges) ExtractEntities(
-        IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
+    internal static (IReadOnlyList<Node> Nodes, IReadOnlyList<Edge> Edges) ParseEntities(
+        string nodesJson, string edgesJson)
     {
-        var nodeIds = new HashSet<long>();
-        var edgeIds = new HashSet<long>();
         var nodes = new List<Node>();
-        var edges = new List<Edge>();
-
-        foreach (var row in rows)
+        using (var doc = JsonDocument.Parse(nodesJson))
         {
-            foreach (var value in row.Values)
+            foreach (var node in doc.RootElement.EnumerateArray())
             {
-                if (value is not Dictionary<string, object?> map) continue;
-
-                if (map.TryGetValue("_id", out var idObj) && idObj is long id)
-                {
-                    if (map.ContainsKey("_labels"))
-                    {
-                        // Node
-                        if (!nodeIds.Add(id)) continue;
-                        var labels = map.TryGetValue("_labels", out var labelsObj) && labelsObj is List<object?> labelList
-                            ? labelList.OfType<string>().ToList()
-                            : new List<string>();
-                        var props = ExtractProperties(map, NodeKeys);
-                        nodes.Add(new Node(id, labels, props));
-                    }
-                    else if (map.ContainsKey("_type"))
-                    {
-                        // Edge
-                        if (!edgeIds.Add(id)) continue;
-                        var edgeType = map.TryGetValue("_type", out var typeObj) && typeObj is string t ? t : "";
-                        var sourceId = map.TryGetValue("_source", out var srcObj) && srcObj is long src ? src : 0;
-                        var targetId = map.TryGetValue("_target", out var tgtObj) && tgtObj is long tgt ? tgt : 0;
-                        var props = ExtractProperties(map, EdgeKeys);
-                        edges.Add(new Edge(id, edgeType, sourceId, targetId, props));
-                    }
-                }
+                var labels = node.GetProperty("labels").EnumerateArray()
+                    .Select(label => label.GetString() ?? "")
+                    .ToList();
+                nodes.Add(new Node(node.GetProperty("id").GetInt64(), labels, Properties(node)));
             }
         }
-
+        var edges = new List<Edge>();
+        using (var doc = JsonDocument.Parse(edgesJson))
+        {
+            foreach (var edge in doc.RootElement.EnumerateArray())
+            {
+                edges.Add(new Edge(
+                    edge.GetProperty("id").GetInt64(),
+                    edge.GetProperty("type").GetString() ?? "",
+                    edge.GetProperty("source_id").GetInt64(),
+                    edge.GetProperty("target_id").GetInt64(),
+                    Properties(edge)));
+            }
+        }
         return (nodes, edges);
     }
 
-    /// <summary>The structural keys of a node map: its id and labels.</summary>
-    private static readonly string[] NodeKeys = ["_id", "_labels"];
-
-    /// <summary>The structural keys of an edge map: its id, type and ends.</summary>
-    private static readonly string[] EdgeKeys = ["_id", "_type", "_source", "_target"];
-
-    /// <summary>
-    /// Extract user properties: every key but the <paramref name="structural"/> ones, also a
-    /// property whose name starts with <c>_</c> (#254).
-    /// </summary>
-    private static IReadOnlyDictionary<string, object?> ExtractProperties(
-        Dictionary<string, object?> map, string[] structural)
+    /// <summary>The <c>properties</c> of a node or edge object of the C layer.</summary>
+    private static IReadOnlyDictionary<string, object?> Properties(JsonElement entity)
     {
         var props = new Dictionary<string, object?>();
-        foreach (var (key, value) in map)
-        {
-            if (!structural.Contains(key))
-                props[key] = value;
-        }
+        foreach (var prop in entity.GetProperty("properties").EnumerateObject())
+            props[prop.Name] = FromJsonElement(prop.Value);
         return props;
     }
 }

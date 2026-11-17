@@ -179,10 +179,6 @@ tests:
 
   # [10] Matching using self-referencing pattern returns no result
   - name: s10_matching_using_self_referencing_pattern_returns_no_result
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE (a), (b), (c)
@@ -457,10 +453,6 @@ tests:
 
   # [25] Matching twice with an additional node label
   - name: s25_matching_twice_with_an_additional_node_label
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE ()-[:T]->()
@@ -492,10 +484,6 @@ tests:
 
   # [27] Matching from null nodes should return no results owing to finding no matches
   - name: s27_matching_from_null_nodes_should_return_no_results_owing_to_finding_no_matches
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     query: |
       OPTIONAL MATCH (a)
       WITH a
@@ -508,10 +496,6 @@ tests:
 
   # [28] Matching from null nodes should return no results owing to matches being filtered out
   - name: s28_matching_from_null_nodes_should_return_no_results_owing_to_matches_being_filtered_out
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE ()-[:T]->()

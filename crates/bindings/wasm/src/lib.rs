@@ -354,13 +354,20 @@ impl Database {
     /// Returns `{ columns: string[], rows: any[][], executionTimeMs?: number,
     /// counters, warnings, profile? }`, `profile` for a `PROFILE` statement
     /// only. `warnings` lists what the statement raised (`{ code, kind,
-    /// message }`, ordered by code), empty when nothing.
+    /// message }`, ordered by code), empty when nothing. `cellTypes` is the
+    /// type each cell was built with, `{ columns: T[], runs: { from, columns:
+    /// T[] }[] }`: the rows before the first run have `columns`, a run's rows
+    /// its own. `T` is `"node"`, `"edge"`, `"path"`, `{ list: T }`, `{ tuple:
+    /// T[] }`, `{ struct: { key: T } }`, `{ map: T }`, `"any"` or another
+    /// type's name; an object in a row is a node or an edge exactly where its
+    /// type says so (`{_id: 1, _labels: []}` returned as a map is a map).
     ///
     /// # Stability: Experimental
     ///
     /// The `profile` key: new in 0.6.0, its operators and keys may still
     /// change. The `warnings` key: new in 0.6.2, new warnings and kinds may
-    /// come. The rest is stable. See <https://grafeo.dev/stability/>.
+    /// come. The `cellTypes` key: new in 0.6.4, it may change or be removed.
+    /// The rest is stable. See <https://grafeo.dev/stability/>.
     ///
     /// # Errors
     ///
@@ -1857,10 +1864,11 @@ fn counters_to_js(counters: &grafeo_engine::database::WriteCounters) -> JsValue 
     obj.into()
 }
 
-/// Converts a query result to `{ columns: string[], rows: any[][], kind, boolean?,
-/// executionTimeMs?: number, counters, profile? }`, the shape of the `executeRaw*` methods
-/// (`kind` `"rows"`, `"boolean"` for a SPARQL ASK with its `boolean`, or `"graph"` for
-/// CONSTRUCT and DESCRIBE; `profile` for a `PROFILE` statement only).
+/// Converts a query result to `{ columns: string[], rows: any[][], cellTypes, kind,
+/// boolean?, executionTimeMs?: number, counters, profile? }`, the shape of the
+/// `executeRaw*` methods (`kind` `"rows"`, `"boolean"` for a SPARQL ASK with its `boolean`,
+/// or `"graph"` for CONSTRUCT and DESCRIBE; `profile` for a `PROFILE` statement only;
+/// `cellTypes` as `grafeo_bindings_common::entity::cell_types_to_json` writes it).
 ///
 /// # Errors
 ///
@@ -1885,6 +1893,14 @@ fn raw_result_to_js(result: &grafeo_engine::database::QueryResult) -> Result<JsV
         rows.set(i as u32, js_row.into());
     }
     let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("rows"), &rows);
+
+    // cellTypes: the type each cell was built with (Experimental, 0.6.4)
+    // Through JSON text: the workspace's `arbitrary_precision` numbers would
+    // reach JavaScript wrapped.
+    let cell_types = js_sys::JSON::parse(
+        &grafeo_bindings_common::entity::cell_types_to_json(&result.cell_types()).to_string(),
+    )?;
+    let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("cellTypes"), &cell_types);
 
     // kind: "rows" | "boolean" | "graph", and boolean for a SPARQL ASK
     let kind = match result.kind {

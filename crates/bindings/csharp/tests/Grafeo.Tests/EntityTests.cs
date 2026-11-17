@@ -34,4 +34,33 @@ public sealed class EntityTests : IDisposable
         Assert.Equal((ids["Alix"], ids["Gus"]), (edge.SourceId, edge.TargetId));
         Assert.Equal("Paris", edge.Properties["_note"]);
     }
+
+    /// <summary>
+    /// A value is a node or an edge where the engine typed it so: a map built with the keys of
+    /// a node is no node, an edge with a property named <c>_labels</c> is an edge, and nested
+    /// nodes count.
+    /// </summary>
+    [Fact]
+    public void NodesAndEdgesAreKnownByTypeNotByKeys()
+    {
+        _db.Execute(
+            "INSERT (:Person {name: 'Alix'})-[:KNOWS {_labels: ['L']}]->(:Person {name: 'Gus'})");
+
+        var forged = _db.Execute(
+            "MATCH (a:Person {name: 'Alix'}) "
+            + "RETURN a, {_id: 99, _labels: ['Person']} AS fake, "
+            + "{_id: 98, _type: 'KNOWS', _source: 1, _target: 2} AS fakeEdge");
+        Assert.Equal("Alix", Assert.Single(forged.Nodes).Properties["name"]);
+        Assert.Empty(forged.Edges);
+
+        var edges = _db.Execute("MATCH ()-[r:KNOWS]->() RETURN r");
+        Assert.Empty(edges.Nodes);
+        var edge = Assert.Single(edges.Edges);
+        Assert.Equal("KNOWS", edge.Type);
+        Assert.Equal(new List<object?> { "L" }, edge.Properties["_labels"]);
+
+        var nested = _db.Execute(
+            "MATCH (a:Person {name: 'Alix'})-[r]->(b) RETURN [a] AS l, {k: b} AS m");
+        Assert.Equal(["Alix", "Gus"], nested.Nodes.Select(node => (string)node.Properties["name"]!).Order());
+    }
 }

@@ -35,9 +35,14 @@ T withNativeStrings<T>(
 QueryResult buildResult(GrafeoBindings bindings, Pointer<Void> resultPtr) {
   try {
     final rows = parseRows(bindings.grafeoResultJson(resultPtr).toDartString());
-    final (nodes, edges) = extractEntities(rows);
+    final (nodes, edges) = parseEntities(
+      bindings.grafeoResultNodesJson(resultPtr).toDartString(),
+      bindings.grafeoResultEdgesJson(resultPtr).toDartString(),
+    );
     return QueryResult(
-      columns: extractColumns(rows),
+      columns: parseColumns(
+        bindings.grafeoResultColumnsJson(resultPtr).toDartString(),
+      ),
       rows: rows,
       nodes: nodes,
       edges: edges,

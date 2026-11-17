@@ -518,10 +518,6 @@ tests:
 
   # [11] Handling upper and lower bounded variable length match, empty interval 1
   - name: s11_handling_upper_and_lower_bounded_variable_length_match_empty_interval_1
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE (n0:A {name: 'n0'}),
@@ -564,10 +560,6 @@ tests:
 
   # [12] Handling upper and lower bounded variable length match, empty interval 2
   - name: s12_handling_upper_and_lower_bounded_variable_length_match_empty_interval_2
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE (n0:A {name: 'n0'}),
@@ -610,10 +602,6 @@ tests:
 
   # [13] Handling upper bounded variable length match, empty interval
   - name: s13_handling_upper_bounded_variable_length_match_empty_interval
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE (n0:A {name: 'n0'}),

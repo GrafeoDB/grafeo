@@ -43,10 +43,6 @@ tests:
 
   # [1] Limiting to zero results after deleting nodes affects the result set but not the side effects
   - name: s1_limiting_to_zero_results_after_deleting_nodes_affects_the_result_set_but_not_the_side_effects
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE (:N {num: 42})
@@ -65,10 +61,6 @@ tests:
 
   # [2] Skipping all results after deleting nodes affects the result set but not the side effects
   - name: s2_skipping_all_results_after_deleting_nodes_affects_the_result_set_but_not_the_side_effects
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE (:N {num: 42})
@@ -211,10 +203,6 @@ tests:
 
   # [8] Limiting to zero results after deleting relationships affects the result set but not the side effects
   - name: s8_limiting_to_zero_results_after_deleting_relationships_affects_the_result_set_but_not_the_side_effects
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE ()-[r:R {num: 42}]->()
@@ -232,10 +220,6 @@ tests:
 
   # [9] Skipping all results after deleting relationships affects the result set but not the side effects
   - name: s9_skipping_all_results_after_deleting_relationships_affects_the_result_set_but_not_the_side_effects
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE ()-[r:R {num: 42}]->()

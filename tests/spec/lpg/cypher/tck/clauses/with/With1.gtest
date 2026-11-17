@@ -116,10 +116,6 @@ tests:
 
   # [5] Forwarding null
   - name: s5_forwarding_null
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     query: |
       OPTIONAL MATCH (a:Start)
       WITH a

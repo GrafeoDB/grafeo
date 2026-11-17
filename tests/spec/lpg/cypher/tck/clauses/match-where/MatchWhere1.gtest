@@ -58,10 +58,6 @@ tests:
 
   # [2] Filter node with node label predicate on multi variables without any bindings
   - name: s2_filter_node_with_node_label_predicate_on_multi_variables_without_any_bindings
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE (:A)
@@ -246,10 +242,6 @@ tests:
 
   # [13] Filter path with false path length predicate on multi variables with one binding
   - name: s13_filter_path_with_false_path_length_predicate_on_multi_variables_with_one_binding
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE (a:A {name: 'A'})-[:KNOWS]->(b:B {name: 'B'})

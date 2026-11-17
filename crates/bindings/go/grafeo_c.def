@@ -136,6 +136,7 @@ grafeo_remove_node_label
 grafeo_remove_node_property
 grafeo_reset_schema
 grafeo_restore_to_epoch
+grafeo_result_columns_json
 grafeo_result_edges_created
 grafeo_result_edges_deleted
 grafeo_result_edges_json
@@ -150,6 +151,7 @@ grafeo_result_nodes_json
 grafeo_result_properties_set
 grafeo_result_row_count
 grafeo_result_rows_scanned
+grafeo_result_types_json
 grafeo_result_warning_code
 grafeo_result_warning_count
 grafeo_result_warning_kind

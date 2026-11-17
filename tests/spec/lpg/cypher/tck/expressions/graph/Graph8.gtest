@@ -78,10 +78,6 @@ tests:
 
   # [3] Using `keys()` on a single node, empty result
   - name: s3_using_keys_on_a_single_node_empty_result
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE ()
@@ -96,10 +92,6 @@ tests:
 
   # [4] Using `keys()` on an optionally matched node
   - name: s4_using_keys_on_an_optionally_matched_node
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE ()
@@ -130,10 +122,6 @@ tests:
 
   # [6] Using `keys()` on a relationship, empty result
   - name: s6_using_keys_on_a_relationship_empty_result
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE ()-[:KNOWS]->()
@@ -148,10 +136,6 @@ tests:
 
   # [7] Using `keys()` on an optionally matched relationship
   - name: s7_using_keys_on_an_optionally_matched_relationship
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE ()-[:KNOWS]->()

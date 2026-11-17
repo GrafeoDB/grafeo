@@ -839,10 +839,6 @@ tests:
     xfail:
       spec: "openCypher TCK 2024.3 TriadicSelection1: [17] Handling triadic friend of a friend that is a friend with different labels"
       issue: fix in 0.6.4
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE (a:A {name: 'a'}),

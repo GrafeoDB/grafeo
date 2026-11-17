@@ -1043,6 +1043,7 @@ pub(crate) fn explain_result(
     QueryResult {
         columns: vec!["plan".to_string()],
         column_types: vec![grafeo_common::types::LogicalType::String],
+        type_runs: Vec::new(),
         rows: vec![vec![Value::String(tree_text.into())]],
         execution_time_ms: None,
         rows_scanned: None,
@@ -1071,6 +1072,7 @@ pub(crate) fn physical_explain_result(
     Ok(QueryResult {
         columns: vec!["plan".to_string()],
         column_types: vec![grafeo_common::types::LogicalType::String],
+        type_runs: Vec::new(),
         rows: vec![vec![Value::String(output.into())]],
         execution_time_ms: None,
         rows_scanned: None,

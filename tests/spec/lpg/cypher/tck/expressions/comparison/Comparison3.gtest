@@ -179,10 +179,6 @@ tests:
 
   # [9] Handling empty range
   - name: s9_handling_empty_range
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE ({num: 3})

@@ -141,10 +141,6 @@ tests:
 
   # [7] Matching relationships into a list and matching variable length using the list, with bound nodes, wrong direction
   - name: s7_matching_relationships_into_a_list_and_matching_variable_length_using_the_list_with_bound_nodes_wrong_direction
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE (a:A), (b:B), (c:C)

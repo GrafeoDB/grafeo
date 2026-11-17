@@ -133,6 +133,9 @@ fn build_result_checked(
 
     let nodes_str = serde_json::to_string(&nodes_json_val).unwrap_or_default();
     let edges_str = serde_json::to_string(&edges_json_val).unwrap_or_default();
+    let types_str =
+        grafeo_bindings_common::entity::cell_types_to_json(&result.cell_types()).to_string();
+    let columns_str = serde_json::to_string(&result.columns).unwrap_or_default();
 
     Ok(Box::into_raw(Box::new(GrafeoResult {
         json: c_json,
@@ -141,6 +144,8 @@ fn build_result_checked(
         rows_scanned: result.rows_scanned.unwrap_or(0),
         nodes_json: CString::new(nodes_str).unwrap_or_default(),
         edges_json: CString::new(edges_str).unwrap_or_default(),
+        types_json: CString::new(types_str).unwrap_or_default(),
+        columns_json: CString::new(columns_str).unwrap_or_default(),
         counters: result.counters,
         kind: result.kind,
         warnings: crate::warning::c_warnings(&grafeo_bindings_common::warning::of_result(result)),
@@ -786,6 +791,40 @@ pub extern "C" fn grafeo_result_edges_json(result: *const GrafeoResult) -> *cons
     }
     // SAFETY: Caller guarantees valid pointer from grafeo_execute*.
     unsafe { &*result }.edges_json.as_ptr()
+}
+
+/// Get the column names of the result as a JSON array of strings, in their
+/// order, also for a result without rows (whose `grafeo_result_json` is
+/// `[]` and names no column).
+///
+/// The returned pointer is valid until `grafeo_free_result` is called.
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_result_columns_json(result: *const GrafeoResult) -> *const c_char {
+    if result.is_null() {
+        return std::ptr::null();
+    }
+    // SAFETY: Caller guarantees valid pointer from grafeo_execute*.
+    unsafe { &*result }.columns_json.as_ptr()
+}
+
+/// Get the type each cell of the result was built with, as JSON:
+/// `{"columns": [T, ...], "runs": [{"from": <row>, "columns": [T, ...]}, ...]}`.
+/// The rows before the first run have `columns`, a run's rows (from its
+/// `from` row up to the next run) its own. `T` is `"node"`, `"edge"`,
+/// `"path"`, `{"list": T}`, `{"tuple": [T, ...]}`, `{"struct": {"key": T}}`,
+/// `{"map": T}`, `"any"` or another type's lower-case name (`"int64"`). An
+/// object in `grafeo_result_json` is a node or an edge exactly where its
+/// type says so: `{"_id": 1, "_labels": []}` returned as a map is a map.
+///
+/// Experimental, new in 0.6.4: it may change or be removed in any release.
+/// The returned pointer is valid until `grafeo_free_result` is called.
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_result_types_json(result: *const GrafeoResult) -> *const c_char {
+    if result.is_null() {
+        return std::ptr::null();
+    }
+    // SAFETY: Caller guarantees valid pointer from grafeo_execute*.
+    unsafe { &*result }.types_json.as_ptr()
 }
 
 /// Free a query result.
@@ -3035,6 +3074,71 @@ mod tests {
         grafeo_free_database(db);
     }
 
+    /// The nodes of a result are the values its cell types say are nodes:
+    /// a map with the keys of a node is a map, also next to a real node.
+    #[test]
+    fn a_map_with_the_keys_of_a_node_is_no_node() {
+        let text = |ptr: *const c_char| {
+            assert!(!ptr.is_null());
+            // SAFETY: a non-null C string from our API, valid until the
+            // result is freed.
+            unsafe { std::ffi::CStr::from_ptr(ptr) }
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+        let json = |ptr| serde_json::from_str::<serde_json::Value>(&text(ptr)).unwrap();
+        let db = grafeo_open_memory();
+        let insert = CString::new("INSERT (:Person {name: 'Alix'})").unwrap();
+        grafeo_free_result(grafeo_execute(db, insert.as_ptr()));
+        let query =
+            CString::new("MATCH (p:Person) RETURN p, {_id: 99, _labels: ['Person']} AS fake")
+                .unwrap();
+        let result = grafeo_execute(db, query.as_ptr());
+        assert!(!result.is_null());
+        let nodes = json(grafeo_result_nodes_json(result));
+        assert_eq!(nodes.as_array().map(Vec::len), Some(1), "{nodes}");
+        assert_eq!(nodes[0]["properties"]["name"], "Alix");
+        let types = json(grafeo_result_types_json(result));
+        assert_eq!(types["columns"][0], "node", "{types}");
+        assert_ne!(types["columns"][1], "node", "{types}");
+        assert_eq!(types["runs"], serde_json::json!([]), "{types}");
+        assert!(grafeo_result_types_json(std::ptr::null()).is_null());
+        assert_eq!(
+            json(grafeo_result_columns_json(result)),
+            serde_json::json!(["p", "fake"])
+        );
+        grafeo_free_result(result);
+        grafeo_close(db);
+        grafeo_free_database(db);
+    }
+
+    /// A result without rows still names its columns, in their order: the
+    /// rows' JSON is `[]` and names none.
+    #[test]
+    fn an_empty_result_has_its_columns() {
+        let db = grafeo_open_memory();
+        let query = CString::new("MATCH (n:Nobody) RETURN n.name AS name, 1 AS one").unwrap();
+        let result = grafeo_execute(db, query.as_ptr());
+        assert!(!result.is_null());
+        // SAFETY: non-null C strings from our API, valid until the result is freed.
+        let text = |ptr| {
+            unsafe { std::ffi::CStr::from_ptr(ptr) }
+                .to_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(text(grafeo_result_json(result)), "[]");
+        assert_eq!(
+            text(grafeo_result_columns_json(result)),
+            r#"["name","one"]"#
+        );
+        assert!(grafeo_result_columns_json(std::ptr::null()).is_null());
+        grafeo_free_result(result);
+        grafeo_close(db);
+        grafeo_free_database(db);
+    }
+
     /// A GQL statement of one INSERT has no result (#580): no rows and no
     /// nodes. It returned the node it created, which `grafeo_result_json` and
     /// `grafeo_result_nodes_json` listed.
@@ -3057,6 +3161,7 @@ mod tests {
         assert_eq!(text(grafeo_result_json(result)), "[]");
         assert_eq!(text(grafeo_result_nodes_json(result)), "[]");
         assert_eq!(text(grafeo_result_edges_json(result)), "[]");
+        assert_eq!(text(grafeo_result_columns_json(result)), "[]");
         grafeo_free_result(result);
         assert_eq!(
             (

@@ -683,6 +683,18 @@ export declare class QueryResult {
   /** Get column names. */
   get columns(): Array<string>
   /**
+   * The type the value in `row` and `column` was built with: `"node"`,
+   * `"edge"` or `"path"`; `{list: t}`, `{tuple: [t, ...]}`,
+   * `{struct: {key: t}}` or `{map: t}` for what an array or an object
+   * holds; `"any"`; or the name of another type (`"int64"`). An object is
+   * a node or an edge exactly where its type says so: `{_id: 1,
+   * _labels: []}` returned as a map is a map.
+   *
+   * Experimental, new in 0.6.4: it may change or be removed in any
+   * release.
+   */
+  cellType(row: number, column: number): any
+  /**
    * The warnings the statement raised, ordered by code: a deprecated form
    * it wrote or ran, or a notice; empty when there were none.
    *

@@ -57,10 +57,6 @@ tests:
 
   # [2] Handle returned aliases inside an order by item which contains an aggregation expression
   - name: s2_handle_returned_aliases_inside_an_order_by_item_which_contains_an_aggregation_expression
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     query: |
       MATCH (me: Person)--(you: Person)
       RETURN me.age AS age, count(you.age) AS cnt
@@ -72,10 +68,6 @@ tests:
 
   # [3] Handle returned property accesses inside an order by item which contains an aggregation expression
   - name: s3_handle_returned_property_accesses_inside_an_order_by_item_which_contains_an_aggregation_expression
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     query: |
       MATCH (me: Person)--(you: Person)
       RETURN me.age AS age, count(you.age) AS cnt

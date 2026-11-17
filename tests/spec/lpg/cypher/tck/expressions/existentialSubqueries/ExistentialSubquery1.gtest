@@ -80,10 +80,6 @@ tests:
 
   # [3] Simple subquery without WHERE clause, not existing pattern
   - name: s3_simple_subquery_without_where_clause_not_existing_pattern
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE (a:A {prop: 1})-[:R]->(b:B {prop: 1}),
@@ -101,10 +97,6 @@ tests:
 
   # [4] Simple subquery with WHERE clause, not existing pattern
   - name: s4_simple_subquery_with_where_clause_not_existing_pattern
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE (a:A {prop: 1})-[:R]->(b:B {prop: 1}),

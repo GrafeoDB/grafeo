@@ -399,10 +399,6 @@ tests:
 
   # [17] Handle projected variables inside an order by item which contains an aggregation expression
   - name: s17_handle_projected_variables_inside_an_order_by_item_which_contains_an_aggregation_expression
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     query: |
       MATCH (me: Person)--(you: Person)
       WITH me.age AS age, count(you.age) AS cnt
@@ -415,10 +411,6 @@ tests:
 
   # [18]  Handle projected property accesses inside an order by item which contains an aggregation expression
   - name: s18_handle_projected_property_accesses_inside_an_order_by_item_which_contains_an_aggregation_expression
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     query: |
       MATCH (me: Person)--(you: Person)
       WITH me.age AS age, count(you.age) AS cnt

@@ -4221,7 +4221,15 @@ pub struct QueryResult {
     /// Column names from the RETURN clause.
     pub columns: Vec<String>,
     /// Column types - useful for distinguishing NodeId/EdgeId from plain integers.
+    ///
+    /// The types of the first rows: a result whose later rows were built
+    /// with other types (the branches of a `UNION` returning nodes in one and
+    /// edges in the other) reports each row's with [`cell_type`](Self::cell_type).
     pub column_types: Vec<grafeo_common::types::LogicalType>,
+    /// The rows from `.0` on have the column types `.1`, up to the next run;
+    /// the rows before the first run have `column_types`. Empty when every
+    /// row has `column_types`.
+    pub(crate) type_runs: Vec<(usize, Vec<grafeo_common::types::LogicalType>)>,
     /// The actual result rows.
     ///
     /// Use [`rows()`](Self::rows) for borrowed access or
@@ -4268,6 +4276,68 @@ pub struct QueryResult {
     pub warnings: Vec<QueryWarning>,
 }
 
+/// The type each cell of a result was built with, kept apart from its rows
+/// (see [`QueryResult::cell_types`]).
+///
+/// # Stability: Experimental
+///
+/// New in 0.6.4, as [`QueryResult::cell_type`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CellTypes {
+    first: Vec<grafeo_common::types::LogicalType>,
+    runs: Vec<(usize, Vec<grafeo_common::types::LogicalType>)>,
+}
+
+impl CellTypes {
+    /// The type of the value in `row` and `column`, as
+    /// [`QueryResult::cell_type`] says it.
+    #[must_use]
+    pub fn get(&self, row: usize, column: usize) -> &grafeo_common::types::LogicalType {
+        type_at(&self.first, &self.runs, row, column)
+    }
+
+    /// The column types of the rows before the first run.
+    #[must_use]
+    pub fn columns(&self) -> &[grafeo_common::types::LogicalType] {
+        &self.first
+    }
+
+    /// The runs: from the row `.0` on, the columns have the types `.1`, up
+    /// to the next run.
+    #[must_use]
+    pub fn runs(&self) -> &[(usize, Vec<grafeo_common::types::LogicalType>)] {
+        &self.runs
+    }
+}
+
+/// The type of the cell in `row` and `column` of rows whose types are
+/// `first`, then the runs `runs` (each from its first row on); `Any` outside
+/// them.
+fn type_at<'a>(
+    first: &'a [grafeo_common::types::LogicalType],
+    runs: &'a [(usize, Vec<grafeo_common::types::LogicalType>)],
+    row: usize,
+    column: usize,
+) -> &'a grafeo_common::types::LogicalType {
+    static ANY: grafeo_common::types::LogicalType = grafeo_common::types::LogicalType::Any;
+    let types = match runs.partition_point(|(start, _)| *start <= row) {
+        0 => first,
+        run => &runs[run - 1].1,
+    };
+    types.get(column).unwrap_or(&ANY)
+}
+
+/// The type a result reports for a column of type `column`: the shape of its
+/// records for a record column, the column's type otherwise.
+pub(crate) fn record_shape(
+    column: &grafeo_common::types::LogicalType,
+) -> grafeo_common::types::LogicalType {
+    match column {
+        grafeo_common::types::LogicalType::Records(shape) => (**shape).clone(),
+        other => other.clone(),
+    }
+}
+
 impl QueryResult {
     /// Checks that no column name repeats (#371). Bindings read rows by column
     /// name, so a repeated name would silently drop values. Used by every
@@ -4311,6 +4381,7 @@ impl QueryResult {
         Self {
             columns: Vec::new(),
             column_types: Vec::new(),
+            type_runs: Vec::new(),
             rows: Vec::new(),
             execution_time_ms: None,
             rows_scanned: None,
@@ -4330,6 +4401,7 @@ impl QueryResult {
         Self {
             columns: Vec::new(),
             column_types: Vec::new(),
+            type_runs: Vec::new(),
             rows: Vec::new(),
             execution_time_ms: None,
             rows_scanned: None,
@@ -4354,6 +4426,7 @@ impl QueryResult {
         Ok(Self {
             columns,
             column_types: vec![grafeo_common::types::LogicalType::Any; len],
+            type_runs: Vec::new(),
             rows: Vec::new(),
             execution_time_ms: None,
             rows_scanned: None,
@@ -4380,6 +4453,7 @@ impl QueryResult {
         Ok(Self {
             columns,
             column_types,
+            type_runs: Vec::new(),
             rows: Vec::new(),
             execution_time_ms: None,
             rows_scanned: None,
@@ -4407,6 +4481,7 @@ impl QueryResult {
         Ok(Self {
             columns,
             column_types: vec![grafeo_common::types::LogicalType::Any; len],
+            type_runs: Vec::new(),
             rows,
             execution_time_ms: None,
             rows_scanned: None,
@@ -4417,6 +4492,63 @@ impl QueryResult {
             kind: ResultKind::Rows,
             warnings: Vec::new(),
         })
+    }
+
+    /// The type the value in `row` and `column` was built with, `Any` outside
+    /// the result. It says where the value's nodes and edges are: a node or
+    /// edge record (a map) is a node or edge exactly where its type says
+    /// `Node` or `Edge`, also inside a list (`List`, `Tuple`), a map
+    /// (`Struct`, `Map`) or a path (`Path`). A map whose type does not say
+    /// so is a map, whatever its keys (`{_id: 1, _labels: []}`).
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.4, until node and edge values have types of their own: it
+    /// may change or be removed in any release, with a CHANGELOG entry. See
+    /// <https://grafeo.dev/stability/>.
+    #[must_use]
+    pub fn cell_type(&self, row: usize, column: usize) -> &grafeo_common::types::LogicalType {
+        type_at(&self.column_types, &self.type_runs, row, column)
+    }
+
+    /// The cell types of this result, for a reader that takes its rows apart
+    /// ([`into_rows`](Self::into_rows)) and reads the nodes and edges later.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// As [`cell_type`](Self::cell_type).
+    #[must_use]
+    pub fn cell_types(&self) -> CellTypes {
+        CellTypes {
+            first: self.column_types.clone(),
+            runs: self.type_runs.clone(),
+        }
+    }
+
+    /// Notes the column types of the rows pushed from now on, a chunk's:
+    /// record columns report the shape of their records. The first types
+    /// noted are `column_types`; later ones that differ start a run.
+    pub(crate) fn note_types(&mut self, types: &[grafeo_common::types::LogicalType]) {
+        let types: Vec<_> = types.iter().map(record_shape).collect();
+        if self.rows.is_empty() && self.type_runs.is_empty() {
+            self.column_types = types;
+            return;
+        }
+        // A run that has no rows yet is replaced.
+        if self
+            .type_runs
+            .last()
+            .is_some_and(|(first, _)| *first == self.rows.len())
+        {
+            self.type_runs.pop();
+        }
+        let current = self
+            .type_runs
+            .last()
+            .map_or(&self.column_types, |(_, types)| types);
+        if *current != types {
+            self.type_runs.push((self.rows.len(), types));
+        }
     }
 
     /// Appends a row to this result.

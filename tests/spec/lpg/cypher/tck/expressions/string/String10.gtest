@@ -138,10 +138,6 @@ tests:
 
   # [6] No string contains null
   - name: s6_no_string_contains_null
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE (:TheLabel {name: 'ABCDEF'}), (:TheLabel {name: 'AB'}),
@@ -158,10 +154,6 @@ tests:
 
   # [7] No string does not contain null
   - name: s7_no_string_does_not_contain_null
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE (:TheLabel {name: 'ABCDEF'}), (:TheLabel {name: 'AB'}),

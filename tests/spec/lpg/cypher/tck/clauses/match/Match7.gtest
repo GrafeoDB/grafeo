@@ -422,10 +422,6 @@ tests:
 
   # [22] MATCH after OPTIONAL MATCH
   - name: s22_match_after_optional_match
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE (s:Single), (a:A {num: 42}),

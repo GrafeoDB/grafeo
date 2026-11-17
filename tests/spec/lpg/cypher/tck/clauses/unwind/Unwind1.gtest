@@ -164,10 +164,6 @@ tests:
 
   # [8] Unwinding the empty list
   - name: s8_unwinding_the_empty_list
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     query: |
       UNWIND [] AS empty
       RETURN empty
@@ -178,10 +174,6 @@ tests:
 
   # [9] Unwinding null
   - name: s9_unwinding_null
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     query: |
       UNWIND null AS nil
       RETURN nil

@@ -134,6 +134,8 @@ pub use grafeo_engine::database::QueryResult;
 pub use grafeo_engine::database::ResultKind;
 // The warnings a result carries (`QueryResult::warnings`)
 pub use grafeo_engine::database::{QueryWarning, WarningKind};
+// The type of each cell (`QueryResult::cell_types`)
+pub use grafeo_engine::database::CellTypes;
 
 // Re-export MemoryUsage, ProjectionSpec at top level for convenience
 pub use grafeo_engine::MemoryUsage;

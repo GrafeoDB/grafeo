@@ -737,6 +737,42 @@ fn test_lists_maps_and_paths_hold_nodes_and_edges() {
     assert_eq!(text(field(&field(&row, "s"), "name")), "Alix");
 }
 
+/// `executeRaw` says the type each cell was built with (`cellTypes`): a node
+/// where the type says `"node"`, and a map built with the keys of a node is
+/// no node. A union whose branches return nodes, then edges, starts a run.
+#[wasm_bindgen_test]
+fn test_execute_raw_gives_the_cell_types() {
+    let db = Database::new().expect("create db");
+    db.execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
+        .expect("insert");
+    let json = |value: &wasm_bindgen::JsValue| -> serde_json::Value {
+        let text = js_sys::JSON::stringify(value).expect("stringify");
+        serde_json::from_str(&String::from(text)).expect("json")
+    };
+
+    let raw = db
+        .execute_raw(
+            "MATCH (a:Person {name: 'Alix'}) \
+             RETURN a, {_id: 9, _labels: []} AS fake, [a, 1] AS l",
+        )
+        .expect("query");
+    let types = json(&field(&raw, "cellTypes"));
+    assert_eq!(types["columns"][0], "node", "{types}");
+    assert!(!types["columns"][1].to_string().contains("node"), "{types}");
+    assert_eq!(types["columns"][2]["tuple"][0], "node", "{types}");
+    assert_eq!(types["runs"], serde_json::json!([]), "{types}");
+
+    let union = db
+        .execute_raw("MATCH (a:Person) RETURN a AS x UNION ALL MATCH ()-[r]->() RETURN r AS x")
+        .expect("union");
+    let types = json(&field(&union, "cellTypes"));
+    assert_eq!(types["columns"], serde_json::json!(["node"]));
+    assert_eq!(
+        types["runs"],
+        serde_json::json!([{"from": 2, "columns": ["edge"]}])
+    );
+}
+
 /// `hybridSearch` keeps only the nodes its `filters` option matches, and
 /// still returns up to `k` of them (#397). Without options it searches as
 /// before.

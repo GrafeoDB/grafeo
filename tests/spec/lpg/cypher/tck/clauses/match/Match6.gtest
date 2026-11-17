@@ -88,10 +88,6 @@ tests:
 
   # [4] Respecting direction when matching non-existent path
   - name: s4_respecting_direction_when_matching_non_existent_path
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE (a {name: 'a'}), (b {name: 'b'})
@@ -149,10 +145,6 @@ tests:
 
   # [8] Respecting direction when matching non-existent path with multiple directions
   - name: s8_respecting_direction_when_matching_non_existent_path_with_multiple_directions
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE (a), (b)

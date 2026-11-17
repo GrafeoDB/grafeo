@@ -305,16 +305,16 @@ def test_a_gql_class_needs_an_error_case_and_a_note(tmp_path):
         convert(tmp_path, {"s1_first": {"gql_class": "22"}}, ERROR_FEATURE)
 
 
-def test_a_table_without_rows_carries_the_column_gap_of_the_c_bindings(tmp_path):
+def test_a_table_without_rows_carries_no_gap(tmp_path):
+    # Every binding names the columns of a result without rows, so no runner
+    # skips such a case.
     row = "      | (:A {name: 'Alix'}) |\n"
     text = convert(
         tmp_path, {}, temporal_feature("MATCH (n) RETURN n").replace(row, "")
     )
-    assert "    runner_gap:\n      runners: [go, csharp, dart]\n" in text
-    assert "runner_gap" not in convert(
-        tmp_path, {}, temporal_feature("MATCH (n) RETURN n")
-    )
-    # A temporal case keeps the temporal gap, which covers these runners too
+    assert "runner_gap" not in text
+    assert "      values: |\n        | n |\n" in text
+    # A temporal case keeps the temporal gap
     temporal = temporal_feature("RETURN date('1984-10-11') AS n").replace(row, "")
     assert "runners: [python, node, wasm, go, csharp, dart]" in convert(
         tmp_path, {}, temporal

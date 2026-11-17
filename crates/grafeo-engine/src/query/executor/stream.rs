@@ -213,9 +213,9 @@ impl<'s> ResultStream<'s> {
     pub fn collect(mut self) -> Result<QueryResult> {
         let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone())?;
         while let Some(chunk) = self.next_chunk()? {
+            super::note_column_types(&chunk, &mut result);
             append_chunk(&chunk, &mut result);
         }
-        result.column_types = self.column_types;
         result.warnings = self.warnings.raised().to_query_warnings();
         Ok(result)
     }
@@ -430,9 +430,9 @@ impl OwnedResultStream {
     pub fn collect(mut self) -> Result<QueryResult> {
         let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone())?;
         while let Some(chunk) = self.next_chunk()? {
+            super::note_column_types(&chunk, &mut result);
             append_chunk(&chunk, &mut result);
         }
-        result.column_types = self.column_types;
         result.warnings = self.warnings.raised().to_query_warnings();
         Ok(result)
     }
@@ -523,7 +523,7 @@ fn refine_column_types(chunk: &DataChunk, types: &mut Vec<LogicalType>) {
         if matches!(slot, LogicalType::Any)
             && let Some(col) = chunk.column(col_idx)
         {
-            *slot = col.data_type().clone();
+            *slot = crate::database::record_shape(col.data_type());
         }
     }
 }

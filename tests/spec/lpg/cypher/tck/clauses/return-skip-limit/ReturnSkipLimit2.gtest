@@ -78,10 +78,6 @@ tests:
 
   # [3] LIMIT 0 should return an empty result
   - name: s3_limit_0_should_return_an_empty_result
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE (), (), ()
@@ -114,10 +110,6 @@ tests:
 
   # [5] ORDER BY with LIMIT 0 should not generate errors
   - name: s5_order_by_with_limit_0_should_not_generate_errors
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     query: |
       MATCH (p:Person)
       RETURN p.name AS name

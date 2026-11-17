@@ -106,10 +106,6 @@ tests:
     xfail:
       spec: "openCypher TCK 2024.3 Return4: [5] Keeping used expression 2"
       issue: fix in 0.6.5
-    runner_gap:
-      runners: [go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "the binding gives no column names for a result without rows"
     setup:
       - |
         CREATE ()

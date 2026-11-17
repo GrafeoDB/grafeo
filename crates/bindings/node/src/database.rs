@@ -2020,6 +2020,7 @@ pub(crate) fn js_result(mut result: EngineQueryResult) -> QueryResult {
     let profile = result.profile.take();
     let kind = result.kind;
     let warnings = grafeo_bindings_common::warning::of_result(&result);
+    let cell_types = result.cell_types();
     QueryResult::with_metrics(
         columns,
         result.into_rows(),
@@ -2032,6 +2033,7 @@ pub(crate) fn js_result(mut result: EngineQueryResult) -> QueryResult {
     .with_profile(profile)
     .with_kind(kind)
     .with_warnings(warnings)
+    .with_cell_types(cell_types)
 }
 
 /// A node of the engine as a JavaScript node.

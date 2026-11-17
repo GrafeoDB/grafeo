@@ -374,6 +374,7 @@ impl ProjectOperator {
         output_types: Vec<LogicalType>,
     ) -> Self {
         assert_eq!(projections.len(), output_types.len());
+        let output_types = record_types(&projections, output_types);
         Self {
             child,
             projections,
@@ -397,6 +398,7 @@ impl ProjectOperator {
         view: ReadView,
     ) -> Self {
         assert_eq!(projections.len(), output_types.len());
+        let output_types = record_types(&projections, output_types);
         Self {
             child,
             projections,
@@ -637,6 +639,16 @@ impl Operator for ProjectOperator {
                         LogicalType::Node => false,
                         _ => matches!(proj, ProjectExpr::EdgeResolve { .. }),
                     };
+                    // The column's type says which records this chunk holds.
+                    let kind = if edges {
+                        LogicalType::Edge
+                    } else {
+                        LogicalType::Node
+                    };
+                    *output_col = ValueVector::with_capacity(
+                        LogicalType::Records(Box::new(kind)),
+                        input.row_count(),
+                    );
                     for row in input.selected_indices() {
                         let value = if edges {
                             match input_col.get_edge_id(row) {
@@ -784,13 +796,31 @@ fn resolve_entities(
     })
 }
 
+/// The output types of `projections`: a projection that builds node and edge
+/// records types its column [`LogicalType::Records`] of the shape it builds,
+/// whatever `declared` says, so the records of a result are known by type.
+fn record_types(projections: &[ProjectExpr], declared: Vec<LogicalType>) -> Vec<LogicalType> {
+    projections
+        .iter()
+        .zip(declared)
+        .map(|(projection, declared)| match projection {
+            ProjectExpr::NodeResolve { .. } => LogicalType::Records(Box::new(LogicalType::Node)),
+            ProjectExpr::EdgeResolve { .. } => LogicalType::Records(Box::new(LogicalType::Edge)),
+            ProjectExpr::Entities { kind, .. } => {
+                LogicalType::Records(Box::new(kind.logical_type()))
+            }
+            _ => declared,
+        })
+        .collect()
+}
+
 /// Converts a [`Node`] to a `Value::Map` with metadata and properties.
 ///
 /// The map contains all node properties at the top level, `_id` (integer)
 /// and `_labels` (list of strings): those two always hold the node's id and
 /// labels, also when a property has the name (#254), which the map then
 /// leaves out.
-fn node_to_map(node: &Node) -> Value {
+pub(crate) fn node_to_map(node: &Node) -> Value {
     let mut map: BTreeMap<PropertyKey, Value> = node
         .properties
         .iter()

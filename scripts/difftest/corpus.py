@@ -464,6 +464,8 @@ WRITE_FIXTURES = {
     "rdf_clear": {"EP"},
     # Writes that break a listed standalone type, and a read of what went in
     "listed_type": {"EP"},
+    # A graph created, filled and replaced in one session
+    "graph_replace": {"EQ"},
 }
 
 
@@ -741,6 +743,7 @@ FIXTURES = {
     "rdf_sort_limit": rdf_sort_limit,
     "index_graphs": index_graphs,
     "listed_type": listed_type,
+    "graph_replace": empty,
 }
 
 CASES: list[Case] = []
@@ -3688,6 +3691,6 @@ for case_id, query in [
     ("EQ5", "MATCH (n) RETURN count(n) AS c"),
     ("EQ6", "USE GRAPH default"),
 ]:
-    case(case_id, query, GQL, "empty")
+    case(case_id, query, GQL, "graph_replace")
 
 # fmt: on

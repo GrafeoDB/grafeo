@@ -120,7 +120,7 @@ published() {
     [ "$waited" -lt 600 ] || break
     sleep "$delay"
     waited=$((waited + delay))
-    delay=$((delay < 60 ? delay * 2 : 60))
+    delay=$((delay * 2 < 60 ? delay * 2 : 60))
   done
   [ -n "$listed" ] || fail "@grafeo-db/js@$version lists no optional dependencies on npm after ${waited}s"
   printf '%s' "$listed" | assert_lists_all "$version" "$names"

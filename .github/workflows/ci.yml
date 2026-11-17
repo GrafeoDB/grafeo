@@ -1723,7 +1723,7 @@ jobs:
         run: python scripts/check_policy.py tree
       - name: Policy script tests
         run: |
-          uv pip install --system pytest
+          uv pip install --system pytest rdflib
           pytest scripts/tests -q
 
   # The one check to require on main and release/*: fails when any job it needs failed

@@ -19,17 +19,28 @@ git clone https://github.com/w3c/rdf-tests.git tests/spec/rdf/sparql/w3c/rdf-tes
 
 ## Converting W3C Manifests to .gtest Files
 
-The conversion script reads W3C manifest.ttl files and generates .gtest files:
+The conversion script reads a W3C manifest.ttl and writes one .gtest file of its
+query evaluation tests, in the manifest's order:
 
 ```bash
-# Convert SPARQL 1.1 aggregates tests
-python scripts/convert_w3c_sparql.py \
-  --manifest tests/spec/rdf/sparql/w3c/rdf-tests/sparql/sparql11/data-sparql11/aggregates/manifest.ttl \
+# Convert the SPARQL 1.1 aggregates tests
+uv run --with rdflib python scripts/convert_w3c_sparql.py \
+  --manifest tests/spec/rdf/sparql/w3c/rdf-tests/sparql/sparql11/aggregates/manifest.ttl \
   --output tests/spec/rdf/sparql/w3c/aggregates.gtest
 
 # Convert all SPARQL 1.1 tests
-python scripts/convert_w3c_sparql.py --all
+uv run --with rdflib python scripts/convert_w3c_sparql.py --all
 ```
+
+Each case carries the result the manifest names. The data becomes one `INSERT DATA`
+of N-Triples, with literals as the suite writes them. A SELECT result (.srx, .srj,
+.tsv) becomes `terms` rows, with the columns in the order the query names its
+variables; an ASK result becomes a `true` or `false` row. Rows compare as a sorted
+bag, so `ORDER BY` is not checked.
+
+Tests the .gtest format cannot express are left out and listed with their reason in
+the file's header: named graphs, updates, syntax-only tests, CSV format tests,
+entailment regimes, federated service data and graph results.
 
 ## Tracking Known Failures
 

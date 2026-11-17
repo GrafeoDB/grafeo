@@ -152,6 +152,13 @@ harness = false
 name = "topk_e2e"
 harness = false
 
+# Work per query (#794): counts only under `--cfg grafeo_work_counters` (see the file's doc);
+# checked against benches/work_per_query.baseline.json.
+[[bench]]
+name = "work_per_query"
+harness = false
+required-features = ["gql", "cypher", "sql-pgq", "algos"]
+
 [[bench]]
 name = "algorithms_bench"
 harness = false

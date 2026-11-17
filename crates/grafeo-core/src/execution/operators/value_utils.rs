@@ -27,6 +27,7 @@ pub fn value_to_f64(value: &Value) -> Option<f64> {
 /// Compares two values with partial ordering (returns `None` for incomparable types): numbers by
 /// value, a decimal among them (see [`Value::compare_decimal`]).
 pub fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
+    grafeo_common::work::count(grafeo_common::work::Work::ValueCompare, 1);
     match (a, b) {
         (Value::Decimal(_), _) | (_, Value::Decimal(_)) => a.compare_decimal(b),
         (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
@@ -72,6 +73,7 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
 /// [`sparql_order`](grafeo_common::types::sparql_order)).
 #[must_use]
 pub fn compare_values_total(a: &Value, b: &Value) -> Ordering {
+    grafeo_common::work::count(grafeo_common::work::Work::ValueCompare, 1);
     let by_type = type_rank(a).cmp(&type_rank(b));
     if by_type.is_ne() {
         return by_type;

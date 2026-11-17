@@ -511,8 +511,10 @@ impl QueryCache {
         };
         if found.is_some() {
             hits.fetch_add(1, Ordering::Relaxed);
+            grafeo_common::work::count(grafeo_common::work::Work::PlanCacheHit, 1);
         } else {
             misses.fetch_add(1, Ordering::Relaxed);
+            grafeo_common::work::count(grafeo_common::work::Work::PlanCacheMiss, 1);
         }
         found
     }

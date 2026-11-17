@@ -185,7 +185,9 @@ impl RowVersion {
     };
 
     /// Whether `read` sees the row: it sees the create and not the delete.
+    /// Counted as one visibility test, whichever path asks.
     fn visible(self, read: Read) -> bool {
+        grafeo_common::work::count(grafeo_common::work::Work::VisibilityTest, 1);
         read.sees(self.created) && !read.sees(self.deleted)
     }
 }
@@ -1284,6 +1286,7 @@ impl Inner {
     /// its vector's versions, a bit test while the vector is flat.
     #[inline]
     fn node_seen(&self, id: u64, read: Read) -> Option<(&NodeGroup, usize)> {
+        grafeo_common::work::count(grafeo_common::work::Work::RowGroupLookup, 1);
         let (group, row) = locate(id);
         let group = self.nodes.get(&group)?;
         group.versions.visible(row, read).then_some((group, row))
@@ -1293,6 +1296,7 @@ impl Inner {
     /// [`node_seen`](Self::node_seen)).
     #[inline]
     fn edge_seen(&self, id: u64, read: Read) -> Option<(&EdgeGroup, usize)> {
+        grafeo_common::work::count(grafeo_common::work::Work::RowGroupLookup, 1);
         let (group, row) = locate(id);
         let group = self.edges.get(&group)?;
         group.versions.visible(row, read).then_some((group, row))

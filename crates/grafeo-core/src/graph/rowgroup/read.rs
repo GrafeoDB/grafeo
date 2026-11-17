@@ -616,6 +616,7 @@ impl Inner {
         types: &[ArcStr],
         read: Read,
     ) -> Vec<(NodeId, EdgeId)> {
+        grafeo_common::work::count(grafeo_common::work::Work::AdjacencyRead, 1);
         let ids = self.type_ids(types);
         if ids.as_ref().is_some_and(SmallVec::is_empty) {
             return Vec::new();
@@ -677,6 +678,7 @@ impl Inner {
         far: &HopFrom<'_>,
         read: Read,
     ) -> Option<(Vec<CommonEdge>, usize)> {
+        grafeo_common::work::count(grafeo_common::work::Work::AdjacencyRead, 2);
         let kept =
             |hop: &HopFrom<'_>| hop.direction == Direction::Outgoing || self.keeps_incoming();
         if !kept(near) || !kept(far) {

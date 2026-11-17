@@ -508,6 +508,7 @@ mod wal_directory_checkpoint;
 mod wal_recovery;
 mod wal_rotation_panics;
 mod wal_transaction_groups;
+mod work_counters;
 mod write_checks;
 mod write_counters;
 mod write_directions;

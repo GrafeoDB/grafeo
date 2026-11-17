@@ -1649,6 +1649,7 @@ impl Columns {
 
     /// The value of key `key` at `row` as `read` sees it.
     pub(super) fn get_at(&self, key: u32, row: usize, read: Read) -> Option<Value> {
+        grafeo_common::work::count(grafeo_common::work::Work::ColumnRead, 1);
         self.by_key.get(&key)?.value_at(row, read)
     }
 

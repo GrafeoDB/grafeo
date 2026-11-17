@@ -948,6 +948,7 @@ impl Planner {
     /// or invalid expressions.
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
         let _span = grafeo_debug_span!("grafeo::query::plan");
+        grafeo_common::work::count(grafeo_common::work::Work::PlanBuilt, 1);
         self.check_statement_scope();
         self.take_plan_names(logical_plan);
         self.find_reachability_expands(&logical_plan.root);
@@ -973,6 +974,7 @@ impl Planner {
         &self,
         logical_plan: &LogicalPlan,
     ) -> Result<(PhysicalPlan, Vec<crate::query::profile::ProfileEntry>)> {
+        grafeo_common::work::count(grafeo_common::work::Work::PlanBuilt, 1);
         self.profiling.set(true);
         self.profile_entries.borrow_mut().clear();
         self.check_statement_scope();

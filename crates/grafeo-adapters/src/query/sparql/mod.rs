@@ -36,6 +36,7 @@ use grafeo_common::utils::error::Result;
 ///
 /// Returns a `QueryError` if the query is syntactically invalid.
 pub fn parse(query: &str) -> Result<Query> {
+    grafeo_common::work::count(grafeo_common::work::Work::Parse, 1);
     let mut parser = Parser::new(query);
     parser.parse()
 }

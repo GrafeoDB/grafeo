@@ -301,6 +301,10 @@ impl Operator for TopKOperator {
                             dst_col.push_value(val);
                         }
                     }
+                    grafeo_common::work::count(
+                        grafeo_common::work::Work::ColumnCopied,
+                        width as u64,
+                    );
                     builder.advance_row();
                     *position += 1;
                 }

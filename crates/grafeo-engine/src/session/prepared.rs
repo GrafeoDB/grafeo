@@ -45,17 +45,38 @@ impl Session {
             .with_rules(self.plan_options.rules)
     }
 
-    /// The cached plan of a statement in this session (`key`): for a call
+    /// The cached plan of a statement in this session (`key`), with the values
+    /// to fill it with ([`fill_prepared`](Self::fill_prepared)): for a call
     /// without values its optimized plan, for one with values `params` its
     /// prepared plan, which keeps the parameters (see `plan_with_values`).
-    pub(super) fn cached_plan(
+    ///
+    /// An empty map fills in nothing, so its call shares the plan of the call
+    /// without one (as `params_to_fill` decides after a parse), found before
+    /// any parse. Only GraphQL gives parameters defaults, and it does not come
+    /// here. An EXPLAIN plan is not shared so: without a map, its parameters
+    /// stay unresolved, where an empty map fails as missing them.
+    pub(super) fn cached_plan<'a>(
         &self,
         key: &CacheKey,
-        params: Option<&HashMap<String, Value>>,
-    ) -> Option<std::sync::Arc<CachedPlan>> {
+        params: Option<&'a HashMap<String, Value>>,
+    ) -> Option<(
+        std::sync::Arc<CachedPlan>,
+        Option<&'a HashMap<String, Value>>,
+    )> {
         match params {
-            None => self.plan_cache().get(key, Stage::Optimized),
-            Some(_) => self.plan_cache().get(&key.prepared(), Stage::Optimized),
+            None => self
+                .plan_cache()
+                .get(key, Stage::Optimized)
+                .map(|plan| (plan, None)),
+            Some(values) if values.is_empty() => self
+                .plan_cache()
+                .get(key, Stage::Optimized)
+                .filter(|plan| !plan.plan().explain)
+                .map(|plan| (plan, None)),
+            Some(_) => self
+                .plan_cache()
+                .get(&key.prepared(), Stage::Optimized)
+                .map(|plan| (plan, params)),
         }
     }
 

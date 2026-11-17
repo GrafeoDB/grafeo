@@ -4410,11 +4410,11 @@ impl Session {
         let cached = self.cached_plan(&cache_key, params);
         // The graph a `USE g` focuses the statement on, from here to its end.
         let mut _focus = None;
-        let optimized_plan = if let Some(plan) = cached {
+        let optimized_plan = if let Some((plan, fill)) = cached {
             self.check_external_access(&plan)?;
             _focus = self.focus_statement(plan.graph.as_deref())?;
             check_writes(&plan)?;
-            Self::fill_prepared(plan, params)?
+            Self::fill_prepared(plan, fill)?
         } else {
             // A statement with values that binds by value keeps its parsed
             // plan, which each call fills, binds and optimizes with its values
@@ -4445,8 +4445,8 @@ impl Session {
             check_writes(&logical_plan)?;
 
             // An empty parameter map fills in nothing and shares the plan of
-            // the same call without one; without a map, the lookup above missed.
-            let given = params.is_some();
+            // the same call without one, which `cached_plan` looked up before
+            // the parse.
             let params = params_to_fill(&mut logical_plan, params)?;
             if let Some(params) = params {
                 let active = self.active_store();
@@ -4458,12 +4458,6 @@ impl Session {
                     bound_by_value,
                     generation,
                 )?
-            } else if given
-                && let Some(cached_plan) = self
-                    .plan_cache()
-                    .get(&cache_key, crate::query::cache::Stage::Optimized)
-            {
-                prepared::RunPlan::Shared(cached_plan)
             } else {
                 // Semantic validation
                 let mut binder = Binder::new();
@@ -4928,9 +4922,9 @@ impl Session {
         let cache_key = self.plan_cache_key(query, QueryLanguage::Cypher);
         let generation = self.plan_cache().generation();
         let cached = self.cached_plan(&cache_key, params);
-        let optimized_plan = if let Some(plan) = cached {
+        let optimized_plan = if let Some((plan, fill)) = cached {
             self.check_external_access(&plan)?;
-            Self::fill_prepared(plan, params)?
+            Self::fill_prepared(plan, fill)?
         } else {
             // A statement that binds by value keeps its parsed plan (see
             // execute_gql).
@@ -4964,7 +4958,6 @@ impl Session {
                 },
             };
 
-            let given = params.is_some();
             let params = params_to_fill(&mut logical_plan, params)?;
             if let Some(params) = params {
                 {
@@ -4978,12 +4971,6 @@ impl Session {
                         generation,
                     )?
                 }
-            } else if given
-                && let Some(cached_plan) = self
-                    .plan_cache()
-                    .get(&cache_key, crate::query::cache::Stage::Optimized)
-            {
-                prepared::RunPlan::Shared(cached_plan)
             } else {
                 // Semantic validation
                 let mut binder = Binder::new();
@@ -5441,9 +5428,9 @@ impl Session {
         let cache_key = self.plan_cache_key(query, QueryLanguage::SqlPgq);
         let generation = self.plan_cache().generation();
         let cached = self.cached_plan(&cache_key, params);
-        let optimized_plan = if let Some(plan) = cached {
+        let optimized_plan = if let Some((plan, fill)) = cached {
             self.check_external_access(&plan)?;
-            Self::fill_prepared(plan, params)?
+            Self::fill_prepared(plan, fill)?
         } else {
             // A statement that binds by value keeps its parsed plan (see
             // execute_gql).
@@ -5479,7 +5466,6 @@ impl Session {
                 }
             };
 
-            let given = params.is_some();
             let params = params_to_fill(&mut logical_plan, params)?;
             if let Some(params) = params {
                 {
@@ -5494,12 +5480,6 @@ impl Session {
                         generation,
                     )?
                 }
-            } else if given
-                && let Some(cached_plan) = self
-                    .plan_cache()
-                    .get(&cache_key, crate::query::cache::Stage::Optimized)
-            {
-                prepared::RunPlan::Shared(cached_plan)
             } else {
                 let mut binder = Binder::new();
                 let _binding_context = binder.bind(&logical_plan)?;
@@ -7187,6 +7167,8 @@ impl Session {
             // The statement's memory, which its operators capture while it
             // is planned and converted.
             let _memory = self.enter_statement_memory();
+            // The profiled run's work, from here (see `grafeo_common::work`).
+            let _ = grafeo_common::work::take();
             let planner = self.create_planner_for_store(
                 Arc::clone(active),
                 viewing_epoch,
@@ -7198,10 +7180,12 @@ impl Session {
             let _result = executor.execute(physical_plan.operator.as_mut())?;
             let total_time_ms = started.elapsed().as_secs_f64() * 1000.0;
             let profile_tree = crate::query::profile::build_profile_tree(&plan.root, entries)?;
-            Ok(
-                crate::query::profile::profile_result(&profile_tree, total_time_ms)
-                    .with_warnings(planner.warnings().raised()),
+            Ok(crate::query::profile::profile_result(
+                &profile_tree,
+                total_time_ms,
+                &grafeo_common::work::take(),
             )
+            .with_warnings(planner.warnings().raised()))
         }))
     }
 

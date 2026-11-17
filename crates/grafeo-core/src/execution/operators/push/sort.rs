@@ -172,6 +172,7 @@ fn output_chunk(rows: &[Vec<Value>], column_types: &ColumnTypes, width: usize) -
                 out.push_value(row.get(column).cloned().unwrap_or(Value::Null));
             }
         }
+        grafeo_common::work::count(grafeo_common::work::Work::ColumnCopied, width as u64);
         builder.advance_row();
     }
     builder.finish()

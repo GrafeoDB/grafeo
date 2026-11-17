@@ -384,6 +384,10 @@ impl Operator for ApplyOperator {
                             }
 
                             // Reset and run inner plan for this outer row
+                            grafeo_common::work::count(
+                                grafeo_common::work::Work::SubplanReplanned,
+                                1,
+                            );
                             self.inner.reset();
 
                             match self.mode {

@@ -397,6 +397,7 @@ impl RdfPlanner {
     ///
     /// Returns an error if planning fails.
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
+        grafeo_common::work::count(grafeo_common::work::Work::PlanBuilt, 1);
         self.check_statement_scope();
         self.warnings.raise_all(logical_plan.warnings);
         let (operator, columns, types) =
@@ -425,6 +426,7 @@ impl RdfPlanner {
         &self,
         logical_plan: &LogicalPlan,
     ) -> Result<(PhysicalPlan, Vec<crate::query::profile::ProfileEntry>)> {
+        grafeo_common::work::count(grafeo_common::work::Work::PlanBuilt, 1);
         self.profiling.set(true);
         self.profile_entries.borrow_mut().clear();
         self.check_statement_scope();

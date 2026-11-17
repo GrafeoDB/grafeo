@@ -707,6 +707,8 @@ impl QueryProcessor {
 
             // EXPLAIN ANALYZE (PROFILE): execute with instrumentation, report stats.
             if optimized_plan.profile {
+                // The profiled run's work, from here (see `grafeo_common::work`).
+                let _ = grafeo_common::work::take();
                 let (mut physical_plan, entries) = planner.plan_profiled(&optimized_plan)?;
 
                 let start = grafeo_common::clock::Instant::now();
@@ -716,8 +718,12 @@ impl QueryProcessor {
 
                 let tree =
                     crate::query::profile::build_profile_tree(&optimized_plan.root, entries)?;
-                return Ok(crate::query::profile::profile_result(&tree, elapsed_ms)
-                    .with_warnings(planner.warnings().raised()));
+                return Ok(crate::query::profile::profile_result(
+                    &tree,
+                    elapsed_ms,
+                    &grafeo_common::work::take(),
+                )
+                .with_warnings(planner.warnings().raised()));
             }
 
             let mut physical_plan = planner.plan(&optimized_plan)?;

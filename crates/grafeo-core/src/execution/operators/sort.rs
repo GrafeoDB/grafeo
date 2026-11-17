@@ -257,6 +257,7 @@ impl Operator for SortOperator {
                 }
             }
 
+            grafeo_common::work::count(grafeo_common::work::Work::ColumnCopied, width as u64);
             builder.advance_row();
             self.output_position += 1;
         }

@@ -1446,6 +1446,10 @@ impl Operator for HashAggregateOperator {
                 }
             }
 
+            grafeo_common::work::count(
+                grafeo_common::work::Work::ColumnCopied,
+                (self.group_columns.len() + self.aggregates.len()) as u64,
+            );
             builder.advance_row();
 
             if builder.is_full() {

@@ -376,8 +376,8 @@ impl GrafeoDB {
     /// write-ahead log in the sidecar directory `<path>.wal/` while it is open.
     ///
     /// A build without the `wal` feature (the `grafeo` crate's default
-    /// features have none; its `storage` group and `lpg` profile add it)
-    /// keeps no write-ahead log: commits stay in memory until a checkpoint
+    /// features include it since 0.6.4, as do its `storage` group and `lpg`
+    /// profile) keeps no write-ahead log: commits stay in memory until a checkpoint
     /// writes them to the file (`close()`, dropping the database, or
     /// [`wal_checkpoint`](Self::wal_checkpoint)), and a process that exits
     /// without one loses the commits since the last.

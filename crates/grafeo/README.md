@@ -54,7 +54,7 @@ cargo add grafeo --no-default-features --features edge     # Minimal, for WebAss
 cargo add grafeo --features embed                          # ONNX embeddings (opt-in, about 17 MB)
 ```
 
-The default, `cargo add grafeo` alone, is the deprecated `embedded` profile (GQL, vector, text and hybrid search, change data capture, algorithms, parallel execution, the database file and Arrow export), removed in 0.7.0. It has no write-ahead log: commits reach the file at a checkpoint (`close()` or `wal_checkpoint()`), so add `wal` or a persona profile with storage for commits that survive a crash.
+The default, `cargo add grafeo` alone, is the deprecated `embedded` profile (GQL, vector, text and hybrid search, change data capture, algorithms, parallel execution, the `storage` group (database file, write-ahead log, disk spilling, memory-mapped reads) and Arrow export), removed in 0.7.0. It includes `storage` since 0.6.4, so a commit survives a crash and the query memory limit holds.
 
 See [Installation](https://docs.grafeo.dev/get-started/install/) and [API Stability](https://docs.grafeo.dev/project/stability/).
 

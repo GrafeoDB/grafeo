@@ -39,7 +39,7 @@ my_graph.db.wal/    # Write-ahead log, while the database is open
 
 Once a backup has been taken, `close()` keeps the part of the write-ahead log written since the last backup, with the backup's position in it, so the next incremental backup after a restart has it (see [Backups](../../languages/python/database.md#backup-and-restore)). A database that never takes a backup removes its write-ahead log at `close()`.
 
-In Rust the write-ahead log needs the `wal` feature, which the `lpg` profile and the `storage` group include and the default features do not. Without it, `GrafeoDB::open` works the same, but commits reach the file only at a checkpoint (`close()`, dropping the database, or `wal_checkpoint()`), and a process that crashes loses the commits since. The Python, Node.js, C, Go, C# and Dart packages include it.
+In Rust the write-ahead log needs the `wal` feature, which the default features (since 0.6.4), the `lpg` profile and the `storage` group include. Without it (`default-features = false`, or the `edge` profile), `GrafeoDB::open` works the same, but commits reach the file only at a checkpoint (`close()`, dropping the database, or `wal_checkpoint()`), and a process that crashes loses the commits since. The Python, Node.js, C, Go, C# and Dart packages include it.
 
 A path with a trailing separator (`./data/`) names the same database as `./data`, and `path()` (`db.path` in Python) returns the path as you gave it.
 
@@ -245,7 +245,7 @@ Stop every 0.5.x process that uses the database. 0.5.x cannot open the migrated 
 
 ### Builds Without the `wal` Feature
 
-A build without the `wal` feature cannot replay a WAL, so it refuses to open (or migrate) a 0.5.x WAL directory, whose WAL holds all of its data, and a 0.5.x file whose sidecar WAL holds files, and changes nothing. The `grafeo` Rust crate's default profile (`embedded`) is such a build. Open these databases read-write once with a build that has `wal`: the `grafeo` crate with the `lpg` or `storage` feature, the Python, Node.js or C bindings, or the `grafeo` command line tool. A 0.5.x file that was closed cleanly (its sidecar WAL is gone or empty) migrates in every build. For the same reason, a read-only and a read-write open in such a build refuse a 0.6 file whose WAL holds commits a writer left when it exited without `close()`, and change nothing: open it with a build that has `wal`, which replays them.
+A build without the `wal` feature cannot replay a WAL, so it refuses to open (or migrate) a 0.5.x WAL directory, whose WAL holds all of its data, and a 0.5.x file whose sidecar WAL holds files, and changes nothing. The `grafeo` Rust crate's default profile (`embedded`) was such a build in 0.6.0 to 0.6.3. Open these databases read-write once with a build that has `wal`: the `grafeo` crate with its default features (0.6.4 and later) or the `lpg` or `storage` feature, the Python, Node.js or C bindings, or the `grafeo` command line tool. A 0.5.x file that was closed cleanly (its sidecar WAL is gone or empty) migrates in every build. For the same reason, a read-only and a read-write open in such a build refuse a 0.6 file whose WAL holds commits a writer left when it exited without `close()`, and change nothing: open it with a build that has `wal`, which replays them.
 
 ### Builds Without the `triple-store`, `vector-index` or `text-index` Feature
 

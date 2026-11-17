@@ -6,6 +6,14 @@ on:
   pull_request:
     branches: [main, 'release/*']
 
+# A push to a branch with an open PR starts both triggers; keyed on the head repository and
+# branch, the later run cancels the earlier one, and a newer push cancels a stale run. A fork's
+# branch never shares a group with ours. Every push to main gets a group of its own, so no main
+# run is cancelled or dropped while pending.
+concurrency:
+  group: ${{ github.ref == 'refs/heads/main' && format('ci-main-{0}', github.run_id) || format('ci-{0}-{1}', github.event.pull_request.head.repo.full_name || github.repository, github.head_ref || github.ref_name) }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -845,8 +853,9 @@ jobs:
   # Memory per entity (#431): bytes per node, per edge and per property value on a fixed
   # workload, counted by an allocator and as `memory_usage()` reports them. Fails when a count
   # moves more than 5%, up or down, from benches/memory_per_entity.baseline.json, or is in one and
-  # not the other; a change that moves memory updates the baseline in the same commit
-  # (`-- --update-baseline`). The table goes to the job summary, with the compact store's targets
+  # not the other. Built with triple-store, so the RDF rows (bytes per triple) are checked too.
+  # A change that moves memory updates the baseline in the same commit (`-- --update-baseline`,
+  # with `--features triple-store`). The table goes to the job summary, with the compact store's targets
   # beside it.
   memory-per-entity:
     name: Memory per Entity
@@ -872,7 +881,7 @@ jobs:
             ${{ runner.os }}-cargo-memory-per-entity-
 
       - name: Measure and check against the baseline
-        run: cargo bench -p grafeo-engine --bench memory_per_entity -- --check
+        run: cargo bench -p grafeo-engine --features triple-store --bench memory_per_entity -- --check
         env:
           RUSTC_WRAPPER: sccache
 

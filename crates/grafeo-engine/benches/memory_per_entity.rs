@@ -12,6 +12,11 @@
 //! bench prints them as a table next to the issue's targets for the compact store (64 B per
 //! node, 96 B per edge, 16 B per integer property), which are shown, not checked.
 //!
+//! Built with `triple-store`, the bench also loads 100,000 N-Triples into a database of their own
+//! (20,000 subjects with five predicates each: three link to other subjects, two hold integer
+//! literals) and reports the bytes per triple the same two ways. CI checks that build; write the
+//! baseline with `--features triple-store`, since a build without it skips the RDF counts.
+//!
 //! ```bash
 //! cargo bench -p grafeo-engine --bench memory_per_entity                      # print the table
 //! cargo bench -p grafeo-engine --bench memory_per_entity -- --check           # and fail on a rise
@@ -44,6 +49,12 @@ const NODES: usize = 100_000;
 const EDGES_PER_NODE: usize = 3;
 /// The integer properties of each node.
 const PROPERTIES: [&str; 3] = ["id", "age", "score"];
+/// The triples of the RDF workload.
+#[cfg(feature = "triple-store")]
+const TRIPLES: usize = 100_000;
+/// The predicates of each RDF subject: 20,000 subjects in all.
+#[cfg(feature = "triple-store")]
+const PREDICATES: usize = 5;
 /// How far a count may move from the baseline, up or down, before `--check` fails, in percent.
 const MAX_CHANGE_PERCENT: f64 = 5.0;
 /// A change this small (in bytes per entity) never fails: rounding, not memory.
@@ -161,6 +172,77 @@ fn run() -> [Measure; 4] {
     [empty, with_nodes, with_properties, with_edges]
 }
 
+/// The RDF workload as N-Triples: each subject links to three others and holds two integers.
+#[cfg(feature = "triple-store")]
+fn triples_text() -> String {
+    let subjects = TRIPLES / PREDICATES;
+    let mut text = String::new();
+    for index in 0..TRIPLES {
+        let (subject, predicate) = (index / PREDICATES, index % PREDICATES);
+        let object = if predicate < 3 {
+            format!(
+                "<http://ex.org/s{}>",
+                (subject * 7 + predicate * 13 + 1) % subjects
+            )
+        } else {
+            format!(
+                "\"{}\"^^<http://www.w3.org/2001/XMLSchema#integer>",
+                (index * 31) % 1000
+            )
+        };
+        // Writing to a String cannot fail.
+        let _ = writeln!(
+            text,
+            "<http://ex.org/s{subject}> <http://ex.org/p{predicate}> {object} ."
+        );
+    }
+    text
+}
+
+/// The RDF database before and after the load.
+#[cfg(feature = "triple-store")]
+fn run_rdf() -> [Measure; 2] {
+    let db = GrafeoDB::new_in_memory();
+    // Built before the first measurement and dropped after the last, so no difference holds it.
+    let text = triples_text();
+    let empty = measure(&db);
+    let loaded = db
+        .load_rdf_text(&text, grafeo_engine::RdfFormat::NTriples, None)
+        .expect("load the triples");
+    assert_eq!(loaded, TRIPLES, "every triple is new");
+    let with_triples = measure(&db);
+    drop(text);
+    [empty, with_triples]
+}
+
+/// The RDF counts, each in bytes per triple.
+#[cfg(feature = "triple-store")]
+fn rdf_counts(phases: &[Measure; 2]) -> BTreeMap<&'static str, f64> {
+    let [empty, loaded] = phases;
+    let rdf = &loaded.usage.rdf;
+    BTreeMap::from([
+        (
+            "allocated per triple",
+            per(loaded.held.saturating_sub(empty.held), TRIPLES),
+        ),
+        (
+            "reported per triple",
+            per(
+                loaded
+                    .usage
+                    .total_bytes
+                    .saturating_sub(empty.usage.total_bytes),
+                TRIPLES,
+            ),
+        ),
+        (
+            "triples and indexes",
+            per(rdf.triples_and_indexes_bytes, TRIPLES),
+        ),
+        ("term dictionary", per(rdf.term_dictionary_bytes, TRIPLES)),
+    ])
+}
+
 /// `bytes` per one of `count`, rounded to a tenth of a byte.
 fn per(bytes: usize, count: usize) -> f64 {
     let tenths = (bytes * 10 + count / 2) / count;
@@ -228,7 +310,9 @@ fn counts(phases: &[Measure; 4]) -> BTreeMap<&'static str, f64> {
 
 /// The unit of a count, as the table prints it.
 fn unit(name: &str) -> &'static str {
-    if name.contains("property") || name.contains("properties") {
+    if name.contains("triple") || name.contains("term") {
+        "B/triple"
+    } else if name.contains("property") || name.contains("properties") {
         "B/value"
     } else if name.contains("edge") || name.contains("adjacency") {
         "B/edge"
@@ -388,8 +472,23 @@ fn main() {
         .and_then(|at| args.get(at + 1))
         .map(PathBuf::from);
 
-    let counts = counts(&run());
-    let baseline = read_baseline();
+    #[cfg_attr(
+        not(feature = "triple-store"),
+        expect(unused_mut, reason = "only RDF adds counts")
+    )]
+    let mut counts = counts(&run());
+    #[cfg(feature = "triple-store")]
+    counts.extend(rdf_counts(&run_rdf()));
+    // A build without RDF measures no triples: the baseline's RDF counts are not its to check.
+    #[cfg_attr(
+        feature = "triple-store",
+        expect(unused_mut, reason = "only a build without RDF drops counts")
+    )]
+    let mut baseline = read_baseline();
+    #[cfg(not(feature = "triple-store"))]
+    if let Ok(baseline) = baseline.as_mut() {
+        baseline.retain(|name, _| unit(name) != "B/triple");
+    }
     let table = table(&counts, baseline.as_ref().ok());
     println!(
         "Memory per entity: {NODES} nodes, {} properties each, {} edges\n\n{table}",

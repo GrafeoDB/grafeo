@@ -282,6 +282,11 @@ jobs:
           echo "Version $TAG_VERSION is consistent"
 
       - name: Publish crates in dependency order
+        # The workspace publishes its own crates seconds apart, so each one would fail the
+        # dependency cooldown in .cargo/config.toml on the crate just before it. The exception
+        # holds for this step only; every other resolution keeps the cooldown.
+        env:
+          CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE: allow
         run: |
           set -eo pipefail
 

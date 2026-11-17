@@ -802,7 +802,17 @@
       "source": "gavin-belson",
       "target": "hooli",
       "props": {
-        "role": "CEO"
+        "role": "CEO",
+        "to": "2017-06"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "gavin-belson",
+      "target": "hooli",
+      "props": {
+        "role": "CEO",
+        "from": "2018-04"
       }
     },
     {
@@ -889,7 +899,18 @@
       "source": "jack-barker",
       "target": "hooli",
       "props": {
-        "role": "Executive"
+        "role": "Executive",
+        "to": "2017-06"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "jack-barker",
+      "target": "hooli",
+      "props": {
+        "role": "CEO",
+        "from": "2017-06",
+        "to": "2018-04"
       }
     },
     {
@@ -1361,6 +1382,12 @@
       "type": "BUILT",
       "source": "bertram-gilfoyle",
       "target": "son-of-anton",
+      "props": {}
+    },
+    {
+      "type": "TRAINED_ON",
+      "source": "son-of-anton",
+      "target": "anton",
       "props": {}
     },
     {

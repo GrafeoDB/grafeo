@@ -50,6 +50,31 @@ def test_gilfoyle_built_anton(loaded):
     assert rows == ["Anton"]
 
 
+def test_son_of_anton_was_trained_on_anton(loaded):
+    rows = column(
+        loaded,
+        "MATCH (:AI {key: 'son-of-anton'})-[:TRAINED_ON]->(n:AI) RETURN n.key AS v",
+        "v",
+    )
+    assert rows == ["anton"]
+
+
+def test_hooli_ceos_in_order(loaded):
+    rows = list(
+        loaded.execute(
+            "MATCH (p:Person)-[w:WORKS_AT {role: 'CEO'}]->(:Company {key: 'hooli'}) "
+            "RETURN p.key AS who, w.from AS since, w.to AS until "
+            "ORDER BY coalesce(w.from, DATE '0001-01-01')"
+        )
+    )
+    assert [r["who"] for r in rows] == ["gavin-belson", "jack-barker", "gavin-belson"]
+    assert [(str(r["since"]), str(r["until"])) for r in rows] == [
+        ("None", "2017-06-01"),
+        ("2017-06-01", "2018-04-01"),
+        ("2018-04-01", "None"),
+    ]
+
+
 def test_jared_born_as_donald_dunn(loaded):
     assert column(
         loaded, "MATCH (n {key: 'jared-dunn'}) RETURN n.born_as AS v", "v"

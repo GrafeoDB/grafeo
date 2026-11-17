@@ -22,8 +22,8 @@ const lines = (s = source()) => emitTurtle(s).split('\n');
 test('prefixes are declared', () => {
   const l = lines();
   assert.deepEqual(l.slice(0, 4), [
-    '@prefix sv: <https://grafeo.dev/datasets/silicon-valley/vocab#> .',
-    '@prefix svr: <https://grafeo.dev/datasets/silicon-valley/id/> .',
+    '@prefix sv: <https://docs.grafeo.dev/datasets/silicon-valley/vocab#> .',
+    '@prefix svr: <https://docs.grafeo.dev/datasets/silicon-valley/id#> .',
     '@prefix schema: <https://schema.org/> .',
     '@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .',
   ]);

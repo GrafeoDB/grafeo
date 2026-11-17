@@ -26,10 +26,6 @@ KNOWN_MISSING_ANCHORS = set()
 # the CLI page is getting-started/cli.
 KNOWN_MISSING_PAGES = {"/user-guide/cli"}
 
-# RDF namespace IRIs: identifiers in the shipped datasets' Turtle and their READMEs, not links
-# to a page. They stay stable whatever the site serves at the path.
-NAMESPACE_IRIS = {"/datasets/silicon-valley/"}
-
 
 def fixture_lines(name):
     text = (FIXTURES / name).read_text(encoding="utf-8")
@@ -176,6 +172,8 @@ def resolve(url_path, pages):
     for cand in (f"{stem}/index.md", f"{stem}.md"):
         if cand in pages:
             return "page", pages[cand]
+        if (DOCS / cand).is_file():
+            return "page", cand
     return None, None
 
 
@@ -190,10 +188,7 @@ def test_repo_links_resolve():
         seen.add(key)
         kind, target = resolve(url_path, pages)
         if kind is None:
-            if (
-                url_path in KNOWN_MISSING_PAGES
-                or url_path.split("#", 1)[0] in NAMESPACE_IRIS
-            ):
+            if url_path in KNOWN_MISSING_PAGES:
                 continue
             problems.append(f"{source}: {url_path}: no such page")
             continue

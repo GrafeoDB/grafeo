@@ -59,20 +59,22 @@ def test_tricky_text_round_trips(db, tricky):
 
     g = rdflib.Graph()
     g.parse(out / "silicon-valley.ttl", format="turtle")
-    uri = rdflib.URIRef("https://grafeo.dev/datasets/silicon-valley/id/" + node["key"])
+    uri = rdflib.URIRef(
+        "https://docs.grafeo.dev/datasets/silicon-valley/id#" + node["key"]
+    )
     literal = g.value(uri, rdflib.URIRef("https://schema.org/description"))
     assert str(literal).encode("utf-8") == expected.encode("utf-8")
     for predicate, want in (
         ("https://schema.org/name", node["name"]),
         (
-            "https://grafeo.dev/datasets/silicon-valley/vocab#title",
+            "https://docs.grafeo.dev/datasets/silicon-valley/vocab#title",
             node["props"]["title"],
         ),
     ):
         got = g.value(uri, rdflib.URIRef(predicate))
         assert str(got).encode("utf-8") == want.encode("utf-8"), predicate
     palapa = g.value(
-        rdflib.URIRef("https://grafeo.dev/datasets/silicon-valley/id/the-palapa"),
+        rdflib.URIRef("https://docs.grafeo.dev/datasets/silicon-valley/id#the-palapa"),
         rdflib.URIRef("https://schema.org/name"),
     )
     assert str(palapa) == "Erlich's palapa"

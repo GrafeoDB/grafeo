@@ -1,5 +1,5 @@
-@prefix sv: <https://grafeo.dev/datasets/silicon-valley/vocab#> .
-@prefix svr: <https://grafeo.dev/datasets/silicon-valley/id/> .
+@prefix sv: <https://docs.grafeo.dev/datasets/silicon-valley/vocab#> .
+@prefix svr: <https://docs.grafeo.dev/datasets/silicon-valley/id#> .
 @prefix schema: <https://schema.org/> .
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 
@@ -488,6 +488,7 @@ svr:bertram-gilfoyle sv:rivalOf svr:dinesh-chugtai .
 svr:dinesh-chugtai sv:rivalOf svr:bertram-gilfoyle .
 svr:gavin-belson sv:rivalOf svr:richard-hendricks .
 svr:jian-yang sv:rivalOf svr:erlich-bachman .
+svr:son-of-anton sv:trainedOn svr:anton .
 svr:pied-piper-app sv:uses svr:middle-out .
 svr:piper-chat sv:uses svr:middle-out .
 svr:pipercoin sv:uses svr:blockchain .
@@ -763,7 +764,17 @@ svr:works-at-gavin-belson-hooli-1
     a sv:Employment ;
     sv:person svr:gavin-belson ;
     sv:company svr:hooli ;
+    sv:from "2018-04-01"^^xsd:date ;
+    sv:fromPrecision "month" ;
     sv:role "CEO" .
+
+svr:works-at-gavin-belson-hooli-2
+    a sv:Employment ;
+    sv:person svr:gavin-belson ;
+    sv:company svr:hooli ;
+    sv:role "CEO" ;
+    sv:to "2017-06-01"^^xsd:date ;
+    sv:toPrecision "month" .
 
 svr:works-at-hoover-hooli-1
     a sv:Employment ;
@@ -775,7 +786,19 @@ svr:works-at-jack-barker-hooli-1
     a sv:Employment ;
     sv:person svr:jack-barker ;
     sv:company svr:hooli ;
-    sv:role "Executive" .
+    sv:from "2017-06-01"^^xsd:date ;
+    sv:fromPrecision "month" ;
+    sv:role "CEO" ;
+    sv:to "2018-04-01"^^xsd:date ;
+    sv:toPrecision "month" .
+
+svr:works-at-jack-barker-hooli-2
+    a sv:Employment ;
+    sv:person svr:jack-barker ;
+    sv:company svr:hooli ;
+    sv:role "Executive" ;
+    sv:to "2017-06-01"^^xsd:date ;
+    sv:toPrecision "month" .
 
 svr:works-at-jack-barker-pied-piper-1
     a sv:Employment ;

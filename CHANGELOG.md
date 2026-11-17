@@ -13,6 +13,8 @@ Performance and memory release, in progress: this section lists what has landed 
 ### Changed
 
 - **The Rust crate's default features include `storage`**: `grafeo` with its default features (`embedded`) now logs each commit beside the database file (`<path>.wal/`), so a commit survives a crash, and enforces `Config::with_query_memory_limit`, spilling to disk or failing with `GRAFEO-S001`, as the Python, Node.js and C packages do. Before, a commit reached the file only at a checkpoint and a crash lost every commit since. Each commit now pays the log's write, batched as `Config::with_wal_durability` sets; a build with `default-features = false` and without `storage` keeps the old behaviour.
+- **The demo dataset links Son of Anton to Anton and dates Hooli's CEOs**: `grafeo-datasets` and `@grafeo-db/datasets` add the edge type `TRAINED_ON` (Son of Anton to Anton), and Hooli's `CEO` periods are dated: Gavin Belson until 2017-06 and from 2018-04, Jack Barker in between.
+- **The demo dataset's RDF namespaces move to docs.grafeo.dev**: `sv:` is `https://docs.grafeo.dev/datasets/silicon-valley/vocab#` and `svr:` `https://docs.grafeo.dev/datasets/silicon-valley/id#` (a resource was `.../id/<key>`, now `.../id#<key>`), so every IRI opens a page that describes it; data that stored the 0.6.3 IRIs needs them rewritten.
 
 ## [0.6.3] - 2026-11-15
 

@@ -13,6 +13,7 @@ export type EdgeType =
   | 'USES'
   | 'COMPETES_WITH'
   | 'BUILT'
+  | 'TRAINED_ON'
   | 'OWNS'
   | 'ATTENDED'
   | 'LOCATED_IN';

@@ -328,11 +328,23 @@ fn generate_single_test(output: &mut String, spec: &TestSpec<'_>) {
     writeln!(output, "    #[test]").unwrap();
     if let Some(reason) = &tc.skip {
         writeln!(output, "    #[ignore = {reason:?}]").unwrap();
+    } else if let Some(gap) = tc
+        .runner_gap
+        .as_ref()
+        .filter(|gap| gap.runners.iter().any(|r| r == "rust"))
+    {
+        let reason = format!("runner gap: {} ({})", gap.reason, gap.issue);
+        writeln!(output, "    #[ignore = {reason:?}]").unwrap();
     }
     writeln!(output, "    fn {fn_name}() {{").unwrap();
     let mut body = String::new();
     generate_body(&mut body, spec, language, model);
-    match &tc.xfail {
+    // A runner the xfail names in `passes_in` runs the case as a normal one
+    let xfail = tc
+        .xfail
+        .as_ref()
+        .filter(|xfail| !xfail.passes_in.iter().any(|r| r == "rust"));
+    match xfail {
         // Passes as the expected failure only on a `SpecFailure`; a pass is an XPASS, and any
         // other panic goes on (see `run_xfail`).
         Some(xfail) => {
@@ -409,6 +421,14 @@ fn generate_body(output: &mut String, spec: &TestSpec<'_>, language: &str, model
     // Setup queries run in the file's declared language and model. This allows
     // SPARQL tests to use INSERT DATA in setup, Cypher tests to use CREATE, etc.
     // For rosetta variant tests, setup always uses meta.language (the file default).
+    for statement in &tc.setup_gql {
+        writeln!(
+            output,
+            "        execute_query_with_model(&db, \"gql\", \"lpg\", \"{}\");",
+            escape_rust_string(statement)
+        )
+        .unwrap();
+    }
     let setup_language = &file.meta.language;
     for setup_q in &tc.setup {
         writeln!(
@@ -441,7 +461,15 @@ fn generate_body(output: &mut String, spec: &TestSpec<'_>, language: &str, model
 
     // Execute queries (all but last are fire-and-forget, last captures result)
     if queries.len() == 1 {
-        generate_execute_and_assert(output, &queries[0], language, model, tc, false);
+        generate_execute_and_assert(
+            output,
+            &queries[0],
+            language,
+            model,
+            tc,
+            false,
+            &file.meta.values_dialect,
+        );
     } else {
         let has_params = !tc.params.is_empty();
 
@@ -475,7 +503,15 @@ fn generate_body(output: &mut String, spec: &TestSpec<'_>, language: &str, model
         }
         // Last query: capture result and assert
         let last = &queries[queries.len() - 1];
-        generate_execute_and_assert(output, last, language, model, tc, has_params);
+        generate_execute_and_assert(
+            output,
+            last,
+            language,
+            model,
+            tc,
+            has_params,
+            &file.meta.values_dialect,
+        );
     }
 }
 
@@ -543,6 +579,9 @@ fn param_value_code(param: &ParamText) -> Result<String, String> {
     }
     if text == "true" || text == "false" {
         return Ok(format!("{VALUE}::Bool({text})"));
+    }
+    if text == "null" {
+        return Ok(format!("{VALUE}::Null"));
     }
     Ok(format!(
         "{VALUE}::String(\"{}\".into())",
@@ -817,6 +856,7 @@ fn generate_execute_and_assert(
     model: &str,
     tc: &TestCase,
     params_already_emitted: bool,
+    values_dialect: &str,
 ) {
     let expect = &tc.expect;
     let has_params = !tc.params.is_empty();
@@ -825,6 +865,11 @@ fn generate_execute_and_assert(
     // (multi-statement tests emit params before the fire-and-forget loop).
     if has_params && !params_already_emitted {
         generate_params_hashmap(output, tc);
+    }
+
+    // The graph before the statement, when its side effects are checked
+    if expect.side_effects.is_some() {
+        writeln!(output, "        let before = observe_graph(&db);").unwrap();
     }
 
     // Error case: a message to contain, a GQLSTATUS to have, or both
@@ -859,6 +904,7 @@ fn generate_execute_and_assert(
             option(&expect.gql_status)
         )
         .unwrap();
+        generate_side_effects(output, expect);
         return;
     }
 
@@ -882,6 +928,8 @@ fn generate_execute_and_assert(
         )
         .unwrap();
     }
+
+    generate_side_effects(output, expect);
 
     // The warnings, also when none are expected: a statement that raises one
     // it should not fails here.
@@ -910,6 +958,20 @@ fn generate_execute_and_assert(
             cols.join(", ")
         )
         .unwrap();
+    }
+
+    // Typed rows in the TCK's value notation
+    if let Some(table) = &expect.values {
+        writeln!(
+            output,
+            "        assert_values(&db, &result, \"{}\", {}, {}, {});",
+            escape_rust_string(table),
+            expect.ordered,
+            expect.unordered_lists,
+            values_dialect == "tck"
+        )
+        .unwrap();
+        return;
     }
 
     // Empty check
@@ -986,4 +1048,22 @@ fn generate_execute_and_assert(
             writeln!(output, "        assert_rows_sorted(&result, &expected);").unwrap();
         }
     }
+}
+
+/// Emits the check of the statement's side effects against `before`, when the case names
+/// them (`side_effects:`).
+fn generate_side_effects(output: &mut String, expect: &Expect) {
+    let Some(counts) = &expect.side_effects else {
+        return;
+    };
+    let pairs: Vec<String> = counts
+        .iter()
+        .map(|(key, count)| format!("(\"{key}\", {count})"))
+        .collect();
+    writeln!(
+        output,
+        "        assert_side_effects(&before, &observe_graph(&db), &[{}]);",
+        pairs.join(", ")
+    )
+    .unwrap();
 }

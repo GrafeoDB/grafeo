@@ -1,0 +1,747 @@
+{
+  "about": "Cases every spec runner's `values:` comparison must agree on. `cell` is a cell in TCK value notation, `actual` a result value in the neutral form below, `match` the verdict. `dialect` is `tck` where the case needs `values_dialect: tck`, otherwise `strict`. `unordered_lists` sets that flag. Neutral form: null and booleans as themselves; {\"int\": \"<digits>\"}; {\"float\": \"<text>\" or \"NaN\", \"Inf\", \"-Inf\"}; {\"string\": \"...\"}; [list]; {\"map\": {key: value}}; {\"node\": {\"id\": n, \"labels\": [...], \"properties\": {...}}}; {\"relationship\": {\"id\": n, \"type\": \"T\", \"source\": n, \"target\": n, \"properties\": {...}}}; {\"path\": {\"nodes\": [node], \"relationships\": [relationship]}}; {\"cypher\": \"<expression>\"} for the value `RETURN <expression>` gives (temporals, so their Cypher toString() is Grafeo's own). A case with `limitation` is a known false verdict, the opposite of `match`, until the engine fixes what it names: runners assert the opposite, so the fix flips it.",
+  "cases": [
+    {
+      "cell": "1",
+      "actual": {
+        "int": "1"
+      },
+      "match": true
+    },
+    {
+      "cell": "1",
+      "actual": {
+        "float": "1.0"
+      },
+      "match": false,
+      "runner_gaps": {
+        "node": "JavaScript has one number type (the cell_type accessor)",
+        "wasm": "JavaScript has one number type (the cell_type accessor)"
+      }
+    },
+    {
+      "cell": "1",
+      "actual": {
+        "string": "1"
+      },
+      "match": false
+    },
+    {
+      "cell": "1",
+      "actual": true,
+      "match": false
+    },
+    {
+      "cell": "-9223372036854775808",
+      "actual": {
+        "int": "-9223372036854775808"
+      },
+      "match": true
+    },
+    {
+      "cell": "1.0",
+      "actual": {
+        "float": "1.0"
+      },
+      "match": true
+    },
+    {
+      "cell": "1.0",
+      "actual": {
+        "int": "1"
+      },
+      "match": false,
+      "runner_gaps": {
+        "node": "JavaScript has one number type (the cell_type accessor)",
+        "wasm": "JavaScript has one number type (the cell_type accessor)"
+      }
+    },
+    {
+      "cell": "1e-3",
+      "actual": {
+        "float": "0.001"
+      },
+      "match": true
+    },
+    {
+      "cell": "0.1",
+      "actual": {
+        "float": "0.1"
+      },
+      "match": true
+    },
+    {
+      "cell": "NaN",
+      "actual": {
+        "float": "NaN"
+      },
+      "match": true
+    },
+    {
+      "cell": "-Inf",
+      "actual": {
+        "float": "-Inf"
+      },
+      "match": true
+    },
+    {
+      "cell": "Inf",
+      "actual": {
+        "float": "-Inf"
+      },
+      "match": false
+    },
+    {
+      "cell": "'Alix'",
+      "actual": {
+        "string": "Alix"
+      },
+      "match": true
+    },
+    {
+      "cell": "'Alix'",
+      "actual": {
+        "string": "alix"
+      },
+      "match": false
+    },
+    {
+      "cell": "'🧐🍌❖⋙⚐'",
+      "actual": {
+        "string": "🧐🍌❖⋙⚐"
+      },
+      "match": true
+    },
+    {
+      "cell": "(:𝒜ñ {𝒜x: '🧐'})",
+      "actual": {
+        "node": {
+          "id": 0,
+          "labels": [
+            "𝒜ñ"
+          ],
+          "properties": {
+            "𝒜x": {
+              "string": "🧐"
+            }
+          }
+        }
+      },
+      "match": true
+    },
+    {
+      "cell": "'it\\'s'",
+      "actual": {
+        "string": "it's"
+      },
+      "match": true
+    },
+    {
+      "cell": "''",
+      "actual": {
+        "string": ""
+      },
+      "match": true
+    },
+    {
+      "cell": "''",
+      "actual": null,
+      "match": false
+    },
+    {
+      "cell": "true",
+      "actual": true,
+      "match": true
+    },
+    {
+      "cell": "true",
+      "actual": {
+        "string": "true"
+      },
+      "match": false
+    },
+    {
+      "cell": "null",
+      "actual": null,
+      "match": true
+    },
+    {
+      "cell": "null",
+      "actual": {
+        "string": "null"
+      },
+      "match": false
+    },
+    {
+      "cell": "[1, 'a']",
+      "actual": [
+        {
+          "int": "1"
+        },
+        {
+          "string": "a"
+        }
+      ],
+      "match": true
+    },
+    {
+      "cell": "[1, 'a']",
+      "actual": [
+        {
+          "string": "a"
+        },
+        {
+          "int": "1"
+        }
+      ],
+      "match": false
+    },
+    {
+      "cell": "[1, 'a']",
+      "actual": [
+        {
+          "string": "a"
+        },
+        {
+          "int": "1"
+        }
+      ],
+      "unordered_lists": true,
+      "match": true
+    },
+    {
+      "cell": "[[2, 1]]",
+      "actual": [
+        [
+          {
+            "int": "1"
+          },
+          {
+            "int": "2"
+          }
+        ]
+      ],
+      "unordered_lists": true,
+      "match": true
+    },
+    {
+      "cell": "[1, 1, 2]",
+      "actual": [
+        {
+          "int": "1"
+        },
+        {
+          "int": "2"
+        },
+        {
+          "int": "2"
+        }
+      ],
+      "unordered_lists": true,
+      "match": false
+    },
+    {
+      "cell": "[]",
+      "actual": [],
+      "match": true
+    },
+    {
+      "cell": "[]",
+      "actual": null,
+      "match": false
+    },
+    {
+      "cell": "{name: 'Gus', age: 30}",
+      "actual": {
+        "map": {
+          "age": {
+            "int": "30"
+          },
+          "name": {
+            "string": "Gus"
+          }
+        }
+      },
+      "match": true
+    },
+    {
+      "cell": "{name: 'Gus'}",
+      "actual": {
+        "map": {
+          "name": {
+            "string": "Gus"
+          },
+          "age": {
+            "int": "30"
+          }
+        }
+      },
+      "match": false
+    },
+    {
+      "cell": "{k: null}",
+      "actual": {
+        "map": {
+          "k": null
+        }
+      },
+      "match": true
+    },
+    {
+      "cell": "{k: null}",
+      "actual": {
+        "map": {}
+      },
+      "match": false
+    },
+    {
+      "cell": "()",
+      "actual": {
+        "node": {
+          "id": 7,
+          "labels": [],
+          "properties": {}
+        }
+      },
+      "match": true
+    },
+    {
+      "cell": "(:A:B {name: 'Alix'})",
+      "actual": {
+        "node": {
+          "id": 0,
+          "labels": [
+            "B",
+            "A"
+          ],
+          "properties": {
+            "name": {
+              "string": "Alix"
+            }
+          }
+        }
+      },
+      "match": true
+    },
+    {
+      "cell": "(:A {name: 'Alix'})",
+      "actual": {
+        "node": {
+          "id": 0,
+          "labels": [
+            "A",
+            "B"
+          ],
+          "properties": {
+            "name": {
+              "string": "Alix"
+            }
+          }
+        }
+      },
+      "match": false
+    },
+    {
+      "cell": "(:A)",
+      "actual": {
+        "node": {
+          "id": 0,
+          "labels": [
+            "A"
+          ],
+          "properties": {
+            "name": {
+              "string": "Alix"
+            }
+          }
+        }
+      },
+      "match": false
+    },
+    {
+      "cell": "(:A {n: 1})",
+      "actual": {
+        "node": {
+          "id": 0,
+          "labels": [
+            "A"
+          ],
+          "properties": {
+            "n": {
+              "float": "1.0"
+            }
+          }
+        }
+      },
+      "match": false,
+      "runner_gaps": {
+        "node": "JavaScript has one number type (the cell_type accessor)",
+        "wasm": "JavaScript has one number type (the cell_type accessor)"
+      }
+    },
+    {
+      "cell": "()",
+      "actual": {
+        "map": {
+          "_id": {
+            "int": "1"
+          },
+          "_labels": []
+        }
+      },
+      "match": false,
+      "limitation": "A map with `_id` and `_labels` comes back as a node"
+    },
+    {
+      "cell": "{_id: 1, _labels: []}",
+      "actual": {
+        "node": {
+          "id": 1,
+          "labels": [],
+          "properties": {}
+        }
+      },
+      "match": false
+    },
+    {
+      "cell": "{_id: 1, _labels: []}",
+      "actual": {
+        "map": {
+          "_id": {
+            "int": "1"
+          },
+          "_labels": []
+        }
+      },
+      "match": true,
+      "limitation": "A map with `_id` and `_labels` comes back as a node"
+    },
+    {
+      "cell": "[:KNOWS {since: 2020}]",
+      "actual": {
+        "relationship": {
+          "id": 3,
+          "type": "KNOWS",
+          "source": 0,
+          "target": 1,
+          "properties": {
+            "since": {
+              "int": "2020"
+            }
+          }
+        }
+      },
+      "match": true
+    },
+    {
+      "cell": "[:KNOWS]",
+      "actual": {
+        "relationship": {
+          "id": 3,
+          "type": "LIKES",
+          "source": 0,
+          "target": 1,
+          "properties": {}
+        }
+      },
+      "match": false
+    },
+    {
+      "cell": "[:KNOWS]",
+      "actual": {
+        "map": {
+          "_id": {
+            "int": "3"
+          },
+          "_type": {
+            "string": "KNOWS"
+          }
+        }
+      },
+      "match": false
+    },
+    {
+      "cell": "<(:A)-[:T]->(:B)>",
+      "actual": {
+        "path": {
+          "nodes": [
+            {
+              "id": 0,
+              "labels": [
+                "A"
+              ],
+              "properties": {}
+            },
+            {
+              "id": 1,
+              "labels": [
+                "B"
+              ],
+              "properties": {}
+            }
+          ],
+          "relationships": [
+            {
+              "id": 5,
+              "type": "T",
+              "source": 0,
+              "target": 1,
+              "properties": {}
+            }
+          ]
+        }
+      },
+      "match": true
+    },
+    {
+      "cell": "<(:A)<-[:T]-(:B)>",
+      "actual": {
+        "path": {
+          "nodes": [
+            {
+              "id": 0,
+              "labels": [
+                "A"
+              ],
+              "properties": {}
+            },
+            {
+              "id": 1,
+              "labels": [
+                "B"
+              ],
+              "properties": {}
+            }
+          ],
+          "relationships": [
+            {
+              "id": 5,
+              "type": "T",
+              "source": 0,
+              "target": 1,
+              "properties": {}
+            }
+          ]
+        }
+      },
+      "match": false
+    },
+    {
+      "cell": "<(:A)<-[:T]-(:B)>",
+      "actual": {
+        "path": {
+          "nodes": [
+            {
+              "id": 0,
+              "labels": [
+                "A"
+              ],
+              "properties": {}
+            },
+            {
+              "id": 1,
+              "labels": [
+                "B"
+              ],
+              "properties": {}
+            }
+          ],
+          "relationships": [
+            {
+              "id": 5,
+              "type": "T",
+              "source": 1,
+              "target": 0,
+              "properties": {}
+            }
+          ]
+        }
+      },
+      "match": true
+    },
+    {
+      "cell": "<(:A)>",
+      "actual": {
+        "path": {
+          "nodes": [
+            {
+              "id": 0,
+              "labels": [
+                "A"
+              ],
+              "properties": {}
+            }
+          ],
+          "relationships": []
+        }
+      },
+      "match": true
+    },
+    {
+      "cell": "<(:A)>",
+      "actual": {
+        "node": {
+          "id": 0,
+          "labels": [
+            "A"
+          ],
+          "properties": {}
+        }
+      },
+      "match": false
+    },
+    {
+      "cell": "'1984-10-11'",
+      "actual": {
+        "cypher": "date('1984-10-11')"
+      },
+      "dialect": "tck",
+      "match": true
+    },
+    {
+      "cell": "'1984-10-11'",
+      "actual": {
+        "cypher": "date('1984-10-11')"
+      },
+      "match": false,
+      "runner_gaps": {
+        "wasm": "a temporal comes back as its text, so it matches a string"
+      }
+    },
+    {
+      "cell": "'1984-10-11'",
+      "actual": {
+        "cypher": "date('1984-10-12')"
+      },
+      "dialect": "tck",
+      "match": false
+    },
+    {
+      "cell": "'12:31:14.645876123'",
+      "actual": {
+        "cypher": "localtime('12:31:14.645876123')"
+      },
+      "dialect": "tck",
+      "match": true,
+      "runner_gaps": {
+        "python": "fix in 0.6.4"
+      }
+    },
+    {
+      "cell": "'12:31:14.645876+01:00'",
+      "actual": {
+        "cypher": "time('12:31:14.645876+01:00')"
+      },
+      "dialect": "tck",
+      "match": true
+    },
+    {
+      "cell": "'1984-10-11T12:31:14.645876'",
+      "actual": {
+        "cypher": "localdatetime('1984-10-11T12:31:14.645876')"
+      },
+      "dialect": "tck",
+      "match": true,
+      "runner_gaps": {
+        "node": "a local datetime comes back as a JavaScript Date, to the millisecond",
+        "wasm": "a local datetime comes back as text with a Z, a zone it does not have"
+      }
+    },
+    {
+      "cell": "'1984-10-11T12:31:14.645876+01:00'",
+      "actual": {
+        "cypher": "datetime('1984-10-11T12:31:14.645876+01:00')"
+      },
+      "dialect": "tck",
+      "match": true,
+      "runner_gaps": {
+        "python": "fix in 0.6.4"
+      }
+    },
+    {
+      "cell": "'P1Y2M10DT12H45M30.25S'",
+      "actual": {
+        "cypher": "duration('P1Y2M10DT12H45M30.25S')"
+      },
+      "dialect": "tck",
+      "match": true,
+      "runner_gaps": {
+        "python": "fix in 0.6.4"
+      }
+    },
+    {
+      "cell": "'1984-10-11'",
+      "actual": {
+        "string": "1984-10-11"
+      },
+      "dialect": "tck",
+      "match": true
+    },
+    {
+      "cell": "['1984-10-11']",
+      "actual": [
+        {
+          "cypher": "date('1984-10-11')"
+        }
+      ],
+      "dialect": "tck",
+      "match": true
+    }
+  ],
+  "params": [
+    {
+      "param": "null",
+      "value": null
+    },
+    {
+      "param": "'null'",
+      "value": {
+        "string": "null"
+      }
+    },
+    {
+      "param": "\"null\"",
+      "value": {
+        "string": "null"
+      }
+    }
+  ],
+  "about_params": "How a bare or quoted .gtest param is typed: a bare `null` is null, a quoted one the string.",
+  "round_trips": [
+    {
+      "cypher": "localtime('12:31:14.645876123')",
+      "text": "12:31:14.645876123",
+      "runner_gaps": {
+        "python": "fix in 0.6.4"
+      }
+    },
+    {
+      "cypher": "datetime('1984-10-11T12:31:14.645876+01:00')",
+      "text": "1984-10-11T12:31:14.645876+01:00",
+      "runner_gaps": {
+        "python": "fix in 0.6.4"
+      }
+    },
+    {
+      "cypher": "datetime('1984-10-11T12:31:14.645876+01:00[Europe/Stockholm]')",
+      "text": "1984-10-11T12:31:14.645876+01:00[Europe/Stockholm]",
+      "runner_gaps": {
+        "rust": "fix in 0.6.4",
+        "python": "fix in 0.6.4",
+        "node": "fix in 0.6.4",
+        "wasm": "fix in 0.6.4",
+        "go": "fix in 0.6.4",
+        "csharp": "fix in 0.6.4",
+        "dart": "fix in 0.6.4"
+      }
+    },
+    {
+      "cypher": "duration('P1Y2M10D')",
+      "text": "P1Y2M10D",
+      "runner_gaps": {
+        "python": "fix in 0.6.4"
+      }
+    }
+  ],
+  "about_round_trips": "Each binding's own temporal fidelity: `RETURN <cypher> AS v`, then `RETURN toString($v)` with that value passed back as a parameter, must give `text`. `runner_gaps` names, per runner, the issue under which the case is a strict expected failure (it must fail there, so the fix flips it); the zone id is an engine gap, so every runner fails it. The same `runner_gaps` key on a case above works the same way."
+}

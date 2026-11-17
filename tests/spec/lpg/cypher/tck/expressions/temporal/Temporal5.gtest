@@ -1,0 +1,192 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/temporal/Temporal5.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Temporal5"
+  title: "Temporal5 - Access Components of Temporal Values"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Should provide accessors for date
+  - name: s1_should_provide_accessors_for_date
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal5: [1] Should provide accessors for date"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE (:Val {date: date({year: 1984, month: 10, day: 11})})
+    query: |
+      MATCH (v:Val)
+      WITH v.date AS d
+      RETURN d.year, d.quarter, d.month, d.week, d.weekYear, d.day, d.ordinalDay, d.weekDay, d.dayOfQuarter
+    expect:
+      values: |
+        | d.year | d.quarter | d.month | d.week | d.weekYear | d.day | d.ordinalDay | d.weekDay | d.dayOfQuarter |
+        | 1984 | 4 | 10 | 41 | 1984 | 11 | 285 | 4 | 11 |
+      side_effects: {}
+
+  # [2] Should provide accessors for date in last weekYear
+  - name: s2_should_provide_accessors_for_date_in_last_weekyear
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal5: [2] Should provide accessors for date in last weekYear"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE (:Val {date: date({year: 1984, month: 1, day: 1})})
+    query: |
+      MATCH (v:Val)
+      WITH v.date AS d
+      RETURN d.year, d.weekYear, d.week, d.weekDay
+    expect:
+      values: |
+        | d.year | d.weekYear | d.week | d.weekDay |
+        | 1984 | 1983 | 52 | 7 |
+      side_effects: {}
+
+  # [3] Should provide accessors for local time
+  - name: s3_should_provide_accessors_for_local_time
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE (:Val {date: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123})})
+    query: |
+      MATCH (v:Val)
+      WITH v.date AS d
+      RETURN d.hour, d.minute, d.second, d.millisecond, d.microsecond, d.nanosecond
+    expect:
+      values: |
+        | d.hour | d.minute | d.second | d.millisecond | d.microsecond | d.nanosecond |
+        | 12 | 31 | 14 | 645 | 645876 | 645876123 |
+      side_effects: {}
+
+  # [4] Should provide accessors for time
+  - name: s4_should_provide_accessors_for_time
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE (:Val {date: time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'})})
+    query: |
+      MATCH (v:Val)
+      WITH v.date AS d
+      RETURN d.hour, d.minute, d.second, d.millisecond, d.microsecond, d.nanosecond, d.timezone, d.offset, d.offsetMinutes, d.offsetSeconds
+    expect:
+      values: |
+        | d.hour | d.minute | d.second | d.millisecond | d.microsecond | d.nanosecond | d.timezone | d.offset | d.offsetMinutes | d.offsetSeconds |
+        | 12 | 31 | 14 | 645 | 645876 | 645876123 | '+01:00' | '+01:00' | 60 | 3600 |
+      side_effects: {}
+
+  # [5] Should provide accessors for local date time
+  - name: s5_should_provide_accessors_for_local_date_time
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal5: [5] Should provide accessors for local date time"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE (:Val {date: localdatetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123})})
+    query: |
+      MATCH (v:Val)
+      WITH v.date AS d
+      RETURN d.year, d.quarter, d.month, d.week, d.weekYear, d.day, d.ordinalDay, d.weekDay, d.dayOfQuarter,
+             d.hour, d.minute, d.second, d.millisecond, d.microsecond, d.nanosecond
+    expect:
+      values: |
+        | d.year | d.quarter | d.month | d.week | d.weekYear | d.day | d.ordinalDay | d.weekDay | d.dayOfQuarter | d.hour | d.minute | d.second | d.millisecond | d.microsecond | d.nanosecond |
+        | 1984 | 4 | 11 | 45 | 1984 | 11 | 316 | 7 | 42 | 12 | 31 | 14 | 645 | 645876 | 645876123 |
+      side_effects: {}
+
+  # [6] Should provide accessors for date time
+  - name: s6_should_provide_accessors_for_date_time
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal5: [6] Should provide accessors for date time"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE (:Val {date: datetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: 'Europe/Stockholm'})})
+    query: |
+      MATCH (v:Val)
+      WITH v.date AS d
+      RETURN d.year, d.quarter, d.month, d.week, d.weekYear, d.day, d.ordinalDay, d.weekDay, d.dayOfQuarter,
+             d.hour, d.minute, d.second, d.millisecond, d.microsecond, d.nanosecond,
+             d.timezone, d.offset, d.offsetMinutes, d.offsetSeconds, d.epochSeconds, d.epochMillis
+    expect:
+      values: |
+        | d.year | d.quarter | d.month | d.week | d.weekYear | d.day | d.ordinalDay | d.weekDay | d.dayOfQuarter | d.hour | d.minute | d.second | d.millisecond | d.microsecond | d.nanosecond | d.timezone | d.offset | d.offsetMinutes | d.offsetSeconds | d.epochSeconds | d.epochMillis |
+        | 1984 | 4 | 11 | 45 | 1984 | 11 | 316 | 7 | 42 | 12 | 31 | 14 | 645 | 645876 | 645876123 | 'Europe/Stockholm' | '+01:00' | 60 | 3600 | 469020674 | 469020674645 |
+      side_effects: {}
+
+  # [7] Should provide accessors for duration
+  - name: s7_should_provide_accessors_for_duration
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE (:Val {date: duration({years: 1, months: 4, days: 10, hours: 1, minutes: 1, seconds: 1, nanoseconds: 111111111})})
+    query: |
+      MATCH (v:Val)
+      WITH v.date AS d
+      RETURN d.years, d.quarters, d.months, d.weeks, d.days,
+             d.hours, d.minutes, d.seconds, d.milliseconds, d.microseconds, d.nanoseconds,
+             d.quartersOfYear, d.monthsOfQuarter, d.monthsOfYear, d.daysOfWeek, d.minutesOfHour, d.secondsOfMinute, d.millisecondsOfSecond, d.microsecondsOfSecond, d.nanosecondsOfSecond
+    expect:
+      values: |
+        | d.years | d.quarters | d.months | d.weeks | d.days | d.hours | d.minutes | d.seconds | d.milliseconds | d.microseconds | d.nanoseconds | d.quartersOfYear | d.monthsOfQuarter | d.monthsOfYear | d.daysOfWeek | d.minutesOfHour | d.secondsOfMinute | d.millisecondsOfSecond | d.microsecondsOfSecond | d.nanosecondsOfSecond |
+        | 1 | 5 | 16 | 1 | 10 | 1 | 61 | 3661 | 3661111 | 3661111111 | 3661111111111 | 1 | 1 | 4 | 3 | 1 | 1 | 111 | 111111 | 111111111 |
+      side_effects: {}

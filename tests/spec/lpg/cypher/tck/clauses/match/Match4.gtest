@@ -1,0 +1,275 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/match/Match4.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Match4"
+  title: "Match4 - Match variable length patterns scenarios"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Handling fixed-length variable length pattern
+  - name: s1_handling_fixed_length_variable_length_pattern
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH (a)-[r*1..1]->(b)
+      RETURN r
+    expect:
+      values: |
+        | r |
+        | [[:T]] |
+      side_effects: {}
+
+  # [2] Simple variable length pattern
+  - name: s2_simple_variable_length_pattern
+    setup:
+      - |
+        CREATE (a {name: 'A'}), (b {name: 'B'}),
+               (c {name: 'C'}), (d {name: 'D'})
+        CREATE (a)-[:CONTAINS]->(b),
+               (b)-[:CONTAINS]->(c),
+               (c)-[:CONTAINS]->(d)
+    query: |
+      MATCH (a {name: 'A'})-[*]->(x)
+      RETURN x
+    expect:
+      values: |
+        | x |
+        | ({name: 'B'}) |
+        | ({name: 'C'}) |
+        | ({name: 'D'}) |
+      side_effects: {}
+
+  # [3] Zero-length variable length pattern in the middle of the pattern
+  - name: s3_zero_length_variable_length_pattern_in_the_middle_of_the_pattern
+    setup:
+      - |
+        CREATE (a {name: 'A'}), (b {name: 'B'}),
+               (c {name: 'C'}), ({name: 'D'}),
+               ({name: 'E'})
+        CREATE (a)-[:CONTAINS]->(b),
+               (b)-[:FRIEND]->(c)
+    query: |
+      MATCH (a {name: 'A'})-[:CONTAINS*0..1]->(b)-[:FRIEND*0..1]->(c)
+      RETURN a, b, c
+    expect:
+      values: |
+        | a | b | c |
+        | ({name: 'A'}) | ({name: 'A'}) | ({name: 'A'}) |
+        | ({name: 'A'}) | ({name: 'B'}) | ({name: 'B'}) |
+        | ({name: 'A'}) | ({name: 'B'}) | ({name: 'C'}) |
+      side_effects: {}
+
+  # [4] Matching longer variable length paths
+  - name: s4_matching_longer_variable_length_paths
+    setup:
+      - |
+        CREATE (a {var: 'start'}), (b {var: 'end'})
+        WITH *
+        UNWIND range(1, 20) AS i
+        CREATE (n {var: i})
+        WITH a, b, [a] + collect(n) + [b] AS nodeList
+        UNWIND range(0, size(nodeList) - 2, 1) AS i
+        WITH nodeList[i] AS n1, nodeList[i+1] AS n2
+        CREATE (n1)-[:T]->(n2)
+    query: |
+      MATCH (n {var: 'start'})-[:T*]->(m {var: 'end'})
+      RETURN m
+    expect:
+      values: |
+        | m |
+        | ({var: 'end'}) |
+      side_effects: {}
+
+  # [5] Matching variable length pattern with property predicate
+  - name: s5_matching_variable_length_pattern_with_property_predicate
+    setup:
+      - |
+        CREATE (a:Artist:A), (b:Artist:B), (c:Artist:C)
+        CREATE (a)-[:WORKED_WITH {year: 1987}]->(b),
+               (b)-[:WORKED_WITH {year: 1988}]->(c)
+    query: |
+      MATCH (a:Artist)-[:WORKED_WITH* {year: 1988}]->(b:Artist)
+      RETURN *
+    expect:
+      values: |
+        | a | b |
+        | (:Artist:B) | (:Artist:C) |
+      side_effects: {}
+
+  # [6] Matching variable length patterns from a bound node
+  - name: s6_matching_variable_length_patterns_from_a_bound_node
+    setup:
+      - |
+        CREATE (a:A), (b), (c)
+        CREATE (a)-[:X]->(b),
+               (b)-[:Y]->(c)
+    query: |
+      MATCH (a:A)
+      MATCH (a)-[r*2]->()
+      RETURN r
+    expect:
+      unordered_lists: true
+      values: |
+        | r |
+        | [[:X], [:Y]] |
+      side_effects: {}
+
+  # [7] Matching variable length patterns including a bound relationship
+  - name: s7_matching_variable_length_patterns_including_a_bound_relationship
+    setup:
+      - |
+        CREATE (n0:Node),
+               (n1:Node),
+               (n2:Node),
+               (n3:Node),
+               (n0)-[:EDGE]->(n1),
+               (n1)-[:EDGE]->(n2),
+               (n2)-[:EDGE]->(n3)
+    query: |
+      MATCH ()-[r:EDGE]-()
+      MATCH p = (n)-[*0..1]-()-[r]-()-[*0..1]-(m)
+      RETURN count(p) AS c
+    expect:
+      values: |
+        | c |
+        | 32 |
+      side_effects: {}
+
+  # [8] Matching relationships into a list and matching variable length using the list
+  - name: s8_matching_relationships_into_a_list_and_matching_variable_length_using_the_list
+    setup:
+      - |
+        CREATE (a:A), (b:B), (c:C)
+        CREATE (a)-[:Y]->(b),
+               (b)-[:Y]->(c)
+    query: |
+      MATCH ()-[r1]->()-[r2]->()
+      WITH [r1, r2] AS rs
+        LIMIT 1
+      MATCH (first)-[rs*]->(second)
+      RETURN first, second
+    expect:
+      values: |
+        | first | second |
+        | (:A) | (:C) |
+      side_effects: {}
+
+  # [9] Fail when asterisk operator is missing
+  # TCK: SyntaxError at compile time: InvalidRelationshipPattern
+  - name: s9_fail_when_asterisk_operator_is_missing
+    setup:
+      - |
+        CREATE (n0:A {name: 'n0'}),
+               (n00:B {name: 'n00'}),
+               (n01:B {name: 'n01'}),
+               (n000:C {name: 'n000'}),
+               (n001:C {name: 'n001'}),
+               (n010:C {name: 'n010'}),
+               (n011:C {name: 'n011'}),
+               (n0000:D {name: 'n0000'}),
+               (n0001:D {name: 'n0001'}),
+               (n0010:D {name: 'n0010'}),
+               (n0011:D {name: 'n0011'}),
+               (n0100:D {name: 'n0100'}),
+               (n0101:D {name: 'n0101'}),
+               (n0110:D {name: 'n0110'}),
+               (n0111:D {name: 'n0111'})
+        CREATE (n0)-[:LIKES]->(n00),
+               (n0)-[:LIKES]->(n01),
+               (n00)-[:LIKES]->(n000),
+               (n00)-[:LIKES]->(n001),
+               (n01)-[:LIKES]->(n010),
+               (n01)-[:LIKES]->(n011),
+               (n000)-[:LIKES]->(n0000),
+               (n000)-[:LIKES]->(n0001),
+               (n001)-[:LIKES]->(n0010),
+               (n001)-[:LIKES]->(n0011),
+               (n010)-[:LIKES]->(n0100),
+               (n010)-[:LIKES]->(n0101),
+               (n011)-[:LIKES]->(n0110),
+               (n011)-[:LIKES]->(n0111)
+    query: |
+      MATCH (a:A)
+      MATCH (a)-[:LIKES..]->(c)
+      RETURN c.name
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [10] Fail on negative bound
+  # TCK: SyntaxError at compile time: InvalidRelationshipPattern
+  - name: s10_fail_on_negative_bound
+    setup:
+      - |
+        CREATE (n0:A {name: 'n0'}),
+               (n00:B {name: 'n00'}),
+               (n01:B {name: 'n01'}),
+               (n000:C {name: 'n000'}),
+               (n001:C {name: 'n001'}),
+               (n010:C {name: 'n010'}),
+               (n011:C {name: 'n011'}),
+               (n0000:D {name: 'n0000'}),
+               (n0001:D {name: 'n0001'}),
+               (n0010:D {name: 'n0010'}),
+               (n0011:D {name: 'n0011'}),
+               (n0100:D {name: 'n0100'}),
+               (n0101:D {name: 'n0101'}),
+               (n0110:D {name: 'n0110'}),
+               (n0111:D {name: 'n0111'})
+        CREATE (n0)-[:LIKES]->(n00),
+               (n0)-[:LIKES]->(n01),
+               (n00)-[:LIKES]->(n000),
+               (n00)-[:LIKES]->(n001),
+               (n01)-[:LIKES]->(n010),
+               (n01)-[:LIKES]->(n011),
+               (n000)-[:LIKES]->(n0000),
+               (n000)-[:LIKES]->(n0001),
+               (n001)-[:LIKES]->(n0010),
+               (n001)-[:LIKES]->(n0011),
+               (n010)-[:LIKES]->(n0100),
+               (n010)-[:LIKES]->(n0101),
+               (n011)-[:LIKES]->(n0110),
+               (n011)-[:LIKES]->(n0111)
+    query: |
+      MATCH (a:A)
+      MATCH (a)-[:LIKES*-2]->(c)
+      RETURN c.name
+    expect:
+      gql_status: "42"
+      side_effects: {}

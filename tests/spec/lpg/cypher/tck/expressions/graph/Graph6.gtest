@@ -1,0 +1,234 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/graph/Graph6.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Graph6"
+  title: "Graph6 - Static property access"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Statically access a property of a non-null node
+  - name: s1_statically_access_a_property_of_a_non_null_node
+    setup:
+      - |
+        CREATE ({existing: 42, missing: null})
+    query: |
+      MATCH (n)
+      RETURN n.missing, n.missingToo, n.existing
+    expect:
+      values: |
+        | n.missing | n.missingToo | n.existing |
+        | null | null | 42 |
+      side_effects: {}
+
+  # [2] Statically access a property of a optional non-null node
+  - name: s2_statically_access_a_property_of_a_optional_non_null_node
+    setup:
+      - |
+        CREATE ({existing: 42, missing: null})
+    query: |
+      OPTIONAL MATCH (n)
+      RETURN n.missing, n.missingToo, n.existing
+    expect:
+      values: |
+        | n.missing | n.missingToo | n.existing |
+        | null | null | 42 |
+      side_effects: {}
+
+  # [3] Statically access a property of a null node
+  - name: s3_statically_access_a_property_of_a_null_node
+    query: |
+      OPTIONAL MATCH (n)
+      RETURN n.missing
+    expect:
+      values: |
+        | n.missing |
+        | null |
+      side_effects: {}
+
+  # [4] Statically access a property of a node resulting from an expression
+  - name: s4_statically_access_a_property_of_a_node_resulting_from_an_expression
+    xfail:
+      spec: "openCypher TCK 2024.3 Graph6: [4] Statically access a property of a node resulting from an expression"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        CREATE ({existing: 42, missing: null})
+    query: |
+      MATCH (n)
+      WITH [123, n] AS list
+      RETURN (list[1]).missing, (list[1]).missingToo, (list[1]).existing
+    expect:
+      values: |
+        | (list[1]).missing | (list[1]).missingToo | (list[1]).existing |
+        | null | null | 42 |
+      side_effects: {}
+
+  # [5] Statically access a property of a non-null relationship
+  - name: s5_statically_access_a_property_of_a_non_null_relationship
+    setup:
+      - |
+        CREATE ()-[:REL {existing: 42, missing: null}]->()
+    query: |
+      MATCH ()-[r]->()
+      RETURN r.missing, r.missingToo, r.existing
+    expect:
+      values: |
+        | r.missing | r.missingToo | r.existing |
+        | null | null | 42 |
+      side_effects: {}
+
+  # [6] Statically access a property of a optional non-null relationship
+  - name: s6_statically_access_a_property_of_a_optional_non_null_relationship
+    setup:
+      - |
+        CREATE ()-[:REL {existing: 42, missing: null}]->()
+    query: |
+      OPTIONAL MATCH ()-[r]->()
+      RETURN r.missing, r.missingToo, r.existing
+    expect:
+      values: |
+        | r.missing | r.missingToo | r.existing |
+        | null | null | 42 |
+      side_effects: {}
+
+  # [7] Statically access a property of a null relationship
+  - name: s7_statically_access_a_property_of_a_null_relationship
+    query: |
+      OPTIONAL MATCH ()-[r]->()
+      RETURN r.missing
+    expect:
+      values: |
+        | r.missing |
+        | null |
+      side_effects: {}
+
+  # [8] Statically access a property of a relationship resulting from an expression
+  - name: s8_statically_access_a_property_of_a_relationship_resulting_from_an_expression
+    xfail:
+      spec: "openCypher TCK 2024.3 Graph6: [8] Statically access a property of a relationship resulting from an expression"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        CREATE ()-[:REL {existing: 42, missing: null}]->()
+    query: |
+      MATCH ()-[r]->()
+      WITH [123, r] AS list
+      RETURN (list[1]).missing, (list[1]).missingToo, (list[1]).existing
+    expect:
+      values: |
+        | (list[1]).missing | (list[1]).missingToo | (list[1]).existing |
+        | null | null | 42 |
+      side_effects: {}
+
+  # [9] Fail when performing property access on a non-graph element #1
+  # TCK: TypeError at compile time: InvalidArgumentType
+  - name: s9_fail_when_performing_property_access_on_a_non_graph_element_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Graph6: [9] Fail when performing property access on a non-graph element #1"
+      issue: fix in 0.6.5
+    query: |
+      WITH 123 AS nonGraphElement
+      RETURN nonGraphElement.num
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [9] Fail when performing property access on a non-graph element #2
+  # TCK: TypeError at compile time: InvalidArgumentType
+  - name: s9_fail_when_performing_property_access_on_a_non_graph_element_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Graph6: [9] Fail when performing property access on a non-graph element #2"
+      issue: fix in 0.6.5
+    query: |
+      WITH 42.45 AS nonGraphElement
+      RETURN nonGraphElement.num
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [9] Fail when performing property access on a non-graph element #3
+  # TCK: TypeError at compile time: InvalidArgumentType
+  - name: s9_fail_when_performing_property_access_on_a_non_graph_element_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Graph6: [9] Fail when performing property access on a non-graph element #3"
+      issue: fix in 0.6.5
+    query: |
+      WITH true AS nonGraphElement
+      RETURN nonGraphElement.num
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [9] Fail when performing property access on a non-graph element #4
+  # TCK: TypeError at compile time: InvalidArgumentType
+  - name: s9_fail_when_performing_property_access_on_a_non_graph_element_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Graph6: [9] Fail when performing property access on a non-graph element #4"
+      issue: fix in 0.6.5
+    query: |
+      WITH false AS nonGraphElement
+      RETURN nonGraphElement.num
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [9] Fail when performing property access on a non-graph element #5
+  # TCK: TypeError at compile time: InvalidArgumentType
+  - name: s9_fail_when_performing_property_access_on_a_non_graph_element_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Graph6: [9] Fail when performing property access on a non-graph element #5"
+      issue: fix in 0.6.5
+    query: |
+      WITH 'string' AS nonGraphElement
+      RETURN nonGraphElement.num
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [9] Fail when performing property access on a non-graph element #6
+  # TCK: TypeError at compile time: InvalidArgumentType
+  - name: s9_fail_when_performing_property_access_on_a_non_graph_element_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Graph6: [9] Fail when performing property access on a non-graph element #6"
+      issue: fix in 0.6.5
+    query: |
+      WITH [123, true] AS nonGraphElement
+      RETURN nonGraphElement.num
+    expect:
+      gql_status: "42"
+      side_effects: {}

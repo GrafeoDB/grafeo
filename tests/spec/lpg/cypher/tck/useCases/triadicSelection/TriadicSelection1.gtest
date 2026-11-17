@@ -1,0 +1,979 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/useCases/triadicSelection/TriadicSelection1.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.TriadicSelection1"
+  title: "TriadicSelection1 - Query three related nodes on binary-tree graphs"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Handling triadic friend of a friend
+  - name: s1_handling_triadic_friend_of_a_friend
+    setup:
+      - |
+        CREATE (a:A {name: 'a'}),
+               (b1:X {name: 'b1'}),
+               (b2:X {name: 'b2'}),
+               (b3:X {name: 'b3'}),
+               (b4:X {name: 'b4'}),
+               (c11:X {name: 'c11'}),
+               (c12:X {name: 'c12'}),
+               (c21:X {name: 'c21'}),
+               (c22:X {name: 'c22'}),
+               (c31:X {name: 'c31'}),
+               (c32:X {name: 'c32'}),
+               (c41:X {name: 'c41'}),
+               (c42:X {name: 'c42'})
+        CREATE (a)-[:KNOWS]->(b1),
+               (a)-[:KNOWS]->(b2),
+               (a)-[:FOLLOWS]->(b3),
+               (a)-[:FOLLOWS]->(b4)
+        CREATE (b1)-[:FRIEND]->(c11),
+               (b1)-[:FRIEND]->(c12),
+               (b2)-[:FRIEND]->(c21),
+               (b2)-[:FRIEND]->(c22),
+               (b3)-[:FRIEND]->(c31),
+               (b3)-[:FRIEND]->(c32),
+               (b4)-[:FRIEND]->(c41),
+               (b4)-[:FRIEND]->(c42)
+        CREATE (b1)-[:FRIEND]->(b2),
+               (b2)-[:FRIEND]->(b3),
+               (b3)-[:FRIEND]->(b4),
+               (b4)-[:FRIEND]->(b1);
+    query: |
+      MATCH (a:A)-[:KNOWS]->(b)-->(c)
+      RETURN c.name
+    expect:
+      values: |
+        | c.name |
+        | 'b2' |
+        | 'b3' |
+        | 'c11' |
+        | 'c12' |
+        | 'c21' |
+        | 'c22' |
+      side_effects: {}
+
+  # [2] Handling triadic friend of a friend that is not a friend
+  - name: s2_handling_triadic_friend_of_a_friend_that_is_not_a_friend
+    xfail:
+      spec: "openCypher TCK 2024.3 TriadicSelection1: [2] Handling triadic friend of a friend that is not a friend"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE (a:A {name: 'a'}),
+               (b1:X {name: 'b1'}),
+               (b2:X {name: 'b2'}),
+               (b3:X {name: 'b3'}),
+               (b4:X {name: 'b4'}),
+               (c11:X {name: 'c11'}),
+               (c12:X {name: 'c12'}),
+               (c21:X {name: 'c21'}),
+               (c22:X {name: 'c22'}),
+               (c31:X {name: 'c31'}),
+               (c32:X {name: 'c32'}),
+               (c41:X {name: 'c41'}),
+               (c42:X {name: 'c42'})
+        CREATE (a)-[:KNOWS]->(b1),
+               (a)-[:KNOWS]->(b2),
+               (a)-[:FOLLOWS]->(b3),
+               (a)-[:FOLLOWS]->(b4)
+        CREATE (b1)-[:FRIEND]->(c11),
+               (b1)-[:FRIEND]->(c12),
+               (b2)-[:FRIEND]->(c21),
+               (b2)-[:FRIEND]->(c22),
+               (b3)-[:FRIEND]->(c31),
+               (b3)-[:FRIEND]->(c32),
+               (b4)-[:FRIEND]->(c41),
+               (b4)-[:FRIEND]->(c42)
+        CREATE (b1)-[:FRIEND]->(b2),
+               (b2)-[:FRIEND]->(b3),
+               (b3)-[:FRIEND]->(b4),
+               (b4)-[:FRIEND]->(b1);
+    query: |
+      MATCH (a:A)-[:KNOWS]->(b)-->(c)
+      OPTIONAL MATCH (a)-[r:KNOWS]->(c)
+      WITH c WHERE r IS NULL
+      RETURN c.name
+    expect:
+      values: |
+        | c.name |
+        | 'b3' |
+        | 'c11' |
+        | 'c12' |
+        | 'c21' |
+        | 'c22' |
+      side_effects: {}
+
+  # [3] Handling triadic friend of a friend that is not a friend with different relationship type
+  - name: s3_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_different_relationship_type
+    xfail:
+      spec: "openCypher TCK 2024.3 TriadicSelection1: [3] Handling triadic friend of a friend that is not a friend with different relationship type"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE (a:A {name: 'a'}),
+               (b1:X {name: 'b1'}),
+               (b2:X {name: 'b2'}),
+               (b3:X {name: 'b3'}),
+               (b4:X {name: 'b4'}),
+               (c11:X {name: 'c11'}),
+               (c12:X {name: 'c12'}),
+               (c21:X {name: 'c21'}),
+               (c22:X {name: 'c22'}),
+               (c31:X {name: 'c31'}),
+               (c32:X {name: 'c32'}),
+               (c41:X {name: 'c41'}),
+               (c42:X {name: 'c42'})
+        CREATE (a)-[:KNOWS]->(b1),
+               (a)-[:KNOWS]->(b2),
+               (a)-[:FOLLOWS]->(b3),
+               (a)-[:FOLLOWS]->(b4)
+        CREATE (b1)-[:FRIEND]->(c11),
+               (b1)-[:FRIEND]->(c12),
+               (b2)-[:FRIEND]->(c21),
+               (b2)-[:FRIEND]->(c22),
+               (b3)-[:FRIEND]->(c31),
+               (b3)-[:FRIEND]->(c32),
+               (b4)-[:FRIEND]->(c41),
+               (b4)-[:FRIEND]->(c42)
+        CREATE (b1)-[:FRIEND]->(b2),
+               (b2)-[:FRIEND]->(b3),
+               (b3)-[:FRIEND]->(b4),
+               (b4)-[:FRIEND]->(b1);
+    query: |
+      MATCH (a:A)-[:KNOWS]->(b)-->(c)
+      OPTIONAL MATCH (a)-[r:FOLLOWS]->(c)
+      WITH c WHERE r IS NULL
+      RETURN c.name
+    expect:
+      values: |
+        | c.name |
+        | 'b2' |
+        | 'c11' |
+        | 'c12' |
+        | 'c21' |
+        | 'c22' |
+      side_effects: {}
+
+  # [4] Handling triadic friend of a friend that is not a friend with superset of relationship type
+  - name: s4_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_superset_of_relationship_type
+    xfail:
+      spec: "openCypher TCK 2024.3 TriadicSelection1: [4] Handling triadic friend of a friend that is not a friend with superset of relationship type"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE (a:A {name: 'a'}),
+               (b1:X {name: 'b1'}),
+               (b2:X {name: 'b2'}),
+               (b3:X {name: 'b3'}),
+               (b4:X {name: 'b4'}),
+               (c11:X {name: 'c11'}),
+               (c12:X {name: 'c12'}),
+               (c21:X {name: 'c21'}),
+               (c22:X {name: 'c22'}),
+               (c31:X {name: 'c31'}),
+               (c32:X {name: 'c32'}),
+               (c41:X {name: 'c41'}),
+               (c42:X {name: 'c42'})
+        CREATE (a)-[:KNOWS]->(b1),
+               (a)-[:KNOWS]->(b2),
+               (a)-[:FOLLOWS]->(b3),
+               (a)-[:FOLLOWS]->(b4)
+        CREATE (b1)-[:FRIEND]->(c11),
+               (b1)-[:FRIEND]->(c12),
+               (b2)-[:FRIEND]->(c21),
+               (b2)-[:FRIEND]->(c22),
+               (b3)-[:FRIEND]->(c31),
+               (b3)-[:FRIEND]->(c32),
+               (b4)-[:FRIEND]->(c41),
+               (b4)-[:FRIEND]->(c42)
+        CREATE (b1)-[:FRIEND]->(b2),
+               (b2)-[:FRIEND]->(b3),
+               (b3)-[:FRIEND]->(b4),
+               (b4)-[:FRIEND]->(b1);
+    query: |
+      MATCH (a:A)-[:KNOWS]->(b)-->(c)
+      OPTIONAL MATCH (a)-[r]->(c)
+      WITH c WHERE r IS NULL
+      RETURN c.name
+    expect:
+      values: |
+        | c.name |
+        | 'c11' |
+        | 'c12' |
+        | 'c21' |
+        | 'c22' |
+      side_effects: {}
+
+  # [5] Handling triadic friend of a friend that is not a friend with implicit subset of relationship type
+  - name: s5_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_implicit_subset_of_relationship_type
+    xfail:
+      spec: "openCypher TCK 2024.3 TriadicSelection1: [5] Handling triadic friend of a friend that is not a friend with implicit subset of relationship type"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE (a:A {name: 'a'}),
+               (b1:X {name: 'b1'}),
+               (b2:X {name: 'b2'}),
+               (b3:X {name: 'b3'}),
+               (b4:X {name: 'b4'}),
+               (c11:X {name: 'c11'}),
+               (c12:X {name: 'c12'}),
+               (c21:X {name: 'c21'}),
+               (c22:X {name: 'c22'}),
+               (c31:X {name: 'c31'}),
+               (c32:X {name: 'c32'}),
+               (c41:X {name: 'c41'}),
+               (c42:X {name: 'c42'})
+        CREATE (a)-[:KNOWS]->(b1),
+               (a)-[:KNOWS]->(b2),
+               (a)-[:FOLLOWS]->(b3),
+               (a)-[:FOLLOWS]->(b4)
+        CREATE (b1)-[:FRIEND]->(c11),
+               (b1)-[:FRIEND]->(c12),
+               (b2)-[:FRIEND]->(c21),
+               (b2)-[:FRIEND]->(c22),
+               (b3)-[:FRIEND]->(c31),
+               (b3)-[:FRIEND]->(c32),
+               (b4)-[:FRIEND]->(c41),
+               (b4)-[:FRIEND]->(c42)
+        CREATE (b1)-[:FRIEND]->(b2),
+               (b2)-[:FRIEND]->(b3),
+               (b3)-[:FRIEND]->(b4),
+               (b4)-[:FRIEND]->(b1);
+    query: |
+      MATCH (a:A)-->(b)-->(c)
+      OPTIONAL MATCH (a)-[r:KNOWS]->(c)
+      WITH c WHERE r IS NULL
+      RETURN c.name
+    expect:
+      values: |
+        | c.name |
+        | 'b3' |
+        | 'b4' |
+        | 'c11' |
+        | 'c12' |
+        | 'c21' |
+        | 'c22' |
+        | 'c31' |
+        | 'c32' |
+        | 'c41' |
+        | 'c42' |
+      side_effects: {}
+
+  # [6] Handling triadic friend of a friend that is not a friend with explicit subset of relationship type
+  - name: s6_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_explicit_subset_of_relationship_type
+    xfail:
+      spec: "openCypher TCK 2024.3 TriadicSelection1: [6] Handling triadic friend of a friend that is not a friend with explicit subset of relationship type"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE (a:A {name: 'a'}),
+               (b1:X {name: 'b1'}),
+               (b2:X {name: 'b2'}),
+               (b3:X {name: 'b3'}),
+               (b4:X {name: 'b4'}),
+               (c11:X {name: 'c11'}),
+               (c12:X {name: 'c12'}),
+               (c21:X {name: 'c21'}),
+               (c22:X {name: 'c22'}),
+               (c31:X {name: 'c31'}),
+               (c32:X {name: 'c32'}),
+               (c41:X {name: 'c41'}),
+               (c42:X {name: 'c42'})
+        CREATE (a)-[:KNOWS]->(b1),
+               (a)-[:KNOWS]->(b2),
+               (a)-[:FOLLOWS]->(b3),
+               (a)-[:FOLLOWS]->(b4)
+        CREATE (b1)-[:FRIEND]->(c11),
+               (b1)-[:FRIEND]->(c12),
+               (b2)-[:FRIEND]->(c21),
+               (b2)-[:FRIEND]->(c22),
+               (b3)-[:FRIEND]->(c31),
+               (b3)-[:FRIEND]->(c32),
+               (b4)-[:FRIEND]->(c41),
+               (b4)-[:FRIEND]->(c42)
+        CREATE (b1)-[:FRIEND]->(b2),
+               (b2)-[:FRIEND]->(b3),
+               (b3)-[:FRIEND]->(b4),
+               (b4)-[:FRIEND]->(b1);
+    query: |
+      MATCH (a:A)-[:KNOWS|FOLLOWS]->(b)-->(c)
+      OPTIONAL MATCH (a)-[r:KNOWS]->(c)
+      WITH c WHERE r IS NULL
+      RETURN c.name
+    expect:
+      values: |
+        | c.name |
+        | 'b3' |
+        | 'b4' |
+        | 'c11' |
+        | 'c12' |
+        | 'c21' |
+        | 'c22' |
+        | 'c31' |
+        | 'c32' |
+        | 'c41' |
+        | 'c42' |
+      side_effects: {}
+
+  # [7] Handling triadic friend of a friend that is not a friend with same labels
+  - name: s7_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_same_labels
+    xfail:
+      spec: "openCypher TCK 2024.3 TriadicSelection1: [7] Handling triadic friend of a friend that is not a friend with same labels"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE (a:A {name: 'a'}),
+               (b1:X {name: 'b1'}),
+               (b2:X {name: 'b2'}),
+               (b3:X {name: 'b3'}),
+               (b4:X {name: 'b4'}),
+               (c11:X {name: 'c11'}),
+               (c12:Y {name: 'c12'}),
+               (c21:X {name: 'c21'}),
+               (c22:Y {name: 'c22'}),
+               (c31:X {name: 'c31'}),
+               (c32:Y {name: 'c32'}),
+               (c41:X {name: 'c41'}),
+               (c42:Y {name: 'c42'})
+        CREATE (a)-[:KNOWS]->(b1),
+               (a)-[:KNOWS]->(b2),
+               (a)-[:FOLLOWS]->(b3),
+               (a)-[:FOLLOWS]->(b4)
+        CREATE (b1)-[:FRIEND]->(c11),
+               (b1)-[:FRIEND]->(c12),
+               (b2)-[:FRIEND]->(c21),
+               (b2)-[:FRIEND]->(c22),
+               (b3)-[:FRIEND]->(c31),
+               (b3)-[:FRIEND]->(c32),
+               (b4)-[:FRIEND]->(c41),
+               (b4)-[:FRIEND]->(c42)
+        CREATE (b1)-[:FRIEND]->(b2),
+               (b2)-[:FRIEND]->(b3),
+               (b3)-[:FRIEND]->(b4),
+               (b4)-[:FRIEND]->(b1);
+    query: |
+      MATCH (a:A)-[:KNOWS]->(b:X)-->(c:X)
+      OPTIONAL MATCH (a)-[r:KNOWS]->(c)
+      WITH c WHERE r IS NULL
+      RETURN c.name
+    expect:
+      values: |
+        | c.name |
+        | 'b3' |
+        | 'c11' |
+        | 'c21' |
+      side_effects: {}
+
+  # [8] Handling triadic friend of a friend that is not a friend with different labels
+  - name: s8_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_different_labels
+    xfail:
+      spec: "openCypher TCK 2024.3 TriadicSelection1: [8] Handling triadic friend of a friend that is not a friend with different labels"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE (a:A {name: 'a'}),
+               (b1:X {name: 'b1'}),
+               (b2:X {name: 'b2'}),
+               (b3:X {name: 'b3'}),
+               (b4:X {name: 'b4'}),
+               (c11:X {name: 'c11'}),
+               (c12:Y {name: 'c12'}),
+               (c21:X {name: 'c21'}),
+               (c22:Y {name: 'c22'}),
+               (c31:X {name: 'c31'}),
+               (c32:Y {name: 'c32'}),
+               (c41:X {name: 'c41'}),
+               (c42:Y {name: 'c42'})
+        CREATE (a)-[:KNOWS]->(b1),
+               (a)-[:KNOWS]->(b2),
+               (a)-[:FOLLOWS]->(b3),
+               (a)-[:FOLLOWS]->(b4)
+        CREATE (b1)-[:FRIEND]->(c11),
+               (b1)-[:FRIEND]->(c12),
+               (b2)-[:FRIEND]->(c21),
+               (b2)-[:FRIEND]->(c22),
+               (b3)-[:FRIEND]->(c31),
+               (b3)-[:FRIEND]->(c32),
+               (b4)-[:FRIEND]->(c41),
+               (b4)-[:FRIEND]->(c42)
+        CREATE (b1)-[:FRIEND]->(b2),
+               (b2)-[:FRIEND]->(b3),
+               (b3)-[:FRIEND]->(b4),
+               (b4)-[:FRIEND]->(b1);
+    query: |
+      MATCH (a:A)-[:KNOWS]->(b:X)-->(c:Y)
+      OPTIONAL MATCH (a)-[r:KNOWS]->(c)
+      WITH c WHERE r IS NULL
+      RETURN c.name
+    expect:
+      values: |
+        | c.name |
+        | 'c12' |
+        | 'c22' |
+      side_effects: {}
+
+  # [9] Handling triadic friend of a friend that is not a friend with implicit subset of labels
+  - name: s9_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_implicit_subset_of_labels
+    xfail:
+      spec: "openCypher TCK 2024.3 TriadicSelection1: [9] Handling triadic friend of a friend that is not a friend with implicit subset of labels"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE (a:A {name: 'a'}),
+               (b1:X {name: 'b1'}),
+               (b2:X {name: 'b2'}),
+               (b3:X {name: 'b3'}),
+               (b4:X {name: 'b4'}),
+               (c11:X {name: 'c11'}),
+               (c12:Y {name: 'c12'}),
+               (c21:X {name: 'c21'}),
+               (c22:Y {name: 'c22'}),
+               (c31:X {name: 'c31'}),
+               (c32:Y {name: 'c32'}),
+               (c41:X {name: 'c41'}),
+               (c42:Y {name: 'c42'})
+        CREATE (a)-[:KNOWS]->(b1),
+               (a)-[:KNOWS]->(b2),
+               (a)-[:FOLLOWS]->(b3),
+               (a)-[:FOLLOWS]->(b4)
+        CREATE (b1)-[:FRIEND]->(c11),
+               (b1)-[:FRIEND]->(c12),
+               (b2)-[:FRIEND]->(c21),
+               (b2)-[:FRIEND]->(c22),
+               (b3)-[:FRIEND]->(c31),
+               (b3)-[:FRIEND]->(c32),
+               (b4)-[:FRIEND]->(c41),
+               (b4)-[:FRIEND]->(c42)
+        CREATE (b1)-[:FRIEND]->(b2),
+               (b2)-[:FRIEND]->(b3),
+               (b3)-[:FRIEND]->(b4),
+               (b4)-[:FRIEND]->(b1);
+    query: |
+      MATCH (a:A)-[:KNOWS]->(b)-->(c:X)
+      OPTIONAL MATCH (a)-[r:KNOWS]->(c)
+      WITH c WHERE r IS NULL
+      RETURN c.name
+    expect:
+      values: |
+        | c.name |
+        | 'b3' |
+        | 'c11' |
+        | 'c21' |
+      side_effects: {}
+
+  # [10] Handling triadic friend of a friend that is not a friend with implicit superset of labels
+  - name: s10_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_implicit_superset_of_labels
+    xfail:
+      spec: "openCypher TCK 2024.3 TriadicSelection1: [10] Handling triadic friend of a friend that is not a friend with implicit superset of labels"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE (a:A {name: 'a'}),
+               (b1:X {name: 'b1'}),
+               (b2:X {name: 'b2'}),
+               (b3:X {name: 'b3'}),
+               (b4:X {name: 'b4'}),
+               (c11:X {name: 'c11'}),
+               (c12:Y {name: 'c12'}),
+               (c21:X {name: 'c21'}),
+               (c22:Y {name: 'c22'}),
+               (c31:X {name: 'c31'}),
+               (c32:Y {name: 'c32'}),
+               (c41:X {name: 'c41'}),
+               (c42:Y {name: 'c42'})
+        CREATE (a)-[:KNOWS]->(b1),
+               (a)-[:KNOWS]->(b2),
+               (a)-[:FOLLOWS]->(b3),
+               (a)-[:FOLLOWS]->(b4)
+        CREATE (b1)-[:FRIEND]->(c11),
+               (b1)-[:FRIEND]->(c12),
+               (b2)-[:FRIEND]->(c21),
+               (b2)-[:FRIEND]->(c22),
+               (b3)-[:FRIEND]->(c31),
+               (b3)-[:FRIEND]->(c32),
+               (b4)-[:FRIEND]->(c41),
+               (b4)-[:FRIEND]->(c42)
+        CREATE (b1)-[:FRIEND]->(b2),
+               (b2)-[:FRIEND]->(b3),
+               (b3)-[:FRIEND]->(b4),
+               (b4)-[:FRIEND]->(b1);
+    query: |
+      MATCH (a:A)-[:KNOWS]->(b:X)-->(c)
+      OPTIONAL MATCH (a)-[r:KNOWS]->(c)
+      WITH c WHERE r IS NULL
+      RETURN c.name
+    expect:
+      values: |
+        | c.name |
+        | 'b3' |
+        | 'c11' |
+        | 'c12' |
+        | 'c21' |
+        | 'c22' |
+      side_effects: {}
+
+  # [11] Handling triadic friend of a friend that is a friend
+  - name: s11_handling_triadic_friend_of_a_friend_that_is_a_friend
+    xfail:
+      spec: "openCypher TCK 2024.3 TriadicSelection1: [11] Handling triadic friend of a friend that is a friend"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE (a:A {name: 'a'}),
+               (b1:X {name: 'b1'}),
+               (b2:X {name: 'b2'}),
+               (b3:X {name: 'b3'}),
+               (b4:X {name: 'b4'}),
+               (c11:X {name: 'c11'}),
+               (c12:Y {name: 'c12'}),
+               (c21:X {name: 'c21'}),
+               (c22:Y {name: 'c22'}),
+               (c31:X {name: 'c31'}),
+               (c32:Y {name: 'c32'}),
+               (c41:X {name: 'c41'}),
+               (c42:Y {name: 'c42'})
+        CREATE (a)-[:KNOWS]->(b1),
+               (a)-[:KNOWS]->(b2),
+               (a)-[:FOLLOWS]->(b3),
+               (a)-[:FOLLOWS]->(b4)
+        CREATE (b1)-[:FRIEND]->(c11),
+               (b1)-[:FRIEND]->(c12),
+               (b2)-[:FRIEND]->(c21),
+               (b2)-[:FRIEND]->(c22),
+               (b3)-[:FRIEND]->(c31),
+               (b3)-[:FRIEND]->(c32),
+               (b4)-[:FRIEND]->(c41),
+               (b4)-[:FRIEND]->(c42)
+        CREATE (b1)-[:FRIEND]->(b2),
+               (b2)-[:FRIEND]->(b3),
+               (b3)-[:FRIEND]->(b4),
+               (b4)-[:FRIEND]->(b1);
+    query: |
+      MATCH (a:A)-[:KNOWS]->(b)-->(c)
+      OPTIONAL MATCH (a)-[r:KNOWS]->(c)
+      WITH c WHERE r IS NOT NULL
+      RETURN c.name
+    expect:
+      values: |
+        | c.name |
+        | 'b2' |
+      side_effects: {}
+
+  # [12] Handling triadic friend of a friend that is a friend with different relationship type
+  - name: s12_handling_triadic_friend_of_a_friend_that_is_a_friend_with_different_relationship_type
+    xfail:
+      spec: "openCypher TCK 2024.3 TriadicSelection1: [12] Handling triadic friend of a friend that is a friend with different relationship type"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE (a:A {name: 'a'}),
+               (b1:X {name: 'b1'}),
+               (b2:X {name: 'b2'}),
+               (b3:X {name: 'b3'}),
+               (b4:X {name: 'b4'}),
+               (c11:X {name: 'c11'}),
+               (c12:X {name: 'c12'}),
+               (c21:X {name: 'c21'}),
+               (c22:X {name: 'c22'}),
+               (c31:X {name: 'c31'}),
+               (c32:X {name: 'c32'}),
+               (c41:X {name: 'c41'}),
+               (c42:X {name: 'c42'})
+        CREATE (a)-[:KNOWS]->(b1),
+               (a)-[:KNOWS]->(b2),
+               (a)-[:FOLLOWS]->(b3),
+               (a)-[:FOLLOWS]->(b4)
+        CREATE (b1)-[:FRIEND]->(c11),
+               (b1)-[:FRIEND]->(c12),
+               (b2)-[:FRIEND]->(c21),
+               (b2)-[:FRIEND]->(c22),
+               (b3)-[:FRIEND]->(c31),
+               (b3)-[:FRIEND]->(c32),
+               (b4)-[:FRIEND]->(c41),
+               (b4)-[:FRIEND]->(c42)
+        CREATE (b1)-[:FRIEND]->(b2),
+               (b2)-[:FRIEND]->(b3),
+               (b3)-[:FRIEND]->(b4),
+               (b4)-[:FRIEND]->(b1);
+    query: |
+      MATCH (a:A)-[:KNOWS]->(b)-->(c)
+      OPTIONAL MATCH (a)-[r:FOLLOWS]->(c)
+      WITH c WHERE r IS NOT NULL
+      RETURN c.name
+    expect:
+      values: |
+        | c.name |
+        | 'b3' |
+      side_effects: {}
+
+  # [13] Handling triadic friend of a friend that is a friend with superset of relationship type
+  - name: s13_handling_triadic_friend_of_a_friend_that_is_a_friend_with_superset_of_relationship_type
+    xfail:
+      spec: "openCypher TCK 2024.3 TriadicSelection1: [13] Handling triadic friend of a friend that is a friend with superset of relationship type"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE (a:A {name: 'a'}),
+               (b1:X {name: 'b1'}),
+               (b2:X {name: 'b2'}),
+               (b3:X {name: 'b3'}),
+               (b4:X {name: 'b4'}),
+               (c11:X {name: 'c11'}),
+               (c12:X {name: 'c12'}),
+               (c21:X {name: 'c21'}),
+               (c22:X {name: 'c22'}),
+               (c31:X {name: 'c31'}),
+               (c32:X {name: 'c32'}),
+               (c41:X {name: 'c41'}),
+               (c42:X {name: 'c42'})
+        CREATE (a)-[:KNOWS]->(b1),
+               (a)-[:KNOWS]->(b2),
+               (a)-[:FOLLOWS]->(b3),
+               (a)-[:FOLLOWS]->(b4)
+        CREATE (b1)-[:FRIEND]->(c11),
+               (b1)-[:FRIEND]->(c12),
+               (b2)-[:FRIEND]->(c21),
+               (b2)-[:FRIEND]->(c22),
+               (b3)-[:FRIEND]->(c31),
+               (b3)-[:FRIEND]->(c32),
+               (b4)-[:FRIEND]->(c41),
+               (b4)-[:FRIEND]->(c42)
+        CREATE (b1)-[:FRIEND]->(b2),
+               (b2)-[:FRIEND]->(b3),
+               (b3)-[:FRIEND]->(b4),
+               (b4)-[:FRIEND]->(b1);
+    query: |
+      MATCH (a:A)-[:KNOWS]->(b)-->(c)
+      OPTIONAL MATCH (a)-[r]->(c)
+      WITH c WHERE r IS NOT NULL
+      RETURN c.name
+    expect:
+      values: |
+        | c.name |
+        | 'b2' |
+        | 'b3' |
+      side_effects: {}
+
+  # [14] Handling triadic friend of a friend that is a friend with implicit subset of relationship type
+  - name: s14_handling_triadic_friend_of_a_friend_that_is_a_friend_with_implicit_subset_of_relationship_type
+    xfail:
+      spec: "openCypher TCK 2024.3 TriadicSelection1: [14] Handling triadic friend of a friend that is a friend with implicit subset of relationship type"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE (a:A {name: 'a'}),
+               (b1:X {name: 'b1'}),
+               (b2:X {name: 'b2'}),
+               (b3:X {name: 'b3'}),
+               (b4:X {name: 'b4'}),
+               (c11:X {name: 'c11'}),
+               (c12:X {name: 'c12'}),
+               (c21:X {name: 'c21'}),
+               (c22:X {name: 'c22'}),
+               (c31:X {name: 'c31'}),
+               (c32:X {name: 'c32'}),
+               (c41:X {name: 'c41'}),
+               (c42:X {name: 'c42'})
+        CREATE (a)-[:KNOWS]->(b1),
+               (a)-[:KNOWS]->(b2),
+               (a)-[:FOLLOWS]->(b3),
+               (a)-[:FOLLOWS]->(b4)
+        CREATE (b1)-[:FRIEND]->(c11),
+               (b1)-[:FRIEND]->(c12),
+               (b2)-[:FRIEND]->(c21),
+               (b2)-[:FRIEND]->(c22),
+               (b3)-[:FRIEND]->(c31),
+               (b3)-[:FRIEND]->(c32),
+               (b4)-[:FRIEND]->(c41),
+               (b4)-[:FRIEND]->(c42)
+        CREATE (b1)-[:FRIEND]->(b2),
+               (b2)-[:FRIEND]->(b3),
+               (b3)-[:FRIEND]->(b4),
+               (b4)-[:FRIEND]->(b1);
+    query: |
+      MATCH (a:A)-->(b)-->(c)
+      OPTIONAL MATCH (a)-[r:KNOWS]->(c)
+      WITH c WHERE r IS NOT NULL
+      RETURN c.name
+    expect:
+      values: |
+        | c.name |
+        | 'b1' |
+        | 'b2' |
+      side_effects: {}
+
+  # [15] Handling triadic friend of a friend that is a friend with explicit subset of relationship type
+  - name: s15_handling_triadic_friend_of_a_friend_that_is_a_friend_with_explicit_subset_of_relationship_type
+    xfail:
+      spec: "openCypher TCK 2024.3 TriadicSelection1: [15] Handling triadic friend of a friend that is a friend with explicit subset of relationship type"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE (a:A {name: 'a'}),
+               (b1:X {name: 'b1'}),
+               (b2:X {name: 'b2'}),
+               (b3:X {name: 'b3'}),
+               (b4:X {name: 'b4'}),
+               (c11:X {name: 'c11'}),
+               (c12:X {name: 'c12'}),
+               (c21:X {name: 'c21'}),
+               (c22:X {name: 'c22'}),
+               (c31:X {name: 'c31'}),
+               (c32:X {name: 'c32'}),
+               (c41:X {name: 'c41'}),
+               (c42:X {name: 'c42'})
+        CREATE (a)-[:KNOWS]->(b1),
+               (a)-[:KNOWS]->(b2),
+               (a)-[:FOLLOWS]->(b3),
+               (a)-[:FOLLOWS]->(b4)
+        CREATE (b1)-[:FRIEND]->(c11),
+               (b1)-[:FRIEND]->(c12),
+               (b2)-[:FRIEND]->(c21),
+               (b2)-[:FRIEND]->(c22),
+               (b3)-[:FRIEND]->(c31),
+               (b3)-[:FRIEND]->(c32),
+               (b4)-[:FRIEND]->(c41),
+               (b4)-[:FRIEND]->(c42)
+        CREATE (b1)-[:FRIEND]->(b2),
+               (b2)-[:FRIEND]->(b3),
+               (b3)-[:FRIEND]->(b4),
+               (b4)-[:FRIEND]->(b1);
+    query: |
+      MATCH (a:A)-[:KNOWS|FOLLOWS]->(b)-->(c)
+      OPTIONAL MATCH (a)-[r:KNOWS]->(c)
+      WITH c WHERE r IS NOT NULL
+      RETURN c.name
+    expect:
+      values: |
+        | c.name |
+        | 'b1' |
+        | 'b2' |
+      side_effects: {}
+
+  # [16] Handling triadic friend of a friend that is a friend with same labels
+  - name: s16_handling_triadic_friend_of_a_friend_that_is_a_friend_with_same_labels
+    xfail:
+      spec: "openCypher TCK 2024.3 TriadicSelection1: [16] Handling triadic friend of a friend that is a friend with same labels"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE (a:A {name: 'a'}),
+               (b1:X {name: 'b1'}),
+               (b2:X {name: 'b2'}),
+               (b3:X {name: 'b3'}),
+               (b4:X {name: 'b4'}),
+               (c11:X {name: 'c11'}),
+               (c12:Y {name: 'c12'}),
+               (c21:X {name: 'c21'}),
+               (c22:Y {name: 'c22'}),
+               (c31:X {name: 'c31'}),
+               (c32:Y {name: 'c32'}),
+               (c41:X {name: 'c41'}),
+               (c42:Y {name: 'c42'})
+        CREATE (a)-[:KNOWS]->(b1),
+               (a)-[:KNOWS]->(b2),
+               (a)-[:FOLLOWS]->(b3),
+               (a)-[:FOLLOWS]->(b4)
+        CREATE (b1)-[:FRIEND]->(c11),
+               (b1)-[:FRIEND]->(c12),
+               (b2)-[:FRIEND]->(c21),
+               (b2)-[:FRIEND]->(c22),
+               (b3)-[:FRIEND]->(c31),
+               (b3)-[:FRIEND]->(c32),
+               (b4)-[:FRIEND]->(c41),
+               (b4)-[:FRIEND]->(c42)
+        CREATE (b1)-[:FRIEND]->(b2),
+               (b2)-[:FRIEND]->(b3),
+               (b3)-[:FRIEND]->(b4),
+               (b4)-[:FRIEND]->(b1);
+    query: |
+      MATCH (a:A)-[:KNOWS]->(b:X)-->(c:X)
+      OPTIONAL MATCH (a)-[r:KNOWS]->(c)
+      WITH c WHERE r IS NOT NULL
+      RETURN c.name
+    expect:
+      values: |
+        | c.name |
+        | 'b2' |
+      side_effects: {}
+
+  # [17] Handling triadic friend of a friend that is a friend with different labels
+  - name: s17_handling_triadic_friend_of_a_friend_that_is_a_friend_with_different_labels
+    xfail:
+      spec: "openCypher TCK 2024.3 TriadicSelection1: [17] Handling triadic friend of a friend that is a friend with different labels"
+      issue: fix in 0.6.4
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    setup:
+      - |
+        CREATE (a:A {name: 'a'}),
+               (b1:X {name: 'b1'}),
+               (b2:X {name: 'b2'}),
+               (b3:X {name: 'b3'}),
+               (b4:X {name: 'b4'}),
+               (c11:X {name: 'c11'}),
+               (c12:Y {name: 'c12'}),
+               (c21:X {name: 'c21'}),
+               (c22:Y {name: 'c22'}),
+               (c31:X {name: 'c31'}),
+               (c32:Y {name: 'c32'}),
+               (c41:X {name: 'c41'}),
+               (c42:Y {name: 'c42'})
+        CREATE (a)-[:KNOWS]->(b1),
+               (a)-[:KNOWS]->(b2),
+               (a)-[:FOLLOWS]->(b3),
+               (a)-[:FOLLOWS]->(b4)
+        CREATE (b1)-[:FRIEND]->(c11),
+               (b1)-[:FRIEND]->(c12),
+               (b2)-[:FRIEND]->(c21),
+               (b2)-[:FRIEND]->(c22),
+               (b3)-[:FRIEND]->(c31),
+               (b3)-[:FRIEND]->(c32),
+               (b4)-[:FRIEND]->(c41),
+               (b4)-[:FRIEND]->(c42)
+        CREATE (b1)-[:FRIEND]->(b2),
+               (b2)-[:FRIEND]->(b3),
+               (b3)-[:FRIEND]->(b4),
+               (b4)-[:FRIEND]->(b1);
+    query: |
+      MATCH (a:A)-[:KNOWS]->(b:X)-->(c:Y)
+      OPTIONAL MATCH (a)-[r:KNOWS]->(c)
+      WITH c WHERE r IS NOT NULL
+      RETURN c.name
+    expect:
+      values: |
+        | c.name |
+      side_effects: {}
+
+  # [18] Handling triadic friend of a friend that is a friend with implicit subset of labels
+  - name: s18_handling_triadic_friend_of_a_friend_that_is_a_friend_with_implicit_subset_of_labels
+    xfail:
+      spec: "openCypher TCK 2024.3 TriadicSelection1: [18] Handling triadic friend of a friend that is a friend with implicit subset of labels"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE (a:A {name: 'a'}),
+               (b1:X {name: 'b1'}),
+               (b2:X {name: 'b2'}),
+               (b3:X {name: 'b3'}),
+               (b4:X {name: 'b4'}),
+               (c11:X {name: 'c11'}),
+               (c12:Y {name: 'c12'}),
+               (c21:X {name: 'c21'}),
+               (c22:Y {name: 'c22'}),
+               (c31:X {name: 'c31'}),
+               (c32:Y {name: 'c32'}),
+               (c41:X {name: 'c41'}),
+               (c42:Y {name: 'c42'})
+        CREATE (a)-[:KNOWS]->(b1),
+               (a)-[:KNOWS]->(b2),
+               (a)-[:FOLLOWS]->(b3),
+               (a)-[:FOLLOWS]->(b4)
+        CREATE (b1)-[:FRIEND]->(c11),
+               (b1)-[:FRIEND]->(c12),
+               (b2)-[:FRIEND]->(c21),
+               (b2)-[:FRIEND]->(c22),
+               (b3)-[:FRIEND]->(c31),
+               (b3)-[:FRIEND]->(c32),
+               (b4)-[:FRIEND]->(c41),
+               (b4)-[:FRIEND]->(c42)
+        CREATE (b1)-[:FRIEND]->(b2),
+               (b2)-[:FRIEND]->(b3),
+               (b3)-[:FRIEND]->(b4),
+               (b4)-[:FRIEND]->(b1);
+    query: |
+      MATCH (a:A)-[:KNOWS]->(b)-->(c:X)
+      OPTIONAL MATCH (a)-[r:KNOWS]->(c)
+      WITH c WHERE r IS NOT NULL
+      RETURN c.name
+    expect:
+      values: |
+        | c.name |
+        | 'b2' |
+      side_effects: {}
+
+  # [19] Handling triadic friend of a friend that is a friend with implicit superset of labels
+  - name: s19_handling_triadic_friend_of_a_friend_that_is_a_friend_with_implicit_superset_of_labels
+    xfail:
+      spec: "openCypher TCK 2024.3 TriadicSelection1: [19] Handling triadic friend of a friend that is a friend with implicit superset of labels"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE (a:A {name: 'a'}),
+               (b1:X {name: 'b1'}),
+               (b2:X {name: 'b2'}),
+               (b3:X {name: 'b3'}),
+               (b4:X {name: 'b4'}),
+               (c11:X {name: 'c11'}),
+               (c12:Y {name: 'c12'}),
+               (c21:X {name: 'c21'}),
+               (c22:Y {name: 'c22'}),
+               (c31:X {name: 'c31'}),
+               (c32:Y {name: 'c32'}),
+               (c41:X {name: 'c41'}),
+               (c42:Y {name: 'c42'})
+        CREATE (a)-[:KNOWS]->(b1),
+               (a)-[:KNOWS]->(b2),
+               (a)-[:FOLLOWS]->(b3),
+               (a)-[:FOLLOWS]->(b4)
+        CREATE (b1)-[:FRIEND]->(c11),
+               (b1)-[:FRIEND]->(c12),
+               (b2)-[:FRIEND]->(c21),
+               (b2)-[:FRIEND]->(c22),
+               (b3)-[:FRIEND]->(c31),
+               (b3)-[:FRIEND]->(c32),
+               (b4)-[:FRIEND]->(c41),
+               (b4)-[:FRIEND]->(c42)
+        CREATE (b1)-[:FRIEND]->(b2),
+               (b2)-[:FRIEND]->(b3),
+               (b3)-[:FRIEND]->(b4),
+               (b4)-[:FRIEND]->(b1);
+    query: |
+      MATCH (a:A)-[:KNOWS]->(b:X)-->(c)
+      OPTIONAL MATCH (a)-[r:KNOWS]->(c)
+      WITH c WHERE r IS NOT NULL
+      RETURN c.name
+    expect:
+      values: |
+        | c.name |
+        | 'b2' |
+      side_effects: {}

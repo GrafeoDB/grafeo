@@ -1,0 +1,332 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.ReturnSkipLimit2"
+  title: "ReturnSkipLimit2 - Limit"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Limit to two hits
+  - name: s1_limit_to_two_hits
+    query: |
+      UNWIND [1, 1, 1, 1, 1] AS i
+      RETURN i
+      LIMIT 2
+    expect:
+      values: |
+        | i |
+        | 1 |
+        | 1 |
+      side_effects: {}
+
+  # [2] Limit to two hits with explicit order
+  - name: s2_limit_to_two_hits_with_explicit_order
+    setup:
+      - |
+        CREATE ({name: 'A'}),
+          ({name: 'B'}),
+          ({name: 'C'}),
+          ({name: 'D'}),
+          ({name: 'E'})
+    query: |
+      MATCH (n)
+      RETURN n
+      ORDER BY n.name ASC
+      LIMIT 2
+    expect:
+      ordered: true
+      values: |
+        | n |
+        | ({name: 'A'}) |
+        | ({name: 'B'}) |
+      side_effects: {}
+
+  # [3] LIMIT 0 should return an empty result
+  - name: s3_limit_0_should_return_an_empty_result
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    setup:
+      - |
+        CREATE (), (), ()
+    query: |
+      MATCH (n)
+      RETURN n
+        LIMIT 0
+    expect:
+      values: |
+        | n |
+      side_effects: {}
+
+  # [4] Handle ORDER BY with LIMIT 1
+  - name: s4_handle_order_by_with_limit_1
+    setup:
+      - |
+        CREATE (s:Person {name: 'Steven'}),
+          (c:Person {name: 'Craig'})
+    query: |
+      MATCH (p:Person)
+      RETURN p.name AS name
+      ORDER BY p.name
+      LIMIT 1
+    expect:
+      ordered: true
+      values: |
+        | name |
+        | 'Craig' |
+      side_effects: {}
+
+  # [5] ORDER BY with LIMIT 0 should not generate errors
+  - name: s5_order_by_with_limit_0_should_not_generate_errors
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    query: |
+      MATCH (p:Person)
+      RETURN p.name AS name
+      ORDER BY p.name
+      LIMIT 0
+    expect:
+      ordered: true
+      values: |
+        | name |
+      side_effects: {}
+
+  # [6] LIMIT with an expression that does not depend on variables
+  - name: s6_limit_with_an_expression_that_does_not_depend_on_variables
+    xfail:
+      spec: "openCypher TCK 2024.3 ReturnSkipLimit2: [6] LIMIT with an expression that does not depend on variables"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        UNWIND range(1, 3) AS i
+        CREATE ({nr: i})
+    query: |
+      MATCH (n)
+      WITH n LIMIT toInteger(ceil(1.7))
+      RETURN count(*) AS count
+    expect:
+      values: |
+        | count |
+        | 2 |
+      side_effects: {}
+
+  # [7] Limit to more rows than actual results 1
+  - name: s7_limit_to_more_rows_than_actual_results_1
+    setup:
+      - |
+        CREATE ({num: 1}), ({num: 3}), ({num: 2})
+    query: |
+      MATCH (foo)
+      RETURN foo.num AS x
+        ORDER BY x DESC
+        LIMIT 4
+    expect:
+      ordered: true
+      values: |
+        | x |
+        | 3 |
+        | 2 |
+        | 1 |
+      side_effects: {}
+
+  # [8] Limit to more rows than actual results 2
+  - name: s8_limit_to_more_rows_than_actual_results_2
+    setup:
+      - |
+        CREATE (a:A), (n1 {num: 1}), (n2 {num: 2}),
+               (m1), (m2)
+        CREATE (a)-[:T]->(n1),
+               (n1)-[:T]->(m1),
+               (a)-[:T]->(n2),
+               (n2)-[:T]->(m2)
+    query: |
+      MATCH (a:A)-->(n)-->(m)
+      RETURN n.num, count(*)
+        ORDER BY n.num
+        LIMIT 1000
+    expect:
+      ordered: true
+      values: |
+        | n.num | count(*) |
+        | 1 | 1 |
+        | 2 | 1 |
+      side_effects: {}
+
+  # [9] Fail when using non-constants in LIMIT
+  # TCK: SyntaxError at compile time: NonConstantExpression
+  - name: s9_fail_when_using_non_constants_in_limit
+    query: |
+      MATCH (n) RETURN n LIMIT n.count
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [10] Negative parameter for LIMIT should fail
+  # TCK: SyntaxError at runtime: NegativeIntegerArgument
+  # GQL class 22, the TCK expects 42: GQL checks a SKIP or LIMIT value by a General Rule (22G02, 22G03)
+  - name: s10_negative_parameter_for_limit_should_fail
+    setup:
+      - |
+        CREATE (s:Person {name: 'Steven'}),
+               (c:Person {name: 'Craig'})
+    params:
+      _limit: -1
+    query: |
+      MATCH (p:Person)
+      RETURN p.name AS name
+      LIMIT $_limit
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [11] Negative parameter for LIMIT with ORDER BY should fail
+  # TCK: SyntaxError at runtime: NegativeIntegerArgument
+  # GQL class 22, the TCK expects 42: GQL checks a SKIP or LIMIT value by a General Rule (22G02, 22G03)
+  - name: s11_negative_parameter_for_limit_with_order_by_should_fail
+    setup:
+      - |
+        CREATE (s:Person {name: 'Steven'}),
+               (c:Person {name: 'Craig'})
+    params:
+      _limit: -1
+    query: |
+      MATCH (p:Person)
+      RETURN p.name AS name
+      ORDER BY name LIMIT $_limit
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [12] Fail when using negative value in LIMIT 1
+  # TCK: SyntaxError at compile time: NegativeIntegerArgument
+  # GQL class 22, the TCK expects 42: GQL checks a SKIP or LIMIT value by a General Rule (22G02, 22G03)
+  - name: s12_fail_when_using_negative_value_in_limit_1
+    query: |
+      MATCH (n)
+      RETURN n
+        LIMIT -1
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [13] Fail when using negative value in LIMIT 2
+  # TCK: SyntaxError at compile time: NegativeIntegerArgument
+  # GQL class 22, the TCK expects 42: GQL checks a SKIP or LIMIT value by a General Rule (22G02, 22G03)
+  - name: s13_fail_when_using_negative_value_in_limit_2
+    setup:
+      - |
+        CREATE (s:Person {name: 'Steven'}),
+               (c:Person {name: 'Craig'})
+    query: |
+      MATCH (p:Person)
+      RETURN p.name AS name
+      LIMIT -1
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [14] Floating point parameter for LIMIT should fail
+  # TCK: SyntaxError at runtime: InvalidArgumentType
+  # GQL class 22, the TCK expects 42: GQL checks a SKIP or LIMIT value by a General Rule (22G02, 22G03)
+  - name: s14_floating_point_parameter_for_limit_should_fail
+    setup:
+      - |
+        CREATE (s:Person {name: 'Steven'}),
+               (c:Person {name: 'Craig'})
+    params:
+      _limit: 1.5
+    query: |
+      MATCH (p:Person)
+      RETURN p.name AS name
+      LIMIT $_limit
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [15] Floating point parameter for LIMIT with ORDER BY should fail
+  # TCK: SyntaxError at runtime: InvalidArgumentType
+  # GQL class 22, the TCK expects 42: GQL checks a SKIP or LIMIT value by a General Rule (22G02, 22G03)
+  - name: s15_floating_point_parameter_for_limit_with_order_by_should_fail
+    setup:
+      - |
+        CREATE (s:Person {name: 'Steven'}),
+               (c:Person {name: 'Craig'})
+    params:
+      _limit: 1.5
+    query: |
+      MATCH (p:Person)
+      RETURN p.name AS name
+      ORDER BY name LIMIT $_limit
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [16] Fail when using floating point in LIMIT 1
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s16_fail_when_using_floating_point_in_limit_1
+    xfail:
+      spec: "openCypher TCK 2024.3 ReturnSkipLimit2: [16] Fail when using floating point in LIMIT 1"
+      issue: fix in 0.6.5
+    query: |
+      MATCH (n)
+      RETURN n
+        LIMIT 1.7
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [17] Fail when using floating point in LIMIT 2
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s17_fail_when_using_floating_point_in_limit_2
+    xfail:
+      spec: "openCypher TCK 2024.3 ReturnSkipLimit2: [17] Fail when using floating point in LIMIT 2"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        CREATE (s:Person {name: 'Steven'}),
+               (c:Person {name: 'Craig'})
+    query: |
+      MATCH (p:Person)
+      RETURN p.name AS name
+      LIMIT 1.5
+    expect:
+      gql_status: "42"
+      side_effects: {}

@@ -1,0 +1,254 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/call/Call1.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+# Not converted:
+#   [2] Standalone call to procedure that takes no arguments and yields no results, called with implicit arguments: out-of-scope: standalone CALL with implicit arguments
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Call1"
+  title: "Call1 - Basic procedure calling"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Standalone call to procedure that takes no arguments and yields no results
+  - name: s1_standalone_call_to_procedure_that_takes_no_arguments_and_yields_no_results
+    xfail:
+      spec: "openCypher TCK 2024.3 Call1: [1] Standalone call to procedure that takes no arguments and yields no results"
+      issue: fix in 0.6.4
+    setup_gql:
+      - "CREATE PROCEDURE `test.doNothing`() RETURNS () AS { UNWIND [] AS r FINISH }"
+    query: |
+      CALL test.doNothing()
+    expect:
+      empty: true
+      side_effects: {}
+
+  # [3] In-query call to procedure that takes no arguments and yields no results
+  - name: s3_in_query_call_to_procedure_that_takes_no_arguments_and_yields_no_results
+    xfail:
+      spec: "openCypher TCK 2024.3 Call1: [3] In-query call to procedure that takes no arguments and yields no results"
+      issue: fix in 0.6.4
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    setup_gql:
+      - "CREATE PROCEDURE `test.doNothing`() RETURNS () AS { UNWIND [] AS r FINISH }"
+    query: |
+      MATCH (n)
+      CALL test.doNothing()
+      RETURN n
+    expect:
+      values: |
+        | n |
+      side_effects: {}
+
+  # [4] In-query call to procedure that takes no arguments and yields no results and consumes no rows
+  - name: s4_in_query_call_to_procedure_that_takes_no_arguments_and_yields_no_results_and_consumes_no_rows
+    xfail:
+      spec: "openCypher TCK 2024.3 Call1: [4] In-query call to procedure that takes no arguments and yields no results and consumes no rows"
+      issue: fix in 0.6.4
+    setup_gql:
+      - "CREATE PROCEDURE `test.doNothing`() RETURNS () AS { UNWIND [] AS r FINISH }"
+    setup:
+      - |
+        CREATE (:A {name: 'a'})
+        CREATE (:B {name: 'b'})
+        CREATE (:C {name: 'c'})
+    query: |
+      MATCH (n)
+      CALL test.doNothing()
+      RETURN n.name AS `name`
+    expect:
+      values: |
+        | name |
+        | 'a' |
+        | 'b' |
+        | 'c' |
+      side_effects: {}
+
+  # [5] Standalone call to STRING procedure that takes no arguments
+  - name: s5_standalone_call_to_string_procedure_that_takes_no_arguments
+    xfail:
+      spec: "openCypher TCK 2024.3 Call1: [5] Standalone call to STRING procedure that takes no arguments"
+      issue: fix in 0.6.4
+    setup_gql:
+      - "CREATE PROCEDURE `test.labels`() RETURNS (label STRING) AS { UNWIND [{p0: 'A'}, {p0: 'B'}, {p0: 'C'}] AS r RETURN r.p0 AS label }"
+    query: |
+      CALL test.labels()
+    expect:
+      ordered: true
+      values: |
+        | label |
+        | 'A' |
+        | 'B' |
+        | 'C' |
+      side_effects: {}
+
+  # [6] In-query call to STRING procedure that takes no arguments
+  - name: s6_in_query_call_to_string_procedure_that_takes_no_arguments
+    xfail:
+      spec: "openCypher TCK 2024.3 Call1: [6] In-query call to STRING procedure that takes no arguments"
+      issue: fix in 0.6.4
+    setup_gql:
+      - "CREATE PROCEDURE `test.labels`() RETURNS (label STRING) AS { UNWIND [{p0: 'A'}, {p0: 'B'}, {p0: 'C'}] AS r RETURN r.p0 AS label }"
+    query: |
+      CALL test.labels() YIELD label
+      RETURN label
+    expect:
+      ordered: true
+      values: |
+        | label |
+        | 'A' |
+        | 'B' |
+        | 'C' |
+      side_effects: {}
+
+  # [7] Standalone call to procedure should fail if explicit argument is missing
+  # TCK: SyntaxError at compile time: InvalidNumberOfArguments
+  - name: s7_standalone_call_to_procedure_should_fail_if_explicit_argument_is_missing
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(name STRING, in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER r.p0 = $name AND r.p1 = $in RETURN r.p2 AS out }"
+    query: |
+      CALL test.my.proc('Dobby')
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] In-query call to procedure should fail if explicit argument is missing
+  # TCK: SyntaxError at compile time: InvalidNumberOfArguments
+  - name: s8_in_query_call_to_procedure_should_fail_if_explicit_argument_is_missing
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(name STRING, in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER r.p0 = $name AND r.p1 = $in RETURN r.p2 AS out }"
+    query: |
+      CALL test.my.proc('Dobby') YIELD out
+      RETURN out
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [9] Standalone call to procedure should fail if too many explicit argument are given
+  # TCK: SyntaxError at compile time: InvalidNumberOfArguments
+  - name: s9_standalone_call_to_procedure_should_fail_if_too_many_explicit_argument_are_given
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+    query: |
+      CALL test.my.proc(1, 2, 3, 4)
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [10] In-query call to procedure should fail if too many explicit argument are given
+  # TCK: SyntaxError at compile time: InvalidNumberOfArguments
+  - name: s10_in_query_call_to_procedure_should_fail_if_too_many_explicit_argument_are_given
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+    query: |
+      CALL test.my.proc(1, 2, 3, 4) YIELD out
+      RETURN out
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [11] Standalone call to procedure should fail if implicit argument is missing
+  # TCK: ParameterMissing at compile time: MissingParameter
+  - name: s11_standalone_call_to_procedure_should_fail_if_implicit_argument_is_missing
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(name STRING, in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER r.p0 = $name AND r.p1 = $in RETURN r.p2 AS out }"
+    params:
+      name: "Stefan"
+    query: |
+      CALL test.my.proc
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [12] In-query call to procedure that has outputs fails if no outputs are yielded
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s12_in_query_call_to_procedure_that_has_outputs_fails_if_no_outputs_are_yielded
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+    query: |
+      CALL test.my.proc(1)
+      RETURN out
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [13] Standalone call to unknown procedure should fail
+  # TCK: ProcedureError at compile time: ProcedureNotFound
+  - name: s13_standalone_call_to_unknown_procedure_should_fail
+    query: |
+      CALL test.my.proc
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [14] In-query call to unknown procedure should fail
+  # TCK: ProcedureError at compile time: ProcedureNotFound
+  - name: s14_in_query_call_to_unknown_procedure_should_fail
+    query: |
+      CALL test.my.proc() YIELD out
+      RETURN out
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [15] In-query procedure call should fail if shadowing an already bound variable
+  # TCK: SyntaxError at compile time: VariableAlreadyBound
+  - name: s15_in_query_procedure_call_should_fail_if_shadowing_an_already_bound_variable
+    setup_gql:
+      - "CREATE PROCEDURE `test.labels`() RETURNS (label STRING) AS { UNWIND [{p0: 'A'}, {p0: 'B'}, {p0: 'C'}] AS r RETURN r.p0 AS label }"
+    query: |
+      WITH 'Hi' AS label
+      CALL test.labels() YIELD label
+      RETURN *
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [16] In-query procedure call should fail if one of the argument expressions uses an aggregation function
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s16_in_query_procedure_call_should_fail_if_one_of_the_argument_expressions_uses_an_aggregation_function
+    setup_gql:
+      - "CREATE PROCEDURE `test.labels`(in INT64) RETURNS (label STRING) AS { UNWIND [] AS r FILTER r.p0 = $in RETURN r.p1 AS label }"
+    query: |
+      MATCH (n)
+      CALL test.labels(count(n)) YIELD label
+      RETURN label
+    expect:
+      gql_status: "42"
+      side_effects: {}

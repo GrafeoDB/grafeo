@@ -23,6 +23,8 @@ pub mod gtest {
     include!("gtest.rs");
 }
 
+pub mod tck;
+
 /// The failure of a spec case: an assertion that does not hold, or an error of one of its
 /// statements, with its text. The one panic payload [`run_xfail`] takes for a case's expected
 /// failure.
@@ -541,9 +543,14 @@ pub fn assert_error(result: Result<QueryResult>, message: Option<&str>, gql_stat
     }
     if let Some(status) = gql_status {
         let actual = grafeo_common::utils::GqlStatus::from(&error).to_string();
-        check_eq!(
-            actual,
-            status,
+        // Two characters name a class (`42`), five a status (`42001`)
+        let holds = if status.len() == 2 {
+            actual.starts_with(status)
+        } else {
+            actual == status
+        };
+        check!(
+            holds,
             "Error '{text}' has GQLSTATUS {actual}, expected {status}"
         );
     }
@@ -707,6 +714,153 @@ pub fn assert_terms(result: &QueryResult, expected: &[Vec<String>], ordered: boo
             }
         }
     }
+}
+
+/// What the graph of `db` holds, as the openCypher TCK observes side effects: every node and
+/// relationship, read with two GQL queries every build has.
+///
+/// # Panics
+///
+/// When either query fails: the observation is the runner's, not the case's.
+#[must_use]
+pub fn observe_graph(db: &GrafeoDB) -> tck::Observation {
+    let mut observation = tck::Observation::default();
+    for query in ["MATCH (n) RETURN n", "MATCH ()-[r]->() RETURN r"] {
+        let result = execute_query_result(db, "gql", "lpg", query)
+            .unwrap_or_else(|e| panic!("observing the graph with `{query}` failed: {e}"));
+        for row in result.rows() {
+            observation.add(&row[0]);
+        }
+    }
+    observation
+}
+
+/// Asserts the side effects from `before` to `after` are `expected` (each TCK key and its
+/// count; an unnamed key is 0).
+///
+/// # Panics
+///
+/// With a [`SpecFailure`] listing every count that differs.
+pub fn assert_side_effects(
+    before: &tck::Observation,
+    after: &tck::Observation,
+    expected: &[(&str, i64)],
+) {
+    let actual = before.side_effects(after);
+    let differ: Vec<String> = actual
+        .iter()
+        .filter_map(|(key, count)| {
+            let want = expected
+                .iter()
+                .find(|(k, _)| k == key)
+                .map_or(0, |(_, n)| *n);
+            (i64::try_from(*count).ok() != Some(want))
+                .then(|| format!("{key}: {count}, expected {want}"))
+        })
+        .collect();
+    check!(
+        differ.is_empty(),
+        "Side effects differ: {}",
+        differ.join("; ")
+    );
+}
+
+/// `value` with each temporal in it written as its Cypher `toString()`, the engine's own text:
+/// how a `values_dialect: tck` file compares temporals, which the TCK writes as strings.
+///
+/// # Panics
+///
+/// When the engine cannot write a temporal it returned.
+#[must_use]
+pub fn temporals_as_text(db: &GrafeoDB, value: &Value) -> Value {
+    match value {
+        Value::Date(_)
+        | Value::Time(_)
+        | Value::Timestamp(_)
+        | Value::ZonedDatetime(_)
+        | Value::Duration(_) => {
+            let params = std::collections::HashMap::from([("v".to_string(), value.clone())]);
+            let query = "RETURN toString($v) AS s";
+            let result = execute_query_result_with_params(db, "cypher", "lpg", query, params)
+                .unwrap_or_else(|e| panic!("toString of {value:?} failed: {e}"));
+            result.rows()[0][0].clone()
+        }
+        Value::List(items) => Value::List(items.iter().map(|v| temporals_as_text(db, v)).collect()),
+        Value::Map(map) => Value::Map(std::sync::Arc::new(
+            map.iter()
+                .map(|(key, v)| (key.clone(), temporals_as_text(db, v)))
+                .collect(),
+        )),
+        Value::Path { nodes, edges } => Value::Path {
+            nodes: nodes.iter().map(|v| temporals_as_text(db, v)).collect(),
+            edges: edges.iter().map(|v| temporals_as_text(db, v)).collect(),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Asserts `result` holds the rows of `table`, a `values:` table in the TCK's value notation
+/// whose first row names the columns: in order when `ordered`, otherwise as a bag.
+///
+/// # Panics
+///
+/// With a [`SpecFailure`] when the columns or rows differ, or when a cell does not parse.
+pub fn assert_values(
+    db: &GrafeoDB,
+    result: &QueryResult,
+    table: &str,
+    ordered: bool,
+    unordered_lists: bool,
+    tck_dialect: bool,
+) {
+    let mut rows = tck::table_rows(table).into_iter();
+    let header = rows.next().unwrap_or_default();
+    let header: Vec<String> = header.into_iter().filter(|c| !c.is_empty()).collect();
+    check_eq!(
+        result.columns,
+        header,
+        "Columns differ: {:?}, expected {header:?}",
+        result.columns
+    );
+    let expected: Vec<Vec<tck::Cell>> = rows
+        .map(|row| {
+            row.iter()
+                .map(|cell| tck::parse(cell).unwrap_or_else(|e| spec_failure(e)))
+                .collect()
+        })
+        .collect();
+    let flags = tck::Flags { unordered_lists };
+    let rows: Vec<Vec<Value>> = if tck_dialect {
+        result
+            .rows()
+            .iter()
+            .map(|row| row.iter().map(|v| temporals_as_text(db, v)).collect())
+            .collect()
+    } else {
+        result.rows().to_vec()
+    };
+    let row_matches = |cells: &Vec<tck::Cell>, values: &Vec<Value>| {
+        cells.len() == values.len()
+            && cells
+                .iter()
+                .zip(values.iter())
+                .all(|(cell, value)| tck::matches(cell, value, flags))
+    };
+    let holds = if ordered {
+        expected.len() == rows.len()
+            && expected
+                .iter()
+                .zip(rows.iter())
+                .all(|(cells, values)| row_matches(cells, values))
+    } else {
+        tck::bag_matches(&expected, &rows, row_matches)
+    };
+    check!(
+        holds,
+        "Rows differ{}:\nactual:   {:?}\nexpected: {table}",
+        if ordered { " (in order)" } else { "" },
+        rows
+    );
 }
 
 // Include the generated test code

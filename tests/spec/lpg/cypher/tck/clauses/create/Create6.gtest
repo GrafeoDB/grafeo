@@ -1,0 +1,286 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/create/Create6.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Create6"
+  title: "Create6 - Persistence of create clause side effects"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Limiting to zero results after creating nodes affects the result set but not the side effects
+  - name: s1_limiting_to_zero_results_after_creating_nodes_affects_the_result_set_but_not_the_side_effects
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    query: |
+      CREATE (n:N {num: 42})
+      RETURN n
+      LIMIT 0
+    expect:
+      values: |
+        | n |
+      side_effects:
+        +nodes: 1
+        +labels: 1
+        +properties: 1
+
+  # [2] Skipping all results after creating nodes affects the result set but not the side effects
+  - name: s2_skipping_all_results_after_creating_nodes_affects_the_result_set_but_not_the_side_effects
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    query: |
+      CREATE (n:N {num: 42})
+      RETURN n
+      SKIP 1
+    expect:
+      values: |
+        | n |
+      side_effects:
+        +nodes: 1
+        +labels: 1
+        +properties: 1
+
+  # [3] Skipping and limiting to a few results after creating nodes does not affect the result set nor the side effects
+  - name: s3_skipping_and_limiting_to_a_few_results_after_creating_nodes_does_not_affect_the_result_set_nor_the_side_effects
+    query: |
+      UNWIND [42, 42, 42, 42, 42] AS x
+      CREATE (n:N {num: x})
+      RETURN n.num AS num
+      SKIP 2 LIMIT 2
+    expect:
+      values: |
+        | num |
+        | 42 |
+        | 42 |
+      side_effects:
+        +nodes: 5
+        +labels: 1
+        +properties: 5
+
+  # [4] Skipping zero result and limiting to all results after creating nodes does not affect the result set nor the side effects
+  - name: s4_skipping_zero_result_and_limiting_to_all_results_after_creating_nodes_does_not_affect_the_result_set_nor_the_side_effects
+    query: |
+      UNWIND [42, 42, 42, 42, 42] AS x
+      CREATE (n:N {num: x})
+      RETURN n.num AS num
+      SKIP 0 LIMIT 5
+    expect:
+      values: |
+        | num |
+        | 42 |
+        | 42 |
+        | 42 |
+        | 42 |
+        | 42 |
+      side_effects:
+        +nodes: 5
+        +labels: 1
+        +properties: 5
+
+  # [5] Filtering after creating nodes affects the result set but not the side effects
+  - name: s5_filtering_after_creating_nodes_affects_the_result_set_but_not_the_side_effects
+    query: |
+      UNWIND [1, 2, 3, 4, 5] AS x
+      CREATE (n:N {num: x})
+      WITH n
+      WHERE n.num % 2 = 0
+      RETURN n.num AS num
+    expect:
+      values: |
+        | num |
+        | 2 |
+        | 4 |
+      side_effects:
+        +nodes: 5
+        +labels: 1
+        +properties: 5
+
+  # [6] Aggregating in `RETURN` after creating nodes affects the result set but not the side effects
+  - name: s6_aggregating_in_return_after_creating_nodes_affects_the_result_set_but_not_the_side_effects
+    query: |
+      UNWIND [1, 2, 3, 4, 5] AS x
+      CREATE (n:N {num: x})
+      RETURN sum(n.num) AS sum
+    expect:
+      values: |
+        | sum |
+        | 15 |
+      side_effects:
+        +nodes: 5
+        +labels: 1
+        +properties: 5
+
+  # [7] Aggregating in `WITH` after creating nodes affects the result set but not the side effects
+  - name: s7_aggregating_in_with_after_creating_nodes_affects_the_result_set_but_not_the_side_effects
+    query: |
+      UNWIND [1, 2, 3, 4, 5] AS x
+      CREATE (n:N {num: x})
+      WITH sum(n.num) AS sum
+      RETURN sum
+    expect:
+      values: |
+        | sum |
+        | 15 |
+      side_effects:
+        +nodes: 5
+        +labels: 1
+        +properties: 5
+
+  # [8] Limiting to zero results after creating relationships affects the result set but not the side effects
+  - name: s8_limiting_to_zero_results_after_creating_relationships_affects_the_result_set_but_not_the_side_effects
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    query: |
+      CREATE ()-[r:R {num: 42}]->()
+      RETURN r
+      LIMIT 0
+    expect:
+      values: |
+        | r |
+      side_effects:
+        +nodes: 2
+        +relationships: 1
+        +properties: 1
+
+  # [9] Skipping all results after creating relationships affects the result set but not the side effects
+  - name: s9_skipping_all_results_after_creating_relationships_affects_the_result_set_but_not_the_side_effects
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    query: |
+      CREATE ()-[r:R {num: 42}]->()
+      RETURN r
+      SKIP 1
+    expect:
+      values: |
+        | r |
+      side_effects:
+        +nodes: 2
+        +relationships: 1
+        +properties: 1
+
+  # [10] Skipping and limiting to a few results after creating relationships does not affect the result set nor the side effects
+  - name: s10_skipping_and_limiting_to_a_few_results_after_creating_relationships_does_not_affect_the_result_set_nor_the_side_effects
+    query: |
+      UNWIND [42, 42, 42, 42, 42] AS x
+      CREATE ()-[r:R {num: x}]->()
+      RETURN r.num AS num
+      SKIP 2 LIMIT 2
+    expect:
+      values: |
+        | num |
+        | 42 |
+        | 42 |
+      side_effects:
+        +nodes: 10
+        +relationships: 5
+        +properties: 5
+
+  # [11] Skipping zero result and limiting to all results after creating relationships does not affect the result set nor the side effects
+  - name: s11_skipping_zero_result_and_limiting_to_all_results_after_creating_relationships_does_not_affect_the_result_set_nor_the_side_effects
+    query: |
+      UNWIND [42, 42, 42, 42, 42] AS x
+      CREATE ()-[r:R {num: x}]->()
+      RETURN r.num AS num
+      SKIP 0 LIMIT 5
+    expect:
+      values: |
+        | num |
+        | 42 |
+        | 42 |
+        | 42 |
+        | 42 |
+        | 42 |
+      side_effects:
+        +nodes: 10
+        +relationships: 5
+        +properties: 5
+
+  # [12] Filtering after creating relationships affects the result set but not the side effects
+  - name: s12_filtering_after_creating_relationships_affects_the_result_set_but_not_the_side_effects
+    query: |
+      UNWIND [1, 2, 3, 4, 5] AS x
+      CREATE ()-[r:R {num: x}]->()
+      WITH r
+      WHERE r.num % 2 = 0
+      RETURN r.num AS num
+    expect:
+      values: |
+        | num |
+        | 2 |
+        | 4 |
+      side_effects:
+        +nodes: 10
+        +relationships: 5
+        +properties: 5
+
+  # [13] Aggregating in `RETURN` after creating relationships affects the result set but not the side effects
+  - name: s13_aggregating_in_return_after_creating_relationships_affects_the_result_set_but_not_the_side_effects
+    query: |
+      UNWIND [1, 2, 3, 4, 5] AS x
+      CREATE ()-[r:R {num: x}]->()
+      RETURN sum(r.num) AS sum
+    expect:
+      values: |
+        | sum |
+        | 15 |
+      side_effects:
+        +nodes: 10
+        +relationships: 5
+        +properties: 5
+
+  # [14] Aggregating in `WITH` after creating relationships affects the result set but not the side effects
+  - name: s14_aggregating_in_with_after_creating_relationships_affects_the_result_set_but_not_the_side_effects
+    query: |
+      UNWIND [1, 2, 3, 4, 5] AS x
+      CREATE ()-[r:R {num: x}]->()
+      WITH sum(r.num) AS sum
+      RETURN sum
+    expect:
+      values: |
+        | sum |
+        | 15 |
+      side_effects:
+        +nodes: 10
+        +relationships: 5
+        +properties: 5

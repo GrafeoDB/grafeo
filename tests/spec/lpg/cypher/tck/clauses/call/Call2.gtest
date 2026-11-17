@@ -1,0 +1,112 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/call/Call2.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+# Not converted:
+#   [3] Standalone call to procedure with implicit arguments: out-of-scope: standalone CALL with implicit arguments
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Call2"
+  title: "Call2 - Procedure arguments"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] In-query call to procedure with explicit arguments
+  - name: s1_in_query_call_to_procedure_with_explicit_arguments
+    xfail:
+      spec: "openCypher TCK 2024.3 Call2: [1] In-query call to procedure with explicit arguments"
+      issue: fix in 0.6.4
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(name STRING, id INT64) RETURNS (city STRING, country_code INT64) AS { UNWIND [{p0: 'Andres', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Tobias', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Mats', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Stefan', p1: 1, p2: 'Berlin', p3: 49}, {p0: 'Stefan', p1: 2, p2: 'München', p3: 49}, {p0: 'Petra', p1: 1, p2: 'London', p3: 44}] AS r FILTER r.p0 = $name AND r.p1 = $id RETURN r.p2 AS city, r.p3 AS country_code }"
+    query: |
+      CALL test.my.proc('Stefan', 1) YIELD city, country_code
+      RETURN city, country_code
+    expect:
+      ordered: true
+      values: |
+        | city | country_code |
+        | 'Berlin' | 49 |
+      side_effects: {}
+
+  # [2] Standalone call to procedure with explicit arguments
+  - name: s2_standalone_call_to_procedure_with_explicit_arguments
+    xfail:
+      spec: "openCypher TCK 2024.3 Call2: [2] Standalone call to procedure with explicit arguments"
+      issue: fix in 0.6.4
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(name STRING, id INT64) RETURNS (city STRING, country_code INT64) AS { UNWIND [{p0: 'Andres', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Tobias', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Mats', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Stefan', p1: 1, p2: 'Berlin', p3: 49}, {p0: 'Stefan', p1: 2, p2: 'München', p3: 49}, {p0: 'Petra', p1: 1, p2: 'London', p3: 44}] AS r FILTER r.p0 = $name AND r.p1 = $id RETURN r.p2 AS city, r.p3 AS country_code }"
+    query: |
+      CALL test.my.proc('Stefan', 1)
+    expect:
+      ordered: true
+      values: |
+        | city | country_code |
+        | 'Berlin' | 49 |
+      side_effects: {}
+
+  # [4] In-query call to procedure that takes arguments fails when trying to pass them implicitly
+  # TCK: SyntaxError at compile time: InvalidArgumentPassingMode
+  - name: s4_in_query_call_to_procedure_that_takes_arguments_fails_when_trying_to_pass_them_implicitly
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+    query: |
+      CALL test.my.proc YIELD out
+      RETURN out
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [5] Standalone call to procedure should fail if input type is wrong
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s5_standalone_call_to_procedure_should_fail_if_input_type_is_wrong
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+    query: |
+      CALL test.my.proc(true)
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [6] In-query call to procedure should fail if input type is wrong
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s6_in_query_call_to_procedure_should_fail_if_input_type_is_wrong
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+    query: |
+      CALL test.my.proc(true) YIELD out
+      RETURN out
+    expect:
+      gql_status: "42"
+      side_effects: {}

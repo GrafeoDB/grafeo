@@ -1,0 +1,272 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/map/Map1.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Map1"
+  title: "Map1 - Static value access"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Statically access a field of a non-null map
+  - name: s1_statically_access_a_field_of_a_non_null_map
+    query: |
+      WITH {existing: 42, notMissing: null} AS m
+      RETURN m.missing, m.notMissing, m.existing
+    expect:
+      values: |
+        | m.missing | m.notMissing | m.existing |
+        | null | null | 42 |
+      side_effects: {}
+
+  # [2] Statically access a field of a null map
+  - name: s2_statically_access_a_field_of_a_null_map
+    query: |
+      WITH null AS m
+      RETURN m.missing
+    expect:
+      values: |
+        | m.missing |
+        | null |
+      side_effects: {}
+
+  # [3] Statically access a field of a map resulting from an expression
+  - name: s3_statically_access_a_field_of_a_map_resulting_from_an_expression
+    xfail:
+      spec: "openCypher TCK 2024.3 Map1: [3] Statically access a field of a map resulting from an expression"
+      issue: fix in 0.6.5
+    query: |
+      WITH [123, {existing: 42, notMissing: null}] AS list
+      RETURN (list[1]).missing, (list[1]).notMissing, (list[1]).existing
+    expect:
+      values: |
+        | (list[1]).missing | (list[1]).notMissing | (list[1]).existing |
+        | null | null | 42 |
+      side_effects: {}
+
+  # [4] Statically access a field is case-sensitive #1
+  - name: s4_statically_access_a_field_is_case_sensitive_1
+    query: |
+      WITH {name: 'Mats', nome: 'Pontus'} AS map
+      RETURN map.name AS result
+    expect:
+      values: |
+        | result |
+        | 'Mats' |
+      side_effects: {}
+
+  # [4] Statically access a field is case-sensitive #2
+  - name: s4_statically_access_a_field_is_case_sensitive_2
+    query: |
+      WITH {name: 'Mats', Name: 'Pontus'} AS map
+      RETURN map.name AS result
+    expect:
+      values: |
+        | result |
+        | 'Mats' |
+      side_effects: {}
+
+  # [4] Statically access a field is case-sensitive #3
+  - name: s4_statically_access_a_field_is_case_sensitive_3
+    query: |
+      WITH {name: 'Mats', Name: 'Pontus'} AS map
+      RETURN map.Name AS result
+    expect:
+      values: |
+        | result |
+        | 'Pontus' |
+      side_effects: {}
+
+  # [4] Statically access a field is case-sensitive #4
+  - name: s4_statically_access_a_field_is_case_sensitive_4
+    query: |
+      WITH {name: 'Mats', Name: 'Pontus'} AS map
+      RETURN map.nAMe AS result
+    expect:
+      values: |
+        | result |
+        | null |
+      side_effects: {}
+
+  # [5] Statically access a field with a delimited identifier #1
+  - name: s5_statically_access_a_field_with_a_delimited_identifier_1
+    query: |
+      WITH {name: 'Mats', nome: 'Pontus'} AS map
+      RETURN map.`name` AS result
+    expect:
+      values: |
+        | result |
+        | 'Mats' |
+      side_effects: {}
+
+  # [5] Statically access a field with a delimited identifier #2
+  - name: s5_statically_access_a_field_with_a_delimited_identifier_2
+    query: |
+      WITH {name: 'Mats', nome: 'Pontus'} AS map
+      RETURN map.`nome` AS result
+    expect:
+      values: |
+        | result |
+        | 'Pontus' |
+      side_effects: {}
+
+  # [5] Statically access a field with a delimited identifier #3
+  - name: s5_statically_access_a_field_with_a_delimited_identifier_3
+    query: |
+      WITH {name: 'Mats', nome: 'Pontus'} AS map
+      RETURN map.`Mats` AS result
+    expect:
+      values: |
+        | result |
+        | null |
+      side_effects: {}
+
+  # [5] Statically access a field with a delimited identifier #4
+  - name: s5_statically_access_a_field_with_a_delimited_identifier_4
+    query: |
+      WITH {name: 'Mats', nome: 'Pontus'} AS map
+      RETURN map.`null` AS result
+    expect:
+      values: |
+        | result |
+        | null |
+      side_effects: {}
+
+  # [5] Statically access a field with a delimited identifier #5
+  - name: s5_statically_access_a_field_with_a_delimited_identifier_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Map1: [5] Statically access a field with a delimited identifier #5"
+      issue: fix in 0.6.5
+    query: |
+      WITH {null: 'Mats', NULL: 'Pontus'} AS map
+      RETURN map.`null` AS result
+    expect:
+      values: |
+        | result |
+        | 'Mats' |
+      side_effects: {}
+
+  # [5] Statically access a field with a delimited identifier #6
+  - name: s5_statically_access_a_field_with_a_delimited_identifier_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Map1: [5] Statically access a field with a delimited identifier #6"
+      issue: fix in 0.6.5
+    query: |
+      WITH {null: 'Mats', NULL: 'Pontus'} AS map
+      RETURN map.`NULL` AS result
+    expect:
+      values: |
+        | result |
+        | 'Pontus' |
+      side_effects: {}
+
+  # [6] Fail when performing property access on a non-map #1
+  # TCK: TypeError at compile time: InvalidArgumentType
+  - name: s6_fail_when_performing_property_access_on_a_non_map_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Map1: [6] Fail when performing property access on a non-map #1"
+      issue: fix in 0.6.5
+    query: |
+      WITH 123 AS nonMap
+      RETURN nonMap.num
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [6] Fail when performing property access on a non-map #2
+  # TCK: TypeError at compile time: InvalidArgumentType
+  - name: s6_fail_when_performing_property_access_on_a_non_map_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Map1: [6] Fail when performing property access on a non-map #2"
+      issue: fix in 0.6.5
+    query: |
+      WITH 42.45 AS nonMap
+      RETURN nonMap.num
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [6] Fail when performing property access on a non-map #3
+  # TCK: TypeError at compile time: InvalidArgumentType
+  - name: s6_fail_when_performing_property_access_on_a_non_map_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Map1: [6] Fail when performing property access on a non-map #3"
+      issue: fix in 0.6.5
+    query: |
+      WITH true AS nonMap
+      RETURN nonMap.num
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [6] Fail when performing property access on a non-map #4
+  # TCK: TypeError at compile time: InvalidArgumentType
+  - name: s6_fail_when_performing_property_access_on_a_non_map_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Map1: [6] Fail when performing property access on a non-map #4"
+      issue: fix in 0.6.5
+    query: |
+      WITH false AS nonMap
+      RETURN nonMap.num
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [6] Fail when performing property access on a non-map #5
+  # TCK: TypeError at compile time: InvalidArgumentType
+  - name: s6_fail_when_performing_property_access_on_a_non_map_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Map1: [6] Fail when performing property access on a non-map #5"
+      issue: fix in 0.6.5
+    query: |
+      WITH 'string' AS nonMap
+      RETURN nonMap.num
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [6] Fail when performing property access on a non-map #6
+  # TCK: TypeError at compile time: InvalidArgumentType
+  - name: s6_fail_when_performing_property_access_on_a_non_map_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Map1: [6] Fail when performing property access on a non-map #6"
+      issue: fix in 0.6.5
+    query: |
+      WITH [123, true] AS nonMap
+      RETURN nonMap.num
+    expect:
+      gql_status: "42"
+      side_effects: {}

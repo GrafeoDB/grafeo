@@ -99,6 +99,8 @@ cargo-timing*.html
 
 # The W3C rdf-tests checkout the SPARQL converter reads (only its output is kept)
 tests/spec/rdf/sparql/w3c/rdf-tests/
+# The openCypher checkout the TCK converter reads (only its output is kept)
+tests/spec/lpg/cypher/tck/openCypher/
 
 # ── Documentation (auto-generated) ───────────────────────────────────
 site/

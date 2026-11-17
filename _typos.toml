@@ -15,6 +15,8 @@ extend-exclude = [
     "tests/spec/lpg/*/ldbc_snb_interactive.gtest",
     # W3C SPARQL 1.1 test suite, converted verbatim: test strings such as "aAbBaC"
     "tests/spec/rdf/sparql/w3c/*.gtest",
+    # The openCypher TCK, converted verbatim: variable names such as ba and baa
+    "tests/spec/lpg/cypher/tck/**/*.gtest",
     # Font licences, copied verbatim (they name the variable font axes, such as wdth)
     "docs/stylesheets/fonts/OFL-*.txt",
 ]

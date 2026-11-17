@@ -1,0 +1,174 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/aggregation/Aggregation2.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Aggregation2"
+  title: "Aggregation2 - Min and Max"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] `max()` over integers
+  - name: s1_max_over_integers
+    query: |
+      UNWIND [1, 2, 0, null, -1] AS x
+      RETURN max(x)
+    expect:
+      values: |
+        | max(x) |
+        | 2 |
+      side_effects: {}
+
+  # [2] `min()` over integers
+  - name: s2_min_over_integers
+    query: |
+      UNWIND [1, 2, 0, null, -1] AS x
+      RETURN min(x)
+    expect:
+      values: |
+        | min(x) |
+        | -1 |
+      side_effects: {}
+
+  # [3] `max()` over floats
+  - name: s3_max_over_floats
+    query: |
+      UNWIND [1.0, 2.0, 0.5, null] AS x
+      RETURN max(x)
+    expect:
+      values: |
+        | max(x) |
+        | 2.0 |
+      side_effects: {}
+
+  # [4] `min()` over floats
+  - name: s4_min_over_floats
+    query: |
+      UNWIND [1.0, 2.0, 0.5, null] AS x
+      RETURN min(x)
+    expect:
+      values: |
+        | min(x) |
+        | 0.5 |
+      side_effects: {}
+
+  # [5] `max()` over mixed numeric values
+  - name: s5_max_over_mixed_numeric_values
+    query: |
+      UNWIND [1, 2.0, 5, null, 3.2, 0.1] AS x
+      RETURN max(x)
+    expect:
+      values: |
+        | max(x) |
+        | 5 |
+      side_effects: {}
+
+  # [6] `min()` over mixed numeric values
+  - name: s6_min_over_mixed_numeric_values
+    query: |
+      UNWIND [1, 2.0, 5, null, 3.2, 0.1] AS x
+      RETURN min(x)
+    expect:
+      values: |
+        | min(x) |
+        | 0.1 |
+      side_effects: {}
+
+  # [7] `max()` over strings
+  - name: s7_max_over_strings
+    query: |
+      UNWIND ['a', 'b', 'B', null, 'abc', 'abc1'] AS i
+      RETURN max(i)
+    expect:
+      values: |
+        | max(i) |
+        | 'b' |
+      side_effects: {}
+
+  # [8] `min()` over strings
+  - name: s8_min_over_strings
+    query: |
+      UNWIND ['a', 'b', 'B', null, 'abc', 'abc1'] AS i
+      RETURN min(i)
+    expect:
+      values: |
+        | min(i) |
+        | 'B' |
+      side_effects: {}
+
+  # [9] `max()` over list values
+  - name: s9_max_over_list_values
+    query: |
+      UNWIND [[1], [2], [2, 1]] AS x
+      RETURN max(x)
+    expect:
+      values: |
+        | max(x) |
+        | [2, 1] |
+      side_effects: {}
+
+  # [10] `min()` over list values
+  - name: s10_min_over_list_values
+    query: |
+      UNWIND [[1], [2], [2, 1]] AS x
+      RETURN min(x)
+    expect:
+      values: |
+        | min(x) |
+        | [1] |
+      side_effects: {}
+
+  # [11] `max()` over mixed values
+  - name: s11_max_over_mixed_values
+    query: |
+      UNWIND [1, 'a', null, [1, 2], 0.2, 'b'] AS x
+      RETURN max(x)
+    expect:
+      values: |
+        | max(x) |
+        | 1 |
+      side_effects: {}
+
+  # [12] `min()` over mixed values
+  - name: s12_min_over_mixed_values
+    query: |
+      UNWIND [1, 'a', null, [1, 2], 0.2, 'b'] AS x
+      RETURN min(x)
+    expect:
+      values: |
+        | min(x) |
+        | [1, 2] |
+      side_effects: {}

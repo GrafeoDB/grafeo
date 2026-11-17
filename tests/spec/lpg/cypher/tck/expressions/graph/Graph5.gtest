@@ -1,0 +1,186 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/graph/Graph5.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+# Not converted:
+#   [2] Single-labels expression on relationships: tagged @ignore upstream
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Graph5"
+  title: "Graph5 - Node and edge label expressions"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Single-labels expression on nodes
+  - name: s1_single_labels_expression_on_nodes
+    setup:
+      - |
+        CREATE (:A:B:C), (:A:B), (:A:C), (:B:C),
+               (:A), (:B), (:C), ()
+    query: |
+      MATCH (a)
+      RETURN a, a:B AS result
+    expect:
+      values: |
+        | a | result |
+        | (:A:B:C) | true |
+        | (:A:B) | true |
+        | (:A:C) | false |
+        | (:B:C) | true |
+        | (:A) | false |
+        | (:B) | true |
+        | (:C) | false |
+        | () | false |
+      side_effects: {}
+
+  # [3] Conjunctive labels expression on nodes
+  - name: s3_conjunctive_labels_expression_on_nodes
+    setup:
+      - |
+        CREATE (:A:B:C), (:A:B), (:A:C), (:B:C),
+               (:A), (:B), (:C), ()
+    query: |
+      MATCH (a)
+      RETURN a, a:A:B AS result
+    expect:
+      values: |
+        | a | result |
+        | (:A:B:C) | true |
+        | (:A:B) | true |
+        | (:A:C) | false |
+        | (:B:C) | false |
+        | (:A) | false |
+        | (:B) | false |
+        | (:C) | false |
+        | () | false |
+      side_effects: {}
+
+  # [4] Conjunctive labels expression on nodes with varying order and repeating labels #1
+  - name: s4_conjunctive_labels_expression_on_nodes_with_varying_order_and_repeating_labels_1
+    setup:
+      - |
+        CREATE (:A:B), (:A:C), (:B:C),
+               (:A), (:B), (:C), ()
+    query: |
+      MATCH (a)
+      WHERE a:A:C
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A:C) |
+      side_effects: {}
+
+  # [4] Conjunctive labels expression on nodes with varying order and repeating labels #2
+  - name: s4_conjunctive_labels_expression_on_nodes_with_varying_order_and_repeating_labels_2
+    setup:
+      - |
+        CREATE (:A:B), (:A:C), (:B:C),
+               (:A), (:B), (:C), ()
+    query: |
+      MATCH (a)
+      WHERE a:C:A
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A:C) |
+      side_effects: {}
+
+  # [4] Conjunctive labels expression on nodes with varying order and repeating labels #3
+  - name: s4_conjunctive_labels_expression_on_nodes_with_varying_order_and_repeating_labels_3
+    setup:
+      - |
+        CREATE (:A:B), (:A:C), (:B:C),
+               (:A), (:B), (:C), ()
+    query: |
+      MATCH (a)
+      WHERE a:A:C:A
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A:C) |
+      side_effects: {}
+
+  # [4] Conjunctive labels expression on nodes with varying order and repeating labels #4
+  - name: s4_conjunctive_labels_expression_on_nodes_with_varying_order_and_repeating_labels_4
+    setup:
+      - |
+        CREATE (:A:B), (:A:C), (:B:C),
+               (:A), (:B), (:C), ()
+    query: |
+      MATCH (a)
+      WHERE a:C:C:A
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A:C) |
+      side_effects: {}
+
+  # [4] Conjunctive labels expression on nodes with varying order and repeating labels #5
+  - name: s4_conjunctive_labels_expression_on_nodes_with_varying_order_and_repeating_labels_5
+    setup:
+      - |
+        CREATE (:A:B), (:A:C), (:B:C),
+               (:A), (:B), (:C), ()
+    query: |
+      MATCH (a)
+      WHERE a:C:A:A:C
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A:C) |
+      side_effects: {}
+
+  # [5] Label expression on null
+  - name: s5_label_expression_on_null
+    xfail:
+      spec: "openCypher TCK 2024.3 Graph5: [5] Label expression on null"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        CREATE (s:Single)
+    query: |
+      MATCH (n:Single)
+      OPTIONAL MATCH (n)-[r:TYPE]-(m)
+      RETURN m:TYPE
+    expect:
+      values: |
+        | m:TYPE |
+        | null |
+      side_effects: {}

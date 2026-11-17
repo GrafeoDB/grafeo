@@ -83,6 +83,8 @@ export function paramValue(text) {
   if (text.startsWith('[') || text.startsWith('{')) return JSON.parse(text, jsonNumber)
   if (DECIMAL_INTEGER.test(text) || DECIMAL_NUMBER.test(text)) return numberValue(text)
   if (text === 'true' || text === 'false') return text === 'true'
+  // A bare `null` is null; a quoted 'null' is the string
+  if (text === 'null') return null
   return text
 }
 
@@ -169,17 +171,23 @@ function parseXfail(ctx) {
   const indent = (line) => line.length - line.trimStart().length
   const own = indent(ctx.lines[ctx.idx])
   ctx.idx++
-  const xfail = { spec: '', issue: '' }
+  // `passes_in:` names the runners where the case passes all the same and must
+  const xfail = { spec: '', issue: '', passesIn: [] }
   while (ctx.idx < ctx.lines.length) {
     const line = ctx.lines[ctx.idx]
     const trimmed = line.trim()
     if (!trimmed || trimmed.startsWith('#')) { ctx.idx++; continue }
     if (indent(line) <= own) break
     const kv = parseKV(trimmed)
-    if (!kv || (kv[0] !== 'spec' && kv[0] !== 'issue')) {
+    if (kv && kv[0] === 'passes_in') {
+      xfail.passesIn = parseYamlList(kv[1])
+      const unknown = xfail.passesIn.find((r) => !RUNNERS.includes(r))
+      if (unknown) throw new Error(`unknown runner '${unknown}' in passes_in`)
+    } else if (!kv || (kv[0] !== 'spec' && kv[0] !== 'issue')) {
       throw new Error(`unknown xfail key at line ${ctx.idx + 1}: '${trimmed}'`)
+    } else {
+      xfail[kv[0]] = unquote(kv[1])
     }
-    xfail[kv[0]] = unquote(kv[1])
     ctx.idx++
   }
   return xfail
@@ -192,7 +200,7 @@ function parseXfail(ctx) {
 function parseMeta(ctx) {
   const meta = {
     language: 'gql', model: '', section: '', title: '',
-    dataset: 'empty', requires: [], tags: [],
+    dataset: 'empty', requires: [], tags: [], valuesDialect: 'strict',
   }
   expectLine(ctx, 'meta:')
   while (ctx.idx < ctx.lines.length) {
@@ -211,6 +219,12 @@ function parseMeta(ctx) {
       case 'dataset': meta.dataset = value; break
       case 'requires': meta.requires = parseYamlList(value); break
       case 'tags': meta.tags = parseYamlList(value); break
+      case 'values_dialect':
+        meta.valuesDialect = unquote(value)
+        if (!['strict', 'tck'].includes(meta.valuesDialect)) {
+          throw new Error(`unknown values_dialect '${meta.valuesDialect}' (known: strict, tck)`)
+        }
+        break
     }
     ctx.idx++
   }
@@ -240,8 +254,8 @@ function parseTests(ctx) {
 
 function parseSingleTest(ctx) {
   const tc = {
-    name: '', query: null, statements: [], setup: [],
-    params: {}, tags: [], skip: null, xfail: null, probe: null, language: null,
+    name: '', query: null, statements: [], setup: [], setupGql: [],
+    params: {}, tags: [], skip: null, xfail: null, runnerGap: null, probe: null, language: null,
     expect: makeExpect(), variants: {}, requires: [],
   }
 
@@ -272,8 +286,12 @@ function parseSingleTest(ctx) {
         tc.xfail = parseXfail(ctx); break
       case 'probe':
         tc.probe = unquote(value); ctx.idx++; break
+      case 'runner_gap':
+        tc.runnerGap = parseRunnerGap(ctx); break
       case 'setup':
         ctx.idx++; tc.setup = parseStringList(ctx); break
+      case 'setup_gql':
+        ctx.idx++; tc.setupGql = parseStringList(ctx); break
       case 'statements':
         ctx.idx++; tc.statements = parseStringList(ctx); break
       case 'language':
@@ -302,7 +320,66 @@ function parseSingleTest(ctx) {
 // ---------------------------------------------------------------------------
 
 function makeExpect() {
-  return { rows: [], ordered: false, count: null, empty: false, error: null, gqlStatus: null, hash: null, precision: null, columns: [], terms: [], warnings: [] }
+  return {
+    rows: [], ordered: false, count: null, empty: false, error: null, gqlStatus: null, hash: null,
+    precision: null, columns: [], terms: [], warnings: [],
+    values: null, unorderedLists: false, sideEffects: null,
+  }
+}
+
+/** The runners a `runner_gap:` may name. */
+export const RUNNERS = ['rust', 'python', 'node', 'wasm', 'go', 'csharp', 'dart']
+
+/** The keys of `side_effects:`, as the openCypher TCK names them. */
+export const SIDE_EFFECT_KEYS = [
+  '+nodes', '-nodes', '+relationships', '-relationships',
+  '+labels', '-labels', '+properties', '-properties',
+]
+
+/** The `key: value` lines indented under the key at `ctx.lines[ctx.idx]`; leaves `ctx.idx` past them. */
+function parseNested(ctx) {
+  const indent = (line) => line.length - line.trimStart().length
+  const own = indent(ctx.lines[ctx.idx])
+  ctx.idx++
+  const pairs = []
+  while (ctx.idx < ctx.lines.length) {
+    const line = ctx.lines[ctx.idx]
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('#')) { ctx.idx++; continue }
+    if (indent(line) <= own) break
+    const kv = parseKV(trimmed)
+    if (!kv) throw new Error(`not a key at line ${ctx.idx + 1}: '${trimmed}'`)
+    pairs.push(kv)
+    ctx.idx++
+  }
+  return pairs
+}
+
+/** A `runner_gap:` at `ctx.lines[ctx.idx]`: its runners, issue and reason, all required. */
+function parseRunnerGap(ctx) {
+  const gap = { runners: [], issue: '', reason: '' }
+  for (const [key, value] of parseNested(ctx)) {
+    if (key === 'runners') gap.runners = parseYamlList(value)
+    else if (key === 'issue' || key === 'reason') gap[key] = unquote(value)
+    else throw new Error(`unknown runner_gap key '${key}'`)
+  }
+  if (!gap.runners.length || !gap.issue.trim() || !gap.reason.trim()) {
+    throw new Error('a runner_gap names its `runners:`, `issue:` and `reason:`')
+  }
+  const unknown = gap.runners.find((r) => !RUNNERS.includes(r))
+  if (unknown) throw new Error(`unknown runner '${unknown}' (known: ${RUNNERS.join(', ')})`)
+  return gap
+}
+
+/** The counts of a `side_effects:` key whose value is `value`: `{}`, or one per line below. */
+function parseSideEffects(ctx, value) {
+  if (value === '{}') { ctx.idx++; return [] }
+  if (value) throw new Error(`\`side_effects:\` is \`{}\` or one key per line, not '${value}'`)
+  return parseNested(ctx).map(([key, count]) => {
+    if (!SIDE_EFFECT_KEYS.includes(key)) throw new Error(`unknown side effect '${key}'`)
+    if (!/^-?[0-9]+$/.test(count)) throw new Error(`side effect '${key}' needs a count, not '${count}'`)
+    return [key, parseInt(count, 10)]
+  })
 }
 
 function parseExpectBlock(ctx) {
@@ -336,9 +413,18 @@ function parseExpectBlock(ctx) {
       case 'warnings': expect.warnings = parseYamlList(value); ctx.idx++; break
       case 'rows': ctx.idx++; expect.rows = parseRows(ctx); break
       case 'terms': ctx.idx++; expect.terms = parseRows(ctx); break
+      case 'values':
+        if (value !== '|') throw new Error('`values:` is a block scalar (`|`)')
+        expect.values = parseBlockScalar(ctx).trim(); break
+      case 'unordered_lists': expect.unorderedLists = value === 'true'; ctx.idx++; break
+      case 'side_effects': expect.sideEffects = parseSideEffects(ctx, value); break
       // A key no runner reads would leave a test that checks nothing.
       default: throw new Error(`unknown expect key '${key}'`)
     }
+  }
+  const others = expect.rows.length || expect.terms.length || expect.count !== null || expect.empty
+  if (expect.values !== null && (others || expect.error !== null || expect.gqlStatus !== null)) {
+    throw new Error('`values:` excludes `rows`, `terms`, `count`, `empty`, `error` and `gql_status`')
   }
   return expect
 }

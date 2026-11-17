@@ -6,6 +6,7 @@
  */
 
 import { SpecFailure } from './xfail.mjs'
+import { matches, parse as parseCell, tableRows, toNeutral } from './tck_values.mjs'
 import { createHash } from 'crypto'
 
 /**
@@ -230,9 +231,100 @@ export function assertGqlStatus(err, expected) {
   if (status == null) {
     throw new SpecFailure(`Error '${err?.message ?? String(err)}' has no GQLSTATUS`)
   }
-  if (String(status) !== expected) {
+  // Two characters name a class (`42`), five a status (`42001`)
+  const holds = expected.length === 2 ? String(status).startsWith(expected) : String(status) === expected
+  if (!holds) {
     throw new SpecFailure(`Error '${err.message}' has GQLSTATUS ${status}, expected ${expected}`)
   }
+}
+
+// ---------------------------------------------------------------------------
+// Typed rows (values:) and side effects (side_effects:), the openCypher TCK's forms
+// ---------------------------------------------------------------------------
+
+/**
+ * Assert the result holds the rows of `table`, a `values:` table in the TCK's value notation
+ * whose first row names the columns: in order when `ordered`, otherwise as a bag. `toText`
+ * writes each value the way the file compares it (in the TCK dialect, temporals as their
+ * Cypher `toString()`; otherwise unchanged), which needs the runner's own binding.
+ */
+export async function assertValues(result, table, ordered, unorderedLists, toText) {
+  const columns = result.columns ? [...result.columns] : []
+  const values = []
+  for (const row of result.toArray()) {
+    const written = []
+    for (const column of columns) written.push(await toText(row[column]))
+    values.push(written)
+  }
+  assertValueRows(columns, values, table, ordered, unorderedLists)
+}
+
+/**
+ * `assertValues` for rows already in hand, each a list of values in column order (the WASM
+ * runner, whose binding is synchronous).
+ */
+export function assertValueRows(columns, values, table, ordered, unorderedLists) {
+  const [header, ...rows] = tableRows(table)
+  const names = header.filter(Boolean)
+  if (JSON.stringify(columns) !== JSON.stringify(names)) {
+    throw new SpecFailure(`Columns differ: ${JSON.stringify(columns)}, expected ${JSON.stringify(names)}`)
+  }
+  const expected = rows.map((row) => row.map((cell) => parseCell(cell)))
+  const actual = values.map((row) => row.map(toNeutral))
+  const flags = { unorderedLists }
+  const rowMatches = (cells, values) =>
+    cells.length === values.length && cells.every((c, i) => matches(c, values[i], flags))
+  let holds = expected.length === actual.length
+  if (holds && ordered) {
+    holds = expected.every((cells, i) => rowMatches(cells, actual[i]))
+  } else if (holds) {
+    const left = [...actual]
+    for (const cells of expected) {
+      const hit = left.findIndex((values) => rowMatches(cells, values))
+      if (hit < 0) { holds = false; break }
+      left.splice(hit, 1)
+    }
+  }
+  if (!holds) {
+    const shown = JSON.stringify(actual, (_, v) => (typeof v === 'bigint' ? `${v}n` : v))
+    throw new SpecFailure(`Rows differ${ordered ? ' (in order)' : ''}:\nactual:   ${shown}\nexpected: ${table}`)
+  }
+}
+
+/**
+ * What the graph holds, as the openCypher TCK observes side effects, from the rows of
+ * `MATCH (n) RETURN n` and `MATCH ()-[r]->() RETURN r`: node and relationship ids, the label
+ * names in use, and the properties as (entity, key, value) triples.
+ */
+export function observation(nodeValues, relationshipValues) {
+  const seen = { nodes: new Set(), relationships: new Set(), labels: new Set(), properties: new Set() }
+  const json = (v) => JSON.stringify(v, (_, x) => (typeof x === 'bigint' ? `${x}n` : x))
+  for (const value of [...nodeValues, ...relationshipValues]) {
+    const neutral = toNeutral(value)
+    const [kind, key] = 'node' in neutral ? ['node', 'nodes'] : ['relationship', 'relationships']
+    const entity = neutral[kind]
+    if (!entity) continue
+    seen[key].add(entity.id)
+    for (const label of entity.labels ?? []) seen.labels.add(label)
+    for (const [name, prop] of Object.entries(entity.properties)) {
+      seen.properties.add(json([kind, entity.id, name, prop]))
+    }
+  }
+  return seen
+}
+
+/** Assert the side effects from `before` to `after` are `expected` ([key, count] pairs). */
+export function assertSideEffects(before, after, expected) {
+  const want = Object.fromEntries(expected)
+  const differ = []
+  for (const key of ['nodes', 'relationships', 'labels', 'properties']) {
+    const added = [...after[key]].filter((x) => !before[key].has(x)).length
+    const removed = [...before[key]].filter((x) => !after[key].has(x)).length
+    for (const [name, count] of [[`+${key}`, added], [`-${key}`, removed]]) {
+      if (count !== (want[name] ?? 0)) differ.push(`${name}: ${count}, expected ${want[name] ?? 0}`)
+    }
+  }
+  if (differ.length) throw new SpecFailure(`Side effects differ: ${differ.join('; ')}`)
 }
 
 // ---------------------------------------------------------------------------

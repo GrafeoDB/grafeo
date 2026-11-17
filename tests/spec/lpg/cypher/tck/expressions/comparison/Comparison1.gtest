@@ -1,0 +1,544 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/comparison/Comparison1.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Comparison1"
+  title: "Comparison1 - Equality"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Number-typed integer comparison
+  - name: s1_number_typed_integer_comparison
+    setup:
+      - |
+        CREATE ({id: 0})
+    query: |
+      WITH collect([0, 0.0]) AS numbers
+      UNWIND numbers AS arr
+      WITH arr[0] AS expected
+      MATCH (n) WHERE toInteger(n.id) = expected
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | ({id: 0}) |
+      side_effects: {}
+
+  # [2] Number-typed float comparison
+  - name: s2_number_typed_float_comparison
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    setup:
+      - |
+        CREATE ({id: 0})
+    query: |
+      WITH collect([0.5, 0]) AS numbers
+      UNWIND numbers AS arr
+      WITH arr[0] AS expected
+      MATCH (n) WHERE toInteger(n.id) = expected
+      RETURN n
+    expect:
+      values: |
+        | n |
+      side_effects: {}
+
+  # [3] Any-typed string comparison
+  - name: s3_any_typed_string_comparison
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    setup:
+      - |
+        CREATE ({id: 0})
+    query: |
+      WITH collect(['0', 0]) AS things
+      UNWIND things AS arr
+      WITH arr[0] AS expected
+      MATCH (n) WHERE toInteger(n.id) = expected
+      RETURN n
+    expect:
+      values: |
+        | n |
+      side_effects: {}
+
+  # [4] Comparing nodes to nodes
+  - name: s4_comparing_nodes_to_nodes
+    setup:
+      - |
+        CREATE ()
+    query: |
+      MATCH (a)
+      WITH a
+      MATCH (b)
+      WHERE a = b
+      RETURN count(b)
+    expect:
+      values: |
+        | count(b) |
+        | 1 |
+      side_effects: {}
+
+  # [5] Comparing relationships to relationships
+  - name: s5_comparing_relationships_to_relationships
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH ()-[a]->()
+      WITH a
+      MATCH ()-[b]->()
+      WHERE a = b
+      RETURN count(b)
+    expect:
+      values: |
+        | count(b) |
+        | 1 |
+      side_effects: {}
+
+  # [6] Comparing lists to lists #1
+  - name: s6_comparing_lists_to_lists_1
+    query: |
+      RETURN [1, 2] = [1] AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [6] Comparing lists to lists #2
+  - name: s6_comparing_lists_to_lists_2
+    query: |
+      RETURN [null] = [1] AS result
+    expect:
+      values: |
+        | result |
+        | null |
+      side_effects: {}
+
+  # [6] Comparing lists to lists #3
+  - name: s6_comparing_lists_to_lists_3
+    query: |
+      RETURN ['a'] = [1] AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [6] Comparing lists to lists #4
+  - name: s6_comparing_lists_to_lists_4
+    query: |
+      RETURN [[1]] = [[1], [null]] AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [6] Comparing lists to lists #5
+  - name: s6_comparing_lists_to_lists_5
+    query: |
+      RETURN [[1], [2]] = [[1], [null]] AS result
+    expect:
+      values: |
+        | result |
+        | null |
+      side_effects: {}
+
+  # [6] Comparing lists to lists #6
+  - name: s6_comparing_lists_to_lists_6
+    query: |
+      RETURN [[1], [2, 3]] = [[1], [null]] AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [7] Comparing maps to maps #1
+  - name: s7_comparing_maps_to_maps_1
+    query: |
+      RETURN {} = {} AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [7] Comparing maps to maps #2
+  - name: s7_comparing_maps_to_maps_2
+    query: |
+      RETURN {k: true} = {k: true} AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [7] Comparing maps to maps #3
+  - name: s7_comparing_maps_to_maps_3
+    query: |
+      RETURN {k: 1} = {k: 1} AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [7] Comparing maps to maps #4
+  - name: s7_comparing_maps_to_maps_4
+    query: |
+      RETURN {k: 1.0} = {k: 1.0} AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [7] Comparing maps to maps #5
+  - name: s7_comparing_maps_to_maps_5
+    query: |
+      RETURN {k: 'abc'} = {k: 'abc'} AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [7] Comparing maps to maps #6
+  - name: s7_comparing_maps_to_maps_6
+    query: |
+      RETURN {k: 'a', l: 2} = {k: 'a', l: 2} AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [7] Comparing maps to maps #7
+  - name: s7_comparing_maps_to_maps_7
+    query: |
+      RETURN {} = {k: null} AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [7] Comparing maps to maps #8
+  - name: s7_comparing_maps_to_maps_8
+    query: |
+      RETURN {k: null} = {} AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [7] Comparing maps to maps #9
+  - name: s7_comparing_maps_to_maps_9
+    query: |
+      RETURN {k: 1} = {k: 1, l: null} AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [7] Comparing maps to maps #10
+  - name: s7_comparing_maps_to_maps_10
+    query: |
+      RETURN {k: null, l: 1} = {l: 1} AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [7] Comparing maps to maps #11
+  - name: s7_comparing_maps_to_maps_11
+    query: |
+      RETURN {k: null} = {k: null, l: null} AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [7] Comparing maps to maps #12
+  - name: s7_comparing_maps_to_maps_12
+    query: |
+      RETURN {k: null} = {k: null} AS result
+    expect:
+      values: |
+        | result |
+        | null |
+      side_effects: {}
+
+  # [7] Comparing maps to maps #13
+  - name: s7_comparing_maps_to_maps_13
+    query: |
+      RETURN {k: 1} = {k: null} AS result
+    expect:
+      values: |
+        | result |
+        | null |
+      side_effects: {}
+
+  # [7] Comparing maps to maps #14
+  - name: s7_comparing_maps_to_maps_14
+    query: |
+      RETURN {k: 1, l: null} = {k: null, l: null} AS result
+    expect:
+      values: |
+        | result |
+        | null |
+      side_effects: {}
+
+  # [7] Comparing maps to maps #15
+  - name: s7_comparing_maps_to_maps_15
+    query: |
+      RETURN {k: 1, l: null} = {k: null, l: 1} AS result
+    expect:
+      values: |
+        | result |
+        | null |
+      side_effects: {}
+
+  # [7] Comparing maps to maps #16
+  - name: s7_comparing_maps_to_maps_16
+    query: |
+      RETURN {k: 1, l: null} = {k: 1, l: 1} AS result
+    expect:
+      values: |
+        | result |
+        | null |
+      side_effects: {}
+
+  # [8] Equality and inequality of NaN #1
+  - name: s8_equality_and_inequality_of_nan_1
+    query: |
+      RETURN 0.0 / 0.0 = 1 AS isEqual, 0.0 / 0.0 <> 1 AS isNotEqual
+    expect:
+      values: |
+        | isEqual | isNotEqual |
+        | false | true |
+      side_effects: {}
+
+  # [8] Equality and inequality of NaN #2
+  - name: s8_equality_and_inequality_of_nan_2
+    query: |
+      RETURN 0.0 / 0.0 = 1.0 AS isEqual, 0.0 / 0.0 <> 1.0 AS isNotEqual
+    expect:
+      values: |
+        | isEqual | isNotEqual |
+        | false | true |
+      side_effects: {}
+
+  # [8] Equality and inequality of NaN #3
+  - name: s8_equality_and_inequality_of_nan_3
+    query: |
+      RETURN 0.0 / 0.0 = 0.0 / 0.0 AS isEqual, 0.0 / 0.0 <> 0.0 / 0.0 AS isNotEqual
+    expect:
+      values: |
+        | isEqual | isNotEqual |
+        | false | true |
+      side_effects: {}
+
+  # [8] Equality and inequality of NaN #4
+  - name: s8_equality_and_inequality_of_nan_4
+    query: |
+      RETURN 0.0 / 0.0 = 'a' AS isEqual, 0.0 / 0.0 <> 'a' AS isNotEqual
+    expect:
+      values: |
+        | isEqual | isNotEqual |
+        | false | true |
+      side_effects: {}
+
+  # [9] Equality between strings and numbers #1
+  - name: s9_equality_between_strings_and_numbers_1
+    query: |
+      RETURN 1.0 = 1.0 AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [9] Equality between strings and numbers #2
+  - name: s9_equality_between_strings_and_numbers_2
+    query: |
+      RETURN 1 = 1.0 AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [9] Equality between strings and numbers #3
+  - name: s9_equality_between_strings_and_numbers_3
+    query: |
+      RETURN '1.0' = 1.0 AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [9] Equality between strings and numbers #4
+  - name: s9_equality_between_strings_and_numbers_4
+    query: |
+      RETURN '1' = 1 AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [10] Handling inlined equality of large integer
+  - name: s10_handling_inlined_equality_of_large_integer
+    setup:
+      - |
+        CREATE (:TheLabel {id: 4611686018427387905})
+    query: |
+      MATCH (p:TheLabel {id: 4611686018427387905})
+      RETURN p.id
+    expect:
+      values: |
+        | p.id |
+        | 4611686018427387905 |
+      side_effects: {}
+
+  # [11] Handling explicit equality of large integer
+  - name: s11_handling_explicit_equality_of_large_integer
+    setup:
+      - |
+        CREATE (:TheLabel {id: 4611686018427387905})
+    query: |
+      MATCH (p:TheLabel)
+      WHERE p.id = 4611686018427387905
+      RETURN p.id
+    expect:
+      values: |
+        | p.id |
+        | 4611686018427387905 |
+      side_effects: {}
+
+  # [12] Handling inlined equality of large integer, non-equal values
+  - name: s12_handling_inlined_equality_of_large_integer_non_equal_values
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    setup:
+      - |
+        CREATE (:TheLabel {id: 4611686018427387905})
+    query: |
+      MATCH (p:TheLabel {id : 4611686018427387900})
+      RETURN p.id
+    expect:
+      values: |
+        | p.id |
+      side_effects: {}
+
+  # [13] Handling explicit equality of large integer, non-equal values
+  - name: s13_handling_explicit_equality_of_large_integer_non_equal_values
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    setup:
+      - |
+        CREATE (:TheLabel {id: 4611686018427387905})
+    query: |
+      MATCH (p:TheLabel)
+      WHERE p.id = 4611686018427387900
+      RETURN p.id
+    expect:
+      values: |
+        | p.id |
+      side_effects: {}
+
+  # [14] Direction of traversed relationship is not significant for path equality, simple
+  - name: s14_direction_of_traversed_relationship_is_not_significant_for_path_equality_simple
+    setup:
+      - |
+        CREATE (n:A)-[:LOOP]->(n)
+    query: |
+      MATCH p1 = (:A)-->()
+      MATCH p2 = (:A)<--()
+      RETURN p1 = p2
+    expect:
+      values: |
+        | p1 = p2 |
+        | true |
+      side_effects: {}
+
+  # [15] It is unknown - i.e. null - if a null is equal to a null
+  - name: s15_it_is_unknown_i_e_null_if_a_null_is_equal_to_a_null
+    query: |
+      RETURN null = null AS value
+    expect:
+      values: |
+        | value |
+        | null |
+      side_effects: {}
+
+  # [16] It is unknown - i.e. null - if a null is not equal to a null
+  - name: s16_it_is_unknown_i_e_null_if_a_null_is_not_equal_to_a_null
+    query: |
+      RETURN null <> null AS value
+    expect:
+      values: |
+        | value |
+        | null |
+      side_effects: {}
+
+  # [17] Failing when comparing to an undefined variable
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s17_failing_when_comparing_to_an_undefined_variable
+    query: |
+      MATCH (s)
+      WHERE s.name = undefinedVariable
+        AND s.age = 10
+      RETURN s
+    expect:
+      gql_status: "42"
+      side_effects: {}

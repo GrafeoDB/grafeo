@@ -1,0 +1,305 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/return/Return2.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Return2"
+  title: "Return2 - Return single expression (correctly projecting an expression)"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Arithmetic expressions should propagate null values
+  - name: s1_arithmetic_expressions_should_propagate_null_values
+    query: |
+      RETURN 1 + (2 - (3 * (4 / (5 ^ (6 % null))))) AS a
+    expect:
+      values: |
+        | a |
+        | null |
+      side_effects: {}
+
+  # [2] Returning a node property value
+  - name: s2_returning_a_node_property_value
+    setup:
+      - |
+        CREATE ({num: 1})
+    query: |
+      MATCH (a)
+      RETURN a.num
+    expect:
+      values: |
+        | a.num |
+        | 1 |
+      side_effects: {}
+
+  # [3] Missing node property should become null
+  - name: s3_missing_node_property_should_become_null
+    setup:
+      - |
+        CREATE ({num: 1})
+    query: |
+      MATCH (a)
+      RETURN a.name
+    expect:
+      values: |
+        | a.name |
+        | null |
+      side_effects: {}
+
+  # [4] Returning a relationship property value
+  - name: s4_returning_a_relationship_property_value
+    setup:
+      - |
+        CREATE ()-[:T {num: 1}]->()
+    query: |
+      MATCH ()-[r]->()
+      RETURN r.num
+    expect:
+      values: |
+        | r.num |
+        | 1 |
+      side_effects: {}
+
+  # [5] Missing relationship property should become null
+  - name: s5_missing_relationship_property_should_become_null
+    setup:
+      - |
+        CREATE ()-[:T {name: 1}]->()
+    query: |
+      MATCH ()-[r]->()
+      RETURN r.name2
+    expect:
+      values: |
+        | r.name2 |
+        | null |
+      side_effects: {}
+
+  # [6] Adding a property and a literal in projection
+  - name: s6_adding_a_property_and_a_literal_in_projection
+    setup:
+      - |
+        CREATE ({num: 1})
+    query: |
+      MATCH (a)
+      RETURN a.num + 1 AS foo
+    expect:
+      values: |
+        | foo |
+        | 2 |
+      side_effects: {}
+
+  # [7] Adding list properties in projection
+  - name: s7_adding_list_properties_in_projection
+    setup:
+      - |
+        CREATE ({list1: [1, 2, 3], list2: [4, 5]})
+    query: |
+      MATCH (a)
+      RETURN a.list2 + a.list1 AS foo
+    expect:
+      values: |
+        | foo |
+        | [4, 5, 1, 2, 3] |
+      side_effects: {}
+
+  # [8] Returning label predicate expression
+  - name: s8_returning_label_predicate_expression
+    xfail:
+      spec: "openCypher TCK 2024.3 Return2: [8] Returning label predicate expression"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        CREATE (), (:Foo)
+    query: |
+      MATCH (n)
+      RETURN (n:Foo)
+    expect:
+      values: |
+        | (n:Foo) |
+        | true |
+        | false |
+      side_effects: {}
+
+  # [9] Returning a projected map
+  - name: s9_returning_a_projected_map
+    setup:
+      - |
+        CREATE ({numbers: [1, 2, 3]})
+    query: |
+      RETURN {a: 1, b: 'foo'}
+    expect:
+      values: |
+        | {a: 1, b: 'foo'} |
+        | {a: 1, b: 'foo'} |
+      side_effects: {}
+
+  # [10] Return count aggregation over an empty graph
+  - name: s10_return_count_aggregation_over_an_empty_graph
+    query: |
+      MATCH (a)
+      RETURN count(a) > 0
+    expect:
+      values: |
+        | count(a) > 0 |
+        | false |
+      side_effects: {}
+
+  # [11] RETURN does not lose precision on large integers
+  - name: s11_return_does_not_lose_precision_on_large_integers
+    setup:
+      - |
+        CREATE (:TheLabel {id: 4611686018427387905})
+    query: |
+      MATCH (p:TheLabel)
+      RETURN p.id
+    expect:
+      values: |
+        | p.id |
+        | 4611686018427387905 |
+      side_effects: {}
+
+  # [12] Projecting a list of nodes and relationships
+  - name: s12_projecting_a_list_of_nodes_and_relationships
+    setup:
+      - |
+        CREATE (a:A), (b:B)
+        CREATE (a)-[:T]->(b)
+    query: |
+      MATCH (n)-[r]->(m)
+      RETURN [n, r, m] AS r
+    expect:
+      values: |
+        | r |
+        | [(:A), [:T], (:B)] |
+      side_effects: {}
+
+  # [13] Projecting a map of nodes and relationships
+  - name: s13_projecting_a_map_of_nodes_and_relationships
+    setup:
+      - |
+        CREATE (a:A), (b:B)
+        CREATE (a)-[:T]->(b)
+    query: |
+      MATCH (n)-[r]->(m)
+      RETURN {node1: n, rel: r, node2: m} AS m
+    expect:
+      values: |
+        | m |
+        | {node1: (:A), rel: [:T], node2: (:B)} |
+      side_effects: {}
+
+  # [14] Do not fail when returning type of deleted relationships
+  - name: s14_do_not_fail_when_returning_type_of_deleted_relationships
+    xfail:
+      spec: "openCypher TCK 2024.3 Return2: [14] Do not fail when returning type of deleted relationships"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH ()-[r]->()
+      DELETE r
+      RETURN type(r)
+    expect:
+      values: |
+        | type(r) |
+        | 'T' |
+      side_effects:
+        -relationships: 1
+
+  # [15] Fail when returning properties of deleted nodes
+  # TCK: EntityNotFound at runtime: DeletedEntityAccess
+  # the class of EntityNotFound is provisional
+  - name: s15_fail_when_returning_properties_of_deleted_nodes
+    xfail:
+      spec: "openCypher TCK 2024.3 Return2: [15] Fail when returning properties of deleted nodes"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        CREATE ({num: 0})
+    query: |
+      MATCH (n)
+      DELETE n
+      RETURN n.num
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [16] Fail when returning labels of deleted nodes
+  # TCK: EntityNotFound at runtime: DeletedEntityAccess
+  # the class of EntityNotFound is provisional
+  - name: s16_fail_when_returning_labels_of_deleted_nodes
+    xfail:
+      spec: "openCypher TCK 2024.3 Return2: [16] Fail when returning labels of deleted nodes"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        CREATE (:A)
+    query: |
+      MATCH (n)
+      DELETE n
+      RETURN labels(n)
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [17] Fail when returning properties of deleted relationships
+  # TCK: EntityNotFound at runtime: DeletedEntityAccess
+  # the class of EntityNotFound is provisional
+  - name: s17_fail_when_returning_properties_of_deleted_relationships
+    xfail:
+      spec: "openCypher TCK 2024.3 Return2: [17] Fail when returning properties of deleted relationships"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        CREATE ()-[:T {num: 0}]->()
+    query: |
+      MATCH ()-[r]->()
+      DELETE r
+      RETURN r.num
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [18] Fail on projecting a non-existent function
+  # TCK: SyntaxError at compile time: UnknownFunction
+  - name: s18_fail_on_projecting_a_non_existent_function
+    query: |
+      MATCH (a)
+      RETURN foo(a)
+    expect:
+      gql_status: "42"
+      side_effects: {}

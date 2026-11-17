@@ -1,0 +1,303 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/comparison/Comparison2.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Comparison2"
+  title: "Comparison2 - Half-bounded Range"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Comparing strings and integers using > in an AND'd predicate
+  - name: s1_comparing_strings_and_integers_using_in_an_and_d_predicate
+    setup:
+      - |
+        CREATE (root:Root)-[:T]->(:Child {var: 0}),
+               (root)-[:T]->(:Child {var: 'xx'}),
+               (root)-[:T]->(:Child)
+    query: |
+      MATCH (:Root)-->(i:Child)
+      WHERE i.var IS NOT NULL AND i.var > 'x'
+      RETURN i.var
+    expect:
+      values: |
+        | i.var |
+        | 'xx' |
+      side_effects: {}
+
+  # [2] Comparing strings and integers using > in a OR'd predicate
+  - name: s2_comparing_strings_and_integers_using_in_a_or_d_predicate
+    setup:
+      - |
+        CREATE (root:Root)-[:T]->(:Child {var: 0}),
+               (root)-[:T]->(:Child {var: 'xx'}),
+               (root)-[:T]->(:Child)
+    query: |
+      MATCH (:Root)-->(i:Child)
+      WHERE i.var IS NULL OR i.var > 'x'
+      RETURN i.var
+    expect:
+      values: |
+        | i.var |
+        | 'xx' |
+        | null |
+      side_effects: {}
+
+  # [3] Comparing across types yields null, except numbers #1
+  - name: s3_comparing_across_types_yields_null_except_numbers_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Comparison2: [3] Comparing across types yields null, except numbers #1"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH p = (n)-[r]->()
+      WITH [n, r, p, '', 1, 3.14, true, null, [], {}] AS types
+      UNWIND range(0, size(types) - 1) AS i
+      UNWIND range(0, size(types) - 1) AS j
+      WITH types[i] AS lhs, types[j] AS rhs
+      WHERE i <> j
+      WITH lhs, rhs, lhs < rhs AS result
+      WHERE result
+      RETURN lhs, rhs
+    expect:
+      values: |
+        | lhs | rhs |
+        | 1 | 3.14 |
+      side_effects: {}
+
+  # [3] Comparing across types yields null, except numbers #2
+  - name: s3_comparing_across_types_yields_null_except_numbers_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Comparison2: [3] Comparing across types yields null, except numbers #2"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH p = (n)-[r]->()
+      WITH [n, r, p, '', 1, 3.14, true, null, [], {}] AS types
+      UNWIND range(0, size(types) - 1) AS i
+      UNWIND range(0, size(types) - 1) AS j
+      WITH types[i] AS lhs, types[j] AS rhs
+      WHERE i <> j
+      WITH lhs, rhs, lhs <= rhs AS result
+      WHERE result
+      RETURN lhs, rhs
+    expect:
+      values: |
+        | lhs | rhs |
+        | 1 | 3.14 |
+      side_effects: {}
+
+  # [3] Comparing across types yields null, except numbers #3
+  - name: s3_comparing_across_types_yields_null_except_numbers_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Comparison2: [3] Comparing across types yields null, except numbers #3"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH p = (n)-[r]->()
+      WITH [n, r, p, '', 1, 3.14, true, null, [], {}] AS types
+      UNWIND range(0, size(types) - 1) AS i
+      UNWIND range(0, size(types) - 1) AS j
+      WITH types[i] AS lhs, types[j] AS rhs
+      WHERE i <> j
+      WITH lhs, rhs, lhs >= rhs AS result
+      WHERE result
+      RETURN lhs, rhs
+    expect:
+      values: |
+        | lhs | rhs |
+        | 3.14 | 1 |
+      side_effects: {}
+
+  # [3] Comparing across types yields null, except numbers #4
+  - name: s3_comparing_across_types_yields_null_except_numbers_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Comparison2: [3] Comparing across types yields null, except numbers #4"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH p = (n)-[r]->()
+      WITH [n, r, p, '', 1, 3.14, true, null, [], {}] AS types
+      UNWIND range(0, size(types) - 1) AS i
+      UNWIND range(0, size(types) - 1) AS j
+      WITH types[i] AS lhs, types[j] AS rhs
+      WHERE i <> j
+      WITH lhs, rhs, lhs > rhs AS result
+      WHERE result
+      RETURN lhs, rhs
+    expect:
+      values: |
+        | lhs | rhs |
+        | 3.14 | 1 |
+      side_effects: {}
+
+  # [4] Comparing lists #1
+  - name: s4_comparing_lists_1
+    query: |
+      RETURN [1, 0] >= [1] AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [4] Comparing lists #2
+  - name: s4_comparing_lists_2
+    query: |
+      RETURN [1, null] >= [1] AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [4] Comparing lists #3
+  - name: s4_comparing_lists_3
+    query: |
+      RETURN [1, 2] >= [1, null] AS result
+    expect:
+      values: |
+        | result |
+        | null |
+      side_effects: {}
+
+  # [4] Comparing lists #4
+  - name: s4_comparing_lists_4
+    query: |
+      RETURN [1, 'a'] >= [1, null] AS result
+    expect:
+      values: |
+        | result |
+        | null |
+      side_effects: {}
+
+  # [4] Comparing lists #5
+  - name: s4_comparing_lists_5
+    query: |
+      RETURN [1, 2] >= [3, null] AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [5] Comparing NaN #1
+  - name: s5_comparing_nan_1
+    query: |
+      RETURN 0.0 / 0.0 > 1 AS gt, 0.0 / 0.0 >= 1 AS gtE, 0.0 / 0.0 < 1 AS lt, 0.0 / 0.0 <= 1 AS ltE
+    expect:
+      values: |
+        | gt | gtE | lt | ltE |
+        | false | false | false | false |
+      side_effects: {}
+
+  # [5] Comparing NaN #2
+  - name: s5_comparing_nan_2
+    query: |
+      RETURN 0.0 / 0.0 > 1.0 AS gt, 0.0 / 0.0 >= 1.0 AS gtE, 0.0 / 0.0 < 1.0 AS lt, 0.0 / 0.0 <= 1.0 AS ltE
+    expect:
+      values: |
+        | gt | gtE | lt | ltE |
+        | false | false | false | false |
+      side_effects: {}
+
+  # [5] Comparing NaN #3
+  - name: s5_comparing_nan_3
+    query: |
+      RETURN 0.0 / 0.0 > 0.0 / 0.0 AS gt, 0.0 / 0.0 >= 0.0 / 0.0 AS gtE, 0.0 / 0.0 < 0.0 / 0.0 AS lt, 0.0 / 0.0 <= 0.0 / 0.0 AS ltE
+    expect:
+      values: |
+        | gt | gtE | lt | ltE |
+        | false | false | false | false |
+      side_effects: {}
+
+  # [5] Comparing NaN #4
+  - name: s5_comparing_nan_4
+    query: |
+      RETURN 0.0 / 0.0 > 'a' AS gt, 0.0 / 0.0 >= 'a' AS gtE, 0.0 / 0.0 < 'a' AS lt, 0.0 / 0.0 <= 'a' AS ltE
+    expect:
+      values: |
+        | gt | gtE | lt | ltE |
+        | null | null | null | null |
+      side_effects: {}
+
+  # [6] Comparability between numbers and strings #1
+  - name: s6_comparability_between_numbers_and_strings_1
+    query: |
+      RETURN 1.0 < 1.0 AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [6] Comparability between numbers and strings #2
+  - name: s6_comparability_between_numbers_and_strings_2
+    query: |
+      RETURN 1 < 1.0 AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [6] Comparability between numbers and strings #3
+  - name: s6_comparability_between_numbers_and_strings_3
+    query: |
+      RETURN '1.0' < 1.0 AS result
+    expect:
+      values: |
+        | result |
+        | null |
+      side_effects: {}
+
+  # [6] Comparability between numbers and strings #4
+  - name: s6_comparability_between_numbers_and_strings_4
+    query: |
+      RETURN '1' < 1 AS result
+    expect:
+      values: |
+        | result |
+        | null |
+      side_effects: {}

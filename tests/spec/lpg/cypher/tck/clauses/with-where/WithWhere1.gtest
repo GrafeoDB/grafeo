@@ -1,0 +1,121 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/with-where/WithWhere1.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.WithWhere1"
+  title: "WithWhere1 - Filter single variable"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Filter node with property predicate on a single variable with multiple bindings
+  - name: s1_filter_node_with_property_predicate_on_a_single_variable_with_multiple_bindings
+    setup:
+      - |
+        CREATE ({name: 'A'}),
+               ({name: 'B'}),
+               ({name: 'C'})
+    query: |
+      MATCH (a)
+      WITH a
+      WHERE a.name = 'B'
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({name: 'B'}) |
+      side_effects: {}
+
+  # [2] Filter node with property predicate on a single variable with multiple distinct bindings
+  - name: s2_filter_node_with_property_predicate_on_a_single_variable_with_multiple_distinct_bindings
+    xfail:
+      spec: "openCypher TCK 2024.3 WithWhere1: [2] Filter node with property predicate on a single variable with multiple distinct bindings"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE ({name2: 'A'}),
+               ({name2: 'A'}),
+               ({name2: 'B'})
+    query: |
+      MATCH (a)
+      WITH DISTINCT a.name2 AS name
+      WHERE a.name2 = 'B'
+      RETURN *
+    expect:
+      values: |
+        | name |
+        | 'B' |
+      side_effects: {}
+
+  # [3] Filter for an unbound relationship variable
+  - name: s3_filter_for_an_unbound_relationship_variable
+    xfail:
+      spec: "openCypher TCK 2024.3 WithWhere1: [3] Filter for an unbound relationship variable"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE (a:A), (b:B {id: 1}), (:B {id: 2})
+        CREATE (a)-[:T]->(b)
+    query: |
+      MATCH (a:A), (other:B)
+      OPTIONAL MATCH (a)-[r]->(other)
+      WITH other WHERE r IS NULL
+      RETURN other
+    expect:
+      values: |
+        | other |
+        | (:B {id: 2}) |
+      side_effects: {}
+
+  # [4] Filter for an unbound node variable
+  - name: s4_filter_for_an_unbound_node_variable
+    xfail:
+      spec: "openCypher TCK 2024.3 WithWhere1: [4] Filter for an unbound node variable"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE (a:A), (b:B {id: 1}), (:B {id: 2})
+        CREATE (a)-[:T]->(b)
+    query: |
+      MATCH (other:B)
+      OPTIONAL MATCH (a)-[r]->(other)
+      WITH other WHERE a IS NULL
+      RETURN other
+    expect:
+      values: |
+        | other |
+        | (:B {id: 2}) |
+      side_effects: {}

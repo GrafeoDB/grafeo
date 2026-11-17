@@ -1,0 +1,2275 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/temporal/Temporal10.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Temporal10"
+  title: "Temporal10 - Compute Durations Between two Temporal Values"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Should split between boundaries correctly #1
+  - name: s1_should_split_between_boundaries_correctly_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [1] Should split between boundaries correctly #1"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      WITH duration.between(localdatetime('2018-01-01T12:00'), localdatetime('2018-01-02T10:00')) AS dur
+      RETURN dur, dur.days, dur.seconds, dur.nanosecondsOfSecond
+    expect:
+      values: |
+        | dur | dur.days | dur.seconds | dur.nanosecondsOfSecond |
+        | 'PT22H' | 0 | 79200 | 0 |
+      side_effects: {}
+
+  # [1] Should split between boundaries correctly #2
+  - name: s1_should_split_between_boundaries_correctly_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [1] Should split between boundaries correctly #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      WITH duration.between(localdatetime('2018-01-02T10:00'), localdatetime('2018-01-01T12:00')) AS dur
+      RETURN dur, dur.days, dur.seconds, dur.nanosecondsOfSecond
+    expect:
+      values: |
+        | dur | dur.days | dur.seconds | dur.nanosecondsOfSecond |
+        | 'PT-22H' | 0 | -79200 | 0 |
+      side_effects: {}
+
+  # [1] Should split between boundaries correctly #3
+  - name: s1_should_split_between_boundaries_correctly_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [1] Should split between boundaries correctly #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      WITH duration.between(localdatetime('2018-01-01T10:00:00.2'), localdatetime('2018-01-02T10:00:00.1')) AS dur
+      RETURN dur, dur.days, dur.seconds, dur.nanosecondsOfSecond
+    expect:
+      values: |
+        | dur | dur.days | dur.seconds | dur.nanosecondsOfSecond |
+        | 'PT23H59M59.9S' | 0 | 86399 | 900000000 |
+      side_effects: {}
+
+  # [1] Should split between boundaries correctly #4
+  - name: s1_should_split_between_boundaries_correctly_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [1] Should split between boundaries correctly #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      WITH duration.between(localdatetime('2018-01-02T10:00:00.1'), localdatetime('2018-01-01T10:00:00.2')) AS dur
+      RETURN dur, dur.days, dur.seconds, dur.nanosecondsOfSecond
+    expect:
+      values: |
+        | dur | dur.days | dur.seconds | dur.nanosecondsOfSecond |
+        | 'PT-23H-59M-59.9S' | 0 | -86400 | 100000000 |
+      side_effects: {}
+
+  # [1] Should split between boundaries correctly #5
+  - name: s1_should_split_between_boundaries_correctly_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [1] Should split between boundaries correctly #5"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      WITH duration.between(datetime('2017-10-28T23:00+02:00[Europe/Stockholm]'), datetime('2017-10-29T04:00+01:00[Europe/Stockholm]')) AS dur
+      RETURN dur, dur.days, dur.seconds, dur.nanosecondsOfSecond
+    expect:
+      values: |
+        | dur | dur.days | dur.seconds | dur.nanosecondsOfSecond |
+        | 'PT6H' | 0 | 21600 | 0 |
+      side_effects: {}
+
+  # [1] Should split between boundaries correctly #6
+  - name: s1_should_split_between_boundaries_correctly_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [1] Should split between boundaries correctly #6"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      WITH duration.between(datetime('2017-10-29T04:00+01:00[Europe/Stockholm]'), datetime('2017-10-28T23:00+02:00[Europe/Stockholm]')) AS dur
+      RETURN dur, dur.days, dur.seconds, dur.nanosecondsOfSecond
+    expect:
+      values: |
+        | dur | dur.days | dur.seconds | dur.nanosecondsOfSecond |
+        | 'PT-6H' | 0 | -21600 | 0 |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #1
+  - name: s2_should_compute_duration_between_two_temporals_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #1"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(date('1984-10-11'), date('2015-06-24')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P30Y8M13D' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #2
+  - name: s2_should_compute_duration_between_two_temporals_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(date('1984-10-11'), localdatetime('2016-07-21T21:45:22.142')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P31Y9M10DT21H45M22.142S' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #3
+  - name: s2_should_compute_duration_between_two_temporals_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(date('1984-10-11'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P30Y9M10DT21H40M32.142S' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #4
+  - name: s2_should_compute_duration_between_two_temporals_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(date('1984-10-11'), localtime('16:30')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT16H30M' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #5
+  - name: s2_should_compute_duration_between_two_temporals_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #5"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(date('1984-10-11'), time('16:30+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT16H30M' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #6
+  - name: s2_should_compute_duration_between_two_temporals_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #6"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(localtime('14:30'), date('2015-06-24')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT-14H-30M' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #7
+  - name: s2_should_compute_duration_between_two_temporals_7
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #7"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(localtime('14:30'), localdatetime('2016-07-21T21:45:22.142')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT7H15M22.142S' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #8
+  - name: s2_should_compute_duration_between_two_temporals_8
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #8"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(localtime('14:30'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT7H10M32.142S' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #9
+  - name: s2_should_compute_duration_between_two_temporals_9
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #9"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(localtime('14:30'), localtime('16:30')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT2H' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #10
+  - name: s2_should_compute_duration_between_two_temporals_10
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #10"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(localtime('14:30'), time('16:30+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT2H' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #11
+  - name: s2_should_compute_duration_between_two_temporals_11
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #11"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(time('14:30'), date('2015-06-24')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT-14H-30M' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #12
+  - name: s2_should_compute_duration_between_two_temporals_12
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #12"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(time('14:30'), localdatetime('2016-07-21T21:45:22.142')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT7H15M22.142S' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #13
+  - name: s2_should_compute_duration_between_two_temporals_13
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #13"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(time('14:30'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT6H10M32.142S' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #14
+  - name: s2_should_compute_duration_between_two_temporals_14
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #14"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(time('14:30'), localtime('16:30')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT2H' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #15
+  - name: s2_should_compute_duration_between_two_temporals_15
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #15"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(time('14:30'), time('16:30+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT1H' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #16
+  - name: s2_should_compute_duration_between_two_temporals_16
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #16"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(localdatetime('2015-07-21T21:40:32.142'), date('2015-06-24')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P-27DT-21H-40M-32.142S' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #17
+  - name: s2_should_compute_duration_between_two_temporals_17
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #17"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(localdatetime('2015-07-21T21:40:32.142'), localdatetime('2016-07-21T21:45:22.142')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P1YT4M50S' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #18
+  - name: s2_should_compute_duration_between_two_temporals_18
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #18"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(localdatetime('2015-07-21T21:40:32.142'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #19
+  - name: s2_should_compute_duration_between_two_temporals_19
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #19"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(localdatetime('2015-07-21T21:40:32.142'), localtime('16:30')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT-5H-10M-32.142S' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #20
+  - name: s2_should_compute_duration_between_two_temporals_20
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #20"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(localdatetime('2015-07-21T21:40:32.142'), time('16:30+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT-5H-10M-32.142S' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #21
+  - name: s2_should_compute_duration_between_two_temporals_21
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #21"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(datetime('2014-07-21T21:40:36.143+0200'), date('2015-06-24')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P11M2DT2H19M23.857S' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #22
+  - name: s2_should_compute_duration_between_two_temporals_22
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #22"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(datetime('2014-07-21T21:40:36.143+0200'), localdatetime('2016-07-21T21:45:22.142')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P2YT4M45.999S' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #23
+  - name: s2_should_compute_duration_between_two_temporals_23
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #23"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(datetime('2014-07-21T21:40:36.143+0200'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P1YT59M55.999S' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #24
+  - name: s2_should_compute_duration_between_two_temporals_24
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #24"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(datetime('2014-07-21T21:40:36.143+0200'), localtime('16:30')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT-5H-10M-36.143S' |
+      side_effects: {}
+
+  # [2] Should compute duration between two temporals #25
+  - name: s2_should_compute_duration_between_two_temporals_25
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #25"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(datetime('2014-07-21T21:40:36.143+0200'), time('16:30+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT-4H-10M-36.143S' |
+      side_effects: {}
+
+  # [3] Should compute duration between two temporals in months #1
+  - name: s3_should_compute_duration_between_two_temporals_in_months_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #1"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(date('1984-10-11'), date('2015-06-24')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P30Y8M' |
+      side_effects: {}
+
+  # [3] Should compute duration between two temporals in months #2
+  - name: s3_should_compute_duration_between_two_temporals_in_months_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(date('1984-10-11'), localdatetime('2016-07-21T21:45:22.142')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P31Y9M' |
+      side_effects: {}
+
+  # [3] Should compute duration between two temporals in months #3
+  - name: s3_should_compute_duration_between_two_temporals_in_months_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(date('1984-10-11'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P30Y9M' |
+      side_effects: {}
+
+  # [3] Should compute duration between two temporals in months #4
+  - name: s3_should_compute_duration_between_two_temporals_in_months_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(date('1984-10-11'), localtime('16:30')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [3] Should compute duration between two temporals in months #5
+  - name: s3_should_compute_duration_between_two_temporals_in_months_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #5"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(date('1984-10-11'), time('16:30+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [3] Should compute duration between two temporals in months #6
+  - name: s3_should_compute_duration_between_two_temporals_in_months_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #6"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(localtime('14:30'), date('2015-06-24')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [3] Should compute duration between two temporals in months #7
+  - name: s3_should_compute_duration_between_two_temporals_in_months_7
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #7"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(localtime('14:30'), localdatetime('2016-07-21T21:45:22.142')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [3] Should compute duration between two temporals in months #8
+  - name: s3_should_compute_duration_between_two_temporals_in_months_8
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #8"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(localtime('14:30'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [3] Should compute duration between two temporals in months #9
+  - name: s3_should_compute_duration_between_two_temporals_in_months_9
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #9"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(time('14:30'), date('2015-06-24')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [3] Should compute duration between two temporals in months #10
+  - name: s3_should_compute_duration_between_two_temporals_in_months_10
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #10"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(time('14:30'), localdatetime('2016-07-21T21:45:22.142')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [3] Should compute duration between two temporals in months #11
+  - name: s3_should_compute_duration_between_two_temporals_in_months_11
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #11"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(time('14:30'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [3] Should compute duration between two temporals in months #12
+  - name: s3_should_compute_duration_between_two_temporals_in_months_12
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #12"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(localdatetime('2015-07-21T21:40:32.142'), date('2015-06-24')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [3] Should compute duration between two temporals in months #13
+  - name: s3_should_compute_duration_between_two_temporals_in_months_13
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #13"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(localdatetime('2015-07-21T21:40:32.142'), localdatetime('2016-07-21T21:45:22.142')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P1Y' |
+      side_effects: {}
+
+  # [3] Should compute duration between two temporals in months #14
+  - name: s3_should_compute_duration_between_two_temporals_in_months_14
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #14"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(localdatetime('2015-07-21T21:40:32.142'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [3] Should compute duration between two temporals in months #15
+  - name: s3_should_compute_duration_between_two_temporals_in_months_15
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #15"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(localdatetime('2015-07-21T21:40:32.142'), localtime('16:30')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [3] Should compute duration between two temporals in months #16
+  - name: s3_should_compute_duration_between_two_temporals_in_months_16
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #16"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(localdatetime('2015-07-21T21:40:32.142'), time('16:30+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [3] Should compute duration between two temporals in months #17
+  - name: s3_should_compute_duration_between_two_temporals_in_months_17
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #17"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(datetime('2014-07-21T21:40:36.143+0200'), date('2015-06-24')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P11M' |
+      side_effects: {}
+
+  # [3] Should compute duration between two temporals in months #18
+  - name: s3_should_compute_duration_between_two_temporals_in_months_18
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #18"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(datetime('2014-07-21T21:40:36.143+0200'), localdatetime('2016-07-21T21:45:22.142')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P2Y' |
+      side_effects: {}
+
+  # [3] Should compute duration between two temporals in months #19
+  - name: s3_should_compute_duration_between_two_temporals_in_months_19
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #19"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(datetime('2014-07-21T21:40:36.143+0200'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P1Y' |
+      side_effects: {}
+
+  # [3] Should compute duration between two temporals in months #20
+  - name: s3_should_compute_duration_between_two_temporals_in_months_20
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #20"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(datetime('2014-07-21T21:40:36.143+0200'), localtime('16:30')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [3] Should compute duration between two temporals in months #21
+  - name: s3_should_compute_duration_between_two_temporals_in_months_21
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #21"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(datetime('2014-07-21T21:40:36.143+0200'), time('16:30+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [4] Should compute duration between two temporals in days #1
+  - name: s4_should_compute_duration_between_two_temporals_in_days_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #1"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(date('1984-10-11'), date('2015-06-24')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P11213D' |
+      side_effects: {}
+
+  # [4] Should compute duration between two temporals in days #2
+  - name: s4_should_compute_duration_between_two_temporals_in_days_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(date('1984-10-11'), localdatetime('2016-07-21T21:45:22.142')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P11606D' |
+      side_effects: {}
+
+  # [4] Should compute duration between two temporals in days #3
+  - name: s4_should_compute_duration_between_two_temporals_in_days_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(date('1984-10-11'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P11240D' |
+      side_effects: {}
+
+  # [4] Should compute duration between two temporals in days #4
+  - name: s4_should_compute_duration_between_two_temporals_in_days_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(date('1984-10-11'), localtime('16:30')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [4] Should compute duration between two temporals in days #5
+  - name: s4_should_compute_duration_between_two_temporals_in_days_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #5"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(date('1984-10-11'), time('16:30+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [4] Should compute duration between two temporals in days #6
+  - name: s4_should_compute_duration_between_two_temporals_in_days_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #6"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(localtime('14:30'), date('2015-06-24')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [4] Should compute duration between two temporals in days #7
+  - name: s4_should_compute_duration_between_two_temporals_in_days_7
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #7"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(localtime('14:30'), localdatetime('2016-07-21T21:45:22.142')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [4] Should compute duration between two temporals in days #8
+  - name: s4_should_compute_duration_between_two_temporals_in_days_8
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #8"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(localtime('14:30'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [4] Should compute duration between two temporals in days #9
+  - name: s4_should_compute_duration_between_two_temporals_in_days_9
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #9"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(time('14:30'), date('2015-06-24')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [4] Should compute duration between two temporals in days #10
+  - name: s4_should_compute_duration_between_two_temporals_in_days_10
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #10"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(time('14:30'), localdatetime('2016-07-21T21:45:22.142')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [4] Should compute duration between two temporals in days #11
+  - name: s4_should_compute_duration_between_two_temporals_in_days_11
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #11"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(time('14:30'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [4] Should compute duration between two temporals in days #12
+  - name: s4_should_compute_duration_between_two_temporals_in_days_12
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #12"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(localdatetime('2015-07-21T21:40:32.142'), date('2015-06-24')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P-27D' |
+      side_effects: {}
+
+  # [4] Should compute duration between two temporals in days #13
+  - name: s4_should_compute_duration_between_two_temporals_in_days_13
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #13"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(localdatetime('2015-07-21T21:40:32.142'), localdatetime('2016-07-21T21:45:22.142')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P366D' |
+      side_effects: {}
+
+  # [4] Should compute duration between two temporals in days #14
+  - name: s4_should_compute_duration_between_two_temporals_in_days_14
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #14"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(localdatetime('2015-07-21T21:40:32.142'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [4] Should compute duration between two temporals in days #15
+  - name: s4_should_compute_duration_between_two_temporals_in_days_15
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #15"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(localdatetime('2015-07-21T21:40:32.142'), localtime('16:30')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [4] Should compute duration between two temporals in days #16
+  - name: s4_should_compute_duration_between_two_temporals_in_days_16
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #16"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(localdatetime('2015-07-21T21:40:32.142'), time('16:30+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [4] Should compute duration between two temporals in days #17
+  - name: s4_should_compute_duration_between_two_temporals_in_days_17
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #17"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(datetime('2014-07-21T21:40:36.143+0200'), date('2015-06-24')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P337D' |
+      side_effects: {}
+
+  # [4] Should compute duration between two temporals in days #18
+  - name: s4_should_compute_duration_between_two_temporals_in_days_18
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #18"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(datetime('2014-07-21T21:40:36.143+0200'), localdatetime('2016-07-21T21:45:22.142')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P731D' |
+      side_effects: {}
+
+  # [4] Should compute duration between two temporals in days #19
+  - name: s4_should_compute_duration_between_two_temporals_in_days_19
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #19"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(datetime('2014-07-21T21:40:36.143+0200'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P365D' |
+      side_effects: {}
+
+  # [4] Should compute duration between two temporals in days #20
+  - name: s4_should_compute_duration_between_two_temporals_in_days_20
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #20"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(datetime('2014-07-21T21:40:36.143+0200'), localtime('16:30')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [4] Should compute duration between two temporals in days #21
+  - name: s4_should_compute_duration_between_two_temporals_in_days_21
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #21"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(datetime('2014-07-21T21:40:36.143+0200'), time('16:30+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #1
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #1"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(date('1984-10-11'), date('2015-06-24')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT269112H' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #2
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(date('1984-10-11'), localdatetime('2016-07-21T21:45:22.142')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT278565H45M22.142S' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #3
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(date('1984-10-11'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT269781H40M32.142S' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #4
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(date('1984-10-11'), localtime('16:30')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT16H30M' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #5
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #5"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(date('1984-10-11'), time('16:30+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT16H30M' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #6
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #6"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localtime('14:30'), date('2015-06-24')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT-14H-30M' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #7
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_7
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #7"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localtime('14:30'), localdatetime('2016-07-21T21:45:22.142')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT7H15M22.142S' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #8
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_8
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #8"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localtime('14:30'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT7H10M32.142S' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #9
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_9
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #9"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localtime('14:30'), localtime('16:30')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT2H' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #10
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_10
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #10"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localtime('14:30'), time('16:30+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT2H' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #11
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_11
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #11"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(time('14:30'), date('2015-06-24')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT-14H-30M' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #12
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_12
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #12"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(time('14:30'), localdatetime('2016-07-21T21:45:22.142')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT7H15M22.142S' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #13
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_13
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #13"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(time('14:30'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT6H10M32.142S' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #14
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_14
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #14"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(time('14:30'), localtime('16:30')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT2H' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #15
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_15
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #15"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(time('14:30'), time('16:30+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT1H' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #16
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_16
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #16"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localdatetime('2015-07-21T21:40:32.142'), date('2015-06-24')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT-669H-40M-32.142S' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #17
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_17
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #17"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localdatetime('2015-07-21T21:40:32.142'), localdatetime('2016-07-21T21:45:22.142')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT8784H4M50S' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #18
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_18
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #18"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localdatetime('2015-07-21T21:40:32.142'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #19
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_19
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #19"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localdatetime('2015-07-21T21:40:32.142'), localtime('16:30')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT-5H-10M-32.142S' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #20
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_20
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #20"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localdatetime('2015-07-21T21:40:32.142'), time('16:30+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT-5H-10M-32.142S' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #21
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_21
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #21"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(datetime('2014-07-21T21:40:36.143+0200'), date('2015-06-24')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT8090H19M23.857S' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #22
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_22
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #22"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(datetime('2014-07-21T21:40:36.143+0200'), localdatetime('2016-07-21T21:45:22.142')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT17544H4M45.999S' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #23
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_23
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #23"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(datetime('2014-07-21T21:40:36.143+0200'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT8760H59M55.999S' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #24
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_24
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #24"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(datetime('2014-07-21T21:40:36.143+0200'), localtime('16:30')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT-5H-10M-36.143S' |
+      side_effects: {}
+
+  # [5] Should compute duration between two temporals in seconds #25
+  - name: s5_should_compute_duration_between_two_temporals_in_seconds_25
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #25"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(datetime('2014-07-21T21:40:36.143+0200'), time('16:30+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT-4H-10M-36.143S' |
+      side_effects: {}
+
+  # [6] Should compute duration between if they differ only by a fraction of a second and the first comes after the second.
+  - name: s6_should_compute_duration_between_if_they_differ_only_by_a_fraction_of_a_second_and_the_first_comes_after_the_second
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [6] Should compute duration between if they differ only by a fraction of a second and the first comes after the second."
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localdatetime('2014-07-21T21:40:36.143'), localdatetime('2014-07-21T21:40:36.142')) AS d
+    expect:
+      values: |
+        | d |
+        | 'PT-0.001S' |
+      side_effects: {}
+
+  # [7] Should compute negative duration between in big units #1
+  - name: s7_should_compute_negative_duration_between_in_big_units_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [7] Should compute negative duration between in big units #1"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(date('2018-03-11'), date('2016-06-24')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P-1Y-8M' |
+      side_effects: {}
+
+  # [7] Should compute negative duration between in big units #2
+  - name: s7_should_compute_negative_duration_between_in_big_units_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [7] Should compute negative duration between in big units #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(date('2018-07-21'), datetime('2016-07-21T21:40:32.142+0100')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P-1Y-11M' |
+      side_effects: {}
+
+  # [7] Should compute negative duration between in big units #3
+  - name: s7_should_compute_negative_duration_between_in_big_units_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [7] Should compute negative duration between in big units #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(localdatetime('2018-07-21T21:40:32.142'), date('2016-07-21')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P-2Y' |
+      side_effects: {}
+
+  # [7] Should compute negative duration between in big units #4
+  - name: s7_should_compute_negative_duration_between_in_big_units_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [7] Should compute negative duration between in big units #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(datetime('2018-07-21T21:40:36.143+0200'), localdatetime('2016-07-21T21:40:36.143')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P-2Y' |
+      side_effects: {}
+
+  # [7] Should compute negative duration between in big units #5
+  - name: s7_should_compute_negative_duration_between_in_big_units_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [7] Should compute negative duration between in big units #5"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(datetime('2018-07-21T21:40:36.143+0500'), datetime('1984-07-21T22:40:36.143+0200')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P-33Y-11M' |
+      side_effects: {}
+
+  # [8] Should handle durations at daylight saving time day #1
+  - name: s8_should_handle_durations_at_daylight_saving_time_day_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [8] Should handle durations at daylight saving time day #1"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(datetime({year: 2017, month: 10, day: 29, hour: 0, timezone: 'Europe/Stockholm'}), localdatetime({year: 2017, month: 10, day: 29, hour: 4})) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT5H' |
+      side_effects: {}
+
+  # [8] Should handle durations at daylight saving time day #2
+  - name: s8_should_handle_durations_at_daylight_saving_time_day_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [8] Should handle durations at daylight saving time day #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(datetime({year: 2017, month: 10, day: 29, hour: 0, timezone: 'Europe/Stockholm'}), localtime({hour: 4})) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT5H' |
+      side_effects: {}
+
+  # [8] Should handle durations at daylight saving time day #3
+  - name: s8_should_handle_durations_at_daylight_saving_time_day_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [8] Should handle durations at daylight saving time day #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localdatetime({year: 2017, month: 10, day: 29, hour: 0 }), datetime({year: 2017, month: 10, day: 29, hour: 4, timezone: 'Europe/Stockholm'})) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT5H' |
+      side_effects: {}
+
+  # [8] Should handle durations at daylight saving time day #4
+  - name: s8_should_handle_durations_at_daylight_saving_time_day_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [8] Should handle durations at daylight saving time day #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localtime({hour: 0 }), datetime({year: 2017, month: 10, day: 29, hour: 4, timezone: 'Europe/Stockholm'})) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT5H' |
+      side_effects: {}
+
+  # [8] Should handle durations at daylight saving time day #5
+  - name: s8_should_handle_durations_at_daylight_saving_time_day_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [8] Should handle durations at daylight saving time day #5"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(date({year: 2017, month: 10, day: 29}), datetime({year: 2017, month: 10, day: 29, hour: 4, timezone: 'Europe/Stockholm'})) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT5H' |
+      side_effects: {}
+
+  # [8] Should handle durations at daylight saving time day #6
+  - name: s8_should_handle_durations_at_daylight_saving_time_day_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [8] Should handle durations at daylight saving time day #6"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(datetime({year: 2017, month: 10, day: 29, hour: 0, timezone: 'Europe/Stockholm'}), date({year: 2017, month: 10, day: 30})) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT25H' |
+      side_effects: {}
+
+  # [9] Should handle large durations
+  - name: s9_should_handle_large_durations
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [9] Should handle large durations"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(date('-999999999-01-01'), date('+999999999-12-31')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'P1999999998Y11M30D' |
+      side_effects: {}
+
+  # [10] Should handle large durations in seconds
+  - name: s10_should_handle_large_durations_in_seconds
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [10] Should handle large durations in seconds"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localdatetime('-999999999-01-01'), localdatetime('+999999999-12-31T23:59:59')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT17531639991215H59M59S' |
+      side_effects: {}
+
+  # [11] Should handle when seconds and subseconds have different signs #1
+  - name: s11_should_handle_when_seconds_and_subseconds_have_different_signs_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [11] Should handle when seconds and subseconds have different signs #1"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localtime('12:34:54.7'), localtime('12:34:54.3')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT-0.4S' |
+      side_effects: {}
+
+  # [11] Should handle when seconds and subseconds have different signs #2
+  - name: s11_should_handle_when_seconds_and_subseconds_have_different_signs_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [11] Should handle when seconds and subseconds have different signs #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localtime('12:34:54.3'), localtime('12:34:54.7')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0.4S' |
+      side_effects: {}
+
+  # [11] Should handle when seconds and subseconds have different signs #3
+  - name: s11_should_handle_when_seconds_and_subseconds_have_different_signs_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [11] Should handle when seconds and subseconds have different signs #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localtime('12:34:54.7'), localtime('12:34:55.3')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0.6S' |
+      side_effects: {}
+
+  # [11] Should handle when seconds and subseconds have different signs #4
+  - name: s11_should_handle_when_seconds_and_subseconds_have_different_signs_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [11] Should handle when seconds and subseconds have different signs #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localtime('12:34:54.7'), localtime('12:44:55.3')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT10M0.6S' |
+      side_effects: {}
+
+  # [11] Should handle when seconds and subseconds have different signs #5
+  - name: s11_should_handle_when_seconds_and_subseconds_have_different_signs_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [11] Should handle when seconds and subseconds have different signs #5"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localtime('12:44:54.7'), localtime('12:34:55.3')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT-9M-59.4S' |
+      side_effects: {}
+
+  # [11] Should handle when seconds and subseconds have different signs #6
+  - name: s11_should_handle_when_seconds_and_subseconds_have_different_signs_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [11] Should handle when seconds and subseconds have different signs #6"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localtime('12:34:56'), localtime('12:34:55.7')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT-0.3S' |
+      side_effects: {}
+
+  # [11] Should handle when seconds and subseconds have different signs #7
+  - name: s11_should_handle_when_seconds_and_subseconds_have_different_signs_7
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [11] Should handle when seconds and subseconds have different signs #7"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localtime('12:34:56'), localtime('12:44:55.7')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT9M59.7S' |
+      side_effects: {}
+
+  # [11] Should handle when seconds and subseconds have different signs #8
+  - name: s11_should_handle_when_seconds_and_subseconds_have_different_signs_8
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [11] Should handle when seconds and subseconds have different signs #8"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localtime('12:44:56'), localtime('12:34:55.7')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT-10M-0.3S' |
+      side_effects: {}
+
+  # [11] Should handle when seconds and subseconds have different signs #9
+  - name: s11_should_handle_when_seconds_and_subseconds_have_different_signs_9
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [11] Should handle when seconds and subseconds have different signs #9"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localtime('12:34:56.3'), localtime('12:34:54.7')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT-1.6S' |
+      side_effects: {}
+
+  # [11] Should handle when seconds and subseconds have different signs #10
+  - name: s11_should_handle_when_seconds_and_subseconds_have_different_signs_10
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [11] Should handle when seconds and subseconds have different signs #10"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localtime('12:34:54.7'), localtime('12:34:56.3')) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT1.6S' |
+      side_effects: {}
+
+  # [12] Should compute durations with no difference #1
+  - name: s12_should_compute_durations_with_no_difference_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [12] Should compute durations with no difference #1"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localtime(), localtime()) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [12] Should compute durations with no difference #2
+  - name: s12_should_compute_durations_with_no_difference_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [12] Should compute durations with no difference #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(time(), time()) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [12] Should compute durations with no difference #3
+  - name: s12_should_compute_durations_with_no_difference_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [12] Should compute durations with no difference #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(date(), date()) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [12] Should compute durations with no difference #4
+  - name: s12_should_compute_durations_with_no_difference_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [12] Should compute durations with no difference #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(localdatetime(), localdatetime()) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [12] Should compute durations with no difference #5
+  - name: s12_should_compute_durations_with_no_difference_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [12] Should compute durations with no difference #5"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(datetime(), datetime()) AS duration
+    expect:
+      values: |
+        | duration |
+        | 'PT0S' |
+      side_effects: {}
+
+  # [13] Should propagate null #1
+  - name: s13_should_propagate_null_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [13] Should propagate null #1"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.between(null, null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #2
+  - name: s13_should_propagate_null_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [13] Should propagate null #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inMonths(null, null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #3
+  - name: s13_should_propagate_null_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [13] Should propagate null #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inDays(null, null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #4
+  - name: s13_should_propagate_null_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal10: [13] Should propagate null #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration.inSeconds(null, null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}

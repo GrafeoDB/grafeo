@@ -31,6 +31,9 @@ pub struct Meta {
     pub tags: Vec<String>,
     /// The ISO references it covers.
     pub iso: Vec<String>,
+    /// How `values:` cells read (`values_dialect:`): `strict` when not given, or `tck`,
+    /// where a quoted cell also matches a temporal by its Cypher `toString()`.
+    pub values_dialect: String,
 }
 
 /// One case of a `.gtest` file.
@@ -44,6 +47,8 @@ pub struct TestCase {
     pub statements: Vec<String>,
     /// Statements run before the case.
     pub setup: Vec<String>,
+    /// GQL statements run before `setup`, whatever the file's language (`setup_gql:`).
+    pub setup_gql: Vec<String>,
     /// The query's parameters.
     pub params: std::collections::HashMap<String, ParamText>,
     /// The case's tags.
@@ -60,6 +65,8 @@ pub struct TestCase {
     pub skip: Option<String>,
     /// The spec and issue the case is expected to fail against, when it is (`xfail:`).
     pub xfail: Option<Xfail>,
+    /// The runners that skip the case for a gap of their binding (`runner_gap:`).
+    pub runner_gap: Option<RunnerGap>,
     /// A probe of the runner itself (`probe:`), only in a file under `spec-probes`.
     pub probe: Option<Probe>,
     /// What the case must give.
@@ -76,7 +83,25 @@ pub struct Xfail {
     pub spec: String,
     /// The issue that fixes it: `#N` or `fix in X.Y.Z` (`issue:`).
     pub issue: String,
+    /// The runners where the case passes all the same and must (`passes_in:`): their
+    /// bindings cannot show what fails it (JavaScript's one number type).
+    pub passes_in: Vec<String>,
 }
+
+/// A gap of some runners' bindings (`runner_gap:`): those runners skip the case, naming the
+/// reason and the issue that closes the gap; the others run it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerGap {
+    /// The runners that skip the case.
+    pub runners: Vec<String>,
+    /// The issue that closes the gap: `#N` or `fix in X.Y.Z`.
+    pub issue: String,
+    /// What the bindings lack.
+    pub reason: String,
+}
+
+/// The runners a `runner_gap:` may name.
+pub const RUNNERS: [&str; 7] = ["rust", "python", "node", "wasm", "go", "csharp", "dart"];
 
 /// A probe of the runner itself, which only a file under a `spec-probes` directory may use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,7 +151,27 @@ pub struct Expect {
     /// (by code): none without the key, so every test that runs to a result
     /// also checks that it raises no other warning.
     pub warnings: Vec<String>,
+    /// The typed rows (`values:`): a table in the openCypher TCK's value notation whose
+    /// first row names the columns; see `assert_values`.
+    pub values: Option<String>,
+    /// Whether `values:` compares every list as a bag (`unordered_lists:`).
+    pub unordered_lists: bool,
+    /// The statement's side effects (`side_effects:`), each a key such as `+nodes` and its
+    /// count; an unnamed key is 0, so `{}` is none. See `assert_side_effects`.
+    pub side_effects: Option<Vec<(String, i64)>>,
 }
+
+/// The keys of `side_effects:`, as the openCypher TCK names them.
+pub const SIDE_EFFECT_KEYS: [&str; 8] = [
+    "+nodes",
+    "-nodes",
+    "+relationships",
+    "-relationships",
+    "+labels",
+    "-labels",
+    "+properties",
+    "-properties",
+];
 
 /// Parses the `.gtest` file at `path` (used in errors, and to tell a `spec-probes` file) whose
 /// content is `text`.
@@ -188,6 +233,7 @@ fn parse_meta(lines: &[&str], idx: &mut usize) -> Result<Meta, String> {
                 "requires" => meta.requires = parse_yaml_list(value),
                 "tags" => meta.tags = parse_yaml_list(value),
                 "iso" => meta.iso = parse_yaml_list(value),
+                "values_dialect" => meta.values_dialect = unquote(value),
                 _ => {} // ignore unknown keys
             }
         }
@@ -197,6 +243,15 @@ fn parse_meta(lines: &[&str], idx: &mut usize) -> Result<Meta, String> {
     // Default language
     if meta.language.is_empty() {
         meta.language = "gql".to_string();
+    }
+    match meta.values_dialect.as_str() {
+        "" => meta.values_dialect = "strict".to_string(),
+        "strict" | "tck" => {}
+        other => {
+            return Err(format!(
+                "unknown values_dialect '{other}' (known: strict, tck)"
+            ));
+        }
     }
     if meta.dataset.is_empty() {
         meta.dataset = "empty".to_string();
@@ -247,6 +302,7 @@ fn parse_single_test(path: &str, lines: &[&str], idx: &mut usize) -> Result<Test
         query: None,
         statements: Vec::new(),
         setup: Vec::new(),
+        setup_gql: Vec::new(),
         params: std::collections::HashMap::new(),
         tags: Vec::new(),
         requires: Vec::new(),
@@ -255,6 +311,7 @@ fn parse_single_test(path: &str, lines: &[&str], idx: &mut usize) -> Result<Test
         dataset: None,
         skip: None,
         xfail: None,
+        runner_gap: None,
         probe: None,
         expect: Expect::default(),
         variants: std::collections::HashMap::new(),
@@ -309,6 +366,12 @@ fn parse_single_test(path: &str, lines: &[&str], idx: &mut usize) -> Result<Test
                         parse_xfail(lines, idx).map_err(|e| format!("test '{}': {e}", tc.name))?,
                     );
                 }
+                "runner_gap" => {
+                    tc.runner_gap = Some(
+                        parse_runner_gap(lines, idx)
+                            .map_err(|e| format!("test '{}': {e}", tc.name))?,
+                    );
+                }
                 "probe" => {
                     if !in_spec_probes(path) {
                         return Err(format!(
@@ -331,6 +394,10 @@ fn parse_single_test(path: &str, lines: &[&str], idx: &mut usize) -> Result<Test
                 "setup" => {
                     *idx += 1;
                     tc.setup = parse_string_list(lines, idx);
+                }
+                "setup_gql" => {
+                    *idx += 1;
+                    tc.setup_gql = parse_string_list(lines, idx);
                 }
                 "statements" => {
                     *idx += 1;
@@ -363,7 +430,8 @@ fn parse_single_test(path: &str, lines: &[&str], idx: &mut usize) -> Result<Test
                 }
                 "expect" => {
                     *idx += 1;
-                    tc.expect = parse_expect(lines, idx)?;
+                    tc.expect =
+                        parse_expect(lines, idx).map_err(|e| format!("test '{}': {e}", tc.name))?;
                 }
                 "variants" => {
                     *idx += 1;
@@ -393,7 +461,7 @@ fn parse_xfail(lines: &[&str], idx: &mut usize) -> Result<Xfail, String> {
     let indent = |line: &str| line.len() - line.trim_start().len();
     let own = indent(lines[*idx]);
     *idx += 1;
-    let (mut spec, mut issue) = (None, None);
+    let (mut spec, mut issue, mut passes_in) = (None, None, Vec::new());
     while *idx < lines.len() {
         let line = lines[*idx];
         let trimmed = line.trim();
@@ -407,6 +475,7 @@ fn parse_xfail(lines: &[&str], idx: &mut usize) -> Result<Xfail, String> {
         match parse_kv(trimmed) {
             Some(("spec", value)) => spec = Some(unquote(value)),
             Some(("issue", value)) => issue = Some(unquote(value)),
+            Some(("passes_in", value)) => passes_in = parse_yaml_list(value),
             _ => {
                 return Err(format!(
                     "unknown xfail key at line {}: '{trimmed}'",
@@ -421,9 +490,58 @@ fn parse_xfail(lines: &[&str], idx: &mut usize) -> Result<Xfail, String> {
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| format!("an xfail names its `{key}:`"))
     };
+    if let Some(unknown) = passes_in.iter().find(|r| !RUNNERS.contains(&r.as_str())) {
+        return Err(format!(
+            "unknown runner '{unknown}' in passes_in (known: {RUNNERS:?})"
+        ));
+    }
     Ok(Xfail {
         spec: named(spec, "spec")?,
         issue: named(issue, "issue")?,
+        passes_in,
+    })
+}
+
+/// The `runners:`, `issue:` and `reason:` of a `runner_gap:` whose line is `lines[*idx]`, all
+/// required and each runner known; leaves `idx` past them.
+fn parse_runner_gap(lines: &[&str], idx: &mut usize) -> Result<RunnerGap, String> {
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    let own = indent(lines[*idx]);
+    *idx += 1;
+    let (mut runners, mut issue, mut reason) = (Vec::new(), String::new(), String::new());
+    while *idx < lines.len() {
+        let line = lines[*idx];
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            *idx += 1;
+            continue;
+        }
+        if indent(line) <= own {
+            break;
+        }
+        match parse_kv(trimmed) {
+            Some(("runners", value)) => runners = parse_yaml_list(value),
+            Some(("issue", value)) => issue = unquote(value),
+            Some(("reason", value)) => reason = unquote(value),
+            _ => {
+                return Err(format!(
+                    "unknown runner_gap key at line {}: '{trimmed}'",
+                    *idx + 1
+                ));
+            }
+        }
+        *idx += 1;
+    }
+    if runners.is_empty() || issue.trim().is_empty() || reason.trim().is_empty() {
+        return Err("a runner_gap names its `runners:`, `issue:` and `reason:`".to_string());
+    }
+    if let Some(unknown) = runners.iter().find(|r| !RUNNERS.contains(&r.as_str())) {
+        return Err(format!("unknown runner '{unknown}' (known: {RUNNERS:?})"));
+    }
+    Ok(RunnerGap {
+        runners,
+        issue,
+        reason,
     })
 }
 
@@ -501,6 +619,16 @@ fn parse_expect(lines: &[&str], idx: &mut usize) -> Result<Expect, String> {
                     expect.warnings = parse_yaml_list(value);
                     *idx += 1;
                 }
+                "values" if value == "|" => {
+                    expect.values = Some(parse_block_scalar(lines, idx));
+                }
+                "unordered_lists" => {
+                    expect.unordered_lists = value == "true";
+                    *idx += 1;
+                }
+                "side_effects" => {
+                    expect.side_effects = Some(parse_side_effects(lines, idx, value)?);
+                }
                 // A key no runner reads would leave a test that checks
                 // nothing and passes.
                 other => return Err(format!("unknown expect key '{other}'")),
@@ -511,7 +639,64 @@ fn parse_expect(lines: &[&str], idx: &mut usize) -> Result<Expect, String> {
         }
     }
 
+    if expect.values.is_some()
+        && (!expect.rows.is_empty()
+            || !expect.terms.is_empty()
+            || expect.count.is_some()
+            || expect.empty
+            || expect.error.is_some()
+            || expect.gql_status.is_some())
+    {
+        return Err(
+            "`values:` excludes `rows`, `terms`, `count`, `empty`, `error` and `gql_status`"
+                .to_string(),
+        );
+    }
     Ok(expect)
+}
+
+/// The counts of a `side_effects:` key whose value is `value` on the line `lines[*idx]`:
+/// `{}` there, or one `key: count` per line below it. Leaves `idx` past them.
+fn parse_side_effects(
+    lines: &[&str],
+    idx: &mut usize,
+    value: &str,
+) -> Result<Vec<(String, i64)>, String> {
+    let own = lines[*idx].len() - lines[*idx].trim_start().len();
+    *idx += 1;
+    if value == "{}" {
+        return Ok(Vec::new());
+    }
+    if !value.is_empty() {
+        return Err(format!(
+            "`side_effects:` is `{{}}` or one key per line, not '{value}'"
+        ));
+    }
+    let mut counts = Vec::new();
+    while *idx < lines.len() {
+        let line = lines[*idx];
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            *idx += 1;
+            continue;
+        }
+        if line.len() - line.trim_start().len() <= own {
+            break;
+        }
+        let (key, count) = parse_kv(trimmed)
+            .ok_or_else(|| format!("a side effect is `key: count`, not '{trimmed}'"))?;
+        if !SIDE_EFFECT_KEYS.contains(&key) {
+            return Err(format!(
+                "unknown side effect '{key}' (known: {SIDE_EFFECT_KEYS:?})"
+            ));
+        }
+        let count = count
+            .parse()
+            .map_err(|_| format!("side effect '{key}' needs a count, not '{count}'"))?;
+        counts.push((key.to_string(), count));
+        *idx += 1;
+    }
+    Ok(counts)
 }
 
 fn parse_rows(lines: &[&str], idx: &mut usize) -> Vec<Vec<String>> {

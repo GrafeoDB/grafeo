@@ -1,0 +1,554 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/match/Match3.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Match3"
+  title: "Match3 - Match fixed length patterns"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Get neighbours
+  - name: s1_get_neighbours
+    setup:
+      - |
+        CREATE (a:A {num: 1})-[:KNOWS]->(b:B {num: 2})
+    query: |
+      MATCH (n1)-[rel:KNOWS]->(n2)
+      RETURN n1, n2
+    expect:
+      values: |
+        | n1 | n2 |
+        | (:A {num: 1}) | (:B {num: 2}) |
+      side_effects: {}
+
+  # [2] Directed match of a simple relationship
+  - name: s2_directed_match_of_a_simple_relationship
+    setup:
+      - |
+        CREATE (:A)-[:LOOP]->(:B)
+    query: |
+      MATCH (a)-[r]->(b)
+      RETURN a, r, b
+    expect:
+      values: |
+        | a | r | b |
+        | (:A) | [:LOOP] | (:B) |
+      side_effects: {}
+
+  # [3] Undirected match on simple relationship graph
+  - name: s3_undirected_match_on_simple_relationship_graph
+    setup:
+      - |
+        CREATE (:A)-[:LOOP]->(:B)
+    query: |
+      MATCH (a)-[r]-(b)
+      RETURN a, r, b
+    expect:
+      values: |
+        | a | r | b |
+        | (:A) | [:LOOP] | (:B) |
+        | (:B) | [:LOOP] | (:A) |
+      side_effects: {}
+
+  # [4] Get two related nodes
+  - name: s4_get_two_related_nodes
+    setup:
+      - |
+        CREATE (a:A {num: 1}),
+          (a)-[:KNOWS]->(b:B {num: 2}),
+          (a)-[:KNOWS]->(c:C {num: 3})
+    query: |
+      MATCH ()-[rel:KNOWS]->(x)
+      RETURN x
+    expect:
+      values: |
+        | x |
+        | (:B {num: 2}) |
+        | (:C {num: 3}) |
+      side_effects: {}
+
+  # [5] Return two subgraphs with bound undirected relationship
+  - name: s5_return_two_subgraphs_with_bound_undirected_relationship
+    setup:
+      - |
+        CREATE (a:A {num: 1})-[:REL {name: 'r'}]->(b:B {num: 2})
+    query: |
+      MATCH (a)-[r {name: 'r'}]-(b)
+      RETURN a, b
+    expect:
+      values: |
+        | a | b |
+        | (:B {num: 2}) | (:A {num: 1}) |
+        | (:A {num: 1}) | (:B {num: 2}) |
+      side_effects: {}
+
+  # [6] Matching a relationship pattern using a label predicate
+  - name: s6_matching_a_relationship_pattern_using_a_label_predicate
+    setup:
+      - |
+        CREATE (a), (b1:Foo), (b2)
+        CREATE (a)-[:T]->(b1),
+               (a)-[:T]->(b2)
+    query: |
+      MATCH (a)-->(b:Foo)
+      RETURN b
+    expect:
+      values: |
+        | b |
+        | (:Foo) |
+      side_effects: {}
+
+  # [7] Matching nodes with many labels
+  - name: s7_matching_nodes_with_many_labels
+    setup:
+      - |
+        CREATE (a:A:B:C:D:E:F:G:H:I:J:K:L:M),
+               (b:U:V:W:X:Y:Z)
+        CREATE (a)-[:T]->(b)
+    query: |
+      MATCH (n:A:B:C:D:E:F:G:H:I:J:K:L:M)-[:T]->(m:Z:Y:X:W:V:U)
+      RETURN n, m
+    expect:
+      values: |
+        | n | m |
+        | (:A:B:C:D:E:F:G:H:I:J:K:L:M) | (:Z:Y:X:W:V:U) |
+      side_effects: {}
+
+  # [8] Matching using relationship predicate with multiples of the same type
+  - name: s8_matching_using_relationship_predicate_with_multiples_of_the_same_type
+    setup:
+      - |
+        CREATE (a:A), (b:B)
+        CREATE (a)-[:T]->(b)
+    query: |
+      MATCH (a)-[:T|:T]->(b)
+      RETURN b
+    expect:
+      values: |
+        | b |
+        | (:B) |
+      side_effects: {}
+
+  # [9] Get related to related to
+  - name: s9_get_related_to_related_to
+    setup:
+      - |
+        CREATE (a:A {num: 1})-[:KNOWS]->(b:B {num: 2})-[:FRIEND]->(c:C {num: 3})
+    query: |
+      MATCH (n)-->(a)-->(b)
+      RETURN b
+    expect:
+      values: |
+        | b |
+        | (:C {num: 3}) |
+      side_effects: {}
+
+  # [10] Matching using self-referencing pattern returns no result
+  - name: s10_matching_using_self_referencing_pattern_returns_no_result
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    setup:
+      - |
+        CREATE (a), (b), (c)
+        CREATE (a)-[:T]->(b),
+               (b)-[:T]->(c)
+    query: |
+      MATCH (a)-->(b), (b)-->(b)
+      RETURN b
+    expect:
+      values: |
+        | b |
+      side_effects: {}
+
+  # [11] Undirected match in self-relationship graph
+  - name: s11_undirected_match_in_self_relationship_graph
+    setup:
+      - |
+        CREATE (a:A)-[:LOOP]->(a)
+    query: |
+      MATCH (a)-[r]-(b)
+      RETURN a, r, b
+    expect:
+      values: |
+        | a | r | b |
+        | (:A) | [:LOOP] | (:A) |
+      side_effects: {}
+
+  # [12] Undirected match of self-relationship in self-relationship graph
+  - name: s12_undirected_match_of_self_relationship_in_self_relationship_graph
+    setup:
+      - |
+        CREATE (a:A)-[:LOOP]->(a)
+    query: |
+      MATCH (n)-[r]-(n)
+      RETURN n, r
+    expect:
+      values: |
+        | n | r |
+        | (:A) | [:LOOP] |
+      side_effects: {}
+
+  # [13] Directed match on self-relationship graph
+  - name: s13_directed_match_on_self_relationship_graph
+    setup:
+      - |
+        CREATE (a:A)-[:LOOP]->(a)
+    query: |
+      MATCH (a)-[r]->(b)
+      RETURN a, r, b
+    expect:
+      values: |
+        | a | r | b |
+        | (:A) | [:LOOP] | (:A) |
+      side_effects: {}
+
+  # [14] Directed match of self-relationship on self-relationship graph
+  - name: s14_directed_match_of_self_relationship_on_self_relationship_graph
+    setup:
+      - |
+        CREATE (a:A)-[:LOOP]->(a)
+    query: |
+      MATCH (n)-[r]->(n)
+      RETURN n, r
+    expect:
+      values: |
+        | n | r |
+        | (:A) | [:LOOP] |
+      side_effects: {}
+
+  # [15] Mixing directed and undirected pattern parts with self-relationship, simple
+  - name: s15_mixing_directed_and_undirected_pattern_parts_with_self_relationship_simple
+    setup:
+      - |
+        CREATE (:A)-[:T1]->(l:Looper),
+               (l)-[:LOOP]->(l),
+               (l)-[:T2]->(:B)
+    query: |
+      MATCH (x:A)-[r1]->(y)-[r2]-(z)
+      RETURN x, r1, y, r2, z
+    expect:
+      values: |
+        | x | r1 | y | r2 | z |
+        | (:A) | [:T1] | (:Looper) | [:LOOP] | (:Looper) |
+        | (:A) | [:T1] | (:Looper) | [:T2] | (:B) |
+      side_effects: {}
+
+  # [16] Mixing directed and undirected pattern parts with self-relationship, undirected
+  - name: s16_mixing_directed_and_undirected_pattern_parts_with_self_relationship_undirected
+    setup:
+      - |
+        CREATE (:A)-[:T1]->(l:Looper),
+               (l)-[:LOOP]->(l),
+               (l)-[:T2]->(:B)
+    query: |
+      MATCH (x)-[r1]-(y)-[r2]-(z)
+      RETURN x, r1, y, r2, z
+    expect:
+      values: |
+        | x | r1 | y | r2 | z |
+        | (:A) | [:T1] | (:Looper) | [:LOOP] | (:Looper) |
+        | (:A) | [:T1] | (:Looper) | [:T2] | (:B) |
+        | (:Looper) | [:LOOP] | (:Looper) | [:T1] | (:A) |
+        | (:Looper) | [:LOOP] | (:Looper) | [:T2] | (:B) |
+        | (:B) | [:T2] | (:Looper) | [:LOOP] | (:Looper) |
+        | (:B) | [:T2] | (:Looper) | [:T1] | (:A) |
+      side_effects: {}
+
+  # [17] Handling cyclic patterns
+  - name: s17_handling_cyclic_patterns
+    setup:
+      - |
+        CREATE (a {name: 'a'}), (b {name: 'b'}), (c {name: 'c'})
+        CREATE (a)-[:A]->(b),
+               (b)-[:B]->(a),
+               (b)-[:B]->(c)
+    query: |
+      MATCH (a)-[:A]->()-[:B]->(a)
+      RETURN a.name
+    expect:
+      values: |
+        | a.name |
+        | 'a' |
+      side_effects: {}
+
+  # [18] Handling cyclic patterns when separated into two parts
+  - name: s18_handling_cyclic_patterns_when_separated_into_two_parts
+    setup:
+      - |
+        CREATE (a {name: 'a'}), (b {name: 'b'}), (c {name: 'c'})
+        CREATE (a)-[:A]->(b),
+               (b)-[:B]->(a),
+               (b)-[:B]->(c)
+    query: |
+      MATCH (a)-[:A]->(b), (b)-[:B]->(a)
+      RETURN a.name
+    expect:
+      values: |
+        | a.name |
+        | 'a' |
+      side_effects: {}
+
+  # [19] Two bound nodes pointing to the same node
+  - name: s19_two_bound_nodes_pointing_to_the_same_node
+    setup:
+      - |
+        CREATE (a {name: 'A'}), (b {name: 'B'}),
+               (x1 {name: 'x1'}), (x2 {name: 'x2'})
+        CREATE (a)-[:KNOWS]->(x1),
+               (a)-[:KNOWS]->(x2),
+               (b)-[:KNOWS]->(x1),
+               (b)-[:KNOWS]->(x2)
+    query: |
+      MATCH (a {name: 'A'}), (b {name: 'B'})
+      MATCH (a)-->(x)<-->(b)
+      RETURN x
+    expect:
+      values: |
+        | x |
+        | ({name: 'x1'}) |
+        | ({name: 'x2'}) |
+      side_effects: {}
+
+  # [20] Three bound nodes pointing to the same node
+  - name: s20_three_bound_nodes_pointing_to_the_same_node
+    setup:
+      - |
+        CREATE (a {name: 'A'}), (b {name: 'B'}), (c {name: 'C'}),
+               (x1 {name: 'x1'}), (x2 {name: 'x2'})
+        CREATE (a)-[:KNOWS]->(x1),
+               (a)-[:KNOWS]->(x2),
+               (b)-[:KNOWS]->(x1),
+               (b)-[:KNOWS]->(x2),
+               (c)-[:KNOWS]->(x1),
+               (c)-[:KNOWS]->(x2)
+    query: |
+      MATCH (a {name: 'A'}), (b {name: 'B'}), (c {name: 'C'})
+      MATCH (a)-->(x), (b)-->(x), (c)-->(x)
+      RETURN x
+    expect:
+      values: |
+        | x |
+        | ({name: 'x1'}) |
+        | ({name: 'x2'}) |
+      side_effects: {}
+
+  # [21] Three bound nodes pointing to the same node with extra connections
+  - name: s21_three_bound_nodes_pointing_to_the_same_node_with_extra_connections
+    setup:
+      - |
+        CREATE (a {name: 'a'}), (b {name: 'b'}), (c {name: 'c'}),
+               (d {name: 'd'}), (e {name: 'e'}), (f {name: 'f'}),
+               (g {name: 'g'}), (h {name: 'h'}), (i {name: 'i'}),
+               (j {name: 'j'}), (k {name: 'k'})
+        CREATE (a)-[:KNOWS]->(d),
+               (a)-[:KNOWS]->(e),
+               (a)-[:KNOWS]->(f),
+               (a)-[:KNOWS]->(g),
+               (a)-[:KNOWS]->(i),
+               (b)-[:KNOWS]->(d),
+               (b)-[:KNOWS]->(e),
+               (b)-[:KNOWS]->(f),
+               (b)-[:KNOWS]->(h),
+               (b)-[:KNOWS]->(k),
+               (c)-[:KNOWS]->(d),
+               (c)-[:KNOWS]->(e),
+               (c)-[:KNOWS]->(h),
+               (c)-[:KNOWS]->(g),
+               (c)-[:KNOWS]->(j)
+    query: |
+      MATCH (a {name: 'a'}), (b {name: 'b'}), (c {name: 'c'})
+      MATCH (a)-->(x), (b)-->(x), (c)-->(x)
+      RETURN x
+    expect:
+      values: |
+        | x |
+        | ({name: 'd'}) |
+        | ({name: 'e'}) |
+      side_effects: {}
+
+  # [22] Returning bound nodes that are not part of the pattern
+  - name: s22_returning_bound_nodes_that_are_not_part_of_the_pattern
+    setup:
+      - |
+        CREATE (a {name: 'A'}), (b {name: 'B'}),
+               (c {name: 'C'})
+        CREATE (a)-[:KNOWS]->(b)
+    query: |
+      MATCH (a {name: 'A'}), (c {name: 'C'})
+      MATCH (a)-->(b)
+      RETURN a, b, c
+    expect:
+      values: |
+        | a | b | c |
+        | ({name: 'A'}) | ({name: 'B'}) | ({name: 'C'}) |
+      side_effects: {}
+
+  # [23] Matching disconnected patterns
+  - name: s23_matching_disconnected_patterns
+    setup:
+      - |
+        CREATE (a:A), (b:B), (c:C)
+        CREATE (a)-[:T]->(b),
+               (a)-[:T]->(c)
+    query: |
+      MATCH (a)-->(b)
+      MATCH (c)-->(d)
+      RETURN a, b, c, d
+    expect:
+      values: |
+        | a | b | c | d |
+        | (:A) | (:B) | (:A) | (:B) |
+        | (:A) | (:B) | (:A) | (:C) |
+        | (:A) | (:C) | (:A) | (:B) |
+        | (:A) | (:C) | (:A) | (:C) |
+      side_effects: {}
+
+  # [24] Matching twice with duplicate relationship types on same relationship
+  - name: s24_matching_twice_with_duplicate_relationship_types_on_same_relationship
+    setup:
+      - |
+        CREATE (:A)-[:T]->(:B)
+    query: |
+      MATCH (a1)-[r:T]->()
+      WITH r, a1
+      MATCH (a1)-[r:T]->(b2)
+      RETURN a1, r, b2
+    expect:
+      values: |
+        | a1 | r | b2 |
+        | (:A) | [:T] | (:B) |
+      side_effects: {}
+
+  # [25] Matching twice with an additional node label
+  - name: s25_matching_twice_with_an_additional_node_label
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH (a1)-[r]->()
+      WITH r, a1
+      MATCH (a1:X)-[r]->(b2)
+      RETURN a1, r, b2
+    expect:
+      values: |
+        | a1 | r | b2 |
+      side_effects: {}
+
+  # [26] Matching twice with a duplicate predicate
+  - name: s26_matching_twice_with_a_duplicate_predicate
+    setup:
+      - |
+        CREATE (:X:Y)-[:T]->()
+    query: |
+      MATCH (a1:X:Y)-[r]->()
+      WITH r, a1
+      MATCH (a1:Y)-[r]->(b2)
+      RETURN a1, r, b2
+    expect:
+      values: |
+        | a1 | r | b2 |
+        | (:X:Y) | [:T] | () |
+      side_effects: {}
+
+  # [27] Matching from null nodes should return no results owing to finding no matches
+  - name: s27_matching_from_null_nodes_should_return_no_results_owing_to_finding_no_matches
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    query: |
+      OPTIONAL MATCH (a)
+      WITH a
+      MATCH (a)-->(b)
+      RETURN b
+    expect:
+      values: |
+        | b |
+      side_effects: {}
+
+  # [28] Matching from null nodes should return no results owing to matches being filtered out
+  - name: s28_matching_from_null_nodes_should_return_no_results_owing_to_matches_being_filtered_out
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      OPTIONAL MATCH (a:TheLabel)
+      WITH a
+      MATCH (a)-->(b)
+      RETURN b
+    expect:
+      values: |
+        | b |
+      side_effects: {}
+
+  # [29] Fail when re-using a relationship in the same pattern
+  # TCK: SyntaxError at compile time: RelationshipUniquenessViolation
+  - name: s29_fail_when_re_using_a_relationship_in_the_same_pattern
+    xfail:
+      spec: "openCypher TCK 2024.3 Match3: [29] Fail when re-using a relationship in the same pattern"
+      issue: fix in 0.6.5
+    query: |
+      MATCH (a)-[r]->()-[r]->(a)
+      RETURN r
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [30] Fail when using a list or nodes as a node
+  # TCK: SyntaxError at compile time: VariableTypeConflict
+  - name: s30_fail_when_using_a_list_or_nodes_as_a_node
+    xfail:
+      spec: "openCypher TCK 2024.3 Match3: [30] Fail when using a list or nodes as a node"
+      issue: fix in 0.6.5
+    query: |
+      MATCH (n)
+      WITH [n] AS users
+      MATCH (users)-->(messages)
+      RETURN messages
+    expect:
+      gql_status: "42"
+      side_effects: {}

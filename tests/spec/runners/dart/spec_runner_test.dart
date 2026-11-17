@@ -16,6 +16,8 @@ import 'package:crypto/crypto.dart' as crypto;
 import 'package:grafeo/grafeo.dart';
 import 'package:test/test.dart';
 
+import 'tck_values.dart';
+
 // =============================================================================
 // Paths
 // =============================================================================
@@ -189,6 +191,8 @@ dynamic _paramValue(String text) {
     return number;
   }
   if (text == 'true' || text == 'false') return text == 'true';
+  // A bare null is null; a quoted 'null' is the string
+  if (text == 'null') return null;
   return text;
 }
 
@@ -603,6 +607,10 @@ class _Meta {
   List<String> requires;
   List<String> tags;
 
+  /// How `values:` cells read: `strict`, or `tck`, where a quoted cell also matches a
+  /// temporal by its Cypher toString().
+  String valuesDialect = 'strict';
+
   _Meta({
     this.language = 'gql',
     this.dataset = 'empty',
@@ -636,6 +644,16 @@ class _Expect {
   /// otherwise check nothing.
   String? unknownKey;
 
+  /// A `values:` table in the TCK's value notation, its first row the columns.
+  String? values;
+
+  /// Whether every list in [values] compares as a bag.
+  bool unorderedLists = false;
+
+  /// The statement's side effects (`side_effects:`), null when not checked; a key not
+  /// named is 0.
+  Map<String, int>? sideEffects;
+
   _Expect({
     List<List<String>>? rows,
     this.ordered = false,
@@ -656,7 +674,13 @@ class _TestCase {
   String? query;
   List<String> statements;
   List<String> setup;
+
+  /// GQL statements run before [setup], whatever the file's language.
+  List<String> setupGql = [];
   String? skip;
+
+  /// Runners that skip the case for a gap of their binding (`runner_gap:`).
+  _RunnerGap? runnerGap;
 
   /// The spec and the issue of a case expected to fail (`xfail:`), null otherwise.
   _Xfail? xfail;
@@ -702,6 +726,92 @@ class _TestCase {
 class _Xfail {
   String spec = '';
   String issue = '';
+
+  /// The runners where the case passes all the same and must (`passes_in:`).
+  List<String> passesIn = [];
+}
+
+/// A gap of some runners' bindings: those runners skip the case, naming the reason and the
+/// issue that closes the gap.
+class _RunnerGap {
+  List<String> runners = [];
+  String issue = '';
+  String reason = '';
+}
+
+/// The runners a `runner_gap:` or `passes_in:` may name.
+const _knownRunners = {'rust', 'python', 'node', 'wasm', 'go', 'csharp', 'dart'};
+
+/// The keys of `side_effects:`, as the openCypher TCK names them.
+const _sideEffectKeys = {
+  '+nodes', '-nodes', '+relationships', '-relationships',
+  '+labels', '-labels', '+properties', '-properties',
+};
+
+List<String> _knownRunnersOf(List<String> runners) {
+  for (final runner in runners) {
+    if (!_knownRunners.contains(runner)) throw FormatException("unknown runner '$runner'");
+  }
+  return runners;
+}
+
+/// The `key: value` lines indented under the key at `ctx.lines[ctx.idx]`.
+List<(String, String)> _nestedPairs(_ParseContext ctx) {
+  int indent(String line) => line.length - line.trimLeft().length;
+  final own = indent(ctx.lines[ctx.idx]);
+  ctx.idx++;
+  final pairs = <(String, String)>[];
+  while (ctx.idx < ctx.lines.length) {
+    final line = ctx.lines[ctx.idx];
+    final trimmed = line.trim();
+    if (trimmed.isEmpty || trimmed.startsWith('#')) {
+      ctx.idx++;
+      continue;
+    }
+    if (indent(line) <= own) break;
+    final kv = _parseKV(trimmed);
+    if (kv == null) throw FormatException("not a key at line ${ctx.idx + 1}: '$trimmed'");
+    pairs.add(kv);
+    ctx.idx++;
+  }
+  return pairs;
+}
+
+/// A `runner_gap:` at `ctx.lines[ctx.idx]`: its runners, issue and reason, all required.
+_RunnerGap _parseRunnerGap(_ParseContext ctx) {
+  final gap = _RunnerGap();
+  for (final (key, value) in _nestedPairs(ctx)) {
+    switch (key) {
+      case 'runners':
+        gap.runners = _knownRunnersOf(_parseYamlList(value));
+      case 'issue':
+        gap.issue = _unquote(value);
+      case 'reason':
+        gap.reason = _unquote(value);
+      default:
+        throw FormatException("unknown runner_gap key '$key'");
+    }
+  }
+  if (gap.runners.isEmpty || gap.issue.trim().isEmpty || gap.reason.trim().isEmpty) {
+    throw FormatException('a runner_gap names its `runners:`, `issue:` and `reason:`');
+  }
+  return gap;
+}
+
+/// The counts of a `side_effects:` key whose value is [value]: `{}`, or one key per line below.
+Map<String, int> _parseSideEffects(_ParseContext ctx, String value) {
+  if (value == '{}') {
+    ctx.idx++;
+    return {};
+  }
+  if (value.isNotEmpty) throw FormatException("`side_effects:` is `{}` or one key per line, not '$value'");
+  final counts = <String, int>{};
+  for (final (key, count) in _nestedPairs(ctx)) {
+    final n = int.tryParse(count);
+    if (!_sideEffectKeys.contains(key) || n == null) throw FormatException("bad side effect '$key: $count'");
+    counts[key] = n;
+  }
+  return counts;
 }
 
 /// Parsed .gtest file.
@@ -790,6 +900,8 @@ _Xfail _parseXfail(_ParseContext ctx) {
         xfail.spec = _unquote(kv!.$2);
       case 'issue':
         xfail.issue = _unquote(kv!.$2);
+      case 'passes_in':
+        xfail.passesIn = _knownRunnersOf(_parseYamlList(kv!.$2));
       default:
         throw FormatException("unknown xfail key at line ${ctx.idx + 1}: '$trimmed'");
     }
@@ -825,6 +937,11 @@ _Meta _parseMeta(_ParseContext ctx) {
         meta.requires = _parseYamlList(value);
       case 'tags':
         meta.tags = _parseYamlList(value);
+      case 'values_dialect':
+        meta.valuesDialect = _unquote(value);
+        if (meta.valuesDialect != 'strict' && meta.valuesDialect != 'tck') {
+          throw FormatException("unknown values_dialect '${meta.valuesDialect}' (known: strict, tck)");
+        }
     }
     ctx.idx++;
   }
@@ -905,6 +1022,11 @@ _TestCase _parseSingleTest(_ParseContext ctx) {
       case 'setup':
         ctx.idx++;
         tc.setup = _parseStringList(ctx);
+      case 'setup_gql':
+        ctx.idx++;
+        tc.setupGql = _parseStringList(ctx);
+      case 'runner_gap':
+        tc.runnerGap = _parseRunnerGap(ctx);
       case 'statements':
         ctx.idx++;
         tc.statements = _parseStringList(ctx);
@@ -995,10 +1117,22 @@ _Expect _parseExpectBlock(_ParseContext ctx) {
       case 'terms':
         ctx.idx++;
         e.terms = _parseRows(ctx);
+      case 'values':
+        if (value != '|') throw FormatException('`values:` is a block scalar (`|`)');
+        e.values = _parseBlockScalar(ctx).trim();
+      case 'unordered_lists':
+        e.unorderedLists = value == 'true';
+        ctx.idx++;
+      case 'side_effects':
+        e.sideEffects = _parseSideEffects(ctx, value);
       default:
         e.unknownKey ??= key;
         ctx.idx++;
     }
+  }
+  final others = e.rows.isNotEmpty || e.terms.isNotEmpty || e.count != null || e.empty;
+  if (e.values != null && (others || e.error != null || e.gqlStatus != null)) {
+    throw FormatException('`values:` excludes `rows`, `terms`, `count`, `empty`, `error` and `gql_status`');
   }
   return e;
 }
@@ -1306,7 +1440,8 @@ class _RunnerFault implements Exception {
 /// expected failure, a pass an XPASS, and any other error goes on.
 void _runMarked(_TestCase tc, void Function() run) {
   final xfail = tc.xfail;
-  if (xfail == null) {
+  // An xfail that names this runner in `passes_in` does not hold here: the case runs
+  if (xfail == null || xfail.passesIn.contains('dart')) {
     run();
     return;
   }
@@ -1322,13 +1457,17 @@ void _runMarked(_TestCase tc, void Function() run) {
 }
 
 void _runTestCase(GrafeoDB db, _TestCase tc, String language,
-    [String? setupLanguage]) {
+    [String? setupLanguage, String valuesDialect = 'strict']) {
   // A probe of the runner: it fails as the runner itself fails, which no `xfail:` may take
   // for the expected failure.
   if (tc.probe == 'runner_error') {
     throw StateError('runner error probe: the runner fails, not the case');
   }
-  // Run setup queries in the file's declared language (not the variant language)
+  // GQL statements first (the TCK's test procedures), then the setup queries in the file's
+  // declared language (not the variant language)
+  for (final statement in tc.setupGql) {
+    _executeQuery(db, 'gql', statement);
+  }
   final setupLang = setupLanguage ?? language;
   for (final setupQ in tc.setup) {
     _executeQuery(db, setupLang, setupQ);
@@ -1349,10 +1488,14 @@ void _runTestCase(GrafeoDB db, _TestCase tc, String language,
     throw _RunnerFault("No query or statements in test '${tc.name}'");
   }
 
+  // The graph before the statements, when their side effects are checked
+  final before = exp.sideEffects != null ? observeGraph(db) : null;
+
   // Error case
   if (exp.error != null || exp.gqlStatus != null) {
     _runErrorTest(db, language, queries, exp.error, exp.gqlStatus,
         params: tc.params.isNotEmpty ? tc.params : null);
+    if (before != null) assertSideEffects(before, observeGraph(db), exp.sideEffects!);
     return;
   }
 
@@ -1363,9 +1506,17 @@ void _runTestCase(GrafeoDB db, _TestCase tc, String language,
         params: tc.params.isNotEmpty ? tc.params : null);
   }
 
+  if (before != null) assertSideEffects(before, observeGraph(db), exp.sideEffects!);
+
   // The warnings, also when none are expected
   expect([for (final w in result.warnings) w.code], equals(exp.warnings),
       reason: 'Warning mismatch: ${result.warnings}');
+
+  // Typed rows in the TCK's value notation
+  if (exp.values != null) {
+    assertValues(db, result, exp.values!, exp.ordered, exp.unorderedLists, valuesDialect == 'tck');
+    return;
+  }
 
   // Column assertion (checked before value assertions)
   if (exp.columns.isNotEmpty) {
@@ -1448,7 +1599,8 @@ void _runErrorTest(
       // not expose is a gap, not a pass.
       expect(e.gqlStatus, isNotNull,
           reason: "Error '${e.message}' has no GQLSTATUS");
-      expect(e.gqlStatus, equals(expectedStatus),
+      // Two characters name a class (42), five a status (42001)
+      expect(e.gqlStatus, expectedStatus.length == 2 ? startsWith(expectedStatus) : equals(expectedStatus),
           reason: "Error '${e.message}' has GQLSTATUS ${e.gqlStatus}, "
               'expected $expectedStatus');
     }
@@ -1460,6 +1612,7 @@ void _runErrorTest(
 // =============================================================================
 
 void main() {
+  _sharedValueCases();
   // The typing of parameter values that no .gtest file can hold: a number
   // past the f64 range fails the Rust runner's build, so it is tested here.
   group('parameter values', () {
@@ -1533,6 +1686,12 @@ void main() {
                 markTestSkipped('skipped in .gtest: ${tc.skip}');
                 return;
               }
+              final gap = tc.runnerGap;
+              if (gap != null && gap.runners.contains('dart')) {
+                _skipped++;
+                markTestSkipped('runner gap: ${gap.reason} (${gap.issue})');
+                return;
+              }
               if (!_isAvailable(lang)) {
                 markTestSkipped('Language "$lang" not available');
                 return;
@@ -1553,7 +1712,7 @@ void main() {
                   params: tc.params,
                   probe: tc.probe,
                 );
-                _runMarked(tc, () => _runTestCase(db, variantTc, lang, meta.language));
+                _runMarked(tc, () => _runTestCase(db, variantTc, lang, meta.language, meta.valuesDialect));
               } finally {
                 db.close();
               }
@@ -1567,6 +1726,13 @@ void main() {
           if (tc.skip != null) {
             _skipped++;
             markTestSkipped('skipped in .gtest: ${tc.skip}');
+            return;
+          }
+          // A gap of this binding (`runner_gap:`) skips the case here, as `skip:` does
+          final gap = tc.runnerGap;
+          if (gap != null && gap.runners.contains('dart')) {
+            _skipped++;
+            markTestSkipped('runner gap: ${gap.reason} (${gap.issue})');
             return;
           }
 
@@ -1610,8 +1776,10 @@ void main() {
               _loadDataset(db, effectiveDataset);
             }
 
-            _runMarked(tc,
-                () => _runTestCase(db, tc, tc.language ?? meta.language, meta.language));
+            _runMarked(
+                tc,
+                () => _runTestCase(
+                    db, tc, tc.language ?? meta.language, meta.language, meta.valuesDialect));
           } finally {
             db.close();
           }
@@ -1619,4 +1787,92 @@ void main() {
       }
     });
   }
+}
+
+// ---------------------------------------------------------------------------
+// The shared value cases (tests/spec/runners/values_cases.json): this runner's
+// `values:` comparison, temporal round trips and parameter typing agree with
+// every other runner's, a gap of this binding giving the opposite verdict.
+// ---------------------------------------------------------------------------
+
+/// A neutral value of the case file as the Dart binding returns it.
+dynamic _nativeValue(GrafeoDB db, dynamic actual) {
+  if (actual == null || actual is bool) return actual;
+  if (actual is List) return [for (final a in actual) _nativeValue(db, a)];
+  final entry = (actual as Map).entries.single;
+  final inner = entry.value;
+  Map<String, dynamic> props(Map p) => {for (final e in p.entries) e.key as String: _nativeValue(db, e.value)};
+  switch (entry.key) {
+    case 'int':
+      return int.parse(inner as String);
+    case 'float':
+      return switch (inner as String) {
+        'NaN' => double.nan,
+        'Inf' => double.infinity,
+        '-Inf' => double.negativeInfinity,
+        final t => double.parse(t),
+      };
+    case 'string':
+      return inner;
+    case 'map':
+      return props(inner as Map);
+    case 'node':
+      return {...props(inner['properties'] as Map), '_id': inner['id'], '_labels': inner['labels']};
+    case 'relationship':
+      return {
+        ...props(inner['properties'] as Map),
+        '_id': inner['id'],
+        '_type': inner['type'],
+        '_source': inner['source'],
+        '_target': inner['target'],
+      };
+    case 'path':
+      return {
+        r'$path': {
+          'nodes': [for (final n in inner['nodes'] as List) _nativeValue(db, {'node': n})],
+          'edges': [for (final r in inner['relationships'] as List) _nativeValue(db, {'relationship': r})],
+        },
+      };
+    case 'cypher':
+      return db.executeLanguage('cypher', 'RETURN $inner AS v').rows.first['v'];
+  }
+  throw StateError('unknown neutral kind ${entry.key}');
+}
+
+void _sharedValueCases() {
+  final file = jsonDecode(File('${_resolveRepoRoot().path}/tests/spec/runners/values_cases.json').readAsStringSync()) as Map;
+  group('values_cases.json', () {
+    for (final c in file['cases'] as List) {
+      test('${c['cell']} vs ${jsonEncode(c['actual'])}', () {
+        final db = GrafeoDB.memory();
+        try {
+          var value = _nativeValue(db, c['actual']);
+          if (c['dialect'] == 'tck') value = temporalsAsText(db, value);
+          final verdict = matchTck(parseTck(c['cell'] as String), value, c['unordered_lists'] == true);
+          // A known limitation, or a gap of this binding, gives the opposite verdict until fixed
+          final gap = c.containsKey('limitation') || ((c['runner_gaps'] as Map?)?.containsKey('dart') ?? false);
+          expect(verdict, equals(c['match'] != gap));
+        } finally {
+          db.close();
+        }
+      });
+    }
+    for (final trip in file['round_trips'] as List) {
+      test('round trip ${trip['cypher']}', () {
+        final db = GrafeoDB.memory();
+        try {
+          final text = temporalsAsText(db, _nativeValue(db, {'cypher': trip['cypher']}));
+          expect(text == trip['text'], equals(!(trip['runner_gaps'] as Map).containsKey('dart')));
+        } finally {
+          db.close();
+        }
+      });
+    }
+    for (final p in file['params'] as List) {
+      test('param ${p['param']}', () {
+        final value = _paramValue(p['param'] as String);
+        expect(value, equals(p['value'] == null ? null : (p['value'] as Map)['string']));
+      });
+    }
+  });
 }

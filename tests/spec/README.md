@@ -60,6 +60,7 @@ The `skip:` field keeps CI green while documenting the expected behavior. When t
 | `section` | | Spec reference (e.g. `"14.4"` for GQL clause) |
 | `title` | | Human-readable file description |
 | `tags` | `[]` | Arbitrary tags for filtering |
+| `values_dialect` | `strict` | How `values:` cells read: `strict`, or `tck` (converted openCypher TCK files), where a quoted cell also matches a temporal whose Cypher `toString()` is that text |
 
 ### Test case fields
 
@@ -69,7 +70,10 @@ The `skip:` field keeps CI green while documenting the expected behavior. When t
 | `query` | Single query to execute. Use `\|` for multi-line block scalar |
 | `statements` | List of queries: all execute, last captures result |
 | `setup` | List of queries to run before the test (always in the file's `language`) |
+| `setup_gql` | List of GQL statements run before `setup`, whatever the file's language (the openCypher TCK's test procedures as `CREATE PROCEDURE`) |
+| `runner_gap` | A gap of some runners' bindings: `runners:` (any of `rust`, `python`, `node`, `wasm`, `go`, `csharp`, `dart`), `issue:` (`#N` or `fix in X.Y.Z`) and `reason:`. The runners named skip the case with that reason; the others run it. Counts as a skip |
 | `skip` | Reason string: test is ignored with this message (the Rust runner runs it with `--ignored`) |
+| `xfail` | A strict expected failure: `spec:` (what the expected result is held against) and `issue:` (`#N` or `fix in X.Y.Z`). The case must fail on an assertion or a statement error; a pass fails the run. `passes_in:` lists runners where it passes all the same and must (their binding cannot show what fails it, as JavaScript's one number type) |
 | `params` | Key-value map for parameterized queries (see "Parameter values") |
 | `variants` | Rosetta map: `{gql: "...", cypher: "..."}` runs the same test in multiple languages |
 | `expect` | Assertion block (see below) |
@@ -83,11 +87,14 @@ The `skip:` field keeps CI green while documenting the expected behavior. When t
 | `count` | Expected row count (no value check) |
 | `empty` | `true` for zero rows |
 | `error` | Substring that must appear in the error message |
-| `gql_status` | GQLSTATUS the error must have (`"22012"`), alone or next to `error`. The case fails when the statement succeeds, and when the binding exposes no status for the error |
+| `gql_status` | GQLSTATUS the error must have (`"22012"`), alone or next to `error`; two characters name a class (`"42"` matches `42001`). The case fails when the statement succeeds, and when the binding exposes no status for the error |
 | `columns` | Expected column names: `[name, age]` |
 | `hash` | MD5 hex digest of sorted pipe-delimited rows |
 | `precision` | Float tolerance: cells compared within `10^(-precision)` |
 | `terms` | Expected rows of RDF terms, each cell compared as the exact term (see below). Sorted comparison unless `ordered: true` |
+| `values` | Typed rows: a table in the openCypher TCK's value notation, its first row the column names (see below). Compared as a bag unless `ordered: true`. Excludes `rows`, `terms`, `count`, `empty`, `error` and `gql_status` |
+| `unordered_lists` | `true` compares every list in `values` as a bag |
+| `side_effects` | The statement's effect on the graph, as the TCK counts it (see below); `{}` is none |
 
 Any other key under `expect:` fails the test in every runner, so a misspelled key cannot pass without checking anything.
 
@@ -114,6 +121,42 @@ expect:
     - ['_:b0', '"30"^^xsd:integer']
 ```
 
+### Typed rows (`values:`)
+
+`rows` compares each cell as text, so `'1'`, `1` and `1.0` all match `1`. `values` compares type-exact, in the openCypher TCK's value notation, written as the TCK's own table:
+
+```yaml
+expect:
+  values: |
+    | n                       | count |
+    | (:Person {name: 'Gus'}) | 1     |
+```
+
+| Written | Matches |
+|---------|---------|
+| `42`, `-7` | an integer of that value, never a float |
+| `1.0`, `1e-3`, `NaN`, `Inf`, `-Inf` | a float equal to it, never an integer |
+| `'text'` | a string, exactly (`\'` and `\\` escapes) |
+| `true`, `false`, `null` | that boolean, null |
+| `[a, b]` | a list, element by element (a bag with `unordered_lists: true`) |
+| `{k: v}` | a map with exactly these keys |
+| `(:A:B {p: 1})` | a node: the same label set and properties |
+| `[:T {p: 1}]` | a relationship: the same type and properties |
+| `<(:A)-[:T]->(:B)<-[:U]-()>` | a path, node by node and relationship by relationship, each arrow its direction |
+
+A `|` inside a cell is written `\|`. A runner recognises a node, a relationship and a path by the shape results give them (a node is a map with `_id` and `_labels`), so a map a query builds with those keys counts as one. Every runner checks its comparison against `runners/values_cases.json`.
+
+### Side effects (`side_effects:`)
+
+```yaml
+expect:
+  side_effects:
+    +nodes: 1
+    +properties: 2
+```
+
+The keys are `+nodes`, `-nodes`, `+relationships`, `-relationships`, `+labels`, `-labels`, `+properties` and `-properties`; a key left out is 0. The runner reads the graph right before and right after the statement and counts what changed, as the openCypher TCK defines it: nodes and relationships by id, labels as the set of label names in use, properties as (entity, key, value) triples, so changing a value is one `-properties` and one `+properties`.
+
 ### Parameter values
 
 Every runner types a `params` value by the same rule, so a parameter has the same type in every binding:
@@ -127,6 +170,7 @@ Every runner types a `params` value by the same rule, so a parameter has the sam
 | Bare decimal integer past 38 digits | An error naming the parameter, in every binding | `100000000000000000000000000000000000000` |
 | Other bare decimal number, representable as a finite f64 | Float | `3.5`, `.5e1`, `19.` |
 | Bare `true` or `false` | Boolean | `true` |
+| Bare `null` | Null (a quoted `'null'` is the string) | `null` |
 | Any other bare value | String | `Alix`, `0x1F`, `1_000`, `inf` |
 
 A number past the f64 range, bare (`1e999`) or inside JSON (`[1e400]`), is an error in every runner: the Rust runner refuses it when it builds, so no test can use one.

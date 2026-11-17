@@ -1777,6 +1777,7 @@ dependencies = [
  "grafeo-common",
  "grafeo-engine",
  "md5",
+ "serde_json",
  "tempfile",
 ]
 

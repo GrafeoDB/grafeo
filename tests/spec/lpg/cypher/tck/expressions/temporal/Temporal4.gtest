@@ -1,0 +1,975 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/temporal/Temporal4.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Temporal4"
+  title: "Temporal4 - Store Temporal Values"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Should store date #1
+  - name: s1_should_store_date_1
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      CREATE ({created: date({year: 1984, month: 10, day: 11})})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [1] Should store date #1 (control query)
+  - name: s1_should_store_date_1_control
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE ({created: date({year: 1984, month: 10, day: 11})})
+    query: |
+      MATCH (n)
+      RETURN n.created
+    expect:
+      values: |
+        | n.created |
+        | '1984-10-11' |
+
+  # [2] Should store date array #1
+  - name: s2_should_store_date_array_1
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      CREATE ({dates: [date({year: 1984, month: 10, day: 12})]})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [2] Should store date array #1 (control query)
+  - name: s2_should_store_date_array_1_control
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE ({dates: [date({year: 1984, month: 10, day: 12})]})
+    query: |
+      MATCH (n)
+      RETURN n.dates
+    expect:
+      values: |
+        | n.dates |
+        | ['1984-10-12'] |
+
+  # [2] Should store date array #2
+  - name: s2_should_store_date_array_2
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      CREATE ({dates: [date({year: 1984, month: 10, day: 13}), date({year: 1984, month: 10, day: 14}), date({year: 1984, month: 10, day: 15})]})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [2] Should store date array #2 (control query)
+  - name: s2_should_store_date_array_2_control
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE ({dates: [date({year: 1984, month: 10, day: 13}), date({year: 1984, month: 10, day: 14}), date({year: 1984, month: 10, day: 15})]})
+    query: |
+      MATCH (n)
+      RETURN n.dates
+    expect:
+      values: |
+        | n.dates |
+        | ['1984-10-13', '1984-10-14', '1984-10-15'] |
+
+  # [3] Should store local time #1
+  - name: s3_should_store_local_time_1
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      CREATE ({created: localtime({hour: 12})})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [3] Should store local time #1 (control query)
+  - name: s3_should_store_local_time_1_control
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [3] Should store local time #1 (control query)"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE ({created: localtime({hour: 12})})
+    query: |
+      MATCH (n)
+      RETURN n.created
+    expect:
+      values: |
+        | n.created |
+        | '12:00' |
+
+  # [4] Should store local time array #1
+  - name: s4_should_store_local_time_array_1
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      CREATE ({dates: [localtime({hour: 13})]})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [4] Should store local time array #1 (control query)
+  - name: s4_should_store_local_time_array_1_control
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [4] Should store local time array #1 (control query)"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE ({dates: [localtime({hour: 13})]})
+    query: |
+      MATCH (n)
+      RETURN n.dates
+    expect:
+      values: |
+        | n.dates |
+        | ['13:00'] |
+
+  # [4] Should store local time array #2
+  - name: s4_should_store_local_time_array_2
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      CREATE ({dates: [localtime({hour: 14}), localtime({hour: 15}), localtime({hour: 16})]})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [4] Should store local time array #2 (control query)
+  - name: s4_should_store_local_time_array_2_control
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [4] Should store local time array #2 (control query)"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE ({dates: [localtime({hour: 14}), localtime({hour: 15}), localtime({hour: 16})]})
+    query: |
+      MATCH (n)
+      RETURN n.dates
+    expect:
+      values: |
+        | n.dates |
+        | ['14:00', '15:00', '16:00'] |
+
+  # [5] Should store time #1
+  - name: s5_should_store_time_1
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      CREATE ({created: time({hour: 12})})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [5] Should store time #1 (control query)
+  - name: s5_should_store_time_1_control
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [5] Should store time #1 (control query)"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE ({created: time({hour: 12})})
+    query: |
+      MATCH (n)
+      RETURN n.created
+    expect:
+      values: |
+        | n.created |
+        | '12:00Z' |
+
+  # [6] Should store time array #1
+  - name: s6_should_store_time_array_1
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      CREATE ({dates: [time({hour: 13})]})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [6] Should store time array #1 (control query)
+  - name: s6_should_store_time_array_1_control
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [6] Should store time array #1 (control query)"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE ({dates: [time({hour: 13})]})
+    query: |
+      MATCH (n)
+      RETURN n.dates
+    expect:
+      values: |
+        | n.dates |
+        | ['13:00Z'] |
+
+  # [6] Should store time array #2
+  - name: s6_should_store_time_array_2
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      CREATE ({dates: [time({hour: 14}), time({hour: 15}), time({hour: 16})]})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [6] Should store time array #2 (control query)
+  - name: s6_should_store_time_array_2_control
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [6] Should store time array #2 (control query)"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE ({dates: [time({hour: 14}), time({hour: 15}), time({hour: 16})]})
+    query: |
+      MATCH (n)
+      RETURN n.dates
+    expect:
+      values: |
+        | n.dates |
+        | ['14:00Z', '15:00Z', '16:00Z'] |
+
+  # [7] Should store local date time #1
+  - name: s7_should_store_local_date_time_1
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      CREATE ({created: localdatetime({year: 1912})})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [7] Should store local date time #1 (control query)
+  - name: s7_should_store_local_date_time_1_control
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [7] Should store local date time #1 (control query)"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE ({created: localdatetime({year: 1912})})
+    query: |
+      MATCH (n)
+      RETURN n.created
+    expect:
+      values: |
+        | n.created |
+        | '1912-01-01T00:00' |
+
+  # [8] Should store local date time array #1
+  - name: s8_should_store_local_date_time_array_1
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      CREATE ({dates: [localdatetime({year: 1913})]})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [8] Should store local date time array #1 (control query)
+  - name: s8_should_store_local_date_time_array_1_control
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [8] Should store local date time array #1 (control query)"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE ({dates: [localdatetime({year: 1913})]})
+    query: |
+      MATCH (n)
+      RETURN n.dates
+    expect:
+      values: |
+        | n.dates |
+        | ['1913-01-01T00:00'] |
+
+  # [8] Should store local date time array #2
+  - name: s8_should_store_local_date_time_array_2
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      CREATE ({dates: [localdatetime({year: 1914}), localdatetime({year: 1915}), localdatetime({year: 1916})]})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [8] Should store local date time array #2 (control query)
+  - name: s8_should_store_local_date_time_array_2_control
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [8] Should store local date time array #2 (control query)"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE ({dates: [localdatetime({year: 1914}), localdatetime({year: 1915}), localdatetime({year: 1916})]})
+    query: |
+      MATCH (n)
+      RETURN n.dates
+    expect:
+      values: |
+        | n.dates |
+        | ['1914-01-01T00:00', '1915-01-01T00:00', '1916-01-01T00:00'] |
+
+  # [9] Should store date time #1
+  - name: s9_should_store_date_time_1
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      CREATE ({created: datetime({year: 1912})})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [9] Should store date time #1 (control query)
+  - name: s9_should_store_date_time_1_control
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [9] Should store date time #1 (control query)"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE ({created: datetime({year: 1912})})
+    query: |
+      MATCH (n)
+      RETURN n.created
+    expect:
+      values: |
+        | n.created |
+        | '1912-01-01T00:00Z' |
+
+  # [10] Should store date time array #1
+  - name: s10_should_store_date_time_array_1
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      CREATE ({dates: [datetime({year: 1913})]})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [10] Should store date time array #1 (control query)
+  - name: s10_should_store_date_time_array_1_control
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [10] Should store date time array #1 (control query)"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE ({dates: [datetime({year: 1913})]})
+    query: |
+      MATCH (n)
+      RETURN n.dates
+    expect:
+      values: |
+        | n.dates |
+        | ['1913-01-01T00:00Z'] |
+
+  # [10] Should store date time array #2
+  - name: s10_should_store_date_time_array_2
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      CREATE ({dates: [datetime({year: 1914}), datetime({year: 1915}), datetime({year: 1916})]})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [10] Should store date time array #2 (control query)
+  - name: s10_should_store_date_time_array_2_control
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [10] Should store date time array #2 (control query)"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE ({dates: [datetime({year: 1914}), datetime({year: 1915}), datetime({year: 1916})]})
+    query: |
+      MATCH (n)
+      RETURN n.dates
+    expect:
+      values: |
+        | n.dates |
+        | ['1914-01-01T00:00Z', '1915-01-01T00:00Z', '1916-01-01T00:00Z'] |
+
+  # [11] Should store duration #1
+  - name: s11_should_store_duration_1
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      CREATE ({created: duration({seconds: 12})})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [11] Should store duration #1 (control query)
+  - name: s11_should_store_duration_1_control
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE ({created: duration({seconds: 12})})
+    query: |
+      MATCH (n)
+      RETURN n.created
+    expect:
+      values: |
+        | n.created |
+        | 'PT12S' |
+
+  # [12] Should store duration array #1
+  - name: s12_should_store_duration_array_1
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      CREATE ({dates: [duration({seconds: 13})]})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [12] Should store duration array #1 (control query)
+  - name: s12_should_store_duration_array_1_control
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE ({dates: [duration({seconds: 13})]})
+    query: |
+      MATCH (n)
+      RETURN n.dates
+    expect:
+      values: |
+        | n.dates |
+        | ['PT13S'] |
+
+  # [12] Should store duration array #2
+  - name: s12_should_store_duration_array_2
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      CREATE ({dates: [duration({seconds: 14}), duration({seconds: 15}), duration({seconds: 16})]})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [12] Should store duration array #2 (control query)
+  - name: s12_should_store_duration_array_2_control
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    setup:
+      - |
+        CREATE ({dates: [duration({seconds: 14}), duration({seconds: 15}), duration({seconds: 16})]})
+    query: |
+      MATCH (n)
+      RETURN n.dates
+    expect:
+      values: |
+        | n.dates |
+        | ['PT14S', 'PT15S', 'PT16S'] |
+
+  # [13] Should propagate null #1
+  - name: s13_should_propagate_null_1
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN date(null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #2
+  - name: s13_should_propagate_null_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN date.transaction(null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #3
+  - name: s13_should_propagate_null_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN date.statement(null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #4
+  - name: s13_should_propagate_null_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN date.realtime(null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #5
+  - name: s13_should_propagate_null_5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN localtime(null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #6
+  - name: s13_should_propagate_null_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #6"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN localtime.transaction(null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #7
+  - name: s13_should_propagate_null_7
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #7"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN localtime.statement(null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #8
+  - name: s13_should_propagate_null_8
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #8"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN localtime.realtime(null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #9
+  - name: s13_should_propagate_null_9
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN time(null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #10
+  - name: s13_should_propagate_null_10
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #10"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN time.transaction(null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #11
+  - name: s13_should_propagate_null_11
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #11"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN time.statement(null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #12
+  - name: s13_should_propagate_null_12
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #12"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN time.realtime(null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #13
+  - name: s13_should_propagate_null_13
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN localdatetime(null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #14
+  - name: s13_should_propagate_null_14
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #14"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN localdatetime.transaction(null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #15
+  - name: s13_should_propagate_null_15
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #15"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN localdatetime.statement(null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #16
+  - name: s13_should_propagate_null_16
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #16"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN localdatetime.realtime(null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #17
+  - name: s13_should_propagate_null_17
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN datetime(null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #18
+  - name: s13_should_propagate_null_18
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #18"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN datetime.transaction(null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #19
+  - name: s13_should_propagate_null_19
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #19"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN datetime.statement(null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #20
+  - name: s13_should_propagate_null_20
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #20"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN datetime.realtime(null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}
+
+  # [13] Should propagate null #21
+  - name: s13_should_propagate_null_21
+    runner_gap:
+      runners: [python, node, wasm, go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "temporals do not come back from this binding without loss"
+    query: |
+      RETURN duration(null) AS t
+    expect:
+      values: |
+        | t |
+        | null |
+      side_effects: {}

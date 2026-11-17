@@ -1,0 +1,119 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/union/Union2.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Union2"
+  title: "Union2 - Union All"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Two elements, both unique, not distinct
+  - name: s1_two_elements_both_unique_not_distinct
+    query: |
+      RETURN 1 AS x
+      UNION ALL
+      RETURN 2 AS x
+    expect:
+      values: |
+        | x |
+        | 1 |
+        | 2 |
+      side_effects: {}
+
+  # [2] Three elements, two unique, not distinct
+  - name: s2_three_elements_two_unique_not_distinct
+    query: |
+      RETURN 2 AS x
+      UNION ALL
+      RETURN 1 AS x
+      UNION ALL
+      RETURN 2 AS x
+    expect:
+      values: |
+        | x |
+        | 2 |
+        | 1 |
+        | 2 |
+      side_effects: {}
+
+  # [3] Two single-column inputs, one with duplicates, not distinct
+  - name: s3_two_single_column_inputs_one_with_duplicates_not_distinct
+    query: |
+      UNWIND [2, 1, 2, 3] AS x
+      RETURN x
+      UNION ALL
+      UNWIND [3, 4] AS x
+      RETURN x
+    expect:
+      values: |
+        | x |
+        | 2 |
+        | 1 |
+        | 2 |
+        | 3 |
+        | 3 |
+        | 4 |
+      side_effects: {}
+
+  # [4] Should be able to create text output from union all queries
+  - name: s4_should_be_able_to_create_text_output_from_union_all_queries
+    setup:
+      - |
+        CREATE (:A), (:B)
+    query: |
+      MATCH (a:A)
+      RETURN a AS a
+      UNION ALL
+      MATCH (b:B)
+      RETURN b AS a
+    expect:
+      values: |
+        | a |
+        | (:A) |
+        | (:B) |
+      side_effects: {}
+
+  # [5] Failing when UNION ALL has different columns
+  # TCK: SyntaxError at compile time: DifferentColumnsInUnion
+  - name: s5_failing_when_union_all_has_different_columns
+    query: |
+      RETURN 1 AS a
+      UNION ALL
+      RETURN 2 AS b
+    expect:
+      gql_status: "42"
+      side_effects: {}

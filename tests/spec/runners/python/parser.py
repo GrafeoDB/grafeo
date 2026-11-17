@@ -46,6 +46,9 @@ class Meta:
     requires: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     iso: list[str] = field(default_factory=list)
+    # How ``values:`` cells read: ``strict``, or ``tck``, where a quoted cell also
+    # matches a temporal by its Cypher ``toString()``.
+    values_dialect: str = "strict"
 
 
 @dataclass
@@ -67,6 +70,12 @@ class Expect:
     # code): none without the key, so every test that runs to a result also
     # checks that it raises no other warning.
     warnings: list[str] = field(default_factory=list)
+    # Typed rows (``values:``): a table in the openCypher TCK's value notation
+    # whose first row names the columns; see ``comparator.assert_values``.
+    values: str | None = None
+    unordered_lists: bool = False
+    # The statement's side effects, each TCK key and its count (``{}`` is none).
+    side_effects: list[tuple[str, int]] | None = None
 
 
 # The keys an expectation may have: any other is an error, as a key no runner
@@ -84,8 +93,55 @@ EXPECT_KEYS = frozenset(
         "columns",
         "terms",
         "warnings",
+        "values",
+        "unordered_lists",
+        "side_effects",
     }
 )
+
+# The keys of ``side_effects:``, as the openCypher TCK names them.
+SIDE_EFFECT_KEYS = (
+    "+nodes",
+    "-nodes",
+    "+relationships",
+    "-relationships",
+    "+labels",
+    "-labels",
+    "+properties",
+    "-properties",
+)
+
+
+def _side_effect_counts(pairs) -> list[tuple[str, int]]:
+    """The ``side_effects:`` pairs, each key known and each count an integer."""
+    counts = []
+    for key, count in pairs:
+        if key not in SIDE_EFFECT_KEYS:
+            raise ValueError(f"unknown side effect {key!r} (known: {SIDE_EFFECT_KEYS})")
+        try:
+            counts.append((key, int(str(count))))
+        except ValueError:
+            raise ValueError(
+                f"side effect {key!r} needs a count, not {count!r}"
+            ) from None
+    return counts
+
+
+def _check_values(e: Expect) -> None:
+    """``values:`` stands alone among the result checks."""
+    others = e.rows or e.terms or e.count is not None or e.empty
+    if e.values is not None and (
+        others or e.error is not None or e.gql_status is not None
+    ):
+        raise ValueError(
+            "`values:` excludes `rows`, `terms`, `count`, `empty`, `error` and `gql_status`"
+        )
+
+
+def _values_dialect(value: str) -> str:
+    if value not in ("strict", "tck"):
+        raise ValueError(f"unknown values_dialect {value!r} (known: strict, tck)")
+    return value
 
 
 @dataclass
@@ -95,6 +151,37 @@ class Xfail:
 
     spec: str
     issue: str
+    # The runners where the case passes all the same and must (``passes_in:``):
+    # their bindings cannot show what fails it (JavaScript's one number type).
+    passes_in: list[str] = field(default_factory=list)
+
+
+@dataclass
+class RunnerGap:
+    """A gap of some runners' bindings (``runner_gap:``): those runners skip the case,
+    naming the reason and the issue that closes the gap; the others run it."""
+
+    runners: list[str]
+    issue: str
+    reason: str
+
+
+#: The runners a ``runner_gap:`` may name.
+RUNNERS = ("rust", "python", "node", "wasm", "go", "csharp", "dart")
+
+
+def _runner_gap(raw: dict) -> RunnerGap:
+    gap = RunnerGap(
+        runners=_as_string_list(raw.get("runners", [])),
+        issue=str(raw.get("issue") or ""),
+        reason=str(raw.get("reason") or ""),
+    )
+    if not gap.runners or not gap.issue.strip() or not gap.reason.strip():
+        raise ValueError("a runner_gap names its `runners:`, `issue:` and `reason:`")
+    unknown = [r for r in gap.runners if r not in RUNNERS]
+    if unknown:
+        raise ValueError(f"unknown runner {unknown[0]!r} (known: {RUNNERS})")
+    return gap
 
 
 #: The runner probes a ``probe:`` key may name, only in a file under ``spec-probes``.
@@ -107,6 +194,8 @@ class TestCase:
     query: str | None = None
     statements: list[str] = field(default_factory=list)
     setup: list[str] = field(default_factory=list)
+    # GQL statements run before ``setup``, whatever the file's language.
+    setup_gql: list[str] = field(default_factory=list)
     # Each value as the file writes it, quotes included: whether it was quoted
     # decides its type (see ``coerce_params``).
     params: dict[str, str] = field(default_factory=dict)
@@ -115,6 +204,7 @@ class TestCase:
     iso: list[str] = field(default_factory=list)
     skip: str | None = None
     xfail: Xfail | None = None
+    runner_gap: RunnerGap | None = None
     probe: str | None = None
     expect: Expect = field(default_factory=Expect)
     variants: dict[str, str] = field(default_factory=dict)
@@ -163,6 +253,12 @@ def _check_marks(tc: TestCase, path: Path) -> None:
         for key in ("spec", "issue"):
             if not getattr(tc.xfail, key).strip():
                 raise ValueError(f"test '{tc.name}': an xfail names its `{key}:`")
+    if tc.xfail is not None:
+        unknown = [r for r in tc.xfail.passes_in if r not in RUNNERS]
+        if unknown:
+            raise ValueError(
+                f"test '{tc.name}': unknown runner {unknown[0]!r} in passes_in"
+            )
     if tc.skip is not None and tc.xfail is not None:
         raise ValueError(
             f"test '{tc.name}': a case is either skipped or expected to fail, not both"
@@ -247,6 +343,7 @@ def _parse_meta_dict(d: dict) -> Meta:
     m.requires = _as_string_list(d.get("requires", []))
     m.tags = _as_string_list(d.get("tags", []))
     m.iso = _as_string_list(d.get("iso", []))
+    m.values_dialect = _values_dialect(str(d.get("values_dialect", "strict")))
     return m
 
 
@@ -259,8 +356,13 @@ def _parse_test_dict(d: dict) -> TestCase:
     if "xfail" in d:
         raw = d["xfail"] if isinstance(d["xfail"], dict) else {}
         tc.xfail = Xfail(
-            spec=str(raw.get("spec") or ""), issue=str(raw.get("issue") or "")
+            spec=str(raw.get("spec") or ""),
+            issue=str(raw.get("issue") or ""),
+            passes_in=_as_string_list(raw.get("passes_in", [])),
         )
+    if "runner_gap" in d:
+        raw_gap = d["runner_gap"] if isinstance(d["runner_gap"], dict) else {}
+        tc.runner_gap = _runner_gap(raw_gap)
     probe = d.get("probe")
     if probe is not None:
         tc.probe = str(probe)
@@ -275,6 +377,7 @@ def _parse_test_dict(d: dict) -> TestCase:
 
     # setup / statements: lists of strings
     tc.setup = _as_string_list(d.get("setup", []))
+    tc.setup_gql = _as_string_list(d.get("setup_gql", []))
     tc.statements = _as_string_list(d.get("statements", []))
 
     # params: the caller sets them from the source text (_yaml_param_texts)
@@ -345,6 +448,16 @@ def _parse_expect_dict(d: dict) -> Expect:
             # Single-column shorthand
             e.rows.append([_value_to_string(raw_row)])
 
+    values = d.get("values")
+    if values is not None:
+        e.values = str(values).strip()
+    e.unordered_lists = bool(d.get("unordered_lists", False))
+    if "side_effects" in d:
+        raw = d["side_effects"] or {}
+        if not isinstance(raw, dict):
+            raise ValueError("`side_effects:` is a map of TCK keys to counts")
+        e.side_effects = _side_effect_counts(raw.items())
+    _check_values(e)
     return e
 
 
@@ -402,6 +515,8 @@ def _lb_parse_meta(lines: list[str], idx: int) -> tuple:
             meta.tags = _lb_parse_yaml_list(value)
         elif key == "iso":
             meta.iso = _lb_parse_yaml_list(value)
+        elif key == "values_dialect":
+            meta.values_dialect = _values_dialect(_unquote(value))
         idx += 1
     return meta, idx
 
@@ -455,12 +570,20 @@ def _lb_parse_single_test(lines: list[str], idx: int) -> tuple:
             idx += 1
         elif key == "xfail":
             tc.xfail, idx = _lb_parse_xfail(lines, idx)
+        elif key == "runner_gap":
+            raw_gap, idx = _lb_parse_nested(lines, idx, ("runners", "issue", "reason"))
+            if "runners" in raw_gap:
+                raw_gap["runners"] = _lb_parse_yaml_list(raw_gap["runners"])
+            tc.runner_gap = _runner_gap(raw_gap)
         elif key == "probe":
             tc.probe = _unquote(value)
             idx += 1
         elif key == "setup":
             idx += 1
             tc.setup, idx = _lb_parse_string_list(lines, idx)
+        elif key == "setup_gql":
+            idx += 1
+            tc.setup_gql, idx = _lb_parse_string_list(lines, idx)
         elif key == "statements":
             idx += 1
             tc.statements, idx = _lb_parse_string_list(lines, idx)
@@ -507,11 +630,36 @@ def _lb_parse_xfail(lines: list[str], idx: int) -> tuple:
         if indent(line) <= own:
             break
         key, value = _lb_parse_kv(trimmed)
-        if key not in ("spec", "issue"):
+        if key not in ("spec", "issue", "passes_in"):
             raise ValueError(f"unknown xfail key at line {idx + 1}: {trimmed!r}")
         found[key] = _unquote(value)
         idx += 1
-    return Xfail(spec=found.get("spec", ""), issue=found.get("issue", "")), idx
+    passes_in = _lb_parse_yaml_list(found.get("passes_in", "[]"))
+    return Xfail(
+        spec=found.get("spec", ""), issue=found.get("issue", ""), passes_in=passes_in
+    ), idx
+
+
+def _lb_parse_nested(lines: list[str], idx: int, keys: tuple[str, ...]) -> tuple:
+    """The ``key: value`` lines under the key at ``lines[idx]``, each key one of ``keys``
+    (values unquoted, a list left as its text)."""
+    own = len(lines[idx]) - len(lines[idx].lstrip())
+    idx += 1
+    found: dict[str, str] = {}
+    while idx < len(lines):
+        line = lines[idx]
+        trimmed = line.strip()
+        if not trimmed or trimmed.startswith("#"):
+            idx += 1
+            continue
+        if len(line) - len(line.lstrip()) <= own:
+            break
+        key, value = _lb_parse_kv(trimmed)
+        if key not in keys:
+            raise ValueError(f"unknown key at line {idx + 1}: {trimmed!r}")
+        found[key] = value if value.startswith("[") else _unquote(value)
+        idx += 1
+    return found, idx
 
 
 def _lb_parse_expect(lines: list[str], idx: int) -> tuple:
@@ -571,9 +719,44 @@ def _lb_parse_expect(lines: list[str], idx: int) -> tuple:
             e.terms = [
                 [None if cell == "null" else cell for cell in row] for row in rows
             ]
+        elif key == "values" and value == "|":
+            e.values, idx = _lb_parse_block_scalar(lines, idx)
+            e.values = e.values.strip()
+        elif key == "unordered_lists":
+            e.unordered_lists = value == "true"
+            idx += 1
+        elif key == "side_effects":
+            pairs, idx = _lb_parse_side_effects(lines, idx, value)
+            e.side_effects = _side_effect_counts(pairs)
         else:
             raise ValueError(f"unknown expect key {key!r}")
+    _check_values(e)
     return e, idx
+
+
+def _lb_parse_side_effects(lines: list[str], idx: int, value: str) -> tuple:
+    """The pairs of a ``side_effects:`` key at ``lines[idx]``: ``{}`` there, or one
+    ``key: count`` per line below it."""
+    own = len(lines[idx]) - len(lines[idx].lstrip())
+    idx += 1
+    if value == "{}":
+        return [], idx
+    if value:
+        raise ValueError(
+            f"`side_effects:` is `{{}}` or one key per line, not {value!r}"
+        )
+    pairs = []
+    while idx < len(lines):
+        line = lines[idx]
+        trimmed = line.strip()
+        if not trimmed or trimmed.startswith("#"):
+            idx += 1
+            continue
+        if len(line) - len(line.lstrip()) <= own:
+            break
+        pairs.append(_lb_parse_kv(trimmed))
+        idx += 1
+    return pairs, idx
 
 
 def _lb_parse_rows(lines: list[str], idx: int) -> tuple:
@@ -696,8 +879,8 @@ def param_value(text: str) -> object:
     with ``[`` or ``{`` is JSON; a bare decimal integer is an int, which the
     binding types (an INT64 when it fits 64 bits, else an exact DECIMAL up to
     38 digits, an error past that), and any other bare decimal number a
-    float; a bare ``true`` or ``false`` is a bool; any other bare value is a
-    string.
+    float; a bare ``true`` or ``false`` is a bool; a bare ``null`` is null
+    (a quoted ``'null'`` the string); any other bare value is a string.
     """
     text = text.strip()
     if _is_quoted(text):
@@ -714,6 +897,8 @@ def param_value(text: str) -> object:
         return _finite_float(text)
     if text in ("true", "false"):
         return text == "true"
+    if text == "null":
+        return None
     return text
 
 

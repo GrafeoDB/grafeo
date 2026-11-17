@@ -1,0 +1,495 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/remove/Remove3.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Remove3"
+  title: "Remove3 - Persistence of remove clause side effects"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Limiting to zero results after removing a property from nodes affects the result set but not the side effects
+  - name: s1_limiting_to_zero_results_after_removing_a_property_from_nodes_affects_the_result_set_but_not_the_side_effects
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    setup:
+      - |
+        CREATE (:N {num: 42})
+    query: |
+      MATCH (n:N)
+      REMOVE n.num
+      RETURN n
+      LIMIT 0
+    expect:
+      values: |
+        | n |
+      side_effects:
+        -properties: 1
+
+  # [2] Skipping all results after removing a property from nodes affects the result set but not the side effects
+  - name: s2_skipping_all_results_after_removing_a_property_from_nodes_affects_the_result_set_but_not_the_side_effects
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    setup:
+      - |
+        CREATE (:N {num: 42})
+    query: |
+      MATCH (n:N)
+      REMOVE n.num
+      RETURN n
+      SKIP 1
+    expect:
+      values: |
+        | n |
+      side_effects:
+        -properties: 1
+
+  # [3] Skipping and limiting to a few results after removing a property from nodes affects the result set but not the side effects
+  - name: s3_skipping_and_limiting_to_a_few_results_after_removing_a_property_from_nodes_affects_the_result_set_but_not_the_side_effects
+    setup:
+      - |
+        CREATE (:N {name: 'a', num: 42})
+        CREATE (:N {name: 'a', num: 42})
+        CREATE (:N {name: 'a', num: 42})
+        CREATE (:N {name: 'a', num: 42})
+        CREATE (:N {name: 'a', num: 42})
+    query: |
+      MATCH (n:N)
+      REMOVE n.name
+      RETURN n.num AS num
+      SKIP 2 LIMIT 2
+    expect:
+      values: |
+        | num |
+        | 42 |
+        | 42 |
+      side_effects:
+        -properties: 5
+
+  # [4] Skipping zero results and limiting to all results after removing a property from nodes does not affect the result set nor the side effects
+  - name: s4_skipping_zero_results_and_limiting_to_all_results_after_removing_a_property_from_nodes_does_not_affect_the_result_set_nor_the_side_effects
+    setup:
+      - |
+        CREATE (:N {name: 'a', num: 42})
+        CREATE (:N {name: 'a', num: 42})
+        CREATE (:N {name: 'a', num: 42})
+        CREATE (:N {name: 'a', num: 42})
+        CREATE (:N {name: 'a', num: 42})
+    query: |
+      MATCH (n:N)
+      REMOVE n.name
+      RETURN n.num AS num
+      SKIP 0 LIMIT 5
+    expect:
+      values: |
+        | num |
+        | 42 |
+        | 42 |
+        | 42 |
+        | 42 |
+        | 42 |
+      side_effects:
+        -properties: 5
+
+  # [5] Filtering after removing a property from nodes affects the result set but not the side effects
+  - name: s5_filtering_after_removing_a_property_from_nodes_affects_the_result_set_but_not_the_side_effects
+    setup:
+      - |
+        CREATE (:N {name: 'a', num: 1})
+        CREATE (:N {name: 'a', num: 2})
+        CREATE (:N {name: 'a', num: 3})
+        CREATE (:N {name: 'a', num: 4})
+        CREATE (:N {name: 'a', num: 5})
+    query: |
+      MATCH (n:N)
+      REMOVE n.name
+      WITH n
+      WHERE n.num % 2 = 0
+      RETURN n.num AS num
+    expect:
+      values: |
+        | num |
+        | 2 |
+        | 4 |
+      side_effects:
+        -properties: 5
+
+  # [6] Aggregating in `RETURN` after removing a property from nodes affects the result set but not the side effects
+  - name: s6_aggregating_in_return_after_removing_a_property_from_nodes_affects_the_result_set_but_not_the_side_effects
+    setup:
+      - |
+        CREATE (:N {name: 'a', num: 1})
+        CREATE (:N {name: 'a', num: 2})
+        CREATE (:N {name: 'a', num: 3})
+        CREATE (:N {name: 'a', num: 4})
+        CREATE (:N {name: 'a', num: 5})
+    query: |
+      MATCH (n:N)
+      REMOVE n.name
+      RETURN sum(n.num) AS sum
+    expect:
+      values: |
+        | sum |
+        | 15 |
+      side_effects:
+        -properties: 5
+
+  # [7] Aggregating in `WITH` after removing a property from nodes affects the result set but not the side effects
+  - name: s7_aggregating_in_with_after_removing_a_property_from_nodes_affects_the_result_set_but_not_the_side_effects
+    setup:
+      - |
+        CREATE (:N {name: 'a', num: 1})
+        CREATE (:N {name: 'a', num: 2})
+        CREATE (:N {name: 'a', num: 3})
+        CREATE (:N {name: 'a', num: 4})
+        CREATE (:N {name: 'a', num: 5})
+    query: |
+      MATCH (n:N)
+      REMOVE n.name
+      WITH sum(n.num) AS sum
+      RETURN sum
+    expect:
+      values: |
+        | sum |
+        | 15 |
+      side_effects:
+        -properties: 5
+
+  # [8] Limiting to zero results after removing a label from nodes affects the result set but not the side effects
+  - name: s8_limiting_to_zero_results_after_removing_a_label_from_nodes_affects_the_result_set_but_not_the_side_effects
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    setup:
+      - |
+        CREATE (:N {num: 42})
+    query: |
+      MATCH (n:N)
+      REMOVE n:N
+      RETURN n
+      LIMIT 0
+    expect:
+      values: |
+        | n |
+      side_effects:
+        -labels: 1
+
+  # [9] Skipping all results after removing a label from nodes affects the result set but not the side effects
+  - name: s9_skipping_all_results_after_removing_a_label_from_nodes_affects_the_result_set_but_not_the_side_effects
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    setup:
+      - |
+        CREATE (:N {num: 42})
+    query: |
+      MATCH (n:N)
+      REMOVE n:N
+      RETURN n
+      SKIP 1
+    expect:
+      values: |
+        | n |
+      side_effects:
+        -labels: 1
+
+  # [10] Skipping and limiting to a few results after removing a label from nodes affects the result set but not the side effects
+  - name: s10_skipping_and_limiting_to_a_few_results_after_removing_a_label_from_nodes_affects_the_result_set_but_not_the_side_effects
+    setup:
+      - |
+        CREATE (:N {num: 42})
+        CREATE (:N {num: 42})
+        CREATE (:N {num: 42})
+        CREATE (:N {num: 42})
+        CREATE (:N {num: 42})
+    query: |
+      MATCH (n:N)
+      REMOVE n:N
+      RETURN n.num AS num
+      SKIP 2 LIMIT 2
+    expect:
+      values: |
+        | num |
+        | 42 |
+        | 42 |
+      side_effects:
+        -labels: 1
+
+  # [11] Skipping zero result and limiting to all results after removing a label from nodes does not affect the result set nor the side effects
+  - name: s11_skipping_zero_result_and_limiting_to_all_results_after_removing_a_label_from_nodes_does_not_affect_the_result_set_nor_the_side_effects
+    setup:
+      - |
+        CREATE (:N {num: 42})
+        CREATE (:N {num: 42})
+        CREATE (:N {num: 42})
+        CREATE (:N {num: 42})
+        CREATE (:N {num: 42})
+    query: |
+      MATCH (n:N)
+      REMOVE n:N
+      RETURN n.num AS num
+      SKIP 0 LIMIT 5
+    expect:
+      values: |
+        | num |
+        | 42 |
+        | 42 |
+        | 42 |
+        | 42 |
+        | 42 |
+      side_effects:
+        -labels: 1
+
+  # [12] Filtering after removing a label from nodes affects the result set but not the side effects
+  - name: s12_filtering_after_removing_a_label_from_nodes_affects_the_result_set_but_not_the_side_effects
+    setup:
+      - |
+        CREATE (:N {num: 1})
+        CREATE (:N {num: 2})
+        CREATE (:N {num: 3})
+        CREATE (:N {num: 4})
+        CREATE (:N {num: 5})
+    query: |
+      MATCH (n:N)
+      REMOVE n:N
+      WITH n
+      WHERE n.num % 2 = 0
+      RETURN n.num AS num
+    expect:
+      values: |
+        | num |
+        | 2 |
+        | 4 |
+      side_effects:
+        -labels: 1
+
+  # [13] Aggregating in `RETURN` after removing a label from nodes affects the result set but not the side effects
+  - name: s13_aggregating_in_return_after_removing_a_label_from_nodes_affects_the_result_set_but_not_the_side_effects
+    setup:
+      - |
+        CREATE (:N {num: 1})
+        CREATE (:N {num: 2})
+        CREATE (:N {num: 3})
+        CREATE (:N {num: 4})
+        CREATE (:N {num: 5})
+    query: |
+      MATCH (n:N)
+      REMOVE n:N
+      RETURN sum(n.num) AS sum
+    expect:
+      values: |
+        | sum |
+        | 15 |
+      side_effects:
+        -labels: 1
+
+  # [14] Aggregating in `WITH` after removing a label from nodes affects the result set but not the side effects
+  - name: s14_aggregating_in_with_after_removing_a_label_from_nodes_affects_the_result_set_but_not_the_side_effects
+    setup:
+      - |
+        CREATE (:N {num: 1})
+        CREATE (:N {num: 2})
+        CREATE (:N {num: 3})
+        CREATE (:N {num: 4})
+        CREATE (:N {num: 5})
+    query: |
+      MATCH (n:N)
+      REMOVE n:N
+      WITH sum(n.num) AS sum
+      RETURN sum
+    expect:
+      values: |
+        | sum |
+        | 15 |
+      side_effects:
+        -labels: 1
+
+  # [15] Limiting to zero results after removing a property from relationships affects the result set but not the side effects
+  - name: s15_limiting_to_zero_results_after_removing_a_property_from_relationships_affects_the_result_set_but_not_the_side_effects
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    setup:
+      - |
+        CREATE ()-[r:R {num: 42}]->()
+    query: |
+      MATCH ()-[r:R]->()
+      REMOVE r.num
+      RETURN r
+      LIMIT 0
+    expect:
+      values: |
+        | r |
+      side_effects:
+        -properties: 1
+
+  # [16] Skipping all results after removing a property from relationships affects the result set but not the side effects
+  - name: s16_skipping_all_results_after_removing_a_property_from_relationships_affects_the_result_set_but_not_the_side_effects
+    runner_gap:
+      runners: [go, csharp, dart]
+      issue: fix in 0.6.4
+      reason: "the binding gives no column names for a result without rows"
+    setup:
+      - |
+        CREATE ()-[r:R {num: 42}]->()
+    query: |
+      MATCH ()-[r:R]->()
+      REMOVE r.num
+      RETURN r
+      SKIP 1
+    expect:
+      values: |
+        | r |
+      side_effects:
+        -properties: 1
+
+  # [17] Skipping and limiting to a few results after removing a property from relationships affects the result set but not the side effects
+  - name: s17_skipping_and_limiting_to_a_few_results_after_removing_a_property_from_relationships_affects_the_result_set_but_not_the_side_effects
+    setup:
+      - |
+        CREATE ()-[:R {name: 'a', num: 42}]->()
+        CREATE ()-[:R {name: 'a', num: 42}]->()
+        CREATE ()-[:R {name: 'a', num: 42}]->()
+        CREATE ()-[:R {name: 'a', num: 42}]->()
+        CREATE ()-[:R {name: 'a', num: 42}]->()
+    query: |
+      MATCH ()-[r:R]->()
+      REMOVE r.name
+      RETURN r.num AS num
+      SKIP 2 LIMIT 2
+    expect:
+      values: |
+        | num |
+        | 42 |
+        | 42 |
+      side_effects:
+        -properties: 5
+
+  # [18] Skipping zero result and limiting to all results after removing a property from relationships does not affect the result set nor the side effects
+  - name: s18_skipping_zero_result_and_limiting_to_all_results_after_removing_a_property_from_relationships_does_not_affect_the_result_set_nor_the_side_effects
+    setup:
+      - |
+        CREATE ()-[:R {name: 'a', num: 42}]->()
+        CREATE ()-[:R {name: 'a', num: 42}]->()
+        CREATE ()-[:R {name: 'a', num: 42}]->()
+        CREATE ()-[:R {name: 'a', num: 42}]->()
+        CREATE ()-[:R {name: 'a', num: 42}]->()
+    query: |
+      MATCH ()-[r:R]->()
+      REMOVE r.name
+      RETURN r.num AS num
+      SKIP 0 LIMIT 5
+    expect:
+      values: |
+        | num |
+        | 42 |
+        | 42 |
+        | 42 |
+        | 42 |
+        | 42 |
+      side_effects:
+        -properties: 5
+
+  # [19] Filtering after removing a property from relationships affects the result set but not the side effects
+  - name: s19_filtering_after_removing_a_property_from_relationships_affects_the_result_set_but_not_the_side_effects
+    setup:
+      - |
+        CREATE ()-[:R {name: 'a', num: 1}]->()
+        CREATE ()-[:R {name: 'a', num: 2}]->()
+        CREATE ()-[:R {name: 'a', num: 3}]->()
+        CREATE ()-[:R {name: 'a', num: 4}]->()
+        CREATE ()-[:R {name: 'a', num: 5}]->()
+    query: |
+      MATCH ()-[r:R]->()
+      REMOVE r.name
+      WITH r
+      WHERE r.num % 2 = 0
+      RETURN r.num AS num
+    expect:
+      values: |
+        | num |
+        | 2 |
+        | 4 |
+      side_effects:
+        -properties: 5
+
+  # [20] Aggregating in `RETURN` after removing a property from relationships affects the result set but not the side effects
+  - name: s20_aggregating_in_return_after_removing_a_property_from_relationships_affects_the_result_set_but_not_the_side_effects
+    setup:
+      - |
+        CREATE ()-[:R {name: 'a', num: 1}]->()
+        CREATE ()-[:R {name: 'a', num: 2}]->()
+        CREATE ()-[:R {name: 'a', num: 3}]->()
+        CREATE ()-[:R {name: 'a', num: 4}]->()
+        CREATE ()-[:R {name: 'a', num: 5}]->()
+    query: |
+      MATCH ()-[r:R]->()
+      REMOVE r.name
+      RETURN sum(r.num) AS sum
+    expect:
+      values: |
+        | sum |
+        | 15 |
+      side_effects:
+        -properties: 5
+
+  # [21] Aggregating in `WITH` after removing a property from relationships affects the result set but not the side effects
+  - name: s21_aggregating_in_with_after_removing_a_property_from_relationships_affects_the_result_set_but_not_the_side_effects
+    setup:
+      - |
+        CREATE ()-[:R {name: 'a', num: 1}]->()
+        CREATE ()-[:R {name: 'a', num: 2}]->()
+        CREATE ()-[:R {name: 'a', num: 3}]->()
+        CREATE ()-[:R {name: 'a', num: 4}]->()
+        CREATE ()-[:R {name: 'a', num: 5}]->()
+    query: |
+      MATCH ()-[r:R]->()
+      REMOVE r.name
+      WITH sum(r.num) AS sum
+      RETURN sum
+    expect:
+      values: |
+        | sum |
+        | 15 |
+      side_effects:
+        -properties: 5

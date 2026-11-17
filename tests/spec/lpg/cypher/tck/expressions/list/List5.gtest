@@ -1,0 +1,514 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/list/List5.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.List5"
+  title: "List5 - List Membership Validation - IN Operator"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] IN should work with nested list subscripting
+  - name: s1_in_should_work_with_nested_list_subscripting
+    query: |
+      WITH [[1, 2, 3]] AS list
+      RETURN 3 IN list[0] AS r
+    expect:
+      values: |
+        | r |
+        | true |
+      side_effects: {}
+
+  # [2] IN should work with nested literal list subscripting
+  - name: s2_in_should_work_with_nested_literal_list_subscripting
+    query: |
+      RETURN 3 IN [[1, 2, 3]][0] AS r
+    expect:
+      values: |
+        | r |
+        | true |
+      side_effects: {}
+
+  # [3] IN should work with list slices
+  - name: s3_in_should_work_with_list_slices
+    query: |
+      WITH [1, 2, 3] AS list
+      RETURN 3 IN list[0..1] AS r
+    expect:
+      values: |
+        | r |
+        | false |
+      side_effects: {}
+
+  # [4] IN should work with literal list slices
+  - name: s4_in_should_work_with_literal_list_slices
+    query: |
+      RETURN 3 IN [1, 2, 3][0..1] AS r
+    expect:
+      values: |
+        | r |
+        | false |
+      side_effects: {}
+
+  # [5] IN should return false when matching a number with a string
+  - name: s5_in_should_return_false_when_matching_a_number_with_a_string
+    query: |
+      RETURN 1 IN ['1', 2] AS res
+    expect:
+      values: |
+        | res |
+        | false |
+      side_effects: {}
+
+  # [6] IN should return false when matching a number with a string - list version
+  - name: s6_in_should_return_false_when_matching_a_number_with_a_string_list_version
+    query: |
+      RETURN [1, 2] IN [1, [1, '2']] AS res
+    expect:
+      values: |
+        | res |
+        | false |
+      side_effects: {}
+
+  # [7] IN should return false when types of LHS and RHS don't match - singleton list
+  - name: s7_in_should_return_false_when_types_of_lhs_and_rhs_don_t_match_singleton_list
+    query: |
+      RETURN [1] IN [1, 2] AS res
+    expect:
+      values: |
+        | res |
+        | false |
+      side_effects: {}
+
+  # [8] IN should return false when types of LHS and RHS don't match - list
+  - name: s8_in_should_return_false_when_types_of_lhs_and_rhs_don_t_match_list
+    query: |
+      RETURN [1, 2] IN [1, 2] AS res
+    expect:
+      values: |
+        | res |
+        | false |
+      side_effects: {}
+
+  # [9] IN should return true when types of LHS and RHS match - singleton list
+  - name: s9_in_should_return_true_when_types_of_lhs_and_rhs_match_singleton_list
+    query: |
+      RETURN [1] IN [1, 2, [1]] AS res
+    expect:
+      values: |
+        | res |
+        | true |
+      side_effects: {}
+
+  # [10] IN should return true when types of LHS and RHS match - list
+  - name: s10_in_should_return_true_when_types_of_lhs_and_rhs_match_list
+    query: |
+      RETURN [1, 2] IN [1, [1, 2]] AS res
+    expect:
+      values: |
+        | res |
+        | true |
+      side_effects: {}
+
+  # [11] IN should return false when order of elements in LHS list and RHS list don't match
+  - name: s11_in_should_return_false_when_order_of_elements_in_lhs_list_and_rhs_list_don_t_match
+    query: |
+      RETURN [1, 2] IN [1, [2, 1]] AS res
+    expect:
+      values: |
+        | res |
+        | false |
+      side_effects: {}
+
+  # [12] IN with different length lists should return false
+  - name: s12_in_with_different_length_lists_should_return_false
+    query: |
+      RETURN [1, 2] IN [1, [1, 2, 3]] AS res
+    expect:
+      values: |
+        | res |
+        | false |
+      side_effects: {}
+
+  # [13] IN should return false when matching a list with a nested list with same elements
+  - name: s13_in_should_return_false_when_matching_a_list_with_a_nested_list_with_same_elements
+    query: |
+      RETURN [1, 2] IN [1, [[1, 2]]] AS res
+    expect:
+      values: |
+        | res |
+        | false |
+      side_effects: {}
+
+  # [14] IN should return true when both LHS and RHS contain nested lists
+  - name: s14_in_should_return_true_when_both_lhs_and_rhs_contain_nested_lists
+    query: |
+      RETURN [[1, 2], [3, 4]] IN [5, [[1, 2], [3, 4]]] AS res
+    expect:
+      values: |
+        | res |
+        | true |
+      side_effects: {}
+
+  # [15] IN should return true when both LHS and RHS contain a nested list alongside a scalar element
+  - name: s15_in_should_return_true_when_both_lhs_and_rhs_contain_a_nested_list_alongside_a_scalar_element
+    query: |
+      RETURN [[1, 2], 3] IN [1, [[1, 2], 3]] AS res
+    expect:
+      values: |
+        | res |
+        | true |
+      side_effects: {}
+
+  # [16] IN should return true when LHS and RHS contain a nested list - singleton version
+  - name: s16_in_should_return_true_when_lhs_and_rhs_contain_a_nested_list_singleton_version
+    query: |
+      RETURN [[1]] IN [2, [[1]]] AS res
+    expect:
+      values: |
+        | res |
+        | true |
+      side_effects: {}
+
+  # [17] IN should return true when LHS and RHS contain a nested list
+  - name: s17_in_should_return_true_when_lhs_and_rhs_contain_a_nested_list
+    query: |
+      RETURN [[1, 3]] IN [2, [[1, 3]]] AS res
+    expect:
+      values: |
+        | res |
+        | true |
+      side_effects: {}
+
+  # [18] IN should return false when LHS contains a nested list and type mismatch on RHS - singleton version
+  - name: s18_in_should_return_false_when_lhs_contains_a_nested_list_and_type_mismatch_on_rhs_singleton_version
+    query: |
+      RETURN [[1]] IN [2, [1]] AS res
+    expect:
+      values: |
+        | res |
+        | false |
+      side_effects: {}
+
+  # [19] IN should return false when LHS contains a nested list and type mismatch on RHS
+  - name: s19_in_should_return_false_when_lhs_contains_a_nested_list_and_type_mismatch_on_rhs
+    query: |
+      RETURN [[1, 3]] IN [2, [1, 3]] AS res
+    expect:
+      values: |
+        | res |
+        | false |
+      side_effects: {}
+
+  # [20] IN should return null if LHS and RHS are null
+  - name: s20_in_should_return_null_if_lhs_and_rhs_are_null
+    query: |
+      RETURN null IN [null] AS res
+    expect:
+      values: |
+        | res |
+        | null |
+      side_effects: {}
+
+  # [21] IN should return null if LHS and RHS are null - list version
+  - name: s21_in_should_return_null_if_lhs_and_rhs_are_null_list_version
+    query: |
+      RETURN [null] IN [[null]] AS res
+    expect:
+      values: |
+        | res |
+        | null |
+      side_effects: {}
+
+  # [22] IN should return null when LHS and RHS both ultimately contain null, even if LHS and RHS are of different types (nested list and flat list)
+  - name: s22_in_should_return_null_when_lhs_and_rhs_both_ultimately_contain_null_even_if_lhs_and_rhs_are_of_different_types_nested_list_and_flat_list
+    query: |
+      RETURN [null] IN [null] AS res
+    expect:
+      values: |
+        | res |
+        | null |
+      side_effects: {}
+
+  # [23] IN with different length lists should return false despite nulls
+  - name: s23_in_with_different_length_lists_should_return_false_despite_nulls
+    query: |
+      RETURN [1] IN [[1, null]] AS res
+    expect:
+      values: |
+        | res |
+        | false |
+      side_effects: {}
+
+  # [24] IN should return true if match despite nulls
+  - name: s24_in_should_return_true_if_match_despite_nulls
+    query: |
+      RETURN 3 IN [1, null, 3] AS res
+    expect:
+      values: |
+        | res |
+        | true |
+      side_effects: {}
+
+  # [25] IN should return null if comparison with null is required
+  - name: s25_in_should_return_null_if_comparison_with_null_is_required
+    query: |
+      RETURN 4 IN [1, null, 3] AS res
+    expect:
+      values: |
+        | res |
+        | null |
+      side_effects: {}
+
+  # [26] IN should return true if correct list found despite other lists having nulls
+  - name: s26_in_should_return_true_if_correct_list_found_despite_other_lists_having_nulls
+    query: |
+      RETURN [1, 2] IN [[null, 'foo'], [1, 2]] AS res
+    expect:
+      values: |
+        | res |
+        | true |
+      side_effects: {}
+
+  # [27] IN should return true if correct list found despite null being another element within containing list
+  - name: s27_in_should_return_true_if_correct_list_found_despite_null_being_another_element_within_containing_list
+    query: |
+      RETURN [1, 2] IN [1, [1, 2], null] AS res
+    expect:
+      values: |
+        | res |
+        | true |
+      side_effects: {}
+
+  # [28] IN should return false if no match can be found, despite nulls
+  - name: s28_in_should_return_false_if_no_match_can_be_found_despite_nulls
+    query: |
+      RETURN [1, 2] IN [[null, 'foo']] AS res
+    expect:
+      values: |
+        | res |
+        | false |
+      side_effects: {}
+
+  # [29] IN should return null if comparison with null is required, list version
+  - name: s29_in_should_return_null_if_comparison_with_null_is_required_list_version
+    query: |
+      RETURN [1, 2] IN [[null, 2]] AS res
+    expect:
+      values: |
+        | res |
+        | null |
+      side_effects: {}
+
+  # [30] IN should return false if different length lists compared, even if the extra element is null
+  - name: s30_in_should_return_false_if_different_length_lists_compared_even_if_the_extra_element_is_null
+    query: |
+      RETURN [1, 2] IN [1, [1, 2, null]] AS res
+    expect:
+      values: |
+        | res |
+        | false |
+      side_effects: {}
+
+  # [31] IN should return null when comparing two so-called identical lists where one element is null
+  - name: s31_in_should_return_null_when_comparing_two_so_called_identical_lists_where_one_element_is_null
+    query: |
+      RETURN [1, 2, null] IN [1, [1, 2, null]] AS res
+    expect:
+      values: |
+        | res |
+        | null |
+      side_effects: {}
+
+  # [32] IN should return true with previous null match, list version
+  - name: s32_in_should_return_true_with_previous_null_match_list_version
+    query: |
+      RETURN [1, 2] IN [[null, 2], [1, 2]] AS res
+    expect:
+      values: |
+        | res |
+        | true |
+      side_effects: {}
+
+  # [33] IN should return false if different length lists with nested elements compared, even if the extra element is null
+  - name: s33_in_should_return_false_if_different_length_lists_with_nested_elements_compared_even_if_the_extra_element_is_null
+    query: |
+      RETURN [[1, 2], [3, 4]] IN [5, [[1, 2], [3, 4], null]] AS res
+    expect:
+      values: |
+        | res |
+        | false |
+      side_effects: {}
+
+  # [34] IN should return null if comparison with null is required, list version 2
+  - name: s34_in_should_return_null_if_comparison_with_null_is_required_list_version_2
+    query: |
+      RETURN [1, 2] IN [[null, 2], [1, 3]] AS res
+    expect:
+      values: |
+        | res |
+        | null |
+      side_effects: {}
+
+  # [35] IN should work with an empty list
+  - name: s35_in_should_work_with_an_empty_list
+    query: |
+      RETURN [] IN [[]] AS res
+    expect:
+      values: |
+        | res |
+        | true |
+      side_effects: {}
+
+  # [36] IN should return false for the empty list if the LHS and RHS types differ
+  - name: s36_in_should_return_false_for_the_empty_list_if_the_lhs_and_rhs_types_differ
+    query: |
+      RETURN [] IN [] AS res
+    expect:
+      values: |
+        | res |
+        | false |
+      side_effects: {}
+
+  # [37] IN should work with an empty list in the presence of other list elements: matching
+  - name: s37_in_should_work_with_an_empty_list_in_the_presence_of_other_list_elements_matching
+    query: |
+      RETURN [] IN [1, []] AS res
+    expect:
+      values: |
+        | res |
+        | true |
+      side_effects: {}
+
+  # [38] IN should work with an empty list in the presence of other list elements: not matching
+  - name: s38_in_should_work_with_an_empty_list_in_the_presence_of_other_list_elements_not_matching
+    query: |
+      RETURN [] IN [1, 2] AS res
+    expect:
+      values: |
+        | res |
+        | false |
+      side_effects: {}
+
+  # [39] IN should work with an empty list when comparing nested lists
+  - name: s39_in_should_work_with_an_empty_list_when_comparing_nested_lists
+    query: |
+      RETURN [[]] IN [1, [[]]] AS res
+    expect:
+      values: |
+        | res |
+        | true |
+      side_effects: {}
+
+  # [40] IN should return null if comparison with null is required for empty list
+  - name: s40_in_should_return_null_if_comparison_with_null_is_required_for_empty_list
+    query: |
+      RETURN [] IN [1, 2, null] AS res
+    expect:
+      values: |
+        | res |
+        | null |
+      side_effects: {}
+
+  # [41] IN should return true when LHS and RHS contain nested list with multiple empty lists
+  - name: s41_in_should_return_true_when_lhs_and_rhs_contain_nested_list_with_multiple_empty_lists
+    query: |
+      RETURN [[], []] IN [1, [[], []]] AS res
+    expect:
+      values: |
+        | res |
+        | true |
+      side_effects: {}
+
+  # [42] Failing when using IN on a non-list literal #1
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s42_failing_when_using_in_on_a_non_list_literal_1
+    xfail:
+      spec: "openCypher TCK 2024.3 List5: [42] Failing when using IN on a non-list literal #1"
+      issue: fix in 0.6.5
+    query: |
+      RETURN 1 IN true
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [42] Failing when using IN on a non-list literal #2
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s42_failing_when_using_in_on_a_non_list_literal_2
+    xfail:
+      spec: "openCypher TCK 2024.3 List5: [42] Failing when using IN on a non-list literal #2"
+      issue: fix in 0.6.5
+    query: |
+      RETURN 1 IN 123
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [42] Failing when using IN on a non-list literal #3
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s42_failing_when_using_in_on_a_non_list_literal_3
+    xfail:
+      spec: "openCypher TCK 2024.3 List5: [42] Failing when using IN on a non-list literal #3"
+      issue: fix in 0.6.5
+    query: |
+      RETURN 1 IN 123.4
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [42] Failing when using IN on a non-list literal #4
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s42_failing_when_using_in_on_a_non_list_literal_4
+    xfail:
+      spec: "openCypher TCK 2024.3 List5: [42] Failing when using IN on a non-list literal #4"
+      issue: fix in 0.6.5
+    query: |
+      RETURN 1 IN 'foo'
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [42] Failing when using IN on a non-list literal #5
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s42_failing_when_using_in_on_a_non_list_literal_5
+    xfail:
+      spec: "openCypher TCK 2024.3 List5: [42] Failing when using IN on a non-list literal #5"
+      issue: fix in 0.6.5
+    query: |
+      RETURN 1 IN {x: []}
+    expect:
+      gql_status: "42"
+      side_effects: {}

@@ -1,0 +1,506 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/merge/Merge5.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Merge5"
+  title: "Merge5 - Merge relationships"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Creating a relationship
+  - name: s1_creating_a_relationship
+    setup:
+      - |
+        CREATE (:A), (:B)
+    query: |
+      MATCH (a:A), (b:B)
+      MERGE (a)-[r:TYPE]->(b)
+      RETURN count(*)
+    expect:
+      values: |
+        | count(*) |
+        | 1 |
+      side_effects:
+        +relationships: 1
+
+  # [2] Matching a relationship
+  - name: s2_matching_a_relationship
+    setup:
+      - |
+        CREATE (a:A), (b:B)
+        CREATE (a)-[:TYPE]->(b)
+    query: |
+      MATCH (a:A), (b:B)
+      MERGE (a)-[r:TYPE]->(b)
+      RETURN count(r)
+    expect:
+      values: |
+        | count(r) |
+        | 1 |
+      side_effects: {}
+
+  # [3] Matching two relationships
+  - name: s3_matching_two_relationships
+    setup:
+      - |
+        CREATE (a:A), (b:B)
+        CREATE (a)-[:TYPE]->(b)
+        CREATE (a)-[:TYPE]->(b)
+    query: |
+      MATCH (a:A), (b:B)
+      MERGE (a)-[r:TYPE]->(b)
+      RETURN count(r)
+    expect:
+      values: |
+        | count(r) |
+        | 2 |
+      side_effects: {}
+
+  # [4] Using bound variables from other updating clause
+  - name: s4_using_bound_variables_from_other_updating_clause
+    query: |
+      CREATE (a), (b)
+      MERGE (a)-[:X]->(b)
+      RETURN count(a)
+    expect:
+      values: |
+        | count(a) |
+        | 1 |
+      side_effects:
+        +nodes: 2
+        +relationships: 1
+
+  # [5] Filtering relationships
+  - name: s5_filtering_relationships
+    setup:
+      - |
+        CREATE (a:A), (b:B)
+        CREATE (a)-[:TYPE {name: 'r1'}]->(b)
+        CREATE (a)-[:TYPE {name: 'r2'}]->(b)
+    query: |
+      MATCH (a:A), (b:B)
+      MERGE (a)-[r:TYPE {name: 'r2'}]->(b)
+      RETURN count(r)
+    expect:
+      values: |
+        | count(r) |
+        | 1 |
+      side_effects: {}
+
+  # [6] Creating relationship when all matches filtered out
+  - name: s6_creating_relationship_when_all_matches_filtered_out
+    setup:
+      - |
+        CREATE (a:A), (b:B)
+        CREATE (a)-[:TYPE {name: 'r1'}]->(b)
+    query: |
+      MATCH (a:A), (b:B)
+      MERGE (a)-[r:TYPE {name: 'r2'}]->(b)
+      RETURN count(r)
+    expect:
+      values: |
+        | count(r) |
+        | 1 |
+      side_effects:
+        +relationships: 1
+        +properties: 1
+
+  # [7] Matching incoming relationship
+  - name: s7_matching_incoming_relationship
+    setup:
+      - |
+        CREATE (a:A), (b:B)
+        CREATE (b)-[:TYPE]->(a)
+        CREATE (a)-[:TYPE]->(b)
+    query: |
+      MATCH (a:A), (b:B)
+      MERGE (a)<-[r:TYPE]-(b)
+      RETURN count(r)
+    expect:
+      values: |
+        | count(r) |
+        | 1 |
+      side_effects: {}
+
+  # [8] Creating relationship with property
+  - name: s8_creating_relationship_with_property
+    setup:
+      - |
+        CREATE (a:A), (b:B)
+    query: |
+      MATCH (a:A), (b:B)
+      MERGE (a)-[r:TYPE {name: 'Lola'}]->(b)
+      RETURN count(r)
+    expect:
+      values: |
+        | count(r) |
+        | 1 |
+      side_effects:
+        +relationships: 1
+        +properties: 1
+
+  # [9] Creating relationship using merged nodes
+  - name: s9_creating_relationship_using_merged_nodes
+    setup:
+      - |
+        CREATE (a:A), (b:B)
+    query: |
+      MERGE (a:A)
+      MERGE (b:B)
+      MERGE (a)-[:FOO]->(b)
+    expect:
+      empty: true
+      side_effects:
+        +relationships: 1
+
+  # [10] Merge should bind a path
+  - name: s10_merge_should_bind_a_path
+    query: |
+      MERGE (a {num: 1})
+      MERGE (b {num: 2})
+      MERGE p = (a)-[:R]->(b)
+      RETURN p
+    expect:
+      values: |
+        | p |
+        | <({num: 1})-[:R]->({num: 2})> |
+      side_effects:
+        +nodes: 2
+        +relationships: 1
+        +properties: 2
+
+  # [11] Use outgoing direction when unspecified
+  - name: s11_use_outgoing_direction_when_unspecified
+    query: |
+      CREATE (a {id: 2}), (b {id: 1})
+      MERGE (a)-[r:KNOWS]-(b)
+      RETURN startNode(r).id AS s, endNode(r).id AS e
+    expect:
+      values: |
+        | s | e |
+        | 2 | 1 |
+      side_effects:
+        +nodes: 2
+        +relationships: 1
+        +properties: 2
+
+  # [12] Match outgoing relationship when direction unspecified
+  - name: s12_match_outgoing_relationship_when_direction_unspecified
+    setup:
+      - |
+        CREATE (a {id: 1}), (b {id: 2})
+        CREATE (a)-[:KNOWS]->(b)
+    query: |
+      MATCH (a {id: 2}), (b {id: 1})
+      MERGE (a)-[r:KNOWS]-(b)
+      RETURN r
+    expect:
+      values: |
+        | r |
+        | [:KNOWS] |
+      side_effects: {}
+
+  # [13] Match both incoming and outgoing relationships when direction unspecified
+  - name: s13_match_both_incoming_and_outgoing_relationships_when_direction_unspecified
+    setup:
+      - |
+        CREATE (a {id: 2}), (b {id: 1}), (c {id: 1}), (d {id: 2})
+        CREATE (a)-[:KNOWS {name: 'ab'}]->(b)
+        CREATE (c)-[:KNOWS {name: 'cd'}]->(d)
+    query: |
+      MATCH (a {id: 2})--(b {id: 1})
+      MERGE (a)-[r:KNOWS]-(b)
+      RETURN r
+    expect:
+      values: |
+        | r |
+        | [:KNOWS {name: 'ab'}] |
+        | [:KNOWS {name: 'cd'}] |
+      side_effects: {}
+
+  # [14] Using list properties via variable
+  - name: s14_using_list_properties_via_variable
+    query: |
+      CREATE (a:Foo), (b:Bar)
+      WITH a, b
+      UNWIND ['a,b', 'a,b'] AS str
+      WITH a, b, split(str, ',') AS roles
+      MERGE (a)-[r:FB {foobar: roles}]->(b)
+      RETURN count(*)
+    expect:
+      values: |
+        | count(*) |
+        | 2 |
+      side_effects:
+        +nodes: 2
+        +relationships: 1
+        +labels: 2
+        +properties: 1
+
+  # [15] Matching using list property
+  - name: s15_matching_using_list_property
+    setup:
+      - |
+        CREATE (a:A), (b:B)
+        CREATE (a)-[:T {numbers: [42, 43]}]->(b)
+    query: |
+      MATCH (a:A), (b:B)
+      MERGE (a)-[r:T {numbers: [42, 43]}]->(b)
+      RETURN count(*)
+    expect:
+      values: |
+        | count(*) |
+        | 1 |
+      side_effects: {}
+
+  # [16] Aliasing of existing nodes 1
+  - name: s16_aliasing_of_existing_nodes_1
+    setup:
+      - |
+        CREATE ({id: 0})
+    query: |
+      MATCH (n)
+      MATCH (m)
+      WITH n AS a, m AS b
+      MERGE (a)-[r:T]->(b)
+      RETURN a.id AS a, b.id AS b
+    expect:
+      values: |
+        | a | b |
+        | 0 | 0 |
+      side_effects:
+        +relationships: 1
+
+  # [17] Aliasing of existing nodes 2
+  - name: s17_aliasing_of_existing_nodes_2
+    setup:
+      - |
+        CREATE ({id: 0})
+    query: |
+      MATCH (n)
+      WITH n AS a, n AS b
+      MERGE (a)-[r:T]->(b)
+      RETURN a.id AS a
+    expect:
+      values: |
+        | a |
+        | 0 |
+      side_effects:
+        +relationships: 1
+
+  # [18] Double aliasing of existing nodes 1
+  - name: s18_double_aliasing_of_existing_nodes_1
+    setup:
+      - |
+        CREATE ({id: 0})
+    query: |
+      MATCH (n)
+      MATCH (m)
+      WITH n AS a, m AS b
+      MERGE (a)-[:T]->(b)
+      WITH a AS x, b AS y
+      MERGE (a)
+      MERGE (b)
+      MERGE (a)-[:T]->(b)
+      RETURN x.id AS x, y.id AS y
+    expect:
+      values: |
+        | x | y |
+        | 0 | 0 |
+      side_effects:
+        +relationships: 1
+
+  # [19] Double aliasing of existing nodes 2
+  - name: s19_double_aliasing_of_existing_nodes_2
+    setup:
+      - |
+        CREATE ({id: 0})
+    query: |
+      MATCH (n)
+      WITH n AS a
+      MERGE (c)
+      MERGE (a)-[:T]->(c)
+      WITH a AS x
+      MERGE (c)
+      MERGE (x)-[:T]->(c)
+      RETURN x.id AS x
+    expect:
+      values: |
+        | x |
+        | 0 |
+      side_effects:
+        +relationships: 1
+
+  # [20] Do not match on deleted entities
+  - name: s20_do_not_match_on_deleted_entities
+    setup:
+      - |
+        CREATE (a:A)
+        CREATE (b1:B {num: 0}), (b2:B {num: 1})
+        CREATE (c1:C), (c2:C)
+        CREATE (a)-[:REL]->(b1),
+               (a)-[:REL]->(b2),
+               (b1)-[:REL]->(c1),
+               (b2)-[:REL]->(c2)
+    query: |
+      MATCH (a:A)-[ab]->(b:B)-[bc]->(c:C)
+      DELETE ab, bc, b, c
+      MERGE (newB:B {num: 1})
+      MERGE (a)-[:REL]->(newB)
+      MERGE (newC:C)
+      MERGE (newB)-[:REL]->(newC)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 2
+        -nodes: 4
+        +relationships: 2
+        -relationships: 4
+        +properties: 1
+        -properties: 2
+
+  # [21] Do not match on deleted relationships
+  - name: s21_do_not_match_on_deleted_relationships
+    setup:
+      - |
+        CREATE (a:A), (b:B)
+        CREATE (a)-[:T {name: 'rel1'}]->(b),
+               (a)-[:T {name: 'rel2'}]->(b)
+    query: |
+      MATCH (a)-[t:T]->(b)
+      DELETE t
+      MERGE (a)-[t2:T {name: 'rel3'}]->(b)
+      RETURN t2.name
+    expect:
+      values: |
+        | t2.name |
+        | 'rel3' |
+        | 'rel3' |
+      side_effects:
+        +relationships: 1
+        -relationships: 2
+        +properties: 1
+        -properties: 2
+
+  # [22] Fail when imposing new predicates on a variable that is already bound
+  # TCK: SyntaxError at compile time: VariableAlreadyBound
+  - name: s22_fail_when_imposing_new_predicates_on_a_variable_that_is_already_bound
+    xfail:
+      spec: "openCypher TCK 2024.3 Merge5: [22] Fail when imposing new predicates on a variable that is already bound"
+      issue: fix in 0.6.5
+    query: |
+      CREATE (a:Foo)
+      MERGE (a)-[r:KNOWS]->(a:Bar)
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [23] Fail when merging relationship without type
+  # TCK: SyntaxError at compile time: NoSingleRelationshipType
+  - name: s23_fail_when_merging_relationship_without_type
+    query: |
+      CREATE (a), (b)
+      MERGE (a)-->(b)
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [24] Fail when merging relationship without type, no colon
+  # TCK: SyntaxError at compile time: NoSingleRelationshipType
+  - name: s24_fail_when_merging_relationship_without_type_no_colon
+    query: |
+      MATCH (a), (b)
+      MERGE (a)-[NO_COLON]->(b)
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail when merging relationship with more than one type
+  # TCK: SyntaxError at compile time: NoSingleRelationshipType
+  - name: s25_fail_when_merging_relationship_with_more_than_one_type
+    query: |
+      CREATE (a), (b)
+      MERGE (a)-[:A|:B]->(b)
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [26] Fail when merging relationship that is already bound
+  # TCK: SyntaxError at compile time: VariableAlreadyBound
+  - name: s26_fail_when_merging_relationship_that_is_already_bound
+    query: |
+      MATCH (a)-[r]->(b)
+      MERGE (a)-[r]->(b)
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [27] Fail when using parameter as relationship predicate in MERGE
+  # TCK: SyntaxError at compile time: InvalidParameterUse
+  - name: s27_fail_when_using_parameter_as_relationship_predicate_in_merge
+    query: |
+      MERGE (a)
+      MERGE (b)
+      MERGE (a)-[r:FOO $param]->(b)
+      RETURN r
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [28] Fail when using variable length relationship in MERGE
+  # TCK: SyntaxError at compile time: CreatingVarLength
+  - name: s28_fail_when_using_variable_length_relationship_in_merge
+    query: |
+      MERGE (a)
+      MERGE (b)
+      MERGE (a)-[:FOO*2]->(b)
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [29] Fail on merging relationship with null property
+  # TCK: SemanticError at runtime: MergeReadOwnWrites
+  - name: s29_fail_on_merging_relationship_with_null_property
+    xfail:
+      spec: "openCypher TCK 2024.3 Merge5: [29] Fail on merging relationship with null property"
+      issue: fix in 0.6.5
+    query: |
+      CREATE (a), (b)
+      MERGE (a)-[r:X {num: null}]->(b)
+    expect:
+      gql_status: "42"
+      side_effects: {}

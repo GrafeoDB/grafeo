@@ -1,0 +1,369 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/precedence/Precedence2.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Precedence2"
+  title: "Precedence2 - On numeric values"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Numeric multiplicative operations takes precedence over numeric additive operations #1
+  - name: s1_numeric_multiplicative_operations_takes_precedence_over_numeric_additive_operations_1
+    query: |
+      RETURN 4 * 2 + 3 * 2 AS a,
+             4 * 2 + (3 * 2) AS b,
+             4 * (2 + 3) * 2 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | 14 | 14 | 40 |
+      side_effects: {}
+
+  # [1] Numeric multiplicative operations takes precedence over numeric additive operations #2
+  - name: s1_numeric_multiplicative_operations_takes_precedence_over_numeric_additive_operations_2
+    query: |
+      RETURN 4 * 2 + 3 / 2 AS a,
+             4 * 2 + (3 / 2) AS b,
+             4 * (2 + 3) / 2 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | 9 | 9 | 10 |
+      side_effects: {}
+
+  # [1] Numeric multiplicative operations takes precedence over numeric additive operations #3
+  - name: s1_numeric_multiplicative_operations_takes_precedence_over_numeric_additive_operations_3
+    query: |
+      RETURN 4 * 2 + 3 % 2 AS a,
+             4 * 2 + (3 % 2) AS b,
+             4 * (2 + 3) % 2 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | 9 | 9 | 0 |
+      side_effects: {}
+
+  # [1] Numeric multiplicative operations takes precedence over numeric additive operations #4
+  - name: s1_numeric_multiplicative_operations_takes_precedence_over_numeric_additive_operations_4
+    query: |
+      RETURN 4 * 2 - 3 * 2 AS a,
+             4 * 2 - (3 * 2) AS b,
+             4 * (2 - 3) * 2 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | 2 | 2 | -8 |
+      side_effects: {}
+
+  # [1] Numeric multiplicative operations takes precedence over numeric additive operations #5
+  - name: s1_numeric_multiplicative_operations_takes_precedence_over_numeric_additive_operations_5
+    query: |
+      RETURN 4 * 2 - 3 / 2 AS a,
+             4 * 2 - (3 / 2) AS b,
+             4 * (2 - 3) / 2 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | 7 | 7 | -2 |
+      side_effects: {}
+
+  # [1] Numeric multiplicative operations takes precedence over numeric additive operations #6
+  - name: s1_numeric_multiplicative_operations_takes_precedence_over_numeric_additive_operations_6
+    query: |
+      RETURN 4 * 2 - 3 % 2 AS a,
+             4 * 2 - (3 % 2) AS b,
+             4 * (2 - 3) % 2 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | 7 | 7 | 0 |
+      side_effects: {}
+
+  # [1] Numeric multiplicative operations takes precedence over numeric additive operations #7
+  - name: s1_numeric_multiplicative_operations_takes_precedence_over_numeric_additive_operations_7
+    query: |
+      RETURN 4 / 2 + 3 * 2 AS a,
+             4 / 2 + (3 * 2) AS b,
+             4 / (2 + 3) * 2 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | 8 | 8 | 0 |
+      side_effects: {}
+
+  # [1] Numeric multiplicative operations takes precedence over numeric additive operations #8
+  - name: s1_numeric_multiplicative_operations_takes_precedence_over_numeric_additive_operations_8
+    query: |
+      RETURN 4 / 2 + 3 / 2 AS a,
+             4 / 2 + (3 / 2) AS b,
+             4 / (2 + 3) / 2 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | 3 | 3 | 0 |
+      side_effects: {}
+
+  # [1] Numeric multiplicative operations takes precedence over numeric additive operations #9
+  - name: s1_numeric_multiplicative_operations_takes_precedence_over_numeric_additive_operations_9
+    query: |
+      RETURN 4 / 2 + 3 % 2 AS a,
+             4 / 2 + (3 % 2) AS b,
+             4 / (2 + 3) % 2 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | 3 | 3 | 0 |
+      side_effects: {}
+
+  # [1] Numeric multiplicative operations takes precedence over numeric additive operations #10
+  - name: s1_numeric_multiplicative_operations_takes_precedence_over_numeric_additive_operations_10
+    query: |
+      RETURN 4 / 2 - 3 * 2 AS a,
+             4 / 2 - (3 * 2) AS b,
+             4 / (2 - 3) * 2 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | -4 | -4 | -8 |
+      side_effects: {}
+
+  # [1] Numeric multiplicative operations takes precedence over numeric additive operations #11
+  - name: s1_numeric_multiplicative_operations_takes_precedence_over_numeric_additive_operations_11
+    query: |
+      RETURN 4 / 2 - 3 / 2 AS a,
+             4 / 2 - (3 / 2) AS b,
+             4 / (2 - 3) / 2 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | 1 | 1 | -2 |
+      side_effects: {}
+
+  # [1] Numeric multiplicative operations takes precedence over numeric additive operations #12
+  - name: s1_numeric_multiplicative_operations_takes_precedence_over_numeric_additive_operations_12
+    query: |
+      RETURN 4 / 2 - 3 % 2 AS a,
+             4 / 2 - (3 % 2) AS b,
+             4 / (2 - 3) % 2 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | 1 | 1 | 0 |
+      side_effects: {}
+
+  # [1] Numeric multiplicative operations takes precedence over numeric additive operations #13
+  - name: s1_numeric_multiplicative_operations_takes_precedence_over_numeric_additive_operations_13
+    query: |
+      RETURN 4 % 2 + 3 * 2 AS a,
+             4 % 2 + (3 * 2) AS b,
+             4 % (2 + 3) * 2 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | 6 | 6 | 8 |
+      side_effects: {}
+
+  # [1] Numeric multiplicative operations takes precedence over numeric additive operations #14
+  - name: s1_numeric_multiplicative_operations_takes_precedence_over_numeric_additive_operations_14
+    query: |
+      RETURN 4 % 2 + 3 / 2 AS a,
+             4 % 2 + (3 / 2) AS b,
+             4 % (2 + 3) / 2 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | 1 | 1 | 2 |
+      side_effects: {}
+
+  # [1] Numeric multiplicative operations takes precedence over numeric additive operations #15
+  - name: s1_numeric_multiplicative_operations_takes_precedence_over_numeric_additive_operations_15
+    query: |
+      RETURN 4 % 2 + 3 % 2 AS a,
+             4 % 2 + (3 % 2) AS b,
+             4 % (2 + 3) % 2 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | 1 | 1 | 0 |
+      side_effects: {}
+
+  # [1] Numeric multiplicative operations takes precedence over numeric additive operations #16
+  - name: s1_numeric_multiplicative_operations_takes_precedence_over_numeric_additive_operations_16
+    query: |
+      RETURN 4 % 2 - 3 * 2 AS a,
+             4 % 2 - (3 * 2) AS b,
+             4 % (2 - 3) * 2 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | -6 | -6 | 0 |
+      side_effects: {}
+
+  # [1] Numeric multiplicative operations takes precedence over numeric additive operations #17
+  - name: s1_numeric_multiplicative_operations_takes_precedence_over_numeric_additive_operations_17
+    query: |
+      RETURN 4 % 2 - 3 / 2 AS a,
+             4 % 2 - (3 / 2) AS b,
+             4 % (2 - 3) / 2 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | -1 | -1 | 0 |
+      side_effects: {}
+
+  # [1] Numeric multiplicative operations takes precedence over numeric additive operations #18
+  - name: s1_numeric_multiplicative_operations_takes_precedence_over_numeric_additive_operations_18
+    query: |
+      RETURN 4 % 2 - 3 % 2 AS a,
+             4 % 2 - (3 % 2) AS b,
+             4 % (2 - 3) % 2 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | -1 | -1 | 0 |
+      side_effects: {}
+
+  # [2] Exponentiation takes precedence over numeric multiplicative operations #1
+  - name: s2_exponentiation_takes_precedence_over_numeric_multiplicative_operations_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Precedence2: [2] Exponentiation takes precedence over numeric multiplicative operations #1"
+      issue: fix in 0.6.4
+    query: |
+      RETURN 4 ^ 3 * 2 ^ 3 AS a,
+             (4 ^ 3) * (2 ^ 3) AS b,
+             4 ^ (3 * 2) ^ 3 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | 512.0 | 512.0 | 68719476736.0 |
+      side_effects: {}
+
+  # [2] Exponentiation takes precedence over numeric multiplicative operations #2
+  - name: s2_exponentiation_takes_precedence_over_numeric_multiplicative_operations_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Precedence2: [2] Exponentiation takes precedence over numeric multiplicative operations #2"
+      issue: fix in 0.6.4
+    query: |
+      RETURN 4 ^ 3 / 2 ^ 3 AS a,
+             (4 ^ 3) / (2 ^ 3) AS b,
+             4 ^ (3 / 2) ^ 3 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | 8.0 | 8.0 | 64.0 |
+      side_effects: {}
+
+  # [2] Exponentiation takes precedence over numeric multiplicative operations #3
+  - name: s2_exponentiation_takes_precedence_over_numeric_multiplicative_operations_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Precedence2: [2] Exponentiation takes precedence over numeric multiplicative operations #3"
+      issue: fix in 0.6.4
+    query: |
+      RETURN 4 ^ 3 % 2 ^ 3 AS a,
+             (4 ^ 3) % (2 ^ 3) AS b,
+             4 ^ (3 % 2) ^ 3 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | 0.0 | 0.0 | 64.0 |
+      side_effects: {}
+
+  # [3] Exponentiation takes precedence over numeric additive operations #1
+  - name: s3_exponentiation_takes_precedence_over_numeric_additive_operations_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Precedence2: [3] Exponentiation takes precedence over numeric additive operations #1"
+      issue: fix in 0.6.4
+    query: |
+      RETURN 4 ^ 3 + 2 ^ 3 AS a,
+             (4 ^ 3) + (2 ^ 3) AS b,
+             4 ^ (3 + 2) ^ 3 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | 72.0 | 72.0 | 1073741824.0 |
+      side_effects: {}
+
+  # [3] Exponentiation takes precedence over numeric additive operations #2
+  - name: s3_exponentiation_takes_precedence_over_numeric_additive_operations_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Precedence2: [3] Exponentiation takes precedence over numeric additive operations #2"
+      issue: fix in 0.6.4
+    query: |
+      RETURN 4 ^ 3 - 2 ^ 3 AS a,
+             (4 ^ 3) - (2 ^ 3) AS b,
+             4 ^ (3 - 2) ^ 3 AS c
+    expect:
+      values: |
+        | a | b | c |
+        | 56.0 | 56.0 | 64.0 |
+      side_effects: {}
+
+  # [4] Numeric unary negative takes precedence over exponentiation
+  - name: s4_numeric_unary_negative_takes_precedence_over_exponentiation
+    query: |
+      RETURN -3 ^ 2 AS a,
+             (-3) ^ 2 AS b,
+             -(3 ^ 2) AS c
+    expect:
+      values: |
+        | a | b | c |
+        | 9.0 | 9.0 | -9.0 |
+      side_effects: {}
+
+  # [5] Numeric unary negative takes precedence over numeric additive operations #1
+  - name: s5_numeric_unary_negative_takes_precedence_over_numeric_additive_operations_1
+    query: |
+      RETURN -3 + 2 AS a,
+             (-3) + 2 AS b,
+             -(3 + 2) AS c
+    expect:
+      values: |
+        | a | b | c |
+        | -1 | -1 | -5 |
+      side_effects: {}
+
+  # [5] Numeric unary negative takes precedence over numeric additive operations #2
+  - name: s5_numeric_unary_negative_takes_precedence_over_numeric_additive_operations_2
+    query: |
+      RETURN -3 - 2 AS a,
+             (-3) - 2 AS b,
+             -(3 - 2) AS c
+    expect:
+      values: |
+        | a | b | c |
+        | -5 | -5 | -1 |
+      side_effects: {}

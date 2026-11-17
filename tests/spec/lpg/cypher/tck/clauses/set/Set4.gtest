@@ -1,0 +1,123 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/set/Set4.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Set4"
+  title: "Set4 - Set all properties with a map"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Set multiple properties with a property map
+  - name: s1_set_multiple_properties_with_a_property_map
+    setup:
+      - |
+        CREATE (:X)
+    query: |
+      MATCH (n:X)
+      SET n = {name: 'A', name2: 'B', num: 5}
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | (:X {name: 'A', name2: 'B', num: 5}) |
+      side_effects:
+        +properties: 3
+
+  # [2] Non-existent values in a property map are removed with SET
+  - name: s2_non_existent_values_in_a_property_map_are_removed_with_set
+    setup:
+      - |
+        CREATE (:X {name: 'A', name2: 'B'})
+    query: |
+      MATCH (n:X {name: 'A'})
+      SET n = {name: 'B', baz: 'C'}
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | (:X {name: 'B', baz: 'C'}) |
+      side_effects:
+        +properties: 2
+        -properties: 2
+
+  # [3] Null values in a property map are removed with SET
+  - name: s3_null_values_in_a_property_map_are_removed_with_set
+    setup:
+      - |
+        CREATE (:X {name: 'A', name2: 'B'})
+    query: |
+      MATCH (n:X {name: 'A'})
+      SET n = {name: 'B', name2: null, baz: 'C'}
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | (:X {name: 'B', baz: 'C'}) |
+      side_effects:
+        +properties: 2
+        -properties: 2
+
+  # [4] All properties are removed if node is set to empty property map
+  - name: s4_all_properties_are_removed_if_node_is_set_to_empty_property_map
+    setup:
+      - |
+        CREATE (:X {name: 'A', name2: 'B'})
+    query: |
+      MATCH (n:X {name: 'A'})
+      SET n = { }
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | (:X) |
+      side_effects:
+        -properties: 2
+
+  # [5] Ignore null when setting properties using an overriding map
+  - name: s5_ignore_null_when_setting_properties_using_an_overriding_map
+    xfail:
+      spec: "openCypher TCK 2024.3 Set4: [5] Ignore null when setting properties using an overriding map"
+      issue: fix in 0.6.4
+    query: |
+      OPTIONAL MATCH (a:DoesNotExist)
+      SET a = {num: 42}
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | null |
+      side_effects: {}

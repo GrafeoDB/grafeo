@@ -1,0 +1,155 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/remove/Remove1.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Remove1"
+  title: "Remove1 - Remove a Property"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Remove a single node property
+  - name: s1_remove_a_single_node_property
+    setup:
+      - |
+        CREATE (:L {num: 42})
+    query: |
+      MATCH (n)
+      REMOVE n.num
+      RETURN n.num IS NOT NULL AS still_there
+    expect:
+      values: |
+        | still_there |
+        | false |
+      side_effects:
+        -properties: 1
+
+  # [2] Remove multiple node properties
+  - name: s2_remove_multiple_node_properties
+    setup:
+      - |
+        CREATE (:L {num: 42, name: 'a', name2: 'B'})
+    query: |
+      MATCH (n)
+      REMOVE n.num, n.name
+      RETURN size(keys(n)) AS props
+    expect:
+      values: |
+        | props |
+        | 1 |
+      side_effects:
+        -properties: 2
+
+  # [3] Remove a single relationship property
+  - name: s3_remove_a_single_relationship_property
+    setup:
+      - |
+        CREATE (a), (b), (a)-[:X {num: 42}]->(b)
+    query: |
+      MATCH ()-[r]->()
+      REMOVE r.num
+      RETURN r.num IS NOT NULL AS still_there
+    expect:
+      values: |
+        | still_there |
+        | false |
+      side_effects:
+        -properties: 1
+
+  # [4] Remove multiple relationship properties
+  - name: s4_remove_multiple_relationship_properties
+    setup:
+      - |
+        CREATE (a), (b), (a)-[:X {num: 42, a: 'a', b: 'B'}]->(b)
+    query: |
+      MATCH ()-[r]->()
+      REMOVE r.num, r.a
+      RETURN size(keys(r)) AS props
+    expect:
+      values: |
+        | props |
+        | 1 |
+      side_effects:
+        -properties: 2
+
+  # [5] Ignore null when removing property from a node
+  - name: s5_ignore_null_when_removing_property_from_a_node
+    xfail:
+      spec: "openCypher TCK 2024.3 Remove1: [5] Ignore null when removing property from a node"
+      issue: fix in 0.6.4
+    query: |
+      OPTIONAL MATCH (a:DoesNotExist)
+      REMOVE a.num
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | null |
+      side_effects: {}
+
+  # [6] Ignore null when removing property from a relationship
+  - name: s6_ignore_null_when_removing_property_from_a_relationship
+    xfail:
+      spec: "openCypher TCK 2024.3 Remove1: [6] Ignore null when removing property from a relationship"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        CREATE ({num: 42})
+    query: |
+      MATCH (n)
+      OPTIONAL MATCH (n)-[r]->()
+      REMOVE r.num
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | ({num: 42}) |
+      side_effects: {}
+
+  # [7] Remove a missing node property
+  - name: s7_remove_a_missing_node_property
+    setup:
+      - |
+        CREATE (), (), ()
+    query: |
+      MATCH (n)
+      REMOVE n.num
+      RETURN sum(size(keys(n))) AS totalNumberOfProps
+    expect:
+      values: |
+        | totalNumberOfProps |
+        | 0 |
+      side_effects: {}

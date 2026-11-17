@@ -1,0 +1,121 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/set/Set5.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Set5"
+  title: "Set5 - Set multiple properties with a map"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Ignore null when setting properties using an appending map
+  - name: s1_ignore_null_when_setting_properties_using_an_appending_map
+    xfail:
+      spec: "openCypher TCK 2024.3 Set5: [1] Ignore null when setting properties using an appending map"
+      issue: fix in 0.6.4
+    query: |
+      OPTIONAL MATCH (a:DoesNotExist)
+      SET a += {num: 42}
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | null |
+      side_effects: {}
+
+  # [2] Overwrite values when using +=
+  - name: s2_overwrite_values_when_using
+    setup:
+      - |
+        CREATE (:X {name: 'A', name2: 'B'})
+    query: |
+      MATCH (n:X {name: 'A'})
+      SET n += {name2: 'C'}
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | (:X {name: 'A', name2: 'C'}) |
+      side_effects:
+        +properties: 1
+        -properties: 1
+
+  # [3] Retain old values when using +=
+  - name: s3_retain_old_values_when_using
+    setup:
+      - |
+        CREATE (:X {name: 'A'})
+    query: |
+      MATCH (n:X {name: 'A'})
+      SET n += {name2: 'B'}
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | (:X {name: 'A', name2: 'B'}) |
+      side_effects:
+        +properties: 1
+
+  # [4] Explicit null values in a map remove old values
+  - name: s4_explicit_null_values_in_a_map_remove_old_values
+    setup:
+      - |
+        CREATE (:X {name: 'A', name2: 'B'})
+    query: |
+      MATCH (n:X {name: 'A'})
+      SET n += {name: null}
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | (:X {name2: 'B'}) |
+      side_effects:
+        -properties: 1
+
+  # [5] Set an empty map when using += has no effect
+  - name: s5_set_an_empty_map_when_using_has_no_effect
+    setup:
+      - |
+        CREATE (:X {name: 'A', name2: 'B'})
+    query: |
+      MATCH (n:X {name: 'A'})
+      SET n += { }
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | (:X {name: 'A', name2: 'B'}) |
+      side_effects: {}

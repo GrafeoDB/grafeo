@@ -1,0 +1,171 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/set/Set3.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Set3"
+  title: "Set3 - Set a Label"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Add a single label to a node with no label
+  - name: s1_add_a_single_label_to_a_node_with_no_label
+    setup:
+      - |
+        CREATE ()
+    query: |
+      MATCH (n)
+      SET n:Foo
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | (:Foo) |
+      side_effects:
+        +labels: 1
+
+  # [2] Adding multiple labels to a node with no label
+  - name: s2_adding_multiple_labels_to_a_node_with_no_label
+    setup:
+      - |
+        CREATE ()
+    query: |
+      MATCH (n)
+      SET n:Foo:Bar
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | (:Foo:Bar) |
+      side_effects:
+        +labels: 2
+
+  # [3] Add a single label to a node with an existing label
+  - name: s3_add_a_single_label_to_a_node_with_an_existing_label
+    setup:
+      - |
+        CREATE (:A)
+    query: |
+      MATCH (n:A)
+      SET n:Foo
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | (:A:Foo) |
+      side_effects:
+        +labels: 1
+
+  # [4] Adding multiple labels to a node with an existing label
+  - name: s4_adding_multiple_labels_to_a_node_with_an_existing_label
+    setup:
+      - |
+        CREATE (:A)
+    query: |
+      MATCH (n)
+      SET n:Foo:Bar
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | (:A:Foo:Bar) |
+      side_effects:
+        +labels: 2
+
+  # [5] Ignore whitespace before colon 1
+  - name: s5_ignore_whitespace_before_colon_1
+    setup:
+      - |
+        CREATE ()
+    query: |
+      MATCH (n)
+      SET n :Foo
+      RETURN labels(n)
+    expect:
+      values: |
+        | labels(n) |
+        | ['Foo'] |
+      side_effects:
+        +labels: 1
+
+  # [6] Ignore whitespace before colon 2
+  - name: s6_ignore_whitespace_before_colon_2
+    setup:
+      - |
+        CREATE ()
+    query: |
+      MATCH (n)
+      SET n :Foo :Bar
+      RETURN labels(n)
+    expect:
+      unordered_lists: true
+      values: |
+        | labels(n) |
+        | ['Foo', 'Bar'] |
+      side_effects:
+        +labels: 2
+
+  # [7] Ignore whitespace before colon 3
+  - name: s7_ignore_whitespace_before_colon_3
+    setup:
+      - |
+        CREATE ()
+    query: |
+      MATCH (n)
+      SET n :Foo:Bar
+      RETURN labels(n)
+    expect:
+      unordered_lists: true
+      values: |
+        | labels(n) |
+        | ['Foo', 'Bar'] |
+      side_effects:
+        +labels: 2
+
+  # [8] Ignore null when setting label
+  - name: s8_ignore_null_when_setting_label
+    xfail:
+      spec: "openCypher TCK 2024.3 Set3: [8] Ignore null when setting label"
+      issue: fix in 0.6.4
+    query: |
+      OPTIONAL MATCH (a:DoesNotExist)
+      SET a:L
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | null |
+      side_effects: {}

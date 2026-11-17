@@ -1,0 +1,1048 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/precedence/Precedence1.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Precedence1"
+  title: "Precedence1 - On boolean values"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Exclusive disjunction takes precedence over inclusive disjunction
+  - name: s1_exclusive_disjunction_takes_precedence_over_inclusive_disjunction
+    query: |
+      RETURN true OR true XOR true AS a,
+             true OR (true XOR true) AS b,
+             (true OR true) XOR true AS c
+    expect:
+      values: |
+        | a | b | c |
+        | true | true | false |
+      side_effects: {}
+
+  # [2] Conjunction disjunction takes precedence over exclusive disjunction
+  - name: s2_conjunction_disjunction_takes_precedence_over_exclusive_disjunction
+    query: |
+      RETURN true XOR false AND false AS a,
+             true XOR (false AND false) AS b,
+             (true XOR false) AND false AS c
+    expect:
+      values: |
+        | a | b | c |
+        | true | true | false |
+      side_effects: {}
+
+  # [3] Conjunction disjunction takes precedence over inclusive disjunction
+  - name: s3_conjunction_disjunction_takes_precedence_over_inclusive_disjunction
+    query: |
+      RETURN true OR false AND false AS a,
+             true OR (false AND false) AS b,
+             (true OR false) AND false AS c
+    expect:
+      values: |
+        | a | b | c |
+        | true | true | false |
+      side_effects: {}
+
+  # [4] Negation takes precedence over conjunction
+  - name: s4_negation_takes_precedence_over_conjunction
+    query: |
+      RETURN NOT true AND false AS a,
+             (NOT true) AND false AS b,
+             NOT (true AND false) AS c
+    expect:
+      values: |
+        | a | b | c |
+        | false | false | true |
+      side_effects: {}
+
+  # [5] Negation takes precedence over inclusive disjunction
+  - name: s5_negation_takes_precedence_over_inclusive_disjunction
+    query: |
+      RETURN NOT false OR true AS a,
+             (NOT false) OR true AS b,
+             NOT (false OR true) AS c
+    expect:
+      values: |
+        | a | b | c |
+        | true | true | false |
+      side_effects: {}
+
+  # [6] Comparison operator takes precedence over boolean negation
+  - name: s6_comparison_operator_takes_precedence_over_boolean_negation
+    query: |
+      RETURN NOT false >= false AS a,
+             NOT (false >= false) AS b,
+             (NOT false) >= false AS c
+    expect:
+      values: |
+        | a | b | c |
+        | false | false | true |
+      side_effects: {}
+
+  # [7] Comparison operator takes precedence over binary boolean operator
+  - name: s7_comparison_operator_takes_precedence_over_binary_boolean_operator
+    query: |
+      RETURN true OR false = false AS a,
+             true OR (false = false) AS b,
+             (true OR false) = false AS c
+    expect:
+      values: |
+        | a | b | c |
+        | true | true | false |
+      side_effects: {}
+
+  # [8] Null predicate takes precedence over comparison operator
+  - name: s8_null_predicate_takes_precedence_over_comparison_operator
+    query: |
+      RETURN false = true IS NULL AS a,
+             false = (true IS NULL) AS b,
+             (false = true) IS NULL AS c
+    expect:
+      values: |
+        | a | b | c |
+        | true | true | false |
+      side_effects: {}
+
+  # [9] Null predicate takes precedence over negation
+  - name: s9_null_predicate_takes_precedence_over_negation
+    query: |
+      RETURN NOT false IS NULL AS a,
+             NOT (false IS NULL) AS b,
+             (NOT false) IS NULL AS c
+    expect:
+      values: |
+        | a | b | c |
+        | true | true | false |
+      side_effects: {}
+
+  # [10] Null predicate takes precedence over boolean operator
+  - name: s10_null_predicate_takes_precedence_over_boolean_operator
+    query: |
+      RETURN true OR false IS NULL AS a,
+             true OR (false IS NULL) AS b,
+             (true OR false) IS NULL AS c
+    expect:
+      values: |
+        | a | b | c |
+        | true | true | false |
+      side_effects: {}
+
+  # [11] List predicate takes precedence over comparison operator
+  - name: s11_list_predicate_takes_precedence_over_comparison_operator
+    query: |
+      RETURN false = true IN [true, false] AS a,
+             false = (true IN [true, false]) AS b,
+             (false = true) IN [true, false] AS c
+    expect:
+      values: |
+        | a | b | c |
+        | false | false | true |
+      side_effects: {}
+
+  # [12] List predicate takes precedence over negation
+  - name: s12_list_predicate_takes_precedence_over_negation
+    query: |
+      RETURN NOT true IN [true, false] AS a,
+             NOT (true IN [true, false]) AS b,
+             (NOT true) IN [true, false] AS c
+    expect:
+      values: |
+        | a | b | c |
+        | false | false | true |
+      side_effects: {}
+
+  # [13] List predicate takes precedence over boolean operator
+  - name: s13_list_predicate_takes_precedence_over_boolean_operator
+    query: |
+      RETURN false AND true IN [true, false] AS a,
+             false AND (true IN [true, false]) AS b,
+             (false AND true) IN [true, false] AS c
+    expect:
+      values: |
+        | a | b | c |
+        | false | false | true |
+      side_effects: {}
+
+  # [14] Exclusive disjunction takes precedence over inclusive disjunction in every combination of truth values
+  - name: s14_exclusive_disjunction_takes_precedence_over_inclusive_disjunction_in_every_combination_of_truth_values
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH collect((a OR b XOR c) = (a OR (b XOR c))) AS eq,
+           collect((a OR b XOR c) <> ((a OR b) XOR c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [15] Conjunction takes precedence over exclusive disjunction in every combination of truth values
+  - name: s15_conjunction_takes_precedence_over_exclusive_disjunction_in_every_combination_of_truth_values
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH collect((a XOR b AND c) = (a XOR (b AND c))) AS eq,
+           collect((a XOR b AND c) <> ((a XOR b) AND c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [16] Conjunction takes precedence over inclusive disjunction in every combination of truth values
+  - name: s16_conjunction_takes_precedence_over_inclusive_disjunction_in_every_combination_of_truth_values
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH collect((a OR b AND c) = (a OR (b AND c))) AS eq,
+           collect((a OR b AND c) <> ((a OR b) AND c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [17] Negation takes precedence over conjunction in every combination of truth values
+  - name: s17_negation_takes_precedence_over_conjunction_in_every_combination_of_truth_values
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((NOT a AND b) = ((NOT a) AND b)) AS eq,
+           collect((NOT a AND b) <> (NOT (a AND b))) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [18] Negation takes precedence over inclusive disjunction in every combination of truth values
+  - name: s18_negation_takes_precedence_over_inclusive_disjunction_in_every_combination_of_truth_values
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((NOT a OR b) = ((NOT a) OR b)) AS eq,
+           collect((NOT a OR b) <> (NOT (a OR b))) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [19] Comparison operators takes precedence over boolean negation in every combination of truth values #1
+  - name: s19_comparison_operators_takes_precedence_over_boolean_negation_in_every_combination_of_truth_values_1
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((NOT a <= b) = (NOT (a <= b))) AS eq,
+           collect((NOT a <= b) <> ((NOT a) <= b)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [19] Comparison operators takes precedence over boolean negation in every combination of truth values #2
+  - name: s19_comparison_operators_takes_precedence_over_boolean_negation_in_every_combination_of_truth_values_2
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((NOT a >= b) = (NOT (a >= b))) AS eq,
+           collect((NOT a >= b) <> ((NOT a) >= b)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [19] Comparison operators takes precedence over boolean negation in every combination of truth values #3
+  - name: s19_comparison_operators_takes_precedence_over_boolean_negation_in_every_combination_of_truth_values_3
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((NOT a < b) = (NOT (a < b))) AS eq,
+           collect((NOT a < b) <> ((NOT a) < b)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [19] Comparison operators takes precedence over boolean negation in every combination of truth values #4
+  - name: s19_comparison_operators_takes_precedence_over_boolean_negation_in_every_combination_of_truth_values_4
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((NOT a > b) = (NOT (a > b))) AS eq,
+           collect((NOT a > b) <> ((NOT a) > b)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [20] Pairs of comparison operators and boolean negation that are associative in every combination of truth values #1
+  - name: s20_pairs_of_comparison_operators_and_boolean_negation_that_are_associative_in_every_combination_of_truth_values_1
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((NOT (a = b)) = ((NOT a) = b)) AS eq
+      RETURN all(x IN eq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [20] Pairs of comparison operators and boolean negation that are associative in every combination of truth values #2
+  - name: s20_pairs_of_comparison_operators_and_boolean_negation_that_are_associative_in_every_combination_of_truth_values_2
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((NOT (a <> b)) = ((NOT a) <> b)) AS eq
+      RETURN all(x IN eq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [21] Comparison operators take precedence over binary boolean operators in every combination of truth values #1
+  - name: s21_comparison_operators_take_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_1
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH collect((a OR b = c) = (a OR (b = c))) AS eq,
+           collect((a OR b = c) <> ((a OR b) = c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [21] Comparison operators take precedence over binary boolean operators in every combination of truth values #2
+  - name: s21_comparison_operators_take_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_2
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH collect((a AND b = c) = (a AND (b = c))) AS eq,
+           collect((a AND b = c) <> ((a AND b) = c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [21] Comparison operators take precedence over binary boolean operators in every combination of truth values #3
+  - name: s21_comparison_operators_take_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_3
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH collect((a OR b <= c) = (a OR (b <= c))) AS eq,
+           collect((a OR b <= c) <> ((a OR b) <= c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [21] Comparison operators take precedence over binary boolean operators in every combination of truth values #4
+  - name: s21_comparison_operators_take_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_4
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH collect((a XOR b <= c) = (a XOR (b <= c))) AS eq,
+           collect((a XOR b <= c) <> ((a XOR b) <= c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [21] Comparison operators take precedence over binary boolean operators in every combination of truth values #5
+  - name: s21_comparison_operators_take_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_5
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH collect((a AND b <= c) = (a AND (b <= c))) AS eq,
+           collect((a AND b <= c) <> ((a AND b) <= c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [21] Comparison operators take precedence over binary boolean operators in every combination of truth values #6
+  - name: s21_comparison_operators_take_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_6
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH collect((a XOR b >= c) = (a XOR (b >= c))) AS eq,
+           collect((a XOR b >= c) <> ((a XOR b) >= c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [21] Comparison operators take precedence over binary boolean operators in every combination of truth values #7
+  - name: s21_comparison_operators_take_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_7
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH collect((a AND b >= c) = (a AND (b >= c))) AS eq,
+           collect((a AND b >= c) <> ((a AND b) >= c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [21] Comparison operators take precedence over binary boolean operators in every combination of truth values #8
+  - name: s21_comparison_operators_take_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_8
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH collect((a OR b < c) = (a OR (b < c))) AS eq,
+           collect((a OR b < c) <> ((a OR b) < c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [21] Comparison operators take precedence over binary boolean operators in every combination of truth values #9
+  - name: s21_comparison_operators_take_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_9
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH collect((a XOR b < c) = (a XOR (b < c))) AS eq,
+           collect((a XOR b < c) <> ((a XOR b) < c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [21] Comparison operators take precedence over binary boolean operators in every combination of truth values #10
+  - name: s21_comparison_operators_take_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_10
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH collect((a AND b < c) = (a AND (b < c))) AS eq,
+           collect((a AND b < c) <> ((a AND b) < c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [21] Comparison operators take precedence over binary boolean operators in every combination of truth values #11
+  - name: s21_comparison_operators_take_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_11
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH collect((a OR b > c) = (a OR (b > c))) AS eq,
+           collect((a OR b > c) <> ((a OR b) > c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [21] Comparison operators take precedence over binary boolean operators in every combination of truth values #12
+  - name: s21_comparison_operators_take_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_12
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH collect((a XOR b > c) = (a XOR (b > c))) AS eq,
+           collect((a XOR b > c) <> ((a XOR b) > c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [21] Comparison operators take precedence over binary boolean operators in every combination of truth values #13
+  - name: s21_comparison_operators_take_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_13
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH collect((a OR b <> c) = (a OR (b <> c))) AS eq,
+           collect((a OR b <> c) <> ((a OR b) <> c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [21] Comparison operators take precedence over binary boolean operators in every combination of truth values #14
+  - name: s21_comparison_operators_take_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_14
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH collect((a AND b <> c) = (a AND (b <> c))) AS eq,
+           collect((a AND b <> c) <> ((a AND b) <> c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [22] Pairs of comparison operators and binary boolean operators that are associative in every combination of truth values #1
+  - name: s22_pairs_of_comparison_operators_and_binary_boolean_operators_that_are_associative_in_every_combination_of_truth_values_1
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH collect((a XOR (b = c)) = ((a XOR b) = c)) AS eq
+      RETURN all(x IN eq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [22] Pairs of comparison operators and binary boolean operators that are associative in every combination of truth values #2
+  - name: s22_pairs_of_comparison_operators_and_binary_boolean_operators_that_are_associative_in_every_combination_of_truth_values_2
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH collect((a OR (b >= c)) = ((a OR b) >= c)) AS eq
+      RETURN all(x IN eq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [22] Pairs of comparison operators and binary boolean operators that are associative in every combination of truth values #3
+  - name: s22_pairs_of_comparison_operators_and_binary_boolean_operators_that_are_associative_in_every_combination_of_truth_values_3
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH collect((a AND (b > c)) = ((a AND b) > c)) AS eq
+      RETURN all(x IN eq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [22] Pairs of comparison operators and binary boolean operators that are associative in every combination of truth values #4
+  - name: s22_pairs_of_comparison_operators_and_binary_boolean_operators_that_are_associative_in_every_combination_of_truth_values_4
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH collect((a XOR (b <> c)) = ((a XOR b) <> c)) AS eq
+      RETURN all(x IN eq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [23] Null predicates take precedence over comparison operators in every combination of truth values #1
+  - name: s23_null_predicates_take_precedence_over_comparison_operators_in_every_combination_of_truth_values_1
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((a = b IS NULL) = (a = (b IS NULL))) AS eq,
+           collect((a = b IS NULL) <> ((a = b) IS NULL)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [23] Null predicates take precedence over comparison operators in every combination of truth values #2
+  - name: s23_null_predicates_take_precedence_over_comparison_operators_in_every_combination_of_truth_values_2
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((a = b IS NOT NULL) = (a = (b IS NOT NULL))) AS eq,
+           collect((a = b IS NOT NULL) <> ((a = b) IS NOT NULL)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [23] Null predicates take precedence over comparison operators in every combination of truth values #3
+  - name: s23_null_predicates_take_precedence_over_comparison_operators_in_every_combination_of_truth_values_3
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((a <= b IS NULL) = (a <= (b IS NULL))) AS eq,
+           collect((a <= b IS NULL) <> ((a <= b) IS NULL)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [23] Null predicates take precedence over comparison operators in every combination of truth values #4
+  - name: s23_null_predicates_take_precedence_over_comparison_operators_in_every_combination_of_truth_values_4
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((a <= b IS NOT NULL) = (a <= (b IS NOT NULL))) AS eq,
+           collect((a <= b IS NOT NULL) <> ((a <= b) IS NOT NULL)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [23] Null predicates take precedence over comparison operators in every combination of truth values #5
+  - name: s23_null_predicates_take_precedence_over_comparison_operators_in_every_combination_of_truth_values_5
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((a >= b IS NULL) = (a >= (b IS NULL))) AS eq,
+           collect((a >= b IS NULL) <> ((a >= b) IS NULL)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [23] Null predicates take precedence over comparison operators in every combination of truth values #6
+  - name: s23_null_predicates_take_precedence_over_comparison_operators_in_every_combination_of_truth_values_6
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((a >= b IS NOT NULL) = (a >= (b IS NOT NULL))) AS eq,
+           collect((a >= b IS NOT NULL) <> ((a >= b) IS NOT NULL)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [23] Null predicates take precedence over comparison operators in every combination of truth values #7
+  - name: s23_null_predicates_take_precedence_over_comparison_operators_in_every_combination_of_truth_values_7
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((a < b IS NULL) = (a < (b IS NULL))) AS eq,
+           collect((a < b IS NULL) <> ((a < b) IS NULL)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [23] Null predicates take precedence over comparison operators in every combination of truth values #8
+  - name: s23_null_predicates_take_precedence_over_comparison_operators_in_every_combination_of_truth_values_8
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((a < b IS NOT NULL) = (a < (b IS NOT NULL))) AS eq,
+           collect((a < b IS NOT NULL) <> ((a < b) IS NOT NULL)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [23] Null predicates take precedence over comparison operators in every combination of truth values #9
+  - name: s23_null_predicates_take_precedence_over_comparison_operators_in_every_combination_of_truth_values_9
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((a > b IS NULL) = (a > (b IS NULL))) AS eq,
+           collect((a > b IS NULL) <> ((a > b) IS NULL)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [23] Null predicates take precedence over comparison operators in every combination of truth values #10
+  - name: s23_null_predicates_take_precedence_over_comparison_operators_in_every_combination_of_truth_values_10
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((a > b IS NOT NULL) = (a > (b IS NOT NULL))) AS eq,
+           collect((a > b IS NOT NULL) <> ((a > b) IS NOT NULL)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [23] Null predicates take precedence over comparison operators in every combination of truth values #11
+  - name: s23_null_predicates_take_precedence_over_comparison_operators_in_every_combination_of_truth_values_11
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((a <> b IS NULL) = (a <> (b IS NULL))) AS eq,
+           collect((a <> b IS NULL) <> ((a <> b) IS NULL)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [23] Null predicates take precedence over comparison operators in every combination of truth values #12
+  - name: s23_null_predicates_take_precedence_over_comparison_operators_in_every_combination_of_truth_values_12
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((a <> b IS NOT NULL) = (a <> (b IS NOT NULL))) AS eq,
+           collect((a <> b IS NOT NULL) <> ((a <> b) IS NOT NULL)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [24] Null predicates take precedence over boolean negation on every truth values #1
+  - name: s24_null_predicates_take_precedence_over_boolean_negation_on_every_truth_values_1
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((NOT a IS NULL) = (NOT (a IS NULL))) AS eq,
+           collect((NOT a IS NULL) <> ((NOT a) IS NULL)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [24] Null predicates take precedence over boolean negation on every truth values #2
+  - name: s24_null_predicates_take_precedence_over_boolean_negation_on_every_truth_values_2
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((NOT a IS NOT NULL) = (NOT (a IS NOT NULL))) AS eq,
+           collect((NOT a IS NOT NULL) <> ((NOT a) IS NOT NULL)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [25] Null predicates take precedence over binary boolean operators in every combination of truth values #1
+  - name: s25_null_predicates_take_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_1
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((a OR b IS NULL) = (a OR (b IS NULL))) AS eq,
+           collect((a OR b IS NULL) <> ((a OR b) IS NULL)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [25] Null predicates take precedence over binary boolean operators in every combination of truth values #2
+  - name: s25_null_predicates_take_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_2
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((a OR b IS NOT NULL) = (a OR (b IS NOT NULL))) AS eq,
+           collect((a OR b IS NOT NULL) <> ((a OR b) IS NOT NULL)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [25] Null predicates take precedence over binary boolean operators in every combination of truth values #3
+  - name: s25_null_predicates_take_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_3
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((a XOR b IS NULL) = (a XOR (b IS NULL))) AS eq,
+           collect((a XOR b IS NULL) <> ((a XOR b) IS NULL)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [25] Null predicates take precedence over binary boolean operators in every combination of truth values #4
+  - name: s25_null_predicates_take_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_4
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((a XOR b IS NOT NULL) = (a XOR (b IS NOT NULL))) AS eq,
+           collect((a XOR b IS NOT NULL) <> ((a XOR b) IS NOT NULL)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [25] Null predicates take precedence over binary boolean operators in every combination of truth values #5
+  - name: s25_null_predicates_take_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_5
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((a AND b IS NULL) = (a AND (b IS NULL))) AS eq,
+           collect((a AND b IS NULL) <> ((a AND b) IS NULL)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [25] Null predicates take precedence over binary boolean operators in every combination of truth values #6
+  - name: s25_null_predicates_take_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_6
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH collect((a AND b IS NOT NULL) = (a AND (b IS NOT NULL))) AS eq,
+           collect((a AND b IS NOT NULL) <> ((a AND b) IS NOT NULL)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [26] List predicate takes precedence over comparison operators in every combination of truth values #1
+  - name: s26_list_predicate_takes_precedence_over_comparison_operators_in_every_combination_of_truth_values_1
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [[], [true], [false], [null], [true, false], [true, false, null]] AS c
+      WITH collect((a = b IN c) = (a = (b IN c))) AS eq,
+           collect((a = b IN c) <> ((a = b) IN c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [26] List predicate takes precedence over comparison operators in every combination of truth values #2
+  - name: s26_list_predicate_takes_precedence_over_comparison_operators_in_every_combination_of_truth_values_2
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [[], [true], [false], [null], [true, false], [true, false, null]] AS c
+      WITH collect((a <= b IN c) = (a <= (b IN c))) AS eq,
+           collect((a <= b IN c) <> ((a <= b) IN c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [26] List predicate takes precedence over comparison operators in every combination of truth values #3
+  - name: s26_list_predicate_takes_precedence_over_comparison_operators_in_every_combination_of_truth_values_3
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [[], [true], [false], [null], [true, false], [true, false, null]] AS c
+      WITH collect((a >= b IN c) = (a >= (b IN c))) AS eq,
+           collect((a >= b IN c) <> ((a >= b) IN c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [26] List predicate takes precedence over comparison operators in every combination of truth values #4
+  - name: s26_list_predicate_takes_precedence_over_comparison_operators_in_every_combination_of_truth_values_4
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [[], [true], [false], [null], [true, false], [true, false, null]] AS c
+      WITH collect((a < b IN c) = (a < (b IN c))) AS eq,
+           collect((a < b IN c) <> ((a < b) IN c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [26] List predicate takes precedence over comparison operators in every combination of truth values #5
+  - name: s26_list_predicate_takes_precedence_over_comparison_operators_in_every_combination_of_truth_values_5
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [[], [true], [false], [null], [true, false], [true, false, null]] AS c
+      WITH collect((a > b IN c) = (a > (b IN c))) AS eq,
+           collect((a > b IN c) <> ((a > b) IN c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [26] List predicate takes precedence over comparison operators in every combination of truth values #6
+  - name: s26_list_predicate_takes_precedence_over_comparison_operators_in_every_combination_of_truth_values_6
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [[], [true], [false], [null], [true, false], [true, false, null]] AS c
+      WITH collect((a <> b IN c) = (a <> (b IN c))) AS eq,
+           collect((a <> b IN c) <> ((a <> b) IN c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [27] List predicate takes precedence over negation in every combination of truth values
+  - name: s27_list_predicate_takes_precedence_over_negation_in_every_combination_of_truth_values
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [[], [true], [false], [null], [true, false], [true, false, null]] AS b
+      WITH collect((NOT a IN b) = (NOT (a IN b))) AS eq,
+           collect((NOT a IN b) <> ((NOT a) IN b)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [28] List predicate takes precedence over binary boolean operators in every combination of truth values #1
+  - name: s28_list_predicate_takes_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_1
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [[], [true], [false], [null], [true, false], [true, false, null]] AS c
+      WITH collect((a OR b IN c) = (a OR (b IN c))) AS eq,
+           collect((a OR b IN c) <> ((a OR b) IN c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [28] List predicate takes precedence over binary boolean operators in every combination of truth values #2
+  - name: s28_list_predicate_takes_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_2
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [[], [true], [false], [null], [true, false], [true, false, null]] AS c
+      WITH collect((a XOR b IN c) = (a XOR (b IN c))) AS eq,
+           collect((a XOR b IN c) <> ((a XOR b) IN c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [28] List predicate takes precedence over binary boolean operators in every combination of truth values #3
+  - name: s28_list_predicate_takes_precedence_over_binary_boolean_operators_in_every_combination_of_truth_values_3
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [[], [true], [false], [null], [true, false], [true, false, null]] AS c
+      WITH collect((a AND b IN c) = (a AND (b IN c))) AS eq,
+           collect((a AND b IN c) <> ((a AND b) IN c)) AS neq
+      RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}

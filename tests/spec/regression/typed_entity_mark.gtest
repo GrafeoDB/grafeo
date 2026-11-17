@@ -7,8 +7,10 @@
 # property. A node's own property named `_id` or `_labels` loses to the
 # structural key in the result (read it with `n._id`).
 #
-# Each case is an expected failure in every runner until the runner reads the
-# binding's cell types instead of the shape of a map.
+# The Rust, Python, Node.js and WASM runners read the cell types their bindings
+# give. The Go, C# and Dart bindings give none until typed values, so there a
+# map with those keys still reads as an entity and the cases are expected
+# failures.
 
 meta:
   language: gql
@@ -22,7 +24,8 @@ tests:
   - name: a_map_with_the_keys_of_a_node_is_a_map
     xfail:
       spec: "a map value with keys _id and _labels is a map (typed result values)"
-      issue: fix in 0.6.4
+      issue: fix in 0.7.0
+      passes_in: [rust, python, node, wasm]
     query: "RETURN {_id: 1, _labels: []} AS m"
     expect:
       values: |
@@ -32,7 +35,8 @@ tests:
   - name: a_map_with_the_keys_of_a_relationship_is_a_map
     xfail:
       spec: "a map value with keys _id, _type, _source and _target is a map (typed result values)"
-      issue: fix in 0.6.4
+      issue: fix in 0.7.0
+      passes_in: [rust, python, node, wasm]
     query: "RETURN {_id: 1, _type: 'K', _source: 1, _target: 2} AS m"
     expect:
       values: |
@@ -42,7 +46,8 @@ tests:
   - name: structural_names_of_the_other_kind_are_properties
     xfail:
       spec: "a node keeps a property named _type, a relationship one named _labels (typed result values)"
-      issue: fix in 0.6.4
+      issue: fix in 0.7.0
+      passes_in: [rust, python, node, wasm]
     setup:
       - "INSERT (:A {n: 1, _type: 'import'})-[:K {w: 7, _labels: ['L']}]->(:B {n: 2})"
     query: "MATCH (a:A)-[r:K]->(b:B) RETURN a, r"
@@ -63,7 +68,8 @@ tests:
   - name: nested_nodes_are_nodes_and_nested_maps_are_maps
     xfail:
       spec: "nodes inside a list, a map and a path are nodes; a map beside them is a map (typed result values)"
-      issue: fix in 0.6.4
+      issue: fix in 0.7.0
+      passes_in: [rust, python, node, wasm]
     setup:
       - "INSERT (:A {n: 1})-[:K {w: 1}]->(:B {n: 2})"
     query: |

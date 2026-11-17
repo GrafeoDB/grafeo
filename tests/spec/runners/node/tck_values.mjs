@@ -192,59 +192,88 @@ export function parse(text) {
 }
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
-const isInteger = (v) => typeof v === 'bigint' || Number.isInteger(v)
 
-function isNodeShape(v) {
-  return isPlainObject(v) && isInteger(v._id) && Array.isArray(v._labels)
-}
-
-function isRelationshipShape(v) {
-  return isPlainObject(v) && isInteger(v._id) && typeof v._type === 'string' &&
-    isInteger(v._source) && isInteger(v._target)
-}
-
-function entity(v, reserved) {
+function entity(v, reserved, ty) {
   const properties = {}
-  for (const [k, p] of Object.entries(v)) if (!reserved.includes(k)) properties[k] = toNeutral(p)
+  for (const [k, p] of Object.entries(v)) if (!reserved.includes(k)) properties[k] = toNeutral(p, member(ty, k))
   return { id: Number(v._id), properties }
 }
 
+/** The type of a map's value at `key`: by key in a struct, the one type of a map. */
+function member(ty, key) {
+  if (ty?.struct) return ty.struct[key] ?? 'any'
+  if (ty?.map) return ty.map
+  return 'any'
+}
+
+/** The type of a list's item at `index`: the one type of a list, by position in a tuple. */
+function item(ty, index) {
+  if (ty?.list) return ty.list
+  if (ty?.tuple) return ty.tuple[index] ?? 'any'
+  return 'any'
+}
+
+const nodeOf = (v) => ({ ...entity(v, ['_id', '_labels'], 'any'), labels: [...v._labels] })
+const relationshipOf = (v) => ({
+  ...entity(v, ['_id', '_type', '_source', '_target'], 'any'),
+  type: v._type,
+  source: Number(v._source),
+  target: Number(v._target),
+})
+
 /**
  * A result value as the Node or WASM binding gives it, in the neutral form `matches`
- * compares. The one place that recognises entities, by the shape the bindings give them:
- * an object with an integer `_id` and a `_labels` array is a node; one with `_id`, a string
- * `_type`, `_source` and `_target` a relationship; `{nodes, edges}` of those (WASM adds
- * `_type: 'path'`) a path. A map the query builds with those keys comes back as an entity too.
- * A temporal (Node's `{$date: ...}` tags, a Date) becomes `{other}`, which no cell matches:
- * the TCK dialect writes temporals as their Cypher `toString()` first.
+ * compares. `ty` is the value's cell type (`cellType(row, column)`, a WASM result's
+ * `cellTypes`): the one place that recognises entities. An object is a node where its type
+ * is `'node'`, a relationship where it is `'edge'` and a path (`{nodes, edges}`) where it is
+ * `'path'`; anywhere else it is a map, whatever its keys. Lists and maps hand their items the
+ * types inside theirs. A temporal (Node's `{$date: ...}` tags, a Date) becomes `{other}`,
+ * which no cell matches: the TCK dialect writes temporals as their Cypher `toString()` first.
  */
-export function toNeutral(value) {
+export function toNeutral(value, ty = 'any') {
   if (value === null || value === undefined || typeof value === 'boolean') return value ?? null
   if (typeof value === 'bigint' || typeof value === 'number') return { number: value }
   if (typeof value === 'string') return { string: value }
-  if (Array.isArray(value)) return value.map(toNeutral)
+  if (Array.isArray(value)) return value.map((v, i) => toNeutral(v, item(ty, i)))
   if (isPlainObject(value)) {
-    if (isNodeShape(value)) {
-      return { node: { ...entity(value, ['_id', '_labels']), labels: [...value._labels] } }
-    }
-    if (isRelationshipShape(value)) {
-      const rel = entity(value, ['_id', '_type', '_source', '_target'])
-      return { relationship: { ...rel, type: value._type, source: Number(value._source), target: Number(value._target) } }
-    }
-    const keys = Object.keys(value).filter((k) => k !== '_type' || value._type !== 'path').sort()
-    if (keys.join(',') === 'edges,nodes' && value.nodes.every(isNodeShape) && value.edges.every(isRelationshipShape)) {
-      return {
-        path: {
-          nodes: value.nodes.map((n) => toNeutral(n).node),
-          relationships: value.edges.map((e) => toNeutral(e).relationship),
-        },
-      }
+    if (ty === 'node') return { node: nodeOf(value) }
+    if (ty === 'edge') return { relationship: relationshipOf(value) }
+    if (ty === 'path') {
+      return { path: { nodes: value.nodes.map(nodeOf), relationships: value.edges.map(relationshipOf) } }
     }
     const map = {}
-    for (const [k, v] of Object.entries(value)) map[k] = toNeutral(v)
+    for (const [k, v] of Object.entries(value)) map[k] = toNeutral(v, member(ty, k))
     return { map }
   }
   return { other: String(value) }
+}
+
+/**
+ * The type of the cell at `row`, `column` in a result's cell types (`{columns, runs}`): the
+ * rows before the first run have `columns`, a run's rows its own.
+ */
+export function cellTypeAt(types, row, column) {
+  let columns = types.columns
+  for (const run of types.runs) if (run.from <= row) columns = run.columns
+  return columns[column] ?? 'any'
+}
+
+/**
+ * The cell type the engine would give a value of `values_cases.json` in its neutral form: a
+ * node, a relationship and a path by their kind, the items of a list and a map by position
+ * and key, a `cypher` value the engine's own (`cypherType(text)`).
+ */
+export async function caseCellType(actual, cypherType) {
+  if (Array.isArray(actual)) return { tuple: await Promise.all(actual.map((a) => caseCellType(a, cypherType))) }
+  if (actual === null || typeof actual === 'boolean') return 'any'
+  const [[kind, inner]] = Object.entries(actual)
+  if (kind === 'map') {
+    const struct = {}
+    for (const [k, v] of Object.entries(inner)) struct[k] = await caseCellType(v, cypherType)
+    return { struct }
+  }
+  if (kind === 'cypher') return cypherType(inner)
+  return { node: 'node', relationship: 'edge', path: 'path' }[kind] ?? 'any'
 }
 
 function kindOf(actual) {

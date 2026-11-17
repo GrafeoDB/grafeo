@@ -144,7 +144,7 @@ expect:
 | `[:T {p: 1}]` | a relationship: the same type and properties |
 | `<(:A)-[:T]->(:B)<-[:U]-()>` | a path, node by node and relationship by relationship, each arrow its direction |
 
-A `|` inside a cell is written `\|`. A runner recognises a node, a relationship and a path by the shape results give them (a node is a map with `_id` and `_labels`), so a map a query builds with those keys counts as one. Every runner checks its comparison against `runners/values_cases.json`.
+A `|` inside a cell is written `\|`. A runner recognises a node, a relationship and a path by the type each cell was built with (the binding's cell types), so a map a query builds with the keys of a node (`_id` and `_labels`) stays a map. The Go, C# and Dart bindings give no cell types yet, so their runners still go by those keys. Every runner checks its comparison against `runners/values_cases.json`.
 
 ### Side effects (`side_effects:`)
 

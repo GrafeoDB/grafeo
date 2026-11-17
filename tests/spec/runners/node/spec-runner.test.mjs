@@ -15,7 +15,7 @@ import { join, relative, resolve } from 'path'
 import { parseGtestFile, coerceParams, paramValue } from './parser.mjs'
 import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, describeError, assertGqlStatus, assertTerms, assertValues, assertSideEffects, observation } from './comparator.mjs'
 import { SpecFailure, runMarked, runProbe, specRoot, summary, summaryLine } from './xfail.mjs'
-import { matches as matchCell, parse as parseCell, toNeutral } from './tck_values.mjs'
+import { caseCellType, matches as matchCell, parse as parseCell, toNeutral } from './tck_values.mjs'
 
 // ---------------------------------------------------------------------------
 // Import GrafeoDB. A binding that does not load fails the run: it must not pass
@@ -290,7 +290,10 @@ async function temporalsAsText(db, v) {
 
 /** What the graph holds, as the openCypher TCK observes side effects. */
 async function observeGraph(db) {
-  const values = async (query) => (await db.execute(query)).toArray().map((row) => Object.values(row)[0])
+  const values = async (query) => {
+    const result = await db.execute(query)
+    return result.toArray().map((row, i) => [Object.values(row)[0], result.cellType(i, 0)])
+  }
   return observation(await values('MATCH (n) RETURN n'), await values('MATCH ()-[r]->() RETURN r'))
 }
 
@@ -438,9 +441,10 @@ describe('values_cases.json', () => {
       try {
         let value = await nativeValue(db, c.actual)
         if (c.dialect === 'tck') value = await temporalsAsText(db, value)
-        const verdict = matchCell(parseCell(c.cell), toNeutral(value), { unorderedLists: !!c.unordered_lists })
-        // A known limitation, or a gap of this binding, gives the opposite verdict until fixed
-        const gap = 'limitation' in c || 'node' in (c.runner_gaps ?? {})
+        const ty = await caseCellType(c.actual, async (text) => (await db.executeCypher(`RETURN ${text} AS v`)).cellType(0, 0))
+        const verdict = matchCell(parseCell(c.cell), toNeutral(value, ty), { unorderedLists: !!c.unordered_lists })
+        // A gap of this binding gives the opposite verdict until fixed
+        const gap = 'node' in (c.runner_gaps ?? {})
         expect(verdict).toBe(c.match !== gap)
       } finally {
         db.close()

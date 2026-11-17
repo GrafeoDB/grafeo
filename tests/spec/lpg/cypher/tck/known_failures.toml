@@ -324,6 +324,8 @@ s5_fail_on_invalid_argument_types_for_range_8 = { issue = "fix in 0.7.0", note =
 s5_fail_on_invalid_argument_types_for_range_9 = { issue = "fix in 0.7.0", note = "a function argument of the wrong type" }
 
 [List12]
+s4_returning_a_list_comprehension = { issue = "fix in 0.6.4", note = "a list comprehension has no cell type, so its nodes read as maps", passes_in = ["go", "csharp", "dart"] }
+s5_using_a_list_comprehension_in_a_with = { issue = "fix in 0.6.4", note = "a list comprehension has no cell type, so its nodes read as maps", passes_in = ["go", "csharp", "dart"] }
 s7_fail_when_using_aggregation_in_list_comprehension = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
 
 [List2]

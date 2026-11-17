@@ -390,7 +390,11 @@
         }
       },
       "match": false,
-      "limitation": "A map with `_id` and `_labels` comes back as a node"
+      "runner_gaps": {
+        "go": "the binding hands out no cell types (typed values, fix in 0.7.0)",
+        "csharp": "the binding hands out no cell types (typed values, fix in 0.7.0)",
+        "dart": "the binding hands out no cell types (typed values, fix in 0.7.0)"
+      }
     },
     {
       "cell": "{_id: 1, _labels: []}",
@@ -414,7 +418,36 @@
         }
       },
       "match": true,
-      "limitation": "A map with `_id` and `_labels` comes back as a node"
+      "runner_gaps": {
+        "go": "the binding hands out no cell types (typed values, fix in 0.7.0)",
+        "csharp": "the binding hands out no cell types (typed values, fix in 0.7.0)",
+        "dart": "the binding hands out no cell types (typed values, fix in 0.7.0)"
+      }
+    },
+    {
+      "cell": "[:K]",
+      "actual": {
+        "map": {
+          "_id": {
+            "int": "1"
+          },
+          "_type": {
+            "string": "K"
+          },
+          "_source": {
+            "int": "1"
+          },
+          "_target": {
+            "int": "2"
+          }
+        }
+      },
+      "match": false,
+      "runner_gaps": {
+        "go": "the binding hands out no cell types (typed values, fix in 0.7.0)",
+        "csharp": "the binding hands out no cell types (typed values, fix in 0.7.0)",
+        "dart": "the binding hands out no cell types (typed values, fix in 0.7.0)"
+      }
     },
     {
       "cell": "[:KNOWS {since: 2020}]",

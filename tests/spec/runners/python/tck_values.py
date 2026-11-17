@@ -330,37 +330,50 @@ def matches(expected, actual, *, unordered_lists: bool = False) -> bool:
     raise TypeError(f"not a TCK value: {expected!r}")
 
 
-def _is_node(value) -> bool:
-    return (
-        isinstance(value, dict)
-        and isinstance(value.get("_id"), int)
-        and isinstance(value.get("_labels"), list)
-    )
-
-
-def _is_relationship(value) -> bool:
-    return (
-        isinstance(value, dict)
-        and isinstance(value.get("_id"), int)
-        and isinstance(value.get("_type"), str)
-        and isinstance(value.get("_source"), int)
-        and isinstance(value.get("_target"), int)
-    )
-
-
-def _entity(value: dict, reserved: tuple[str, ...]) -> dict:
-    properties = {k: to_neutral(v) for k, v in value.items() if k not in reserved}
+def _entity(value: dict, reserved: tuple[str, ...], ty) -> dict:
+    properties = {
+        k: to_neutral(v, _member(ty, k)) for k, v in value.items() if k not in reserved
+    }
     return {"id": value["_id"], "properties": properties}
 
 
-def to_neutral(value):
+def _member(ty, key):
+    """The type of a map's value at ``key``: by key in a struct, the one type of a map."""
+    if isinstance(ty, dict) and "struct" in ty:
+        return ty["struct"].get(key, "any")
+    if isinstance(ty, dict) and "map" in ty:
+        return ty["map"]
+    return "any"
+
+
+def _item(ty, index: int):
+    """The type of a list's item at ``index``: the one type of a list, by position in a tuple."""
+    if isinstance(ty, dict) and "list" in ty:
+        return ty["list"]
+    if isinstance(ty, dict) and "tuple" in ty:
+        items = ty["tuple"]
+        return items[index] if index < len(items) else "any"
+    return "any"
+
+
+def _node_of(value: dict) -> dict:
+    node = _entity(value, ("_id", "_labels"), "any")
+    return {**node, "labels": list(value["_labels"])}
+
+
+def _relationship_of(value: dict) -> dict:
+    rel = _entity(value, ("_id", "_type", "_source", "_target"), "any")
+    ends = {"source": value["_source"], "target": value["_target"]}
+    return {**rel, "type": value["_type"], **ends}
+
+
+def to_neutral(value, ty="any"):
     """A result value as the binding gives it, in the neutral form ``matches`` compares.
 
-    The one place that recognises entities, by the shape the bindings give them: a dict
-    with an integer ``_id`` and a ``_labels`` list is a node; one with an integer ``_id``,
-    a string ``_type`` and integer ``_source`` and ``_target`` a relationship; one with
-    exactly ``nodes`` and ``edges`` of those a path. A map the query builds with those
-    keys comes back as an entity too: results have no typed node or relationship value.
+    ``ty`` is the value's cell type (``cell_type(row, column)``): the one place that
+    recognises entities. A dict is a node where its type is ``"node"``, a relationship
+    where it is ``"edge"`` and a path where it is ``"path"``; anywhere else it is a map,
+    whatever its keys. Lists and maps hand their items the types inside theirs.
     """
     if value is None or isinstance(value, bool):
         return value
@@ -375,30 +388,22 @@ def to_neutral(value):
     if isinstance(value, str):
         return {"string": value}
     if isinstance(value, (list, tuple)):
-        return [to_neutral(v) for v in value]
+        return [to_neutral(v, _item(ty, i)) for i, v in enumerate(value)]
     if isinstance(value, dict):
-        if _is_node(value):
-            node = _entity(value, ("_id", "_labels"))
-            return {"node": {**node, "labels": list(value["_labels"])}}
-        if _is_relationship(value):
-            rel = _entity(value, ("_id", "_type", "_source", "_target"))
-            ends = {"source": value["_source"], "target": value["_target"]}
-            return {"relationship": {**rel, "type": value["_type"], **ends}}
-        nodes, edges = value.get("nodes"), value.get("edges")
-        if (
-            set(value) == {"nodes", "edges"}
-            and isinstance(nodes, list)
-            and isinstance(edges, list)
-            and all(map(_is_node, nodes))
-            and all(map(_is_relationship, edges))
-        ):
+        if ty == "node":
+            return {"node": _node_of(value)}
+        if ty == "edge":
+            return {"relationship": _relationship_of(value)}
+        if ty == "path":
             return {
                 "path": {
-                    "nodes": [to_neutral(n)["node"] for n in nodes],
-                    "relationships": [to_neutral(e)["relationship"] for e in edges],
+                    "nodes": [_node_of(n) for n in value["nodes"]],
+                    "relationships": [_relationship_of(e) for e in value["edges"]],
                 }
             }
-        return {"map": {str(k): to_neutral(v) for k, v in value.items()}}
+        return {
+            "map": {str(k): to_neutral(v, _member(ty, k)) for k, v in value.items()}
+        }
     # A value no cell writes (a temporal outside the TCK dialect): it matches no cell
     return {"other": repr(value)}
 

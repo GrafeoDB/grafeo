@@ -1849,8 +1849,8 @@ void _sharedValueCases() {
           var value = _nativeValue(db, c['actual']);
           if (c['dialect'] == 'tck') value = temporalsAsText(db, value);
           final verdict = matchTck(parseTck(c['cell'] as String), value, c['unordered_lists'] == true);
-          // A known limitation, or a gap of this binding, gives the opposite verdict until fixed
-          final gap = c.containsKey('limitation') || ((c['runner_gaps'] as Map?)?.containsKey('dart') ?? false);
+          // A gap of this binding gives the opposite verdict until fixed
+          final gap = (c['runner_gaps'] as Map?)?.containsKey('dart') ?? false;
           expect(verdict, equals(c['match'] != gap));
         } finally {
           db.close();

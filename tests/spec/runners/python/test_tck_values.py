@@ -111,7 +111,23 @@ def native(actual, db):
         edges = [native({"relationship": r}, db) for r in inner["relationships"]]
         return {"nodes": nodes, "edges": edges}
     if kind == "cypher":
-        return list(db.execute_cypher(f"RETURN {inner} AS v"))[0]["v"]
+        return next(iter(db.execute_cypher(f"RETURN {inner} AS v")))["v"]
+
+
+def cell_type(actual, db):
+    """The cell type the engine would give a neutral value: a node, a relationship and a
+    path by their kind, the items of a list and a map by position and key, a ``cypher``
+    value the engine's own."""
+    if isinstance(actual, list):
+        return {"tuple": [cell_type(a, db) for a in actual]}
+    if actual is None or isinstance(actual, bool):
+        return "any"
+    ((kind, inner),) = actual.items()
+    if kind == "map":
+        return {"struct": {k: cell_type(v, db) for k, v in inner.items()}}
+    if kind == "cypher":
+        return db.execute_cypher(f"RETURN {inner} AS v").cell_type(0, 0)
+    return {"node": "node", "relationship": "edge", "path": "path"}.get(kind, "any")
     raise ValueError(f"unknown neutral kind {kind}")
 
 
@@ -127,11 +143,11 @@ def test_the_shared_value_cases(case):
         value = temporals_as_text(db, value)
     verdict = matches(
         parse(case["cell"]),
-        to_neutral(value),
+        to_neutral(value, cell_type(case["actual"], db)),
         unordered_lists=case.get("unordered_lists", False),
     )
-    # A known limitation, or a gap of this binding, gives the opposite verdict until fixed
-    gap = "limitation" in case or "python" in case.get("runner_gaps", {})
+    # A gap of this binding gives the opposite verdict until fixed
+    gap = "python" in case.get("runner_gaps", {})
     assert verdict is (case["match"] != gap)
 
 

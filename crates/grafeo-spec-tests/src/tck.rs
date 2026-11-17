@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use grafeo_common::types::{PropertyKey, Value};
+use grafeo_common::types::{LogicalType, PropertyKey, Value};
 
 /// A cell in the TCK's value notation.
 #[derive(Debug, Clone, PartialEq)]
@@ -326,17 +326,47 @@ pub enum Entity<'a> {
     Relationship(i64, &'a str, i64, i64, Vec<(&'a str, &'a Value)>),
 }
 
-/// The entity `value` is, by the shape the bindings give one: a map with an integer `_id` and
-/// a `_labels` list is a node; one with an integer `_id`, a string `_type` and integer
-/// `_source` and `_target` is a relationship. The underscore keys are not properties.
-///
-/// A map the query builds with those keys comes back as an entity too: results have no typed
-/// node or relationship value to tell them apart.
+/// A cell type with the record wrapper taken off: `Records(shape)` is a column of `shape`.
+fn resolved(ty: &LogicalType) -> &LogicalType {
+    match ty {
+        LogicalType::Records(shape) => resolved(shape),
+        other => other,
+    }
+}
+
+/// The type of a map's value at `key`: by key in a struct, the one type of a map.
+fn member<'t>(ty: &'t LogicalType, key: &str) -> &'t LogicalType {
+    match resolved(ty) {
+        LogicalType::Struct(fields) => fields
+            .iter()
+            .find(|(name, _)| name == key)
+            .map_or(&LogicalType::Any, |(_, ty)| ty),
+        LogicalType::Map { value, .. } => value,
+        _ => &LogicalType::Any,
+    }
+}
+
+/// The type of a list's item at `index`: the one type of a list, by position in a tuple.
+fn item(ty: &LogicalType, index: usize) -> &LogicalType {
+    match resolved(ty) {
+        LogicalType::List(item) => item,
+        LogicalType::Tuple(items) => items.get(index).unwrap_or(&LogicalType::Any),
+        _ => &LogicalType::Any,
+    }
+}
+
+/// The entity `value` is where its cell type `ty` says so (`QueryResult::cell_type`): a map at
+/// type `Node` is a node, one at type `Edge` a relationship, and anywhere else a map is a map,
+/// whatever its keys. The underscore keys of an entity are not properties.
 #[must_use]
-pub fn entity(value: &Value) -> Option<Entity<'_>> {
+pub fn entity<'a>(value: &'a Value, ty: &LogicalType) -> Option<Entity<'a>> {
     let Value::Map(map) = value else {
         return None;
     };
+    let kind = resolved(ty);
+    if !matches!(kind, LogicalType::Node | LogicalType::Edge) {
+        return None;
+    }
     let get = |key: &str| map.get(&PropertyKey::new(key));
     let Some(Value::Int64(id)) = get("_id") else {
         return None;
@@ -347,7 +377,7 @@ pub fn entity(value: &Value) -> Option<Entity<'_>> {
             .map(|(key, value)| (key.as_str(), value))
             .collect::<Vec<_>>()
     };
-    if let Some(Value::List(labels)) = get("_labels") {
+    if let (LogicalType::Node, Some(Value::List(labels))) = (kind, get("_labels")) {
         let labels = labels
             .iter()
             .filter_map(|label| match label {
@@ -357,8 +387,12 @@ pub fn entity(value: &Value) -> Option<Entity<'_>> {
             .collect();
         return Some(Entity::Node(*id, labels, properties(&["_id", "_labels"])));
     }
-    if let (Some(Value::String(rel_type)), Some(Value::Int64(source)), Some(Value::Int64(target))) =
-        (get("_type"), get("_source"), get("_target"))
+    if let (
+        LogicalType::Edge,
+        Some(Value::String(rel_type)),
+        Some(Value::Int64(source)),
+        Some(Value::Int64(target)),
+    ) = (kind, get("_type"), get("_source"), get("_target"))
     {
         return Some(Entity::Relationship(
             *id,
@@ -415,28 +449,37 @@ pub fn bag_matches<E, A>(expected: &[E], actual: &[A], pairs: impl Fn(&E, &A) ->
     (0..expected.len()).all(|e| assign(e, &edges, &mut vec![false; actual.len()], &mut owner))
 }
 
+/// Whether `actual`, a map's or an entity's entries, holds the properties `expected` writes;
+/// `ty` is the type of the map, whose values take the types inside it.
 fn properties_match(
     expected: &BTreeMap<String, Cell>,
     actual: &[(&str, &Value)],
+    ty: &LogicalType,
     flags: Flags,
 ) -> bool {
     expected.len() == actual.len()
         && actual.iter().all(|(key, value)| {
             expected
                 .get(*key)
-                .is_some_and(|cell| matches(cell, value, flags))
+                .is_some_and(|cell| matches(cell, value, member(ty, key), flags))
         })
 }
 
-fn node_matches(expected: &NodeCell, actual: &Value, flags: Flags) -> bool {
-    matches!(entity(actual), Some(Entity::Node(_, labels, properties))
-        if labels == expected.labels && properties_match(&expected.properties, &properties, flags))
+fn node_matches(expected: &NodeCell, actual: &Value, ty: &LogicalType, flags: Flags) -> bool {
+    matches!(entity(actual, ty), Some(Entity::Node(_, labels, properties))
+        if labels == expected.labels
+            && properties_match(&expected.properties, &properties, &LogicalType::Any, flags))
 }
 
-fn relationship_matches(expected: &RelationshipCell, actual: &Value, flags: Flags) -> bool {
-    matches!(entity(actual), Some(Entity::Relationship(_, rel_type, _, _, properties))
+fn relationship_matches(
+    expected: &RelationshipCell,
+    actual: &Value,
+    ty: &LogicalType,
+    flags: Flags,
+) -> bool {
+    matches!(entity(actual, ty), Some(Entity::Relationship(_, rel_type, _, _, properties))
         if rel_type == expected.rel_type
-            && properties_match(&expected.properties, &properties, flags))
+            && properties_match(&expected.properties, &properties, &LogicalType::Any, flags))
 }
 
 fn path_matches(
@@ -454,7 +497,8 @@ fn path_matches(
     if actual_nodes.len() != nodes.len() || edges.len() != relationships.len() {
         return false;
     }
-    let id = |value: &Value| match entity(value) {
+    // A path's nodes are nodes and its edges relationships, by the type of a path
+    let id = |value: &Value| match entity(value, &LogicalType::Node) {
         Some(Entity::Node(id, ..)) => Some(id),
         _ => None,
     };
@@ -464,23 +508,23 @@ fn path_matches(
         } else {
             (&actual_nodes[i + 1], &actual_nodes[i])
         };
-        matches!(entity(edge), Some(Entity::Relationship(_, _, source, target, _))
+        matches!(entity(edge, &LogicalType::Edge), Some(Entity::Relationship(_, _, source, target, _))
             if Some(source) == id(start) && Some(target) == id(end))
     });
     ends_hold
         && nodes
             .iter()
             .zip(actual_nodes.iter())
-            .all(|(cell, node)| node_matches(cell, node, flags))
+            .all(|(cell, node)| node_matches(cell, node, &LogicalType::Node, flags))
         && relationships
             .iter()
             .zip(edges.iter())
-            .all(|(cell, edge)| relationship_matches(cell, edge, flags))
+            .all(|(cell, edge)| relationship_matches(cell, edge, &LogicalType::Edge, flags))
 }
 
-/// Whether `actual` is the value `expected` writes, type-exact.
+/// Whether `actual`, of cell type `ty`, is the value `expected` writes, type-exact.
 #[must_use]
-pub fn matches(expected: &Cell, actual: &Value, flags: Flags) -> bool {
+pub fn matches(expected: &Cell, actual: &Value, ty: &LogicalType, flags: Flags) -> bool {
     match (expected, actual) {
         (Cell::Null, Value::Null) => true,
         (Cell::Bool(e), Value::Bool(a)) => e == a,
@@ -488,22 +532,30 @@ pub fn matches(expected: &Cell, actual: &Value, flags: Flags) -> bool {
         (Cell::Float(e), Value::Float64(a)) => e == a || (e.is_nan() && a.is_nan()),
         (Cell::String(e), Value::String(a)) => e.as_str() == a.as_str(),
         (Cell::List(e), Value::List(a)) => {
+            let typed: Vec<(&Value, &LogicalType)> = a
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (v, item(ty, i)))
+                .collect();
+            let pairs =
+                |cell: &Cell, (value, ty): &(&Value, &LogicalType)| matches(cell, value, ty, flags);
             if flags.unordered_lists {
-                bag_matches(e, a, |cell, value| matches(cell, value, flags))
+                bag_matches(e, &typed, pairs)
             } else {
-                e.len() == a.len() && e.iter().zip(a.iter()).all(|(c, v)| matches(c, v, flags))
+                e.len() == typed.len() && e.iter().zip(typed.iter()).all(|(c, v)| pairs(c, v))
             }
         }
         (Cell::Map(e), Value::Map(map)) => {
-            entity(actual).is_none()
+            entity(actual, ty).is_none()
                 && properties_match(
                     e,
                     &map.iter().map(|(k, v)| (k.as_str(), v)).collect::<Vec<_>>(),
+                    ty,
                     flags,
                 )
         }
-        (Cell::Node(e), _) => node_matches(e, actual, flags),
-        (Cell::Relationship(e), _) => relationship_matches(e, actual, flags),
+        (Cell::Node(e), _) => node_matches(e, actual, ty, flags),
+        (Cell::Relationship(e), _) => relationship_matches(e, actual, ty, flags),
         (Cell::Path(nodes, relationships, forward), _) => {
             path_matches((nodes, relationships, forward), actual, flags)
         }
@@ -526,9 +578,9 @@ pub struct Observation {
 }
 
 impl Observation {
-    /// Adds what one row's entity holds.
-    pub fn add(&mut self, value: &Value) {
-        match entity(value) {
+    /// Adds what one row's entity holds; `ty` is its cell type.
+    pub fn add(&mut self, value: &Value, ty: &LogicalType) {
+        match entity(value, ty) {
             Some(Entity::Node(id, labels, properties)) => {
                 self.nodes.insert(id);
                 self.labels.extend(labels);
@@ -723,6 +775,42 @@ mod tests {
         }
     }
 
+    /// The cell type the engine would give a neutral value: a node, a relationship and a path
+    /// by their kind, the items of a list and a map by position and key, a `cypher` value the
+    /// engine's own.
+    fn neutral_type(json: &Json, db: &GrafeoDB) -> LogicalType {
+        match json {
+            Json::Array(items) => {
+                LogicalType::Tuple(items.iter().map(|i| neutral_type(i, db)).collect())
+            }
+            Json::Object(object) => {
+                let (kind, inner) = object.iter().next().unwrap();
+                match kind.as_str() {
+                    "map" => LogicalType::Struct(
+                        inner
+                            .as_object()
+                            .unwrap()
+                            .iter()
+                            .map(|(k, v)| (k.clone(), neutral_type(v, db)))
+                            .collect(),
+                    ),
+                    "node" => LogicalType::Node,
+                    "relationship" => LogicalType::Edge,
+                    "path" => LogicalType::Path,
+                    "cypher" => {
+                        let query = format!("RETURN {} AS v", inner.as_str().unwrap());
+                        db.execute_cypher(&query)
+                            .expect(&query)
+                            .cell_type(0, 0)
+                            .clone()
+                    }
+                    _ => LogicalType::Any,
+                }
+            }
+            _ => LogicalType::Any,
+        }
+    }
+
     #[test]
     fn the_shared_value_cases() {
         let path = concat!(
@@ -741,9 +829,9 @@ mod tests {
             if case["dialect"].as_str() == Some("tck") {
                 actual = crate::temporals_as_text(&db, &actual);
             }
-            let verdict = matches(&cell, &actual, flags);
-            // A known limitation gives the opposite verdict until the engine fixes it
-            let gap = case.get("limitation").is_some() || case["runner_gaps"].get("rust").is_some();
+            let verdict = matches(&cell, &actual, &neutral_type(&case["actual"], &db), flags);
+            // A gap of this runner gives the opposite verdict until fixed
+            let gap = case["runner_gaps"].get("rust").is_some();
             let want = case["match"].as_bool().unwrap() != gap;
             if verdict != want {
                 wrong.push(format!("{} vs {}: {verdict}", case["cell"], case["actual"]));

@@ -256,21 +256,21 @@ export async function assertValues(result, table, ordered, unorderedLists, toTex
     for (const column of columns) written.push(await toText(row[column]))
     values.push(written)
   }
-  assertValueRows(columns, values, table, ordered, unorderedLists)
+  assertValueRows(columns, values, table, ordered, unorderedLists, (row, column) => result.cellType(row, column))
 }
 
 /**
  * `assertValues` for rows already in hand, each a list of values in column order (the WASM
- * runner, whose binding is synchronous).
+ * runner, whose binding is synchronous); `cellType(row, column)` is each value's cell type.
  */
-export function assertValueRows(columns, values, table, ordered, unorderedLists) {
+export function assertValueRows(columns, values, table, ordered, unorderedLists, cellType) {
   const [header, ...rows] = tableRows(table)
   const names = header.filter(Boolean)
   if (JSON.stringify(columns) !== JSON.stringify(names)) {
     throw new SpecFailure(`Columns differ: ${JSON.stringify(columns)}, expected ${JSON.stringify(names)}`)
   }
   const expected = rows.map((row) => row.map((cell) => parseCell(cell)))
-  const actual = values.map((row) => row.map(toNeutral))
+  const actual = values.map((row, r) => row.map((value, c) => toNeutral(value, cellType(r, c))))
   const flags = { unorderedLists }
   const rowMatches = (cells, values) =>
     cells.length === values.length && cells.every((c, i) => matches(c, values[i], flags))
@@ -293,14 +293,15 @@ export function assertValueRows(columns, values, table, ordered, unorderedLists)
 
 /**
  * What the graph holds, as the openCypher TCK observes side effects, from the rows of
- * `MATCH (n) RETURN n` and `MATCH ()-[r]->() RETURN r`: node and relationship ids, the label
- * names in use, and the properties as (entity, key, value) triples.
+ * `MATCH (n) RETURN n` and `MATCH ()-[r]->() RETURN r`, each a `[value, cellType]` pair: node
+ * and relationship ids, the label names in use, and the properties as (entity, key, value)
+ * triples.
  */
 export function observation(nodeValues, relationshipValues) {
   const seen = { nodes: new Set(), relationships: new Set(), labels: new Set(), properties: new Set() }
   const json = (v) => JSON.stringify(v, (_, x) => (typeof x === 'bigint' ? `${x}n` : x))
-  for (const value of [...nodeValues, ...relationshipValues]) {
-    const neutral = toNeutral(value)
+  for (const [value, ty] of [...nodeValues, ...relationshipValues]) {
+    const neutral = toNeutral(value, ty)
     const [kind, key] = 'node' in neutral ? ['node', 'nodes'] : ['relationship', 'relationships']
     const entity = neutral[kind]
     if (!entity) continue

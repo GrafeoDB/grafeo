@@ -531,8 +531,8 @@ public class TckValueCaseTests
             if (c.TryGetProperty("dialect", out var dialect) && dialect.GetString() == "tck")
                 value = TckValues.TemporalsAsText(db, value);
             var unordered = c.TryGetProperty("unordered_lists", out var u) && u.GetBoolean();
-            // A known limitation, or a gap of this binding, gives the opposite verdict until fixed
-            var gap = c.TryGetProperty("limitation", out _) || HasGap(c);
+            // A gap of this binding gives the opposite verdict until fixed
+            var gap = HasGap(c);
             if (TckValues.Matches(cell, value, unordered) != (c.GetProperty("match").GetBoolean() != gap))
                 wrong.Add($"{c.GetProperty("cell").GetString()} vs {c.GetProperty("actual").GetRawText()}");
         }

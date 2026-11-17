@@ -885,7 +885,6 @@ func TestSpecValueCases(t *testing.T) {
 			Match          bool              `json:"match"`
 			Dialect        string            `json:"dialect"`
 			UnorderedLists bool              `json:"unordered_lists"`
-			Limitation     string            `json:"limitation"`
 			RunnerGaps     map[string]string `json:"runner_gaps"`
 		} `json:"cases"`
 		RoundTrips []struct {
@@ -917,9 +916,8 @@ func TestSpecValueCases(t *testing.T) {
 				t.Fatalf("%v", err)
 			}
 		}
-		// A known limitation, or a gap of this binding, gives the opposite verdict until fixed
+		// A gap of this binding gives the opposite verdict until fixed
 		_, gap := c.RunnerGaps["go"]
-		gap = gap || c.Limitation != ""
 		if matchTck(cell, value, c.UnorderedLists) != (c.Match != gap) {
 			t.Errorf("%s vs %v: verdict differs from the shared case", c.Cell, c.Actual)
 		}

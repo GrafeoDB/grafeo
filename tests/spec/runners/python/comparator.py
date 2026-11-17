@@ -458,7 +458,9 @@ def assert_values(
         values = [row.get(column) for column in columns]
         if tck_dialect:
             values = [temporals_as_text(db, v) for v in values]
-        actual.append([tck_values.to_neutral(v) for v in values])
+        # Each value by its cell type: a map is a node or relationship only where that says so
+        types = [result.cell_type(index, i) for i in range(len(values))]
+        actual.append([tck_values.to_neutral(v, t) for v, t in zip(values, types)])
 
     def row_matches(cells, values) -> bool:
         return len(cells) == len(values) and all(
@@ -494,8 +496,11 @@ def observe_graph(db) -> dict[str, set]:
         "properties": set(),
     }
     for query in ("MATCH (n) RETURN n", "MATCH ()-[r]->() RETURN r"):
-        for row in db.execute(query):
-            value = tck_values.to_neutral(next(iter(row.values())))
+        result = db.execute(query)
+        for index, row in enumerate(result):
+            value = tck_values.to_neutral(
+                next(iter(row.values())), result.cell_type(index, 0)
+            )
             for kind, key in (("node", "nodes"), ("relationship", "relationships")):
                 if kind in value:
                     entity = value[kind]

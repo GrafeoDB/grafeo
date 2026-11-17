@@ -728,8 +728,9 @@ pub fn observe_graph(db: &GrafeoDB) -> tck::Observation {
     for query in ["MATCH (n) RETURN n", "MATCH ()-[r]->() RETURN r"] {
         let result = execute_query_result(db, "gql", "lpg", query)
             .unwrap_or_else(|e| panic!("observing the graph with `{query}` failed: {e}"));
-        for row in result.rows() {
-            observation.add(&row[0]);
+        let types = result.cell_types();
+        for (index, row) in result.rows().iter().enumerate() {
+            observation.add(&row[0], types.get(index, 0));
         }
     }
     observation
@@ -839,12 +840,18 @@ pub fn assert_values(
     } else {
         result.rows().to_vec()
     };
-    let row_matches = |cells: &Vec<tck::Cell>, values: &Vec<Value>| {
+    // Each value by its cell type: a map is a node or relationship only where that says so
+    let types = result.cell_types();
+    let rows: Vec<(usize, Vec<Value>)> = rows.into_iter().enumerate().collect();
+    let row_matches = |cells: &Vec<tck::Cell>, (index, values): &(usize, Vec<Value>)| {
         cells.len() == values.len()
             && cells
                 .iter()
                 .zip(values.iter())
-                .all(|(cell, value)| tck::matches(cell, value, flags))
+                .enumerate()
+                .all(|(column, (cell, value))| {
+                    tck::matches(cell, value, types.get(*index, column), flags)
+                })
     };
     let holds = if ordered {
         expected.len() == rows.len()
@@ -859,7 +866,7 @@ pub fn assert_values(
         holds,
         "Rows differ{}:\nactual:   {:?}\nexpected: {table}",
         if ordered { " (in order)" } else { "" },
-        rows
+        rows.iter().map(|(_, values)| values).collect::<Vec<_>>()
     );
 }
 

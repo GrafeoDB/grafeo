@@ -17,7 +17,7 @@ import { join, relative, resolve } from 'path'
 import { parseGtestFile, coerceParams, paramValue } from '../node/parser.mjs'
 import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, describeError, assertGqlStatus, assertTerms , assertValueRows, assertSideEffects, observation} from '../node/comparator.mjs'
 import { SpecFailure, runMarkedSync, runProbe, specRoot, summary, summaryLine } from '../node/xfail.mjs'
-import { matches as matchCell, parse as parseCell, toNeutral } from '../node/tck_values.mjs'
+import { caseCellType, cellTypeAt, matches as matchCell, parse as parseCell, toNeutral } from '../node/tck_values.mjs'
 
 // ---------------------------------------------------------------------------
 // Import WASM bindings. A package that does not load fails the run: it must not
@@ -53,11 +53,16 @@ function wrapRawResult(rawResult) {
   const columns = [...rawResult.columns]
   const rows = rawResult.rows.map(row => [...row])
   const warnings = rawResult.warnings.map(w => ({ code: w.code, kind: w.kind, message: w.message }))
+  const cellTypes = structuredClone(rawResult.cellTypes ?? { columns: [], runs: [] })
 
   return {
     columns,
     warnings,
     length: rows.length,
+    /** The type the cell at `row`, `column` was built with (the result's `cellTypes`). */
+    cellType(row, column) {
+      return cellTypeAt(cellTypes, row, column)
+    },
     toArray() {
       const arr = []
       for (const row of rows) {
@@ -299,7 +304,10 @@ for (const filePath of gtestFiles) {
 
 /** What the graph holds, as the openCypher TCK observes side effects. */
 function observeGraph(db) {
-  const values = (query) => wrapRawResult(executeQueryRaw(db, 'gql', query)).toArray().map((row) => Object.values(row)[0])
+  const values = (query) => {
+    const result = wrapRawResult(executeQueryRaw(db, 'gql', query))
+    return result.toArray().map((row, i) => [Object.values(row)[0], result.cellType(i, 0)])
+  }
   return observation(values('MATCH (n) RETURN n'), values('MATCH ()-[r]->() RETURN r'))
 }
 
@@ -366,7 +374,7 @@ function runTestCase(db, tc, language, setupLanguage) {
   // file's temporal cases carry a runner_gap for this runner and never get here.
   if (exp.values != null) {
     const values = result.toArray().map((row) => result.columns.map((column) => row[column]))
-    assertValueRows(result.columns, values, exp.values, exp.ordered, exp.unorderedLists)
+    assertValueRows(result.columns, values, exp.values, exp.ordered, exp.unorderedLists, (r, c) => result.cellType(r, c))
     return
   }
 
@@ -460,13 +468,15 @@ const needsCypher = (c) => c.dialect === 'tck' || JSON.stringify(c.actual).inclu
 
 describe('values_cases.json', () => {
   for (const c of CASE_FILE.cases) {
-    it.skipIf(!HAS_CYPHER && needsCypher(c))(`${c.cell} vs ${JSON.stringify(c.actual)}`, () => {
+    it.skipIf(!HAS_CYPHER && needsCypher(c))(`${c.cell} vs ${JSON.stringify(c.actual)}`, async () => {
       const db = new Database()
       try {
         const value = nativeValue(db, c.actual)
-        const verdict = matchCell(parseCell(c.cell), toNeutral(value), { unorderedLists: !!c.unordered_lists })
-        // A known limitation, or a gap of this binding, gives the opposite verdict until fixed
-        const gap = 'limitation' in c || 'wasm' in (c.runner_gaps ?? {})
+        const ty = await caseCellType(c.actual, (text) =>
+          wrapRawResult(executeQueryRaw(db, 'cypher', `RETURN ${text} AS v`)).cellType(0, 0))
+        const verdict = matchCell(parseCell(c.cell), toNeutral(value, ty), { unorderedLists: !!c.unordered_lists })
+        // A gap of this binding gives the opposite verdict until fixed
+        const gap = 'wasm' in (c.runner_gaps ?? {})
         expect(verdict).toBe(c.match !== gap)
       } finally {
         release(db)

@@ -28,12 +28,12 @@ public sealed class ResultStream : IDisposable, IAsyncDisposable
     // _sync serializes Next() with Dispose() so the native handle cannot be
     // freed between ThrowIfDisposed and grafeo_stream_next_row_json.
     private readonly object _sync = new();
-    private nint _handle;
+    private readonly StreamHandle _handle;
     private int _disposed; // 0 = live, 1 = disposed; updated via Interlocked for atomic guard.
     // What the stream had when it was disposed.
     private IReadOnlyList<QueryWarning> _warnings = [];
 
-    internal ResultStream(nint handle, IReadOnlyList<string> columns)
+    internal ResultStream(StreamHandle handle, IReadOnlyList<string> columns)
     {
         _handle = handle;
         _columns = columns;
@@ -55,7 +55,7 @@ public sealed class ResultStream : IDisposable, IAsyncDisposable
         {
             lock (_sync)
             {
-                return _handle == nint.Zero ? _warnings : ReadWarnings();
+                return _handle.IsClosed ? _warnings : ReadWarnings();
             }
         }
     }
@@ -145,11 +145,10 @@ public sealed class ResultStream : IDisposable, IAsyncDisposable
         // release the handle, preventing a use-after-free across threads.
         lock (_sync)
         {
-            if (_handle != nint.Zero)
+            if (!_handle.IsClosed)
             {
                 _warnings = ReadWarnings();
-                NativeMethods.grafeo_stream_free(_handle);
-                _handle = nint.Zero;
+                _handle.Dispose();
             }
         }
     }

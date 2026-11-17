@@ -21,6 +21,7 @@ Performance and memory release, in progress: this section lists what has landed 
 - **Deleted values leave memory at `compact()`**: a column's zone map no longer keeps a copy of a deleted, overwritten or rolled-back value, so after `compact()` no deleted text, list or map stays in memory in the scenario #712 reported. A range filter on a column whose greatest or least value was lowered or removed reads that column's rows in full until the next garbage collection.
 - **A quantized vector index trains on live vectors only**: with scalar or product quantization, a vector deleted or replaced before the quantizer is trained no longer trains it or stays in memory until training; training waits until the configured number of live vectors is reached.
 - **`compact()` and `close()` empty the plan cache**: a deleted value that a statement named as a literal no longer stays in memory in the shared plan cache after `compact()` or `close()`.
+- **C#: a result stream that is never disposed is freed**: `ResultStream`, nodes, edges, results and open options are now released by their finalizer like the database, transaction, graph and time-travel handles, so a stream left undisposed no longer keeps its native stream and the database open.
 
 ## [0.6.3] - 2026-11-15
 

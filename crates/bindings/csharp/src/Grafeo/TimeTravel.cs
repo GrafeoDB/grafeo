@@ -87,10 +87,9 @@ public sealed class AsOfView : IDisposable
     private readonly AsOfHandle _handle;
     private volatile bool _disposed;
 
-    internal AsOfView(nint ptr)
+    internal AsOfView(AsOfHandle handle)
     {
-        _handle = new AsOfHandle();
-        Marshal.InitHandle(_handle, ptr);
+        _handle = handle;
         Epoch = NativeMethods.grafeo_as_of_epoch(_handle);
     }
 
@@ -126,7 +125,7 @@ public sealed class AsOfView : IDisposable
     public Node? GetNode(long id)
     {
         GrafeoException.ThrowIfFailed(NativeMethods.grafeo_as_of_get_node(Handle, (ulong)id, out var nodePtr));
-        if (nodePtr == nint.Zero)
+        if (nodePtr.IsInvalid)
             return null;
         try
         {
@@ -134,7 +133,7 @@ public sealed class AsOfView : IDisposable
         }
         finally
         {
-            NativeMethods.grafeo_free_node(nodePtr);
+            nodePtr.Dispose();
         }
     }
 
@@ -142,7 +141,7 @@ public sealed class AsOfView : IDisposable
     public Edge? GetEdge(long id)
     {
         GrafeoException.ThrowIfFailed(NativeMethods.grafeo_as_of_get_edge(Handle, (ulong)id, out var edgePtr));
-        if (edgePtr == nint.Zero)
+        if (edgePtr.IsInvalid)
             return null;
         try
         {
@@ -150,7 +149,7 @@ public sealed class AsOfView : IDisposable
         }
         finally
         {
-            NativeMethods.grafeo_free_edge(edgePtr);
+            edgePtr.Dispose();
         }
     }
 
@@ -175,9 +174,9 @@ public sealed class AsOfView : IDisposable
         }
     }
 
-    private static QueryResult Result(nint resultPtr)
+    private static QueryResult Result(ResultHandle resultPtr)
     {
-        if (resultPtr == nint.Zero)
+        if (resultPtr.IsInvalid)
             throw GrafeoException.FromLastError(GrafeoStatus.Query);
         return GrafeoDB.BuildResult(resultPtr);
     }

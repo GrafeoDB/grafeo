@@ -80,7 +80,7 @@ public sealed class GrafeoOptions : IDisposable
     private static ulong Bytes(long bytes) => bytes < 0 ? 0 : (ulong)bytes;
 
     /// <summary>Sets these settings on the native options object <paramref name="native"/>.</summary>
-    internal void ApplyTo(nint native)
+    internal void ApplyTo(OptionsHandle native)
     {
         if (_memoryLimit is { } memory)
             GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_memory_limit(native, memory));

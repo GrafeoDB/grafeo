@@ -21,10 +21,9 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
     private volatile bool _finished;
     private volatile bool _disposed;
 
-    internal Transaction(nint ptr)
+    internal Transaction(TransactionHandle handle)
     {
-        _handle = new TransactionHandle();
-        Marshal.InitHandle(_handle, ptr);
+        _handle = handle;
     }
 
     // =========================================================================
@@ -36,7 +35,7 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
     {
         ThrowIfFinished();
         var resultPtr = NativeMethods.grafeo_transaction_execute(Handle, query);
-        if (resultPtr == nint.Zero)
+        if (resultPtr.IsInvalid)
             throw GrafeoException.FromLastError(GrafeoStatus.Query);
         return BuildResult(resultPtr);
     }
@@ -50,7 +49,7 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
         {
             ct.ThrowIfCancellationRequested();
             var resultPtr = NativeMethods.grafeo_transaction_execute(h, query);
-            if (resultPtr == nint.Zero)
+            if (resultPtr.IsInvalid)
                 throw GrafeoException.FromLastError(GrafeoStatus.Query);
             return BuildResult(resultPtr);
         }, ct);
@@ -62,7 +61,7 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
         ThrowIfFinished();
         var paramsJson = ValueConverter.EncodeParams(parameters);
         var resultPtr = NativeMethods.grafeo_transaction_execute_with_params(Handle, query, paramsJson);
-        if (resultPtr == nint.Zero)
+        if (resultPtr.IsInvalid)
             throw GrafeoException.FromLastError(GrafeoStatus.Query);
         return BuildResult(resultPtr);
     }
@@ -80,7 +79,7 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
         {
             ct.ThrowIfCancellationRequested();
             var resultPtr = NativeMethods.grafeo_transaction_execute_with_params(h, query, paramsJson);
-            if (resultPtr == nint.Zero)
+            if (resultPtr.IsInvalid)
                 throw GrafeoException.FromLastError(GrafeoStatus.Query);
             return BuildResult(resultPtr);
         }, ct);
@@ -96,7 +95,7 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
     {
         ThrowIfFinished();
         var resultPtr = NativeMethods.grafeo_transaction_execute_language(Handle, language, query, paramsJson);
-        if (resultPtr == nint.Zero)
+        if (resultPtr.IsInvalid)
             throw GrafeoException.FromLastError(GrafeoStatus.Query);
         return BuildResult(resultPtr);
     }
@@ -120,7 +119,7 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
         {
             ct.ThrowIfCancellationRequested();
             var resultPtr = NativeMethods.grafeo_transaction_execute_language(h, language, query, paramsJson);
-            if (resultPtr == nint.Zero)
+            if (resultPtr.IsInvalid)
                 throw GrafeoException.FromLastError(GrafeoStatus.Query);
             return BuildResult(resultPtr);
         }, ct);
@@ -210,5 +209,5 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
             throw new TransactionException("Transaction is already committed or rolled back");
     }
 
-    private static QueryResult BuildResult(nint resultPtr) => GrafeoDB.BuildResult(resultPtr);
+    private static QueryResult BuildResult(ResultHandle resultPtr) => GrafeoDB.BuildResult(resultPtr);
 }

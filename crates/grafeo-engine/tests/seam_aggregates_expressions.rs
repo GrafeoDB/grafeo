@@ -936,13 +936,30 @@ mod gql_shared_let_scope {
         let b = db
             .create_node_with_props(&["P"], [("name", Value::from("B"))])
             .unwrap();
-        let node_id = |id: NodeId| Value::Int64(i64::try_from(id.as_u64()).unwrap());
-        // Nested comprehensions expose node IDs. Derive them from the public
-        // creation API, independently of query translation or scan order.
+        // The comprehension gives the outer node itself (it gave the node's
+        // id). Ids from the public creation API, independently of query
+        // translation or scan order.
+        let node = |id: NodeId, name: &str| {
+            Value::Map(std::sync::Arc::new(
+                [
+                    (
+                        PropertyKey::new("_id"),
+                        Value::Int64(i64::try_from(id.as_u64()).unwrap()),
+                    ),
+                    (
+                        PropertyKey::new("_labels"),
+                        Value::List(vec![Value::from("P")].into()),
+                    ),
+                    (PropertyKey::new("name"), Value::from(name)),
+                ]
+                .into_iter()
+                .collect(),
+            ))
+        };
         let expected = Value::List(
             vec![
-                Value::List(vec![node_id(a), node_id(a)].into()),
-                Value::List(vec![node_id(b), node_id(b)].into()),
+                Value::List(vec![node(a, "A"), node(a, "A")].into()),
+                Value::List(vec![node(b, "B"), node(b, "B")].into()),
             ]
             .into(),
         );

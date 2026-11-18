@@ -95,10 +95,6 @@ tests:
 
   # [4] Returning a list comprehension
   - name: s4_returning_a_list_comprehension
-    xfail:
-      spec: "openCypher TCK 2024.3 List12: [4] Returning a list comprehension"
-      issue: fix in 0.6.4
-      passes_in: [go, csharp, dart]
     setup:
       - |
         CREATE (a:A)
@@ -115,10 +111,6 @@ tests:
 
   # [5] Using a list comprehension in a WITH
   - name: s5_using_a_list_comprehension_in_a_with
-    xfail:
-      spec: "openCypher TCK 2024.3 List12: [5] Using a list comprehension in a WITH"
-      issue: fix in 0.6.4
-      passes_in: [go, csharp, dart]
     setup:
       - |
         CREATE (a:A)

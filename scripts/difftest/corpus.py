@@ -3693,4 +3693,15 @@ for case_id, query in [
 ]:
     case(case_id, query, GQL, "graph_replace")
 
+# ER: a node or edge in a value an expression builds is the node or edge (0.6.4); in 0.6.3 these
+#     gave its id: a list comprehension's items, indexed and unwound (ER1 to ER3), a CASE (ER4),
+#     coalesce (ER5), the item `+` adds to a list (ER6) and what reduce collects (ER7)
+case("ER1", "MATCH p = (a:Person {name: 'Alix'})-[:LIVES_IN]->(c) RETURN [x IN nodes(p) | x][0] AS m")
+case("ER2", "MATCH (a:Person {name: 'Gus'}) WITH collect(a) AS l RETURN [x IN l | x] AS m")
+case("ER3", "MATCH p = (a:Person {name: 'Mia'})-[:LIVES_IN]->(c) UNWIND [x IN relationships(p) | x] AS y RETURN y")
+case("ER4", "MATCH (a:Person {name: 'Alix'})-[r:LIVES_IN]->(c) RETURN CASE WHEN a.age > 100 THEN a ELSE c END AS m")
+case("ER5", "MATCH (a:Person {name: 'Alix'})-[r:LIVES_IN]->(c) RETURN coalesce(null, r) AS m")
+case("ER6", "MATCH p = (a:Person {name: 'Gus'})-[:LIVES_IN]->(c) RETURN nodes(p) + [a] AS m", CYPHER)
+case("ER7", "MATCH p = (a:Person {name: 'Gus'})-[:LIVES_IN]->(c) RETURN reduce(acc = [], x IN nodes(p) | acc + [x]) AS m", CYPHER)
+
 # fmt: on

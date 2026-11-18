@@ -27,6 +27,7 @@ Performance and memory release, in progress: this section lists what has landed 
 - **A map with the keys of a node is no longer taken for one**: `nodes()` and `edges()` in Python, Node.js, C#, Dart and C (`grafeo_result_nodes_json`, `grafeo_result_edges_json`) list the nodes and edges the engine returned, by type, so `RETURN {_id: 1, _labels: []}` no longer lists a node and an edge with a property named `_labels` is no longer listed as a node. C# and Dart now also list the nodes and edges inside returned lists, maps and paths.
 - **An item of `nodes(p)` keeps the node's id under `_id`**: a node with a property named `_id` or `_labels` gave that property there; the structural keys now win, as for a returned node, and `n._id` still reads the property.
 - **Go, C# and Dart report the columns of a result without rows**: they took the column names from the first row, so an empty result had none; the new C function `grafeo_result_columns_json` gives them for every result.
+- **A node or edge built into a value is the node or edge**: a list comprehension's items (indexed or unwound), a `CASE`, `coalesce`, the item a list `+` adds and what `reduce` collects return the node or edge; they returned its id.
 
 ## [0.6.3] - 2026-11-15
 

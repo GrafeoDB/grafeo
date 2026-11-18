@@ -46,6 +46,21 @@ impl ProfiledOperator {
     }
 }
 
+/// The outer operator's tally, held while a profiled operator runs. Dropping it, also when the
+/// operator unwinds, puts that tally back and adds what the operator counted to its stats, so a
+/// panic cannot leave the outer operator's work swapped out.
+struct OwnWork<'a> {
+    outer: grafeo_common::work::WorkCounts,
+    stats: &'a SharedProfileStats,
+}
+
+impl Drop for OwnWork<'_> {
+    fn drop(&mut self) {
+        let own = grafeo_common::work::swap(self.outer);
+        self.stats.lock().work.add(&own);
+    }
+}
+
 impl Operator for ProfiledOperator {
     fn next(&mut self) -> OperatorResult {
         {
@@ -55,22 +70,22 @@ impl Operator for ProfiledOperator {
 
         // The work counted while the operator runs is its own: a child's wrapper swaps in a
         // tally of its own around the child (see `grafeo_common::work`).
-        let outer = grafeo_common::work::take();
+        let own_work = OwnWork {
+            outer: grafeo_common::work::take(),
+            stats: &self.stats,
+        };
         let start = grafeo_common::clock::Instant::now();
 
         let result = self.inner.next();
 
         let elapsed = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        let own = grafeo_common::work::swap(outer);
-        {
-            let mut stats = self.stats.lock();
-            stats.time_ns += elapsed;
-            stats.work.add(&own);
-        }
-
+        drop(own_work);
+        let mut stats = self.stats.lock();
+        stats.time_ns += elapsed;
         if let Ok(Some(ref chunk)) = result {
-            self.stats.lock().rows_out += chunk.row_count() as u64;
+            stats.rows_out += chunk.row_count() as u64;
         }
+        drop(stats);
 
         result
     }
@@ -251,6 +266,48 @@ mod tests {
             5,
             "unprofiled, the thread holds the total"
         );
+    }
+
+    /// An operator that counts `own` rows built, then panics.
+    #[cfg(grafeo_work_counters)]
+    struct Panicking {
+        own: u64,
+    }
+
+    #[cfg(grafeo_work_counters)]
+    impl Operator for Panicking {
+        fn next(&mut self) -> OperatorResult {
+            grafeo_common::work::count(grafeo_common::work::Work::RowBuilt, self.own);
+            panic!("an operator panics");
+        }
+        fn reset(&mut self) {}
+        fn name(&self) -> &'static str {
+            "Panicking"
+        }
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+            self
+        }
+    }
+
+    /// A child that panics gives the outer tally back as it unwinds: what was counted before it
+    /// ran stays where it was, and the child's own work goes to the child.
+    #[cfg(grafeo_work_counters)]
+    #[test]
+    fn a_panicking_child_leaves_the_outer_tally_intact() {
+        use grafeo_common::work::{Work, count, take};
+
+        let _ = take();
+        let stats = Arc::new(Mutex::new(ProfileStats::default()));
+        let mut child = ProfiledOperator::new(Box::new(Panicking { own: 4 }), Arc::clone(&stats));
+        count(Work::RowBuilt, 2);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| child.next()));
+        assert!(unwound.is_err());
+        assert_eq!(
+            take().get(Work::RowBuilt),
+            2,
+            "the outer tally is back, without the child's work"
+        );
+        assert_eq!(stats.lock().work.get(Work::RowBuilt), 4);
     }
 
     #[test]

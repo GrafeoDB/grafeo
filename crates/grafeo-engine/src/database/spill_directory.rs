@@ -124,14 +124,14 @@ impl SpillDirectory {
 
 impl Drop for SpillDirectory {
     fn drop(&mut self) {
-        if let Some(owner) = self.owner.take() {
+        // The lock is released at the end of this block, before the directory goes.
+        if let Some(_locked) = self.owner.take() {
             // An emptied directory loses its lock file while still locked, so
             // no sweep finds it unlocked. One with something left keeps it,
             // unlocked: the next sweep removes it as a dead owner's.
             if only_the_lock_is_left(&self.path) {
                 let _ = std::fs::remove_file(self.path.join(OWNER_LOCK));
             }
-            drop(owner);
         }
         // Non-recursive: fails, and keeps the directory, while anything is
         // left in it.
@@ -430,12 +430,17 @@ fn user_of(metadata: &std::fs::Metadata) -> User {
     }
 }
 
+/// How old a directory without an `owner.lock` must be (by its modification time) to count as
+/// 0.6.3's: a younger one may be another open's, caught between creating its directory and
+/// taking its lock. Neither is ever removed.
+const UNOWNED_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// What a sweep of a temp directory did (#450).
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Swept {
     /// Directories of dead owners, removed.
     removed: usize,
-    /// Directories without an `owner.lock` (0.6.3 and earlier), kept.
+    /// Directories without an `owner.lock` (0.6.3 and earlier) a minute old or more, kept.
     unowned: usize,
     /// Their bytes.
     unowned_bytes: u64,
@@ -505,9 +510,16 @@ fn sweep_dead(parent: &Path, own: &Path, user: User) -> Swept {
             .open(dir.join(OWNER_LOCK))
         {
             Ok(owner) => owner,
+            // A young one may be another open's, between creating its directory and its lock.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                swept.unowned += 1;
-                swept.unowned_bytes += tree_size(&dir);
+                if entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .is_ok_and(|modified| modified.elapsed().is_ok_and(|age| age >= UNOWNED_AFTER))
+                {
+                    swept.unowned += 1;
+                    swept.unowned_bytes += tree_size(&dir);
+                }
                 continue;
             }
             Err(_) => continue,
@@ -565,10 +577,14 @@ fn remove_owned(dir: &Path, owner: File) -> std::io::Result<()> {
             std::fs::remove_file(&path).or_else(|_| std::fs::remove_dir(&path))?;
         }
     }
-    // While locked: on Windows the file goes once the handle closes.
-    std::fs::remove_file(dir.join(OWNER_LOCK))?;
-    drop(owner);
+    remove_lock(dir, owner)?;
     std::fs::remove_dir(dir)
+}
+
+/// Removes `dir`'s `owner.lock` while `owner` holds it; the lock goes with `owner` at the end.
+/// On Windows the file goes once the handle closes.
+fn remove_lock(dir: &Path, _owner: File) -> std::io::Result<()> {
+    std::fs::remove_file(dir.join(OWNER_LOCK))
 }
 
 /// The bytes of the files under `dir`, links not followed.
@@ -1192,12 +1208,41 @@ mod tests {
         );
     }
 
+    /// Sets the modification time of `dir` two minutes back, past [`UNOWNED_AFTER`].
+    fn two_minutes_old(dir: &Path) {
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        #[cfg(windows)]
+        let handle = {
+            use std::os::windows::fs::OpenOptionsExt;
+            // FILE_WRITE_ATTRIBUTES, and FILE_FLAG_BACKUP_SEMANTICS to open a directory.
+            std::fs::OpenOptions::new()
+                .access_mode(0x100)
+                .custom_flags(0x0200_0000)
+                .open(dir)
+        };
+        #[cfg(not(windows))]
+        let handle = std::fs::File::open(dir);
+        handle.unwrap().set_modified(when).unwrap();
+    }
+
+    /// A directory without an `owner.lock` younger than a minute may be another open's, between
+    /// creating its directory and taking its lock: kept, and left out of the warning's count.
+    #[test]
+    fn the_sweep_counts_no_young_directory_without_an_owner_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let young = dead_dir(temp.path(), "vienna.grafeo", false);
+        let swept = sweep_dead(temp.path(), &temp.path().join("own"), me(temp.path()));
+        assert_eq!(swept, Swept::default());
+        assert!(young.join("columns_1_0_0.bin").exists(), "kept");
+    }
+
     /// Row 5: a directory without an `owner.lock` (0.6.3 and earlier) is kept, and counted
-    /// with its bytes for the warning.
+    /// with its bytes for the warning once it is a minute old.
     #[test]
     fn the_sweep_keeps_a_directory_without_an_owner_lock() {
         let temp = tempfile::tempdir().unwrap();
         let old = dead_dir(temp.path(), "vienna.grafeo", false);
+        two_minutes_old(&old);
         let swept = sweep_dead(temp.path(), &temp.path().join("own"), me(temp.path()));
         assert_eq!(
             swept,

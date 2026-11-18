@@ -43,9 +43,6 @@ tests:
 
   # [1] `collect()` filtering nulls
   - name: s1_collect_filtering_nulls
-    xfail:
-      spec: "openCypher TCK 2024.3 Aggregation5: [1] `collect()` filtering nulls"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE ()

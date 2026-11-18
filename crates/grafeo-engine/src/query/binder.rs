@@ -3418,6 +3418,7 @@ mod tests {
                     alias: Some("cnt".to_string()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 }],
                 input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "n".to_string(),
@@ -4884,6 +4885,7 @@ mod tests {
                 alias: Some("c".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "n".to_string(),
@@ -4917,6 +4919,7 @@ mod tests {
                     alias: Some("total".to_string()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 }],
                 input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "n".to_string(),

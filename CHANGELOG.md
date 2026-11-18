@@ -13,6 +13,7 @@ Performance and memory release, in progress: this section lists what has landed 
 - **The openCypher TCK runs in every binding's spec tests**: 3,927 scenarios of openCypher 2024.3, converted by `scripts/convert_opencypher_tck.py`; the cases Grafeo does not pass yet are listed with their target release in `tests/spec/lpg/cypher/tck/known_failures.toml`.
 - **Python has types for the temporals its own cannot hold** (Experimental): `grafeo.Time`, `grafeo.Duration`, `grafeo.Date`, `grafeo.Timestamp` and `grafeo.ZonedDateTime` hold a time with nanoseconds, a duration with months or a part finer than a microsecond, and a date outside years 1 to 9999. Each compares, hashes and gives `to_native()`; all but `grafeo.Timestamp` (microseconds since 1970) take the engine's text.
 - **A database says whether it is closed**: `GrafeoDB::is_closed()` is true once `close()` has completed, and false after a `close()` that failed and put the database back.
+- **A Cypher CALL on its own takes `YIELD *`**: it yields every output of the procedure.
 
 ### Changed
 
@@ -47,6 +48,24 @@ Performance and memory release, in progress: this section lists what has landed 
 - **Python takes a `timedelta` as a duration parameter**: it was refused.
 - **A Python date or datetime outside years 1 to 9999 comes back**: as a Grafeo type; it came back as `None`.
 - **A Node.js timestamp keeps its microseconds**: it comes back as `{ $timestamp_us: n }` (a `bigint` before 1685 and after 2255) where a `Date` floored it to milliseconds.
+- **An aggregating RETURN without aliases returns nodes and edges**: `MATCH (n) RETURN n, count(n)` and `RETURN collect(n)` give the nodes, in GQL and Cypher; they gave their ids unless an item had an alias.
+- **`SET x = e` and `SET x += e` copy the properties of a node or relationship `e`**: in GQL and Cypher, also in MERGE's `ON CREATE` and `ON MATCH`; nothing was set.
+- **Quantifiers follow three-valued logic**: `all`, `any`, `none` and `single` over a list with a null item give null where that item could decide them; they counted it as false.
+- **`IN` an empty list is false**: `null IN []` gave null.
+- **A list slice with a null bound is null**: `list[null..2]` and `list[1..null]` gave the list as if the bound were left out.
+- **A SET, REMOVE or DELETE of a null target does nothing**: `OPTIONAL MATCH (a:Missing) SET a.x = 1` and the same with REMOVE, DELETE and DETACH DELETE succeed and change nothing, in GQL and Cypher; they failed with a type error.
+- **`nodes()` and `relationships()` take any path expression**: `nodes(null)` is null; any argument but a variable was refused.
+- **The percentile of `percentileDisc` and `percentileCont` may be a parameter or an expression of constants**: `percentileDisc(n.price, $p)` reads `$p`; anything but a number literal was read as 0.5. In Cypher, GQL (`percentile_disc`, `percentile_cont`) and SQL/PGQ.
+- **A percentile outside 0 to 1 fails the statement**: GQLSTATUS 22003, and 22G03 for a null or a value that is no number; it was moved to the nearest end. A percentile that reads the rows fails with 42000.
+- **Cypher's `^` is left associative**: `2 ^ 3 ^ 2` is 64, as openCypher defines it; it was 512.
+- **A stored procedure is called by its whole name**: `CALL test.doNothing()` calls the procedure `test.doNothing`; a dotted name was looked up by its last part, so `CALL x.one()` reached a procedure named `one`, which it no longer does.
+- **A procedure that returns nothing keeps the rows of the query that calls it**: `MATCH (n) CALL test.doNothing() RETURN n` returns every `n`; it returned none.
+- **A stored procedure's arguments are checked against its parameter types**: an argument is converted as a property of that type converts it (an integer for a `DECIMAL`, or for a `FLOAT` when the float is exact), and one the type does not take fails the statement (GQLSTATUS 42). Any value was taken.
+- **YIELD refuses a name twice or a name already bound**: `YIELD a, b AS a` and an output named like an earlier variable fail; the second silently won.
+- **The WHERE of a Cypher WITH reads the variables bound before it**: `MATCH (a) WITH a.name AS name WHERE a.age > 30` filters by `a`; it failed with an undefined variable. After the WITH they stay out of scope.
+- **A Cypher parameter may be named by a number**: `$1` is a parameter; it was a syntax error.
+- **A Cypher pattern comprehension runs in a WHERE**: `MATCH (n) WHERE size([(n)-->(m) | m]) > 0`, and the WHERE of OPTIONAL MATCH and WITH, run; they failed with an internal error. In ORDER BY, SET, UNWIND, a property map or a list comprehension's body it fails as unsupported (GRAFEO-Q004) until 0.6.5.
+- **A Cypher pattern comprehension keeps a match whose projection is null**: `[(n)-[:T]->(b) | b.name]` is `[null]` for a `b` without a name; the match was dropped.
 
 ## [0.6.3] - 2026-11-15
 

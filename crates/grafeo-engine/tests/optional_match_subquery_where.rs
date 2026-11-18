@@ -142,7 +142,6 @@ fn an_uncorrelated_exists() {
 
 /// A pattern comprehension over the outer variable.
 #[test]
-#[ignore = "a pattern comprehension in WHERE fails with: PatternComprehension reached the planner without being rewritten (0.6.0 too)"]
 fn a_pattern_comprehension_over_the_outer_variable() {
     check(
         &["cypher"],

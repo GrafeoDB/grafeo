@@ -106,9 +106,6 @@ tests:
 
   # [5] Ignore null when removing a node label
   - name: s5_ignore_null_when_removing_a_node_label
-    xfail:
-      spec: "openCypher TCK 2024.3 Remove2: [5] Ignore null when removing a node label"
-      issue: fix in 0.6.4
     query: |
       OPTIONAL MATCH (a:DoesNotExist)
       REMOVE a:L

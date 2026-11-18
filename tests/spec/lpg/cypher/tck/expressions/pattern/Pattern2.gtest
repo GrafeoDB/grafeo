@@ -102,9 +102,6 @@ tests:
 
   # [4] Introduce a new node variable in pattern comprehension
   - name: s4_introduce_a_new_node_variable_in_pattern_comprehension
-    xfail:
-      spec: "openCypher TCK 2024.3 Pattern2: [4] Introduce a new node variable in pattern comprehension"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a), (b {name: 'val'}), (c)
@@ -123,9 +120,6 @@ tests:
 
   # [5] Introduce a new relationship variable in pattern comprehension
   - name: s5_introduce_a_new_relationship_variable_in_pattern_comprehension
-    xfail:
-      spec: "openCypher TCK 2024.3 Pattern2: [5] Introduce a new relationship variable in pattern comprehension"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a), (b), (c)

@@ -513,11 +513,13 @@ impl super::Planner {
         let after_a_write = super::after_write::subquery_runs_after_a_write(apply);
         let output = subquery_output(&apply.subplan);
         let subplan = output.as_ref().unwrap_or(&apply.subplan);
+        // A call of a procedure that returns nothing keeps each row once.
+        let unit = apply.unit || self.calls_a_void_procedure(subplan);
         let configure = |mut op: ApplyOperator, inner_col_count: usize| {
             if apply.optional {
                 op = op.with_optional(inner_col_count);
             }
-            if apply.unit {
+            if unit {
                 op = op.with_unit();
             }
             if input_writes {
@@ -531,14 +533,14 @@ impl super::Planner {
             let (inner_op, inner_columns) = self.plan_after_a_write(after_a_write, subplan)?;
             // Any other subquery materializes values (PropertyAccess,
             // NodeResolve, aggregates, etc.), so its output columns are scalar.
-            if output.is_none() && !apply.unit {
+            if output.is_none() && !unit {
                 for col in &inner_columns {
                     self.scalar_columns.borrow_mut().insert(col.clone());
                 }
             }
             let inner_col_count = inner_columns.len();
             let mut columns = outer_columns;
-            if !apply.unit {
+            if !unit {
                 columns.extend(inner_columns);
             }
             let op = configure(ApplyOperator::new(outer_op, inner_op), inner_col_count);
@@ -584,7 +586,7 @@ impl super::Planner {
         // to prevent the outer RETURN from misinterpreting them as node IDs.
         // A unit subplan's columns are dropped: the outer row's own (an
         // imported node among them) keep what they are.
-        if output.is_none() && !apply.unit {
+        if output.is_none() && !unit {
             for col in &inner_columns {
                 self.scalar_columns.borrow_mut().insert(col.clone());
             }
@@ -593,7 +595,7 @@ impl super::Planner {
         // Build correlated Apply
         let mut columns = outer_columns;
         let inner_col_count = inner_columns.len();
-        if !apply.unit {
+        if !unit {
             columns.extend(inner_columns);
         }
         let op = configure(

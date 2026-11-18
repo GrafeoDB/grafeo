@@ -1195,6 +1195,7 @@ mod tests {
                     alias: Some("cnt".to_string()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 },
                 AggregateExpr {
                     function: AggregateFunction::Sum,
@@ -1204,6 +1205,7 @@ mod tests {
                     alias: Some("total".to_string()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 },
             ],
             input: Box::new(LogicalOperator::Empty),

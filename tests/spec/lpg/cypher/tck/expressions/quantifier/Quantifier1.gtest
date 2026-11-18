@@ -791,9 +791,6 @@ tests:
 
   # [10] None quantifier on lists containing nulls #1
   - name: s10_none_quantifier_on_lists_containing_nulls_1
-    xfail:
-      spec: "openCypher TCK 2024.3 Quantifier1: [10] None quantifier on lists containing nulls #1"
-      issue: fix in 0.6.4
     query: |
       RETURN none(x IN [null] WHERE x = 2) AS result
     expect:
@@ -804,9 +801,6 @@ tests:
 
   # [10] None quantifier on lists containing nulls #2
   - name: s10_none_quantifier_on_lists_containing_nulls_2
-    xfail:
-      spec: "openCypher TCK 2024.3 Quantifier1: [10] None quantifier on lists containing nulls #2"
-      issue: fix in 0.6.4
     query: |
       RETURN none(x IN [null, null] WHERE x = 2) AS result
     expect:
@@ -817,9 +811,6 @@ tests:
 
   # [10] None quantifier on lists containing nulls #3
   - name: s10_none_quantifier_on_lists_containing_nulls_3
-    xfail:
-      spec: "openCypher TCK 2024.3 Quantifier1: [10] None quantifier on lists containing nulls #3"
-      issue: fix in 0.6.4
     query: |
       RETURN none(x IN [0, null] WHERE x = 2) AS result
     expect:
@@ -860,9 +851,6 @@ tests:
 
   # [10] None quantifier on lists containing nulls #7
   - name: s10_none_quantifier_on_lists_containing_nulls_7
-    xfail:
-      spec: "openCypher TCK 2024.3 Quantifier1: [10] None quantifier on lists containing nulls #7"
-      issue: fix in 0.6.4
     query: |
       RETURN none(x IN [34, 10, null, 15, 900] WHERE x < 10) AS result
     expect:

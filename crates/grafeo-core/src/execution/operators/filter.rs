@@ -1546,7 +1546,9 @@ impl ExpressionPredicate {
             FilterExpression::Binary { left, op, right } => {
                 // For IN operator, right side is a list that we evaluate specially
                 if *op == BinaryFilterOp::In {
-                    let left_val = self.eval_expr(left, chunk, row)?;
+                    // A needle with no value is a null, which `IN []` still
+                    // answers with false.
+                    let left_val = self.eval_expr(left, chunk, row).unwrap_or(Value::Null);
                     return self.eval_in_operator(left, &left_val, right, chunk, row);
                 }
                 // For logical operators (AND/OR/XOR), treat missing values as
@@ -1731,14 +1733,17 @@ impl ExpressionPredicate {
             }
             FilterExpression::SliceAccess { base, start, end } => {
                 let base_val = self.eval_expr(base, chunk, row)?;
-                let bound = |bound: &Option<Box<FilterExpression>>| match bound
-                    .as_deref()
-                    .and_then(|bound| self.eval_expr(bound, chunk, row))
-                {
-                    Some(Value::Int64(i)) => Some(i),
-                    _ => None,
+                // A bound left out is the start or the end (`Some(None)`); one
+                // given as null makes the slice null (`None`).
+                let bound = |bound: &Option<Box<FilterExpression>>| match bound.as_deref() {
+                    None => Some(None),
+                    Some(bound) => match self.eval_expr(bound, chunk, row) {
+                        Some(Value::Int64(i)) => Some(Some(i)),
+                        Some(Value::Null) | None => None,
+                        Some(_) => Some(None),
+                    },
                 };
-                let (start, end) = (bound(start), bound(end));
+                let (start, end) = (bound(start)?, bound(end)?);
                 match &base_val {
                     Value::List(items) => {
                         let range = super::project::slice_range(items.len(), start, end);
@@ -1848,20 +1853,32 @@ impl ExpressionPredicate {
                 let shape = self.shape(list_expr, chunk, row);
                 let items = Self::list_items(self.eval_expr(list_expr, chunk, row)?)?;
                 let mut scope = ItemScope::new(self, &[variable], chunk, row);
-                let mut match_count = 0usize;
+                // Three-valued: an item whose predicate is not a boolean
+                // (null) could be either, so it decides only where a true or
+                // false item does not.
+                let (mut trues, mut falses) = (0usize, 0usize);
                 for (position, item) in items.iter().enumerate() {
                     scope.bind(0, item, &item_shape(&shape, position));
-                    if matches!(scope.eval(predicate), Some(Value::Bool(true))) {
-                        match_count += 1;
+                    match scope.eval(predicate) {
+                        Some(Value::Bool(true)) => trues += 1,
+                        Some(Value::Bool(false)) => falses += 1,
+                        _ => {}
                     }
                 }
+                let unknown = items.len() - trues - falses > 0;
                 let result = match kind {
-                    ListPredicateKind::All => match_count == items.len(),
-                    ListPredicateKind::Any => match_count > 0,
-                    ListPredicateKind::None => match_count == 0,
-                    ListPredicateKind::Single => match_count == 1,
+                    ListPredicateKind::All if falses > 0 => Some(false),
+                    ListPredicateKind::Any | ListPredicateKind::None if trues > 0 => {
+                        Some(matches!(kind, ListPredicateKind::Any))
+                    }
+                    ListPredicateKind::Single if trues > 1 => Some(false),
+                    _ if unknown => None,
+                    ListPredicateKind::All => Some(true),
+                    ListPredicateKind::Any => Some(false),
+                    ListPredicateKind::None => Some(true),
+                    ListPredicateKind::Single => Some(trues == 1),
                 };
-                Some(Value::Bool(result))
+                Some(result.map_or(Value::Null, Value::Bool))
             }
             FilterExpression::ExistsSubquery {
                 start_var,
@@ -2628,7 +2645,12 @@ impl ExpressionPredicate {
         chunk: &DataChunk,
         row: usize,
     ) -> Option<Value> {
-        let left = self.eval_expr(needle, chunk, row)?;
+        // A needle with no value (an absent property, `null + 1`) is a null.
+        let left = self.eval_expr(needle, chunk, row).unwrap_or(Value::Null);
+        // No item can match, so `IN []` is false, also for a null needle.
+        if items.is_empty() {
+            return Some(Value::Bool(false));
+        }
         let Some(set) = set else {
             return self.walk_in_list(needle, &left, list, items, chunk, row);
         };
@@ -2687,7 +2709,11 @@ impl ExpressionPredicate {
         chunk: &DataChunk,
         row: usize,
     ) -> Option<Value> {
-        // Three-valued IN: NULL IN (...) is UNKNOWN
+        // Three-valued IN: NULL IN (...) is UNKNOWN, except for an empty
+        // list, which no value is in.
+        if items.is_empty() {
+            return Some(Value::Bool(false));
+        }
         if left.is_null() {
             return Some(Value::Null);
         }

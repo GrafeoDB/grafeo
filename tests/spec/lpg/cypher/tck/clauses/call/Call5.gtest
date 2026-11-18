@@ -43,11 +43,8 @@ tests:
 
   # [1] Explicit procedure result projection
   - name: s1_explicit_procedure_result_projection
-    xfail:
-      spec: "openCypher TCK 2024.3 Call5: [1] Explicit procedure result projection"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out STRING) AS { UNWIND [{p0: null, p1: 'nix'}] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out STRING) AS { UNWIND [{p0: null, p1: 'nix'}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS out }"
     query: |
       CALL test.my.proc(null) YIELD out
       RETURN out
@@ -60,11 +57,8 @@ tests:
 
   # [2] Explicit procedure result projection with RETURN *
   - name: s2_explicit_procedure_result_projection_with_return
-    xfail:
-      spec: "openCypher TCK 2024.3 Call5: [2] Explicit procedure result projection with RETURN *"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out STRING) AS { UNWIND [{p0: null, p1: 'nix'}] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out STRING) AS { UNWIND [{p0: null, p1: 'nix'}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS out }"
     query: |
       CALL test.my.proc(null) YIELD out
       RETURN *
@@ -77,11 +71,8 @@ tests:
 
   # [3] The order of yield items is irrelevant #1
   - name: s3_the_order_of_yield_items_is_irrelevant_1
-    xfail:
-      spec: "openCypher TCK 2024.3 Call5: [3] The order of yield items is irrelevant #1"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER r.p0 = $in RETURN r.p1 AS a, r.p2 AS b }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
     query: |
       CALL test.my.proc(null) YIELD a, b
       RETURN a, b
@@ -94,11 +85,8 @@ tests:
 
   # [3] The order of yield items is irrelevant #2
   - name: s3_the_order_of_yield_items_is_irrelevant_2
-    xfail:
-      spec: "openCypher TCK 2024.3 Call5: [3] The order of yield items is irrelevant #2"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER r.p0 = $in RETURN r.p1 AS a, r.p2 AS b }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
     query: |
       CALL test.my.proc(null) YIELD b, a
       RETURN a, b
@@ -111,11 +99,8 @@ tests:
 
   # [4] Rename outputs to unbound variable names #1
   - name: s4_rename_outputs_to_unbound_variable_names_1
-    xfail:
-      spec: "openCypher TCK 2024.3 Call5: [4] Rename outputs to unbound variable names #1"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER r.p0 = $in RETURN r.p1 AS a, r.p2 AS b }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
     query: |
       CALL test.my.proc(null) YIELD a AS c, b AS d
       RETURN c, d
@@ -128,11 +113,8 @@ tests:
 
   # [4] Rename outputs to unbound variable names #2
   - name: s4_rename_outputs_to_unbound_variable_names_2
-    xfail:
-      spec: "openCypher TCK 2024.3 Call5: [4] Rename outputs to unbound variable names #2"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER r.p0 = $in RETURN r.p1 AS a, r.p2 AS b }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
     query: |
       CALL test.my.proc(null) YIELD a AS b, b AS d
       RETURN b, d
@@ -145,11 +127,8 @@ tests:
 
   # [4] Rename outputs to unbound variable names #3
   - name: s4_rename_outputs_to_unbound_variable_names_3
-    xfail:
-      spec: "openCypher TCK 2024.3 Call5: [4] Rename outputs to unbound variable names #3"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER r.p0 = $in RETURN r.p1 AS a, r.p2 AS b }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
     query: |
       CALL test.my.proc(null) YIELD a AS c, b AS a
       RETURN c, a
@@ -162,11 +141,8 @@ tests:
 
   # [4] Rename outputs to unbound variable names #4
   - name: s4_rename_outputs_to_unbound_variable_names_4
-    xfail:
-      spec: "openCypher TCK 2024.3 Call5: [4] Rename outputs to unbound variable names #4"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER r.p0 = $in RETURN r.p1 AS a, r.p2 AS b }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
     query: |
       CALL test.my.proc(null) YIELD a AS b, b AS a
       RETURN b, a
@@ -179,11 +155,8 @@ tests:
 
   # [4] Rename outputs to unbound variable names #5
   - name: s4_rename_outputs_to_unbound_variable_names_5
-    xfail:
-      spec: "openCypher TCK 2024.3 Call5: [4] Rename outputs to unbound variable names #5"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER r.p0 = $in RETURN r.p1 AS a, r.p2 AS b }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
     query: |
       CALL test.my.proc(null) YIELD a AS c, b AS b
       RETURN c, b
@@ -196,11 +169,8 @@ tests:
 
   # [4] Rename outputs to unbound variable names #6
   - name: s4_rename_outputs_to_unbound_variable_names_6
-    xfail:
-      spec: "openCypher TCK 2024.3 Call5: [4] Rename outputs to unbound variable names #6"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER r.p0 = $in RETURN r.p1 AS a, r.p2 AS b }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
     query: |
       CALL test.my.proc(null) YIELD a AS c, b
       RETURN c, b
@@ -213,11 +183,8 @@ tests:
 
   # [4] Rename outputs to unbound variable names #7
   - name: s4_rename_outputs_to_unbound_variable_names_7
-    xfail:
-      spec: "openCypher TCK 2024.3 Call5: [4] Rename outputs to unbound variable names #7"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER r.p0 = $in RETURN r.p1 AS a, r.p2 AS b }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
     query: |
       CALL test.my.proc(null) YIELD a AS a, b AS d
       RETURN a, d
@@ -230,11 +197,8 @@ tests:
 
   # [4] Rename outputs to unbound variable names #8
   - name: s4_rename_outputs_to_unbound_variable_names_8
-    xfail:
-      spec: "openCypher TCK 2024.3 Call5: [4] Rename outputs to unbound variable names #8"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER r.p0 = $in RETURN r.p1 AS a, r.p2 AS b }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
     query: |
       CALL test.my.proc(null) YIELD a, b AS d
       RETURN a, d
@@ -247,11 +211,8 @@ tests:
 
   # [4] Rename outputs to unbound variable names #9
   - name: s4_rename_outputs_to_unbound_variable_names_9
-    xfail:
-      spec: "openCypher TCK 2024.3 Call5: [4] Rename outputs to unbound variable names #9"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER r.p0 = $in RETURN r.p1 AS a, r.p2 AS b }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
     query: |
       CALL test.my.proc(null) YIELD a AS a, b AS b
       RETURN a, b
@@ -264,11 +225,8 @@ tests:
 
   # [4] Rename outputs to unbound variable names #10
   - name: s4_rename_outputs_to_unbound_variable_names_10
-    xfail:
-      spec: "openCypher TCK 2024.3 Call5: [4] Rename outputs to unbound variable names #10"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER r.p0 = $in RETURN r.p1 AS a, r.p2 AS b }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
     query: |
       CALL test.my.proc(null) YIELD a AS a, b
       RETURN a, b
@@ -281,11 +239,8 @@ tests:
 
   # [4] Rename outputs to unbound variable names #11
   - name: s4_rename_outputs_to_unbound_variable_names_11
-    xfail:
-      spec: "openCypher TCK 2024.3 Call5: [4] Rename outputs to unbound variable names #11"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER r.p0 = $in RETURN r.p1 AS a, r.p2 AS b }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
     query: |
       CALL test.my.proc(null) YIELD a, b AS b
       RETURN a, b
@@ -300,7 +255,7 @@ tests:
   # TCK: SyntaxError at compile time: VariableAlreadyBound
   - name: s5_fail_on_renaming_to_an_already_bound_variable_name
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER r.p0 = $in RETURN r.p1 AS a, r.p2 AS b }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
     query: |
       CALL test.my.proc(null) YIELD a, b AS a
       RETURN a
@@ -312,7 +267,7 @@ tests:
   # TCK: SyntaxError at compile time: VariableAlreadyBound
   - name: s6_fail_on_renaming_all_outputs_to_the_same_variable_name
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER r.p0 = $in RETURN r.p1 AS a, r.p2 AS b }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
     query: |
       CALL test.my.proc(null) YIELD a AS c, b AS c
       RETURN c
@@ -324,7 +279,7 @@ tests:
   # TCK: SyntaxError at compile time: UnexpectedSyntax
   - name: s7_fail_on_in_query_call_to_procedure_with_yield
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(name STRING, id INT64) RETURNS (city STRING, country_code INT64) AS { UNWIND [{p0: 'Andres', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Tobias', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Mats', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Stefan', p1: 1, p2: 'Berlin', p3: 49}, {p0: 'Stefan', p1: 2, p2: 'München', p3: 49}, {p0: 'Petra', p1: 1, p2: 'London', p3: 44}] AS r FILTER r.p0 = $name AND r.p1 = $id RETURN r.p2 AS city, r.p3 AS country_code }"
+      - "CREATE PROCEDURE `test.my.proc`(name STRING, id INT64) RETURNS (city STRING, country_code INT64) AS { UNWIND [{p0: 'Andres', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Tobias', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Mats', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Stefan', p1: 1, p2: 'Berlin', p3: 49}, {p0: 'Stefan', p1: 2, p2: 'München', p3: 49}, {p0: 'Petra', p1: 1, p2: 'London', p3: 44}] AS r FILTER (r.p0 = $name OR (r.p0 IS NULL AND $name IS NULL)) AND (r.p1 = $id OR (r.p1 IS NULL AND $id IS NULL)) RETURN r.p2 AS city, r.p3 AS country_code }"
     query: |
       CALL test.my.proc('Stefan', 1) YIELD *
       RETURN city, country_code
@@ -334,11 +289,8 @@ tests:
 
   # [8] Allow standalone call to procedure with YIELD *
   - name: s8_allow_standalone_call_to_procedure_with_yield
-    xfail:
-      spec: "openCypher TCK 2024.3 Call5: [8] Allow standalone call to procedure with YIELD *"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(name STRING, id INT64) RETURNS (city STRING, country_code INT64) AS { UNWIND [{p0: 'Andres', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Tobias', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Mats', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Stefan', p1: 1, p2: 'Berlin', p3: 49}, {p0: 'Stefan', p1: 2, p2: 'München', p3: 49}, {p0: 'Petra', p1: 1, p2: 'London', p3: 44}] AS r FILTER r.p0 = $name AND r.p1 = $id RETURN r.p2 AS city, r.p3 AS country_code }"
+      - "CREATE PROCEDURE `test.my.proc`(name STRING, id INT64) RETURNS (city STRING, country_code INT64) AS { UNWIND [{p0: 'Andres', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Tobias', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Mats', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Stefan', p1: 1, p2: 'Berlin', p3: 49}, {p0: 'Stefan', p1: 2, p2: 'München', p3: 49}, {p0: 'Petra', p1: 1, p2: 'London', p3: 44}] AS r FILTER (r.p0 = $name OR (r.p0 IS NULL AND $name IS NULL)) AND (r.p1 = $id OR (r.p1 IS NULL AND $id IS NULL)) RETURN r.p2 AS city, r.p3 AS country_code }"
     query: |
       CALL test.my.proc('Stefan', 1) YIELD *
     expect:

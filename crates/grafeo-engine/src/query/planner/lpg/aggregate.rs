@@ -11,8 +11,83 @@ use super::{
     convert_aggregate_function, expression_to_string, resolved_column_name,
 };
 use crate::query::plan::AggregateExpr;
+use grafeo_common::types::Value;
+use grafeo_common::utils::error::{QueryError, QueryErrorKind};
 
 impl super::Planner {
+    /// The percentile of a `PERCENTILE_DISC` or `PERCENTILE_CONT`, evaluated
+    /// once: it is the same for every row (a literal, a parameter or an
+    /// expression of them, the parameters already substituted) and a number
+    /// from 0 to 1. `None` for every other aggregate.
+    ///
+    /// # Errors
+    ///
+    /// A percentile aggregate without its percentile, or one that reads the
+    /// rows (42000); a percentile that is null or no number (22G03), or
+    /// outside 0 to 1 (22003).
+    pub(super) fn constant_percentile(
+        &self,
+        function: LogicalAggregateFunction,
+        percentile: Option<&LogicalExpression>,
+    ) -> Result<Option<f64>> {
+        let refuse = |kind, message: String| Err(Error::from(QueryError::new(kind, message)));
+        if !matches!(
+            function,
+            LogicalAggregateFunction::PercentileDisc | LogicalAggregateFunction::PercentileCont
+        ) {
+            return Ok(None);
+        }
+        let Some(expression) = percentile else {
+            return refuse(
+                QueryErrorKind::Semantic,
+                "a percentile aggregate takes its percentile as the second argument".to_string(),
+            );
+        };
+        if !super::seek::value_variables(expression).is_some_and(|read| read.is_empty()) {
+            return refuse(
+                QueryErrorKind::Semantic,
+                format!(
+                    "the percentile {} must be the same for every row: a literal, a parameter \
+                     or an expression of them",
+                    expression_to_string(expression)
+                ),
+            );
+        }
+        let value = ExpressionPredicate::new(
+            self.convert_expression(expression)?,
+            HashMap::new(),
+            Arc::clone(&self.store),
+            self.read_view(),
+        )
+        .with_session_context(self.session_context.clone())
+        .eval_at(&grafeo_core::execution::DataChunk::empty(), 0)
+        .map_err(crate::query::executor::convert_operator_error)?;
+        let number = match value {
+            Some(Value::Int64(n)) => n as f64,
+            Some(Value::Float64(f)) => f,
+            Some(Value::Decimal(d)) => d.to_f64(),
+            Some(Value::Null) | None => {
+                return refuse(
+                    QueryErrorKind::InvalidValueType,
+                    "the percentile is null; it takes a number from 0 to 1".to_string(),
+                );
+            }
+            Some(other) => {
+                return refuse(
+                    QueryErrorKind::InvalidValueType,
+                    format!("the percentile {other} is no number; it takes one from 0 to 1"),
+                );
+            }
+        };
+        if !(0.0..=1.0).contains(&number) {
+            return refuse(
+                QueryErrorKind::NumericOutOfRange,
+                format!("the percentile {number} is outside 0 to 1"),
+            );
+        }
+        Ok(Some(number))
+    }
+
     /// Plans an AGGREGATE operator.
     /// `count(*)` and `count(n)` of a scan of one label and nothing else
     /// (`MATCH (n:Graph) RETURN count(*)`): the store's count of the label's
@@ -354,6 +429,7 @@ impl super::Planner {
                     })),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 })
                 .collect(),
             input: Box::new(LogicalOperator::Empty),
@@ -603,8 +679,10 @@ impl super::Planner {
                     column2,
                     distinct: agg_expr.distinct,
                     alias: agg_expr.alias.clone(),
-                    percentile: agg_expr.percentile,
+                    percentile: self
+                        .constant_percentile(agg_expr.function, agg_expr.percentile.as_ref())?,
                     separator: agg_expr.separator.clone(),
+                    keep_nulls: agg_expr.keep_nulls,
                     rdf_literals: false,
                     temporal: self.session_context.temporal_comparison,
                 })
@@ -1259,6 +1337,7 @@ mod tests {
                 alias: Some("found".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             input: Box::new(expand("q", "S", "t", expand("h", "R", "q", scan))),
             having: None,

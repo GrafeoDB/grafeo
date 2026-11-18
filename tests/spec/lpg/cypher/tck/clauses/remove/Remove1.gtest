@@ -107,9 +107,6 @@ tests:
 
   # [5] Ignore null when removing property from a node
   - name: s5_ignore_null_when_removing_property_from_a_node
-    xfail:
-      spec: "openCypher TCK 2024.3 Remove1: [5] Ignore null when removing property from a node"
-      issue: fix in 0.6.4
     query: |
       OPTIONAL MATCH (a:DoesNotExist)
       REMOVE a.num
@@ -122,9 +119,6 @@ tests:
 
   # [6] Ignore null when removing property from a relationship
   - name: s6_ignore_null_when_removing_property_from_a_relationship
-    xfail:
-      spec: "openCypher TCK 2024.3 Remove1: [6] Ignore null when removing property from a relationship"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE ({num: 42})

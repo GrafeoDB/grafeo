@@ -395,12 +395,22 @@ impl<'a> Parser<'a> {
         // Parse optional YIELD clause
         let yield_items = if self.current.kind == TokenKind::Yield {
             self.advance();
-            let mut items = vec![self.parse_cypher_yield_item()?];
-            while self.current.kind == TokenKind::Comma {
+            // `YIELD *` yields every output, in a CALL that is the whole
+            // statement only (openCypher's standalone call).
+            if self.current.kind == TokenKind::Star {
                 self.advance();
-                items.push(self.parse_cypher_yield_item()?);
+                if !matches!(self.current.kind, TokenKind::Eof | TokenKind::Semicolon) {
+                    return Err(self.error("YIELD * is only allowed in a CALL on its own"));
+                }
+                None
+            } else {
+                let mut items = vec![self.parse_cypher_yield_item()?];
+                while self.current.kind == TokenKind::Comma {
+                    self.advance();
+                    items.push(self.parse_cypher_yield_item()?);
+                }
+                Some(items)
             }
-            Some(items)
         } else {
             None
         };
@@ -1604,22 +1614,22 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_power_expression(&mut self) -> Result<Expression> {
+        // Left associative, as openCypher's grammar has it (`unary ('^'
+        // unary)*`): `2 ^ 3 ^ 2` is `(2 ^ 3) ^ 2`. Each `^` deepens the
+        // expression one level, counted as in the other chains.
+        let chain = self.begin_chain();
         let mut left = self.parse_unary_expression()?;
-
-        if self.current.kind == TokenKind::Caret {
+        while self.current.kind == TokenKind::Caret {
             self.advance();
-            // Right associative: each `^` nests one level, so bound the depth.
-            self.enter_nesting()?;
-            let right = self.parse_power_expression();
-            self.exit_nesting();
-            let right = right?;
+            let right = self.parse_unary_expression()?;
+            self.link_chain()?;
             left = Expression::Binary {
                 left: Box::new(left),
                 op: BinaryOp::Pow,
                 right: Box::new(right),
             };
         }
-
+        self.end_chain(chain);
         Ok(left)
     }
 
@@ -2003,7 +2013,15 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Dollar => {
                 self.advance();
-                let name = self.expect_identifier()?;
+                // openCypher's parameter name is a symbolic name or a decimal
+                // integer (`$1`).
+                let name = if self.current.kind == TokenKind::Integer {
+                    let name = self.current.text.clone();
+                    self.advance();
+                    name
+                } else {
+                    self.expect_identifier()?
+                };
                 Ok(Expression::Parameter(name))
             }
             _ if self.can_be_identifier() => {

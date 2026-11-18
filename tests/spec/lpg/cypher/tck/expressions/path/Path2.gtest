@@ -73,7 +73,7 @@ tests:
   - name: s3_relationships_on_null_path
     xfail:
       spec: "openCypher TCK 2024.3 Path2: [3] `relationships()` on null path"
-      issue: fix in 0.6.4
+      issue: fix in 0.6.5
     query: |
       WITH null AS a
       OPTIONAL MATCH p = (a)-[r]->()

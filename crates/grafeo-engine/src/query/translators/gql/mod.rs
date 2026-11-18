@@ -746,7 +746,7 @@ impl GqlTranslator {
             .map(|a| self.translate_expression(a))
             .collect::<Result<Vec<_>>>()?;
 
-        let yield_items = call.yield_items.as_ref().map(|items| {
+        let yield_items: Option<Vec<ProcedureYield>> = call.yield_items.as_ref().map(|items| {
             items
                 .iter()
                 .map(|item| ProcedureYield {
@@ -755,6 +755,10 @@ impl GqlTranslator {
                 })
                 .collect()
         });
+        if let Some(items) = &yield_items {
+            // A standalone CALL has nothing bound before it.
+            ProcedureYield::check_names(items, &Default::default())?;
+        }
 
         let mut plan = LogicalOperator::CallProcedure(CallProcedureOp {
             name: call.procedure_name.clone(),
@@ -1141,12 +1145,8 @@ impl GqlTranslator {
             //   2. A post-aggregate projection (`_agg_0 > 0 AS exists`)
             // The post-Return also leaves out the columns of HAVING's
             // aggregates.
-            let (mut aggregates, auto_group_by, mut post_return) = self
-                .extract_aggregates_and_groups(
-                    &return_items,
-                    !query.return_clause.group_by.is_empty() || having_aggregates,
-                    &mut plan,
-                )?;
+            let (mut aggregates, auto_group_by, mut post_return) =
+                self.extract_aggregates_and_groups(&return_items, &mut plan)?;
             // HAVING's aggregates are numbered after the `_agg_N` ones of the
             // RETURN list (which skip the names the statement spells, so the
             // next number follows the highest, not the count).
@@ -1167,7 +1167,7 @@ impl GqlTranslator {
             let (group_by, imports_read) = if query.return_clause.group_by.is_empty() {
                 let imports_read = super::common::resolve_implicitly_grouped(
                     "RETURN",
-                    post_return.as_deref_mut().unwrap_or_default(),
+                    &mut post_return,
                     &auto_group_by,
                     &aggregates,
                     &self.call_imports,
@@ -1178,7 +1178,7 @@ impl GqlTranslator {
                     self.translate_group_by(&query.return_clause.group_by, &return_items, &plan)?;
                 let imports_read = self.resolve_grouped_items(
                     &return_items,
-                    post_return.as_deref_mut().unwrap_or_default(),
+                    &mut post_return,
                     &keys,
                     &aggregates,
                 )?;
@@ -1188,7 +1188,7 @@ impl GqlTranslator {
             // Translate HAVING clause if present; its aggregates become
             // columns of the Aggregate (see `having_aggregates`), and its
             // grouping keys and RETURN aliases read the Aggregate's output.
-            let having_scope = aggregate::HavingScope::new(&group_by, post_return.as_deref());
+            let having_scope = aggregate::HavingScope::new(&group_by, Some(&post_return));
             let having = match &having_condition {
                 Some(condition) if having_aggregates => {
                     Some(having_scope.resolve(self.extract_wrapped_aggregates(
@@ -1215,11 +1215,7 @@ impl GqlTranslator {
                 true,
             );
 
-            if let Some(return_items) = post_return {
-                plan = wrap_return(agg_op, return_items, query.return_clause.distinct);
-            } else {
-                plan = agg_op;
-            }
+            plan = wrap_return(agg_op, post_return, query.return_clause.distinct);
 
             // Apply ORDER BY for aggregate queries.
             // Sort keys that reference a property on a match variable (e.g. a.species)
@@ -1230,9 +1226,6 @@ impl GqlTranslator {
                 let keys = self.projected_sort_keys(order_by, &return_items, "RETURN", true)?;
                 plan = wrap_sort(plan, keys);
             }
-
-            // Note: For aggregate queries, we don't add a Return operator
-            // because Aggregate already produces the final output
         } else {
             // With DISTINCT, ORDER BY reads only what the RETURN returns (see
             // `sort`).
@@ -1833,10 +1826,10 @@ impl GqlTranslator {
 
             if has_aggregates {
                 let (aggregates, auto_group_by, mut post_return) =
-                    self.extract_aggregates_and_groups(&items, false, &mut plan)?;
+                    self.extract_aggregates_and_groups(&items, &mut plan)?;
                 let imports_read = super::common::resolve_implicitly_grouped(
                     "WITH",
-                    post_return.as_deref_mut().unwrap_or_default(),
+                    &mut post_return,
                     &auto_group_by,
                     &aggregates,
                     &self.call_imports,
@@ -1880,20 +1873,18 @@ impl GqlTranslator {
 
                 // Apply post-aggregate projection if aggregates were wrapped
                 // in expressions (e.g. WITH count(n) + 1 AS cnt_plus_one)
-                if let Some(post_items) = post_return {
-                    let post_projections: Vec<Projection> = post_items
-                        .into_iter()
-                        .map(|item| Projection {
-                            expression: item.expression,
-                            alias: item.alias,
-                        })
-                        .collect();
-                    plan = LogicalOperator::Project(ProjectOp {
-                        projections: post_projections,
-                        input: Box::new(plan),
-                        pass_through_input: false,
-                    });
-                }
+                let post_projections: Vec<Projection> = post_return
+                    .into_iter()
+                    .map(|item| Projection {
+                        expression: item.expression,
+                        alias: item.alias,
+                    })
+                    .collect();
+                plan = LogicalOperator::Project(ProjectOp {
+                    projections: post_projections,
+                    input: Box::new(plan),
+                    pass_through_input: false,
+                });
                 plan = with_imports(plan, missing, true);
 
                 // Apply non-aggregate WHERE conjuncts as a post-aggregate filter.
@@ -3432,13 +3423,22 @@ mod tests {
         assert!(result.is_ok());
 
         let plan = result.unwrap();
-        if let LogicalOperator::Aggregate(agg) = &plan.root {
-            assert_eq!(agg.aggregates.len(), 1);
-            // COUNT(expr) uses CountNonNull to ensure we fetch values for DISTINCT support
-            assert_eq!(agg.aggregates[0].function, AggregateFunction::CountNonNull);
-        } else {
-            panic!("Expected Aggregate operator, got {:?}", plan.root);
-        }
+        let agg = aggregate_under_return(&plan);
+        assert_eq!(agg.aggregates.len(), 1);
+        // COUNT(expr) uses CountNonNull to ensure we fetch values for DISTINCT support
+        assert_eq!(agg.aggregates[0].function, AggregateFunction::CountNonNull);
+    }
+
+    /// The Aggregate an aggregating RETURN plans, under the Return that reads
+    /// its output (nodes and edges included).
+    fn aggregate_under_return(plan: &LogicalPlan) -> &AggregateOp {
+        let LogicalOperator::Return(ret) = &plan.root else {
+            panic!("Expected Return operator, got {:?}", plan.root);
+        };
+        let LogicalOperator::Aggregate(agg) = ret.input.as_ref() else {
+            panic!("Expected Aggregate under the Return, got {:?}", ret.input);
+        };
+        agg
     }
 
     #[test]
@@ -3448,12 +3448,9 @@ mod tests {
         assert!(result.is_ok());
 
         let plan = result.unwrap();
-        if let LogicalOperator::Aggregate(agg) = &plan.root {
-            assert_eq!(agg.aggregates.len(), 1);
-            assert_eq!(agg.aggregates[0].function, AggregateFunction::Sum);
-        } else {
-            panic!("Expected Aggregate operator");
-        }
+        let agg = aggregate_under_return(&plan);
+        assert_eq!(agg.aggregates.len(), 1);
+        assert_eq!(agg.aggregates[0].function, AggregateFunction::Sum);
     }
 
     #[test]
@@ -3463,12 +3460,9 @@ mod tests {
         assert!(result.is_ok());
 
         let plan = result.unwrap();
-        if let LogicalOperator::Aggregate(agg) = &plan.root {
-            assert_eq!(agg.group_by.len(), 1); // n.city
-            assert_eq!(agg.aggregates.len(), 1); // COUNT(n)
-        } else {
-            panic!("Expected Aggregate operator");
-        }
+        let agg = aggregate_under_return(&plan);
+        assert_eq!(agg.group_by.len(), 1); // n.city
+        assert_eq!(agg.aggregates.len(), 1); // COUNT(n)
     }
 
     // === Ordering and Pagination Tests ===

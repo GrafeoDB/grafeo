@@ -45,11 +45,8 @@ tests:
 
   # [1] In-query call to procedure with explicit arguments
   - name: s1_in_query_call_to_procedure_with_explicit_arguments
-    xfail:
-      spec: "openCypher TCK 2024.3 Call2: [1] In-query call to procedure with explicit arguments"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(name STRING, id INT64) RETURNS (city STRING, country_code INT64) AS { UNWIND [{p0: 'Andres', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Tobias', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Mats', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Stefan', p1: 1, p2: 'Berlin', p3: 49}, {p0: 'Stefan', p1: 2, p2: 'München', p3: 49}, {p0: 'Petra', p1: 1, p2: 'London', p3: 44}] AS r FILTER r.p0 = $name AND r.p1 = $id RETURN r.p2 AS city, r.p3 AS country_code }"
+      - "CREATE PROCEDURE `test.my.proc`(name STRING, id INT64) RETURNS (city STRING, country_code INT64) AS { UNWIND [{p0: 'Andres', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Tobias', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Mats', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Stefan', p1: 1, p2: 'Berlin', p3: 49}, {p0: 'Stefan', p1: 2, p2: 'München', p3: 49}, {p0: 'Petra', p1: 1, p2: 'London', p3: 44}] AS r FILTER (r.p0 = $name OR (r.p0 IS NULL AND $name IS NULL)) AND (r.p1 = $id OR (r.p1 IS NULL AND $id IS NULL)) RETURN r.p2 AS city, r.p3 AS country_code }"
     query: |
       CALL test.my.proc('Stefan', 1) YIELD city, country_code
       RETURN city, country_code
@@ -62,11 +59,8 @@ tests:
 
   # [2] Standalone call to procedure with explicit arguments
   - name: s2_standalone_call_to_procedure_with_explicit_arguments
-    xfail:
-      spec: "openCypher TCK 2024.3 Call2: [2] Standalone call to procedure with explicit arguments"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(name STRING, id INT64) RETURNS (city STRING, country_code INT64) AS { UNWIND [{p0: 'Andres', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Tobias', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Mats', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Stefan', p1: 1, p2: 'Berlin', p3: 49}, {p0: 'Stefan', p1: 2, p2: 'München', p3: 49}, {p0: 'Petra', p1: 1, p2: 'London', p3: 44}] AS r FILTER r.p0 = $name AND r.p1 = $id RETURN r.p2 AS city, r.p3 AS country_code }"
+      - "CREATE PROCEDURE `test.my.proc`(name STRING, id INT64) RETURNS (city STRING, country_code INT64) AS { UNWIND [{p0: 'Andres', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Tobias', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Mats', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Stefan', p1: 1, p2: 'Berlin', p3: 49}, {p0: 'Stefan', p1: 2, p2: 'München', p3: 49}, {p0: 'Petra', p1: 1, p2: 'London', p3: 44}] AS r FILTER (r.p0 = $name OR (r.p0 IS NULL AND $name IS NULL)) AND (r.p1 = $id OR (r.p1 IS NULL AND $id IS NULL)) RETURN r.p2 AS city, r.p3 AS country_code }"
     query: |
       CALL test.my.proc('Stefan', 1)
     expect:
@@ -80,7 +74,7 @@ tests:
   # TCK: SyntaxError at compile time: InvalidArgumentPassingMode
   - name: s4_in_query_call_to_procedure_that_takes_arguments_fails_when_trying_to_pass_them_implicitly
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS out }"
     query: |
       CALL test.my.proc YIELD out
       RETURN out
@@ -92,7 +86,7 @@ tests:
   # TCK: SyntaxError at compile time: InvalidArgumentType
   - name: s5_standalone_call_to_procedure_should_fail_if_input_type_is_wrong
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS out }"
     query: |
       CALL test.my.proc(true)
     expect:
@@ -103,7 +97,7 @@ tests:
   # TCK: SyntaxError at compile time: InvalidArgumentType
   - name: s6_in_query_call_to_procedure_should_fail_if_input_type_is_wrong
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS out }"
     query: |
       CALL test.my.proc(true) YIELD out
       RETURN out

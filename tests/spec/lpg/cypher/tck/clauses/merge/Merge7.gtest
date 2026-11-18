@@ -89,9 +89,6 @@ tests:
 
   # [4] Copying properties from node with ON MATCH
   - name: s4_copying_properties_from_node_with_on_match
-    xfail:
-      spec: "openCypher TCK 2024.3 Merge7: [4] Copying properties from node with ON MATCH"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (:A {name: 'A'}), (:B {name: 'B'})
@@ -110,9 +107,6 @@ tests:
 
   # [4] Copying properties from node with ON MATCH (control query)
   - name: s4_copying_properties_from_node_with_on_match_control
-    xfail:
-      spec: "openCypher TCK 2024.3 Merge7: [4] Copying properties from node with ON MATCH (control query)"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (:A {name: 'A'}), (:B {name: 'B'})

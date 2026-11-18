@@ -43,11 +43,8 @@ tests:
 
   # [1] Standalone call to procedure with null argument
   - name: s1_standalone_call_to_procedure_with_null_argument
-    xfail:
-      spec: "openCypher TCK 2024.3 Call4: [1] Standalone call to procedure with null argument"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out STRING) AS { UNWIND [{p0: null, p1: 'nix'}] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out STRING) AS { UNWIND [{p0: null, p1: 'nix'}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS out }"
     query: |
       CALL test.my.proc(null)
     expect:
@@ -59,11 +56,8 @@ tests:
 
   # [2] In-query call to procedure with null argument
   - name: s2_in_query_call_to_procedure_with_null_argument
-    xfail:
-      spec: "openCypher TCK 2024.3 Call4: [2] In-query call to procedure with null argument"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out STRING) AS { UNWIND [{p0: null, p1: 'nix'}] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out STRING) AS { UNWIND [{p0: null, p1: 'nix'}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS out }"
     query: |
       CALL test.my.proc(null) YIELD out
       RETURN out

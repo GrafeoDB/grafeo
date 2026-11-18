@@ -43,9 +43,6 @@ tests:
 
   # [1] `percentileDisc()` #1
   - name: s1_percentiledisc_1
-    xfail:
-      spec: "openCypher TCK 2024.3 Aggregation6: [1] `percentileDisc()` #1"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE ({price: 10.0}),
@@ -82,9 +79,6 @@ tests:
 
   # [1] `percentileDisc()` #3
   - name: s1_percentiledisc_3
-    xfail:
-      spec: "openCypher TCK 2024.3 Aggregation6: [1] `percentileDisc()` #3"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE ({price: 10.0}),
@@ -103,9 +97,6 @@ tests:
 
   # [2] `percentileCont()` #1
   - name: s2_percentilecont_1
-    xfail:
-      spec: "openCypher TCK 2024.3 Aggregation6: [2] `percentileCont()` #1"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE ({price: 10.0}),
@@ -142,9 +133,6 @@ tests:
 
   # [2] `percentileCont()` #3
   - name: s2_percentilecont_3
-    xfail:
-      spec: "openCypher TCK 2024.3 Aggregation6: [2] `percentileCont()` #3"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE ({price: 10.0}),
@@ -164,9 +152,6 @@ tests:
   # [3] `percentileCont()` failing on bad arguments #1
   # TCK: ArgumentError at runtime: NumberOutOfRange
   - name: s3_percentilecont_failing_on_bad_arguments_1
-    xfail:
-      spec: "openCypher TCK 2024.3 Aggregation6: [3] `percentileCont()` failing on bad arguments #1"
-      issue: fix in 0.6.5
     setup:
       - |
         CREATE ({price: 10.0})
@@ -182,9 +167,6 @@ tests:
   # [3] `percentileCont()` failing on bad arguments #2
   # TCK: ArgumentError at runtime: NumberOutOfRange
   - name: s3_percentilecont_failing_on_bad_arguments_2
-    xfail:
-      spec: "openCypher TCK 2024.3 Aggregation6: [3] `percentileCont()` failing on bad arguments #2"
-      issue: fix in 0.6.5
     setup:
       - |
         CREATE ({price: 10.0})
@@ -200,9 +182,6 @@ tests:
   # [3] `percentileCont()` failing on bad arguments #3
   # TCK: ArgumentError at runtime: NumberOutOfRange
   - name: s3_percentilecont_failing_on_bad_arguments_3
-    xfail:
-      spec: "openCypher TCK 2024.3 Aggregation6: [3] `percentileCont()` failing on bad arguments #3"
-      issue: fix in 0.6.5
     setup:
       - |
         CREATE ({price: 10.0})
@@ -218,9 +197,6 @@ tests:
   # [4] `percentileDisc()` failing on bad arguments #1
   # TCK: ArgumentError at runtime: NumberOutOfRange
   - name: s4_percentiledisc_failing_on_bad_arguments_1
-    xfail:
-      spec: "openCypher TCK 2024.3 Aggregation6: [4] `percentileDisc()` failing on bad arguments #1"
-      issue: fix in 0.6.5
     setup:
       - |
         CREATE ({price: 10.0})
@@ -236,9 +212,6 @@ tests:
   # [4] `percentileDisc()` failing on bad arguments #2
   # TCK: ArgumentError at runtime: NumberOutOfRange
   - name: s4_percentiledisc_failing_on_bad_arguments_2
-    xfail:
-      spec: "openCypher TCK 2024.3 Aggregation6: [4] `percentileDisc()` failing on bad arguments #2"
-      issue: fix in 0.6.5
     setup:
       - |
         CREATE ({price: 10.0})
@@ -254,9 +227,6 @@ tests:
   # [4] `percentileDisc()` failing on bad arguments #3
   # TCK: ArgumentError at runtime: NumberOutOfRange
   - name: s4_percentiledisc_failing_on_bad_arguments_3
-    xfail:
-      spec: "openCypher TCK 2024.3 Aggregation6: [4] `percentileDisc()` failing on bad arguments #3"
-      issue: fix in 0.6.5
     setup:
       - |
         CREATE ({price: 10.0})

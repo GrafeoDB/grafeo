@@ -1282,9 +1282,13 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &Substitution<'_>) -
                 }
             }
             for agg_expr in &mut agg.aggregates {
-                for expr in [&mut agg_expr.expression, &mut agg_expr.expression2]
-                    .into_iter()
-                    .flatten()
+                for expr in [
+                    &mut agg_expr.expression,
+                    &mut agg_expr.expression2,
+                    &mut agg_expr.percentile,
+                ]
+                .into_iter()
+                .flatten()
                 {
                     substitute_in_expression(expr, params)?;
                 }
@@ -1436,6 +1440,9 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &Substitution<'_>) -
         | LogicalOperator::MoveGraph(_)
         | LogicalOperator::AddGraph(_) => {}
         LogicalOperator::HorizontalAggregate(op) => {
+            if let Some(percentile) = &mut op.percentile {
+                substitute_in_expression(percentile, params)?;
+            }
             substitute_in_operator(&mut op.input, params)?;
         }
         LogicalOperator::Empty => {}

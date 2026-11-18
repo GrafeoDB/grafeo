@@ -146,9 +146,6 @@ tests:
 
   # [8] Handle aggregation on functions
   - name: s8_handle_aggregation_on_functions
-    xfail:
-      spec: "openCypher TCK 2024.3 Return6: [8] Handle aggregation on functions"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:L), (b1), (b2)
@@ -179,9 +176,6 @@ tests:
 
   # [10] Multiple aggregates on same variable
   - name: s10_multiple_aggregates_on_same_variable
-    xfail:
-      spec: "openCypher TCK 2024.3 Return6: [10] Multiple aggregates on same variable"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE ()
@@ -211,9 +205,6 @@ tests:
 
   # [12] Counting matches per group
   - name: s12_counting_matches_per_group
-    xfail:
-      spec: "openCypher TCK 2024.3 Return6: [12] Counting matches per group"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:L), (b1), (b2)

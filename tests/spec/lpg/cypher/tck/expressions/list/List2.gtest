@@ -131,9 +131,6 @@ tests:
 
   # [9] List slice with null range #1
   - name: s9_list_slice_with_null_range_1
-    xfail:
-      spec: "openCypher TCK 2024.3 List2: [9] List slice with null range #1"
-      issue: fix in 0.6.4
     query: |
       WITH [1, 2, 3] AS list
       RETURN list[null..null] AS r
@@ -145,9 +142,6 @@ tests:
 
   # [9] List slice with null range #2
   - name: s9_list_slice_with_null_range_2
-    xfail:
-      spec: "openCypher TCK 2024.3 List2: [9] List slice with null range #2"
-      issue: fix in 0.6.4
     query: |
       WITH [1, 2, 3] AS list
       RETURN list[1..null] AS r
@@ -159,9 +153,6 @@ tests:
 
   # [9] List slice with null range #3
   - name: s9_list_slice_with_null_range_3
-    xfail:
-      spec: "openCypher TCK 2024.3 List2: [9] List slice with null range #3"
-      issue: fix in 0.6.4
     query: |
       WITH [1, 2, 3] AS list
       RETURN list[null..3] AS r
@@ -173,9 +164,6 @@ tests:
 
   # [9] List slice with null range #4
   - name: s9_list_slice_with_null_range_4
-    xfail:
-      spec: "openCypher TCK 2024.3 List2: [9] List slice with null range #4"
-      issue: fix in 0.6.4
     query: |
       WITH [1, 2, 3] AS list
       RETURN list[..null] AS r
@@ -187,9 +175,6 @@ tests:
 
   # [9] List slice with null range #5
   - name: s9_list_slice_with_null_range_5
-    xfail:
-      spec: "openCypher TCK 2024.3 List2: [9] List slice with null range #5"
-      issue: fix in 0.6.4
     query: |
       WITH [1, 2, 3] AS list
       RETURN list[null..] AS r

@@ -9,21 +9,8 @@
 #   TCK's for this case; the case expects GQL's class and says so in a comment.
 # An entry that names no case stops the conversion.
 
-[Aggregation5]
-s1_collect_filtering_nulls = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-
 [Aggregation6]
-s1_percentiledisc_1 = { issue = "fix in 0.6.4", note = "wrong result" }
-s1_percentiledisc_3 = { issue = "fix in 0.6.4", note = "wrong result" }
-s2_percentilecont_1 = { issue = "fix in 0.6.4", note = "wrong result" }
-s2_percentilecont_3 = { issue = "fix in 0.6.4", note = "wrong result" }
-s3_percentilecont_failing_on_bad_arguments_1 = { issue = "fix in 0.6.5", note = "a run-time type or range error is not raised" }
-s3_percentilecont_failing_on_bad_arguments_2 = { issue = "fix in 0.6.5", note = "a run-time type or range error is not raised" }
-s3_percentilecont_failing_on_bad_arguments_3 = { issue = "fix in 0.6.5", note = "a run-time type or range error is not raised" }
-s4_percentiledisc_failing_on_bad_arguments_1 = { issue = "fix in 0.6.5", note = "a run-time type or range error is not raised" }
-s4_percentiledisc_failing_on_bad_arguments_2 = { issue = "fix in 0.6.5", note = "a run-time type or range error is not raised" }
-s4_percentiledisc_failing_on_bad_arguments_3 = { issue = "fix in 0.6.5", note = "a run-time type or range error is not raised" }
-s5_percentiledisc_failing_in_more_involved_query = { issue = "fix in 0.6.5", note = "a run-time type or range error is not raised" }
+s5_percentiledisc_failing_in_more_involved_query = { issue = "fix in 0.6.5", note = "the percentile reads a variable of the rows (deg), which is refused before the statement runs (42000), not at run time" }
 
 [Boolean1]
 s8_fail_on_conjunction_of_at_least_one_non_booleans_1 = { issue = "fix in 0.6.5", note = "a statically typed operand of the wrong type is accepted" }
@@ -150,58 +137,16 @@ s4_fail_when_using_not_on_a_non_boolean_literal_8 = { issue = "fix in 0.6.5", no
 s4_fail_when_using_not_on_a_non_boolean_literal_9 = { issue = "fix in 0.6.5", note = "a statically typed operand of the wrong type is accepted" }
 
 [Call1]
-s1_standalone_call_to_procedure_that_takes_no_arguments_and_yields_no_results = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
 s2_standalone_call_to_procedure_that_takes_no_arguments_and_yields_no_results_called_with_implicit_arguments = { reason = "out-of-scope", note = "standalone CALL with implicit arguments" }
-s3_in_query_call_to_procedure_that_takes_no_arguments_and_yields_no_results = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s4_in_query_call_to_procedure_that_takes_no_arguments_and_yields_no_results_and_consumes_no_rows = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s5_standalone_call_to_string_procedure_that_takes_no_arguments = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s6_in_query_call_to_string_procedure_that_takes_no_arguments = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
 
 [Call2]
-s1_in_query_call_to_procedure_with_explicit_arguments = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s2_standalone_call_to_procedure_with_explicit_arguments = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
 s3_standalone_call_to_procedure_with_implicit_arguments = { reason = "out-of-scope", note = "standalone CALL with implicit arguments" }
 
-[Call3]
-s1_standalone_call_to_procedure_with_argument_of_type_number_accepts_value_of_type_integer = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s2_in_query_call_to_procedure_with_argument_of_type_number_accepts_value_of_type_integer = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s3_standalone_call_to_procedure_with_argument_of_type_number_accepts_value_of_type_float = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s4_in_query_call_to_procedure_with_argument_of_type_number_accepts_value_of_type_float = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s5_standalone_call_to_procedure_with_argument_of_type_float_accepts_value_of_type_integer = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s6_in_query_call_to_procedure_with_argument_of_type_float_accepts_value_of_type_integer = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-
-[Call4]
-s1_standalone_call_to_procedure_with_null_argument = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s2_in_query_call_to_procedure_with_null_argument = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-
-[Call5]
-s1_explicit_procedure_result_projection = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s2_explicit_procedure_result_projection_with_return = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s3_the_order_of_yield_items_is_irrelevant_1 = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s3_the_order_of_yield_items_is_irrelevant_2 = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s4_rename_outputs_to_unbound_variable_names_1 = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s4_rename_outputs_to_unbound_variable_names_10 = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s4_rename_outputs_to_unbound_variable_names_11 = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s4_rename_outputs_to_unbound_variable_names_2 = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s4_rename_outputs_to_unbound_variable_names_3 = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s4_rename_outputs_to_unbound_variable_names_4 = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s4_rename_outputs_to_unbound_variable_names_5 = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s4_rename_outputs_to_unbound_variable_names_6 = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s4_rename_outputs_to_unbound_variable_names_7 = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s4_rename_outputs_to_unbound_variable_names_8 = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s4_rename_outputs_to_unbound_variable_names_9 = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s8_allow_standalone_call_to_procedure_with_yield = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-
-[Call6]
-s1_calling_the_same_string_procedure_twice_using_the_same_outputs_in_each_call = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s2_project_procedure_results_between_query_scopes_with_with_clause = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-s3_project_procedure_results_between_query_scopes_with_with_clause_and_rename_the_projection = { issue = "fix in 0.6.4", note = "a dotted procedure name is looked up by its last segment" }
-
 [Comparison2]
-s3_comparing_across_types_yields_null_except_numbers_1 = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s3_comparing_across_types_yields_null_except_numbers_2 = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s3_comparing_across_types_yields_null_except_numbers_3 = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s3_comparing_across_types_yields_null_except_numbers_4 = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
+s3_comparing_across_types_yields_null_except_numbers_1 = { issue = "fix in 0.6.4", note = "a node or relationship taken from a list of mixed kinds by a computed index comes back as its id" }
+s3_comparing_across_types_yields_null_except_numbers_2 = { issue = "fix in 0.6.4", note = "a node or relationship taken from a list of mixed kinds by a computed index comes back as its id" }
+s3_comparing_across_types_yields_null_except_numbers_3 = { issue = "fix in 0.6.4", note = "a node or relationship taken from a list of mixed kinds by a computed index comes back as its id" }
+s3_comparing_across_types_yields_null_except_numbers_4 = { issue = "fix in 0.6.4", note = "a node or relationship taken from a list of mixed kinds by a computed index comes back as its id" }
 
 [Create1]
 s13_fail_when_creating_a_node_that_is_already_bound = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
@@ -222,18 +167,8 @@ s2_many_create_clauses = { issue = "fix in 0.6.5", note = "syntax not supported 
 [Create5]
 s5_create_a_pattern_with_multiple_hops_and_varying_directions_control = { issue = "fix in 0.6.5", note = "Cypher column names are not the source text, or RETURN * is not by name" }
 
-[Delete1]
-s4_delete_on_null_node = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s5_ignore_null_when_deleting_node = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s6_detach_delete_on_null_node = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-
-[Delete2]
-s2_delete_optionally_matched_relationship = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s4_ignore_null_when_deleting_relationship = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-
 [Delete3]
 s1_detach_deleting_paths = { issue = "fix in 0.6.5", note = "syntax not supported yet" }
-s2_delete_on_null_path = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
 
 [Delete5]
 s1_delete_node_from_a_list = { issue = "fix in 0.6.5", note = "syntax not supported yet" }
@@ -325,13 +260,6 @@ s5_fail_on_invalid_argument_types_for_range_9 = { issue = "fix in 0.7.0", note =
 
 [List12]
 s7_fail_when_using_aggregation_in_list_comprehension = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
-
-[List2]
-s9_list_slice_with_null_range_1 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s9_list_slice_with_null_range_2 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s9_list_slice_with_null_range_3 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s9_list_slice_with_null_range_4 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s9_list_slice_with_null_range_5 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
 
 [List5]
 s42_failing_when_using_in_on_a_non_list_literal_1 = { issue = "fix in 0.6.5", note = "a statically typed operand of the wrong type is accepted" }
@@ -543,9 +471,6 @@ s25_fail_when_matching_a_path_variable_bound_to_a_value_8 = { issue = "fix in 0.
 [MatchWhere1]
 s14_fail_when_filtering_path_with_property_predicate = { issue = "fix in 0.6.5", note = "a statically typed operand of the wrong type is accepted" }
 
-[MatchWhere2]
-s2_filter_node_with_conjunctive_multi_part_property_predicates_on_multi_variables_with_multiple_bindings = { issue = "fix in 0.6.5", note = "syntax not supported yet" }
-
 [Mathematical8]
 s1_arithmetic_precedence_test = { issue = "fix in 0.6.5", note = "Cypher column names are not the source text, or RETURN * is not by name" }
 s2_arithmetic_precedence_with_parenthesis_test = { issue = "fix in 0.6.5", note = "Cypher column names are not the source text, or RETURN * is not by name" }
@@ -559,22 +484,11 @@ s17_fail_on_merging_node_with_null_property = { issue = "fix in 0.6.5", note = "
 s22_fail_when_imposing_new_predicates_on_a_variable_that_is_already_bound = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
 s29_fail_on_merging_relationship_with_null_property = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
 
-[Merge6]
-s6_copying_properties_from_node_with_on_create = { issue = "fix in 0.6.4", note = "wrong result" }
-s6_copying_properties_from_node_with_on_create_control = { issue = "fix in 0.6.4", note = "wrong result" }
-
-[Merge7]
-s4_copying_properties_from_node_with_on_match = { issue = "fix in 0.6.4", note = "wrong result" }
-s4_copying_properties_from_node_with_on_match_control = { issue = "fix in 0.6.4", note = "wrong result" }
-
-[Null3]
-s4_using_null_in_in_4 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-
 [Path1]
-s1_nodes_on_null_path = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
+s1_nodes_on_null_path = { issue = "fix in 0.6.5", note = "an unaliased column names a null literal NULL, not null as written" }
 
 [Path2]
-s3_relationships_on_null_path = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
+s3_relationships_on_null_path = { issue = "fix in 0.6.5", note = "an unaliased column names a null literal NULL, not null as written" }
 
 [Path3]
 s2_failing_when_using_length_on_a_node = { issue = "fix in 0.7.0", note = "a function argument of the wrong type" }
@@ -606,65 +520,30 @@ s11_use_a_pattern_comprehension_and_order_by = { issue = "fix in 0.6.5", note = 
 s1_return_a_pattern_comprehension = { issue = "fix in 0.6.5", note = "syntax not supported yet" }
 s2_return_a_pattern_comprehension_with_label_predicate = { issue = "fix in 0.6.5", note = "syntax not supported yet" }
 s3_return_a_pattern_comprehension_with_bound_nodes = { issue = "fix in 0.6.5", note = "syntax not supported yet" }
-s4_introduce_a_new_node_variable_in_pattern_comprehension = { issue = "fix in 0.6.4", note = "wrong result" }
-s5_introduce_a_new_relationship_variable_in_pattern_comprehension = { issue = "fix in 0.6.4", note = "wrong result" }
 s6_aggregate_on_a_pattern_comprehension = { issue = "fix in 0.6.5", note = "syntax not supported yet" }
 s7_use_a_pattern_comprehension_inside_a_list_comprehension = { issue = "fix in 0.6.5", note = "pattern comprehension in a list comprehension (an internal error until then)" }
 s8_use_a_pattern_comprehension_in_with = { issue = "fix in 0.6.5", note = "syntax not supported yet" }
 s9_use_a_variable_length_pattern_comprehension_in_with = { issue = "fix in 0.6.5", note = "syntax not supported yet" }
 
-[Precedence2]
-s2_exponentiation_takes_precedence_over_numeric_multiplicative_operations_1 = { issue = "fix in 0.6.4", note = "wrong result" }
-s2_exponentiation_takes_precedence_over_numeric_multiplicative_operations_2 = { issue = "fix in 0.6.4", note = "wrong result" }
-s2_exponentiation_takes_precedence_over_numeric_multiplicative_operations_3 = { issue = "fix in 0.6.4", note = "wrong result" }
-s3_exponentiation_takes_precedence_over_numeric_additive_operations_1 = { issue = "fix in 0.6.4", note = "wrong result" }
-s3_exponentiation_takes_precedence_over_numeric_additive_operations_2 = { issue = "fix in 0.6.4", note = "wrong result" }
-
 [Quantifier1]
-s10_none_quantifier_on_lists_containing_nulls_1 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s10_none_quantifier_on_lists_containing_nulls_2 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s10_none_quantifier_on_lists_containing_nulls_3 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s10_none_quantifier_on_lists_containing_nulls_7 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
 s15_fail_none_quantifier_on_type_mismatch_between_list_elements_and_predicate_1 = { issue = "fix in 0.6.5", note = "a static type error is raised at run time (class 22)" }
 s15_fail_none_quantifier_on_type_mismatch_between_list_elements_and_predicate_2 = { issue = "fix in 0.6.5", note = "a static type error is raised at run time (class 22)" }
 s15_fail_none_quantifier_on_type_mismatch_between_list_elements_and_predicate_3 = { issue = "fix in 0.6.5", note = "a static type error is raised at run time (class 22)" }
 
 [Quantifier2]
-s10_single_quantifier_on_lists_containing_nulls_1 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s10_single_quantifier_on_lists_containing_nulls_2 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s10_single_quantifier_on_lists_containing_nulls_3 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s10_single_quantifier_on_lists_containing_nulls_4 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s10_single_quantifier_on_lists_containing_nulls_5 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s10_single_quantifier_on_lists_containing_nulls_7 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
 s16_fail_single_quantifier_on_type_mismatch_between_list_elements_and_predicate_1 = { issue = "fix in 0.6.5", note = "a static type error is raised at run time (class 22)" }
 s16_fail_single_quantifier_on_type_mismatch_between_list_elements_and_predicate_2 = { issue = "fix in 0.6.5", note = "a static type error is raised at run time (class 22)" }
 s16_fail_single_quantifier_on_type_mismatch_between_list_elements_and_predicate_3 = { issue = "fix in 0.6.5", note = "a static type error is raised at run time (class 22)" }
 
 [Quantifier3]
-s10_any_quantifier_on_lists_containing_nulls_1 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s10_any_quantifier_on_lists_containing_nulls_2 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s10_any_quantifier_on_lists_containing_nulls_3 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s10_any_quantifier_on_lists_containing_nulls_7 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
 s15_fail_any_quantifier_on_type_mismatch_between_list_elements_and_predicate_1 = { issue = "fix in 0.6.5", note = "a static type error is raised at run time (class 22)" }
 s15_fail_any_quantifier_on_type_mismatch_between_list_elements_and_predicate_2 = { issue = "fix in 0.6.5", note = "a static type error is raised at run time (class 22)" }
 s15_fail_any_quantifier_on_type_mismatch_between_list_elements_and_predicate_3 = { issue = "fix in 0.6.5", note = "a static type error is raised at run time (class 22)" }
 
 [Quantifier4]
-s10_all_quantifier_on_lists_containing_nulls_1 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s10_all_quantifier_on_lists_containing_nulls_2 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s10_all_quantifier_on_lists_containing_nulls_4 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s10_all_quantifier_on_lists_containing_nulls_5 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s10_all_quantifier_on_lists_containing_nulls_8 = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
 s15_fail_all_quantifier_on_type_mismatch_between_list_elements_and_predicate_1 = { issue = "fix in 0.6.5", note = "a static type error is raised at run time (class 22)" }
 s15_fail_all_quantifier_on_type_mismatch_between_list_elements_and_predicate_2 = { issue = "fix in 0.6.5", note = "a static type error is raised at run time (class 22)" }
 s15_fail_all_quantifier_on_type_mismatch_between_list_elements_and_predicate_3 = { issue = "fix in 0.6.5", note = "a static type error is raised at run time (class 22)" }
-
-[Remove1]
-s5_ignore_null_when_removing_property_from_a_node = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-s6_ignore_null_when_removing_property_from_a_relationship = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-
-[Remove2]
-s5_ignore_null_when_removing_a_node_label = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
 
 [Return2]
 s14_do_not_fail_when_returning_type_of_deleted_relationships = { issue = "fix in 0.6.4", note = "a node or relationship comes back as its id" }
@@ -680,13 +559,10 @@ s6_keeping_used_expression_3 = { issue = "fix in 0.6.5", note = "Cypher column n
 s7_keeping_used_expression_4 = { issue = "fix in 0.6.5", note = "Cypher column names are not the source text, or RETURN * is not by name" }
 
 [Return6]
-s10_multiple_aggregates_on_same_variable = { issue = "fix in 0.6.4", note = "a node or relationship comes back as its id" }
-s12_counting_matches_per_group = { issue = "fix in 0.6.4", note = "wrong result" }
 s15_using_rand_in_aggregations = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
 s17_handle_constants_and_parameters_inside_an_expression_which_contains_an_aggregation_expression = { issue = "fix in 0.6.5", note = "Cypher column names are not the source text, or RETURN * is not by name" }
 s21_fail_if_more_complex_expressions_even_if_returned_are_used_inside_expression_which_contains_an_aggregation_expression = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
 s6_handle_aggregates_inside_non_aggregate_expressions = { issue = "fix in 0.6.5", note = "syntax not supported yet" }
-s8_handle_aggregation_on_functions = { issue = "fix in 0.6.4", note = "wrong result" }
 
 [Return7]
 s2_fail_when_using_return_without_variables_in_scope = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
@@ -694,9 +570,6 @@ s2_fail_when_using_return_without_variables_in_scope = { issue = "fix in 0.6.5",
 [ReturnOrderBy1]
 s11_order_by_should_order_distinct_types_in_the_expected_order = { issue = "fix in 0.6.4", note = "a node or relationship comes back as its id" }
 s12_order_by_desc_should_order_distinct_types_in_the_expected_order = { issue = "fix in 0.6.4", note = "a node or relationship comes back as its id" }
-
-[ReturnOrderBy2]
-s6_count_star_should_count_everything_in_scope = { issue = "fix in 0.6.4", note = "wrong result" }
 
 [ReturnOrderBy6]
 s5_fail_if_more_complex_expressions_even_if_returned_are_used_inside_an_order_by_item_which_contains_an_aggregation_expression = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
@@ -724,16 +597,6 @@ s6_limit_with_an_expression_that_does_not_depend_on_variables = { issue = "fix i
 s10_failing_when_setting_a_list_of_maps_as_a_property = { issue = "fix in 0.6.5", note = "a run-time type or range error is not raised" }
 s3_set_a_property_by_selecting_the_node_using_a_simple_expression = { issue = "fix in 0.6.5", note = "syntax not supported yet" }
 s4_set_a_property_by_selecting_the_relationship_using_a_simple_expression = { issue = "fix in 0.6.5", note = "syntax not supported yet" }
-s8_ignore_null_when_setting_property = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-
-[Set3]
-s8_ignore_null_when_setting_label = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-
-[Set4]
-s5_ignore_null_when_setting_properties_using_an_overriding_map = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
-
-[Set5]
-s1_ignore_null_when_setting_properties_using_an_appending_map = { issue = "fix in 0.6.4", note = "null is not handled as openCypher defines" }
 
 [Temporal1]
 s10_should_construct_date_time_with_named_time_zone_1 = { issue = "fix in 0.6.5", note = "temporal functions and values" }
@@ -1679,26 +1542,6 @@ s5_should_truncate_time_7 = { issue = "fix in 0.6.5", note = "temporal functions
 s5_should_truncate_time_8 = { issue = "fix in 0.6.5", note = "temporal functions and values" }
 s5_should_truncate_time_9 = { issue = "fix in 0.6.5", note = "temporal functions and values" }
 
-[TriadicSelection1]
-s10_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_implicit_superset_of_labels = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s11_handling_triadic_friend_of_a_friend_that_is_a_friend = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s12_handling_triadic_friend_of_a_friend_that_is_a_friend_with_different_relationship_type = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s13_handling_triadic_friend_of_a_friend_that_is_a_friend_with_superset_of_relationship_type = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s14_handling_triadic_friend_of_a_friend_that_is_a_friend_with_implicit_subset_of_relationship_type = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s15_handling_triadic_friend_of_a_friend_that_is_a_friend_with_explicit_subset_of_relationship_type = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s16_handling_triadic_friend_of_a_friend_that_is_a_friend_with_same_labels = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s17_handling_triadic_friend_of_a_friend_that_is_a_friend_with_different_labels = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s18_handling_triadic_friend_of_a_friend_that_is_a_friend_with_implicit_subset_of_labels = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s19_handling_triadic_friend_of_a_friend_that_is_a_friend_with_implicit_superset_of_labels = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s2_handling_triadic_friend_of_a_friend_that_is_not_a_friend = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s3_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_different_relationship_type = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s4_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_superset_of_relationship_type = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s5_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_implicit_subset_of_relationship_type = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s6_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_explicit_subset_of_relationship_type = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s7_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_same_labels = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s8_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_different_labels = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s9_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_implicit_subset_of_labels = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-
 [TypeConversion1]
 s5_fail_toboolean_on_invalid_types_example_float_3 = { issue = "fix in 0.7.0", note = "a function argument of the wrong type" }
 s5_fail_toboolean_on_invalid_types_example_list_1 = { issue = "fix in 0.7.0", note = "a function argument of the wrong type" }
@@ -1784,15 +1627,3 @@ s20_sort_by_a_date_time_expression_in_descending_order_2 = { issue = "fix in 0.6
 
 [WithSkipLimit2]
 s3_connected_components_succeeding_with_with_limit = { issue = "fix in 0.6.5", note = "Cypher column names are not the source text, or RETURN * is not by name" }
-
-[WithWhere1]
-s2_filter_node_with_property_predicate_on_a_single_variable_with_multiple_distinct_bindings = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s3_filter_for_an_unbound_relationship_variable = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s4_filter_for_an_unbound_node_variable = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-
-[WithWhere2]
-s2_filter_node_with_conjunctive_multi_part_property_predicates_on_multi_variables_with_multiple_bindings = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-
-[WithWhere7]
-s1_where_sees_a_variable_bound_before_but_not_after_with = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }
-s3_where_sees_both_variable_bound_before_but_not_after_with_and_variable_bound_after_but_not_before_with = { issue = "fix in 0.6.4", note = "the WHERE of a WITH cannot see variables bound before it" }

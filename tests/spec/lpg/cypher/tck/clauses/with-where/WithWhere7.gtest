@@ -43,9 +43,6 @@ tests:
 
   # [1] WHERE sees a variable bound before but not after WITH
   - name: s1_where_sees_a_variable_bound_before_but_not_after_with
-    xfail:
-      spec: "openCypher TCK 2024.3 WithWhere7: [1] WHERE sees a variable bound before but not after WITH"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE ({name2: 'A'}),
@@ -82,9 +79,6 @@ tests:
 
   # [3] WHERE sees both, variable bound before but not after WITH and variable bound after but not before WITH
   - name: s3_where_sees_both_variable_bound_before_but_not_after_with_and_variable_bound_after_but_not_before_with
-    xfail:
-      spec: "openCypher TCK 2024.3 WithWhere7: [3] WHERE sees both, variable bound before but not after WITH and variable bound after but not before WITH"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE ({name2: 'A'}),

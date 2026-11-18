@@ -90,9 +90,6 @@ tests:
 
   # [2] Handling triadic friend of a friend that is not a friend
   - name: s2_handling_triadic_friend_of_a_friend_that_is_not_a_friend
-    xfail:
-      spec: "openCypher TCK 2024.3 TriadicSelection1: [2] Handling triadic friend of a friend that is not a friend"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:A {name: 'a'}),
@@ -141,9 +138,6 @@ tests:
 
   # [3] Handling triadic friend of a friend that is not a friend with different relationship type
   - name: s3_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_different_relationship_type
-    xfail:
-      spec: "openCypher TCK 2024.3 TriadicSelection1: [3] Handling triadic friend of a friend that is not a friend with different relationship type"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:A {name: 'a'}),
@@ -192,9 +186,6 @@ tests:
 
   # [4] Handling triadic friend of a friend that is not a friend with superset of relationship type
   - name: s4_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_superset_of_relationship_type
-    xfail:
-      spec: "openCypher TCK 2024.3 TriadicSelection1: [4] Handling triadic friend of a friend that is not a friend with superset of relationship type"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:A {name: 'a'}),
@@ -242,9 +233,6 @@ tests:
 
   # [5] Handling triadic friend of a friend that is not a friend with implicit subset of relationship type
   - name: s5_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_implicit_subset_of_relationship_type
-    xfail:
-      spec: "openCypher TCK 2024.3 TriadicSelection1: [5] Handling triadic friend of a friend that is not a friend with implicit subset of relationship type"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:A {name: 'a'}),
@@ -298,9 +286,6 @@ tests:
 
   # [6] Handling triadic friend of a friend that is not a friend with explicit subset of relationship type
   - name: s6_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_explicit_subset_of_relationship_type
-    xfail:
-      spec: "openCypher TCK 2024.3 TriadicSelection1: [6] Handling triadic friend of a friend that is not a friend with explicit subset of relationship type"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:A {name: 'a'}),
@@ -354,9 +339,6 @@ tests:
 
   # [7] Handling triadic friend of a friend that is not a friend with same labels
   - name: s7_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_same_labels
-    xfail:
-      spec: "openCypher TCK 2024.3 TriadicSelection1: [7] Handling triadic friend of a friend that is not a friend with same labels"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:A {name: 'a'}),
@@ -403,9 +385,6 @@ tests:
 
   # [8] Handling triadic friend of a friend that is not a friend with different labels
   - name: s8_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_different_labels
-    xfail:
-      spec: "openCypher TCK 2024.3 TriadicSelection1: [8] Handling triadic friend of a friend that is not a friend with different labels"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:A {name: 'a'}),
@@ -451,9 +430,6 @@ tests:
 
   # [9] Handling triadic friend of a friend that is not a friend with implicit subset of labels
   - name: s9_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_implicit_subset_of_labels
-    xfail:
-      spec: "openCypher TCK 2024.3 TriadicSelection1: [9] Handling triadic friend of a friend that is not a friend with implicit subset of labels"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:A {name: 'a'}),
@@ -500,9 +476,6 @@ tests:
 
   # [10] Handling triadic friend of a friend that is not a friend with implicit superset of labels
   - name: s10_handling_triadic_friend_of_a_friend_that_is_not_a_friend_with_implicit_superset_of_labels
-    xfail:
-      spec: "openCypher TCK 2024.3 TriadicSelection1: [10] Handling triadic friend of a friend that is not a friend with implicit superset of labels"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:A {name: 'a'}),
@@ -551,9 +524,6 @@ tests:
 
   # [11] Handling triadic friend of a friend that is a friend
   - name: s11_handling_triadic_friend_of_a_friend_that_is_a_friend
-    xfail:
-      spec: "openCypher TCK 2024.3 TriadicSelection1: [11] Handling triadic friend of a friend that is a friend"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:A {name: 'a'}),
@@ -598,9 +568,6 @@ tests:
 
   # [12] Handling triadic friend of a friend that is a friend with different relationship type
   - name: s12_handling_triadic_friend_of_a_friend_that_is_a_friend_with_different_relationship_type
-    xfail:
-      spec: "openCypher TCK 2024.3 TriadicSelection1: [12] Handling triadic friend of a friend that is a friend with different relationship type"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:A {name: 'a'}),
@@ -645,9 +612,6 @@ tests:
 
   # [13] Handling triadic friend of a friend that is a friend with superset of relationship type
   - name: s13_handling_triadic_friend_of_a_friend_that_is_a_friend_with_superset_of_relationship_type
-    xfail:
-      spec: "openCypher TCK 2024.3 TriadicSelection1: [13] Handling triadic friend of a friend that is a friend with superset of relationship type"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:A {name: 'a'}),
@@ -693,9 +657,6 @@ tests:
 
   # [14] Handling triadic friend of a friend that is a friend with implicit subset of relationship type
   - name: s14_handling_triadic_friend_of_a_friend_that_is_a_friend_with_implicit_subset_of_relationship_type
-    xfail:
-      spec: "openCypher TCK 2024.3 TriadicSelection1: [14] Handling triadic friend of a friend that is a friend with implicit subset of relationship type"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:A {name: 'a'}),
@@ -741,9 +702,6 @@ tests:
 
   # [15] Handling triadic friend of a friend that is a friend with explicit subset of relationship type
   - name: s15_handling_triadic_friend_of_a_friend_that_is_a_friend_with_explicit_subset_of_relationship_type
-    xfail:
-      spec: "openCypher TCK 2024.3 TriadicSelection1: [15] Handling triadic friend of a friend that is a friend with explicit subset of relationship type"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:A {name: 'a'}),
@@ -789,9 +747,6 @@ tests:
 
   # [16] Handling triadic friend of a friend that is a friend with same labels
   - name: s16_handling_triadic_friend_of_a_friend_that_is_a_friend_with_same_labels
-    xfail:
-      spec: "openCypher TCK 2024.3 TriadicSelection1: [16] Handling triadic friend of a friend that is a friend with same labels"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:A {name: 'a'}),
@@ -836,9 +791,6 @@ tests:
 
   # [17] Handling triadic friend of a friend that is a friend with different labels
   - name: s17_handling_triadic_friend_of_a_friend_that_is_a_friend_with_different_labels
-    xfail:
-      spec: "openCypher TCK 2024.3 TriadicSelection1: [17] Handling triadic friend of a friend that is a friend with different labels"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:A {name: 'a'}),
@@ -882,9 +834,6 @@ tests:
 
   # [18] Handling triadic friend of a friend that is a friend with implicit subset of labels
   - name: s18_handling_triadic_friend_of_a_friend_that_is_a_friend_with_implicit_subset_of_labels
-    xfail:
-      spec: "openCypher TCK 2024.3 TriadicSelection1: [18] Handling triadic friend of a friend that is a friend with implicit subset of labels"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:A {name: 'a'}),
@@ -929,9 +878,6 @@ tests:
 
   # [19] Handling triadic friend of a friend that is a friend with implicit superset of labels
   - name: s19_handling_triadic_friend_of_a_friend_that_is_a_friend_with_implicit_superset_of_labels
-    xfail:
-      spec: "openCypher TCK 2024.3 TriadicSelection1: [19] Handling triadic friend of a friend that is a friend with implicit superset of labels"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:A {name: 'a'}),

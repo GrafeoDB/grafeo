@@ -2045,10 +2045,12 @@ impl RdfPlanner {
                 column2,
                 distinct: agg_expr.distinct,
                 alias: agg_expr.alias.clone(),
-                percentile: agg_expr.percentile,
+                // SPARQL has no percentile aggregate.
+                percentile: None,
                 separator: agg_expr.separator.clone(),
                 // SPARQL's SUM and AVG: XPath's division for AVG, and an
                 // argument that is no number an error (the result unbound).
+                keep_nulls: false,
                 rdf_literals: matches!(
                     agg_expr.function,
                     LogicalAggregateFunction::Sum | LogicalAggregateFunction::Avg
@@ -5607,6 +5609,7 @@ mod tests {
                 alias: Some("cnt".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             having: None,
         });
@@ -5751,6 +5754,7 @@ mod tests {
                 alias: Some("cnt".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             having: None,
         });
@@ -5799,6 +5803,7 @@ mod tests {
                 alias: Some("cnt".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             having: Some(LogicalExpression::Binary {
                 left: Box::new(LogicalExpression::Variable("cnt".to_string())),
@@ -5850,6 +5855,7 @@ mod tests {
                     alias: Some("total".to_string()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 },
                 AggregateExpr {
                     function: AggregateFunction::Avg,
@@ -5859,6 +5865,7 @@ mod tests {
                     alias: Some("average".to_string()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 },
             ],
             having: None,
@@ -7031,6 +7038,7 @@ mod tests {
                 alias: Some("cnt".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             having: None,
         });

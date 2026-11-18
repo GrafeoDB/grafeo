@@ -43,9 +43,6 @@ tests:
 
   # [1] Calling the same STRING procedure twice using the same outputs in each call
   - name: s1_calling_the_same_string_procedure_twice_using_the_same_outputs_in_each_call
-    xfail:
-      spec: "openCypher TCK 2024.3 Call6: [1] Calling the same STRING procedure twice using the same outputs in each call"
-      issue: fix in 0.6.4
     setup_gql:
       - "CREATE PROCEDURE `test.labels`() RETURNS (label STRING) AS { UNWIND [{p0: 'A'}, {p0: 'B'}, {p0: 'C'}] AS r RETURN r.p0 AS label }"
     query: |
@@ -64,11 +61,8 @@ tests:
 
   # [2] Project procedure results between query scopes with WITH clause
   - name: s2_project_procedure_results_between_query_scopes_with_with_clause
-    xfail:
-      spec: "openCypher TCK 2024.3 Call6: [2] Project procedure results between query scopes with WITH clause"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out STRING) AS { UNWIND [{p0: null, p1: 'nix'}] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out STRING) AS { UNWIND [{p0: null, p1: 'nix'}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS out }"
     query: |
       CALL test.my.proc(null) YIELD out
       WITH out RETURN out
@@ -81,11 +75,8 @@ tests:
 
   # [3] Project procedure results between query scopes with WITH clause and rename the projection
   - name: s3_project_procedure_results_between_query_scopes_with_with_clause_and_rename_the_projection
-    xfail:
-      spec: "openCypher TCK 2024.3 Call6: [3] Project procedure results between query scopes with WITH clause and rename the projection"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out STRING) AS { UNWIND [{p0: null, p1: 'nix'}] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out STRING) AS { UNWIND [{p0: null, p1: 'nix'}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS out }"
     query: |
       CALL test.my.proc(null) YIELD out
       WITH out AS a RETURN a

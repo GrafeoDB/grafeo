@@ -998,16 +998,10 @@ impl super::Planner {
 
         // Check user-defined procedures first (requires GQL for body re-parsing)
         #[cfg(stored_procedures)]
-        if let Some(catalog) = &self.catalog {
-            let proc_name = if call.name.len() == 1 {
-                &call.name[0]
-            } else {
-                // For dotted names, try the last segment as procedure name
-                call.name.last().expect("name has at least one segment")
-            };
-            if let Some(proc_def) = catalog.get_procedure(proc_name) {
-                return self.plan_user_procedure(call, &proc_def);
-            }
+        if let Some(catalog) = &self.catalog
+            && let Some(proc_def) = catalog.get_procedure(&call.stored_name())
+        {
+            return self.plan_user_procedure(call, &proc_def);
         }
 
         // Look up the procedure
@@ -1242,6 +1236,20 @@ impl super::Planner {
         Ok((operator, output_columns))
     }
 
+    /// Whether `plan` calls a stored procedure that returns nothing
+    /// (`RETURNS ()`): called in a query, it keeps each row once.
+    pub(super) fn calls_a_void_procedure(&self, plan: &LogicalOperator) -> bool {
+        #[cfg(stored_procedures)]
+        if let LogicalOperator::CallProcedure(call) = plan
+            && let Some(catalog) = &self.catalog
+            && let Some(procedure) = catalog.get_procedure(&call.stored_name())
+        {
+            return procedure.returns.is_empty();
+        }
+        let _ = plan;
+        false
+    }
+
     /// Plans a user-defined procedure call.
     #[cfg(stored_procedures)]
     fn plan_user_procedure(
@@ -1269,6 +1277,7 @@ impl super::Planner {
         let mut param_map = std::collections::HashMap::new();
         for (param, argument) in proc_def.params.iter().zip(&call.arguments) {
             let value = self.constant_argument(&proc_def.name, &param.0, argument)?;
+            let value = bind_argument(&proc_def.name, &param.0, &param.1, value)?;
             param_map.insert(param.0.clone(), value);
         }
 
@@ -1438,6 +1447,20 @@ impl super::Planner {
         let mut needs_projection = false;
 
         for (name, expr) in &set_prop.properties {
+            // `SET x = e` and `SET x += e` with a node or relationship `e`
+            // set `e`'s properties: `e` reaches the write as its id.
+            let properties_of;
+            let expr = if name == grafeo_core::execution::operators::MAP_ASSIGNMENT
+                && matches!(
+                    self.held_entity(expr),
+                    Some(EntityValue::Node | EntityValue::Edge)
+                ) {
+                properties_of =
+                    LogicalExpression::builtin(BuiltinFunction::Properties, vec![expr.clone()]);
+                &properties_of
+            } else {
+                expr
+            };
             let source = match self.expression_to_property_source(expr, &columns) {
                 Ok(s) => s,
                 Err(_) => {
@@ -1762,6 +1785,34 @@ impl super::Planner {
             _ => None,
         }
     }
+}
+
+/// The argument `value` bound to the parameter `parameter` of the type
+/// `type_name` of `procedure`, as a property of that type stores it
+/// ([`PropertyDataType::convert`](grafeo_common::types::PropertyDataType::convert),
+/// ISO's store assignment): a null or a value of that type as it is, an
+/// integer for a `FLOAT` when the float is exact, a number for a `DECIMAL`, a
+/// zoned datetime for a `DATETIME` as its instant. A type name the catalog
+/// does not know takes any value.
+///
+/// # Errors
+///
+/// A semantic error (42) for a value the type does not take.
+#[cfg(stored_procedures)]
+fn bind_argument(procedure: &str, parameter: &str, type_name: &str, value: Value) -> Result<Value> {
+    let Some(declared) = grafeo_common::types::PropertyDataType::from_known_type_name(type_name)
+    else {
+        return Ok(value);
+    };
+    if declared.matches(&value) {
+        return Ok(value);
+    }
+    declared.convert(&value).ok_or_else(|| {
+        Error::from(QueryError::semantic(format!(
+            "argument '{parameter}' of procedure '{procedure}' is {}, not {type_name}",
+            value.type_name()
+        )))
+    })
 }
 
 /// Whether any property value must be computed per input row.

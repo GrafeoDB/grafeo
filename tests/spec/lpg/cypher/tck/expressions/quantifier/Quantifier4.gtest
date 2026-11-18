@@ -791,9 +791,6 @@ tests:
 
   # [10] All quantifier on lists containing nulls #1
   - name: s10_all_quantifier_on_lists_containing_nulls_1
-    xfail:
-      spec: "openCypher TCK 2024.3 Quantifier4: [10] All quantifier on lists containing nulls #1"
-      issue: fix in 0.6.4
     query: |
       RETURN all(x IN [null] WHERE x = 2) AS result
     expect:
@@ -804,9 +801,6 @@ tests:
 
   # [10] All quantifier on lists containing nulls #2
   - name: s10_all_quantifier_on_lists_containing_nulls_2
-    xfail:
-      spec: "openCypher TCK 2024.3 Quantifier4: [10] All quantifier on lists containing nulls #2"
-      issue: fix in 0.6.4
     query: |
       RETURN all(x IN [null, null] WHERE x = 2) AS result
     expect:
@@ -827,9 +821,6 @@ tests:
 
   # [10] All quantifier on lists containing nulls #4
   - name: s10_all_quantifier_on_lists_containing_nulls_4
-    xfail:
-      spec: "openCypher TCK 2024.3 Quantifier4: [10] All quantifier on lists containing nulls #4"
-      issue: fix in 0.6.4
     query: |
       RETURN all(x IN [2, null] WHERE x = 2) AS result
     expect:
@@ -840,9 +831,6 @@ tests:
 
   # [10] All quantifier on lists containing nulls #5
   - name: s10_all_quantifier_on_lists_containing_nulls_5
-    xfail:
-      spec: "openCypher TCK 2024.3 Quantifier4: [10] All quantifier on lists containing nulls #5"
-      issue: fix in 0.6.4
     query: |
       RETURN all(x IN [null, 2] WHERE x = 2) AS result
     expect:
@@ -873,9 +861,6 @@ tests:
 
   # [10] All quantifier on lists containing nulls #8
   - name: s10_all_quantifier_on_lists_containing_nulls_8
-    xfail:
-      spec: "openCypher TCK 2024.3 Quantifier4: [10] All quantifier on lists containing nulls #8"
-      issue: fix in 0.6.4
     query: |
       RETURN all(x IN [4, 0, null, -15, 9] WHERE x < 10) AS result
     expect:

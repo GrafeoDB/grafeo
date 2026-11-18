@@ -61,9 +61,6 @@ tests:
 
   # [2] Filter node with property predicate on a single variable with multiple distinct bindings
   - name: s2_filter_node_with_property_predicate_on_a_single_variable_with_multiple_distinct_bindings
-    xfail:
-      spec: "openCypher TCK 2024.3 WithWhere1: [2] Filter node with property predicate on a single variable with multiple distinct bindings"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE ({name2: 'A'}),
@@ -82,9 +79,6 @@ tests:
 
   # [3] Filter for an unbound relationship variable
   - name: s3_filter_for_an_unbound_relationship_variable
-    xfail:
-      spec: "openCypher TCK 2024.3 WithWhere1: [3] Filter for an unbound relationship variable"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:A), (b:B {id: 1}), (:B {id: 2})
@@ -102,9 +96,6 @@ tests:
 
   # [4] Filter for an unbound node variable
   - name: s4_filter_for_an_unbound_node_variable
-    xfail:
-      spec: "openCypher TCK 2024.3 WithWhere1: [4] Filter for an unbound node variable"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (a:A), (b:B {id: 1}), (:B {id: 2})

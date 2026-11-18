@@ -262,11 +262,13 @@ impl super::Planner {
                                     });
                                     output_types.push(LogicalType::Any);
                                 } else {
-                                    return Err(grafeo_common::utils::error::Error::from(
-                                        grafeo_common::utils::error::QueryError::unsupported(
-                                            format!("the argument of {name}() must be a variable"),
-                                        ),
-                                    ));
+                                    // Any other path value (`nodes(null)`,
+                                    // `nodes(head(ps))`): the evaluator reads it.
+                                    projections.push(self.expression_projection(
+                                        &item.expression,
+                                        &variable_columns,
+                                    )?);
+                                    output_types.push(LogicalType::Any);
                                 }
                             }
                             // For other functions (head, tail, size, etc.), use expression evaluation.

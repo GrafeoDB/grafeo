@@ -526,6 +526,7 @@ mod tests {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: grafeo_common::types::TemporalComparison::TypesApart,
         }];

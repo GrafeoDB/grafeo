@@ -109,9 +109,6 @@ tests:
 
   # [5] Ignore null when setting properties using an overriding map
   - name: s5_ignore_null_when_setting_properties_using_an_overriding_map
-    xfail:
-      spec: "openCypher TCK 2024.3 Set4: [5] Ignore null when setting properties using an overriding map"
-      issue: fix in 0.6.4
     query: |
       OPTIONAL MATCH (a:DoesNotExist)
       SET a = {num: 42}

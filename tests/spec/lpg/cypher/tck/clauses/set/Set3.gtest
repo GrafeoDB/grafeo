@@ -157,9 +157,6 @@ tests:
 
   # [8] Ignore null when setting label
   - name: s8_ignore_null_when_setting_label
-    xfail:
-      spec: "openCypher TCK 2024.3 Set3: [8] Ignore null when setting label"
-      issue: fix in 0.6.4
     query: |
       OPTIONAL MATCH (a:DoesNotExist)
       SET a:L

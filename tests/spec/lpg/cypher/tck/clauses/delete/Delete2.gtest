@@ -57,9 +57,6 @@ tests:
 
   # [2] Delete optionally matched relationship
   - name: s2_delete_optionally_matched_relationship
-    xfail:
-      spec: "openCypher TCK 2024.3 Delete2: [2] Delete optionally matched relationship"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE ()
@@ -89,9 +86,6 @@ tests:
 
   # [4] Ignore null when deleting relationship
   - name: s4_ignore_null_when_deleting_relationship
-    xfail:
-      spec: "openCypher TCK 2024.3 Delete2: [4] Ignore null when deleting relationship"
-      issue: fix in 0.6.4
     query: |
       OPTIONAL MATCH ()-[r:DoesNotExist]-()
       DELETE r

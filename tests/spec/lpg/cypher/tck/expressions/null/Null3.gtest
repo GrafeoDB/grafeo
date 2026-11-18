@@ -112,9 +112,6 @@ tests:
 
   # [4] Using null in IN #4
   - name: s4_using_null_in_in_4
-    xfail:
-      spec: "openCypher TCK 2024.3 Null3: [4] Using null in IN #4"
-      issue: fix in 0.6.4
     params:
       elt: null
       coll: []

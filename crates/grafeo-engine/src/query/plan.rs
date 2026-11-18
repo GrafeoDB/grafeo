@@ -2602,8 +2602,9 @@ pub struct HorizontalAggregateOp {
     pub function: AggregateFunction,
     /// Whether the aggregate reads each distinct value once.
     pub distinct: bool,
-    /// The percentile of `PERCENTILE_DISC` and `PERCENTILE_CONT`.
-    pub percentile: Option<f64>,
+    /// The percentile of `PERCENTILE_DISC` and `PERCENTILE_CONT`, as written:
+    /// the planner evaluates it once (see [`AggregateExpr::percentile`]).
+    pub percentile: Option<LogicalExpression>,
     /// The separator of `LISTAGG` and `GROUP_CONCAT`.
     pub separator: Option<String>,
     /// The property to access on each entity.
@@ -2627,10 +2628,17 @@ pub struct AggregateExpr {
     pub distinct: bool,
     /// Alias for the result.
     pub alias: Option<String>,
-    /// Percentile parameter for PERCENTILE_DISC/PERCENTILE_CONT (0.0 to 1.0).
-    pub percentile: Option<f64>,
+    /// The percentile of `PERCENTILE_DISC` and `PERCENTILE_CONT`, as written:
+    /// a literal, a parameter or an expression of them, constant over the
+    /// aggregation. The planner evaluates it once, after the parameters are
+    /// substituted, and refuses one outside 0 to 1.
+    pub percentile: Option<LogicalExpression>,
     /// Separator string for GROUP_CONCAT / LISTAGG (defaults to space for GROUP_CONCAT, comma for LISTAGG).
     pub separator: Option<String>,
+    /// Whether a `collect` keeps a null operand as an item: set only by the
+    /// rewrite of a pattern comprehension, whose list has one item per match,
+    /// a null projection among them. No function name sets it.
+    pub keep_nulls: bool,
 }
 
 /// What a call resolves to: a built-in function, or an aggregate.
@@ -4070,6 +4078,14 @@ pub struct CallProcedureOp {
 }
 
 impl CallProcedureOp {
+    /// The name a stored procedure is looked up by: the whole name as
+    /// written, its parts joined with dots (`CALL test.doNothing()` calls the
+    /// procedure `test.doNothing`, never one named `doNothing`).
+    #[must_use]
+    pub fn stored_name(&self) -> String {
+        self.name.join(".")
+    }
+
     /// Whether the procedure writes the graph, as the built-in procedure it
     /// names declares it (see [`Procedure::graph_access`](crate::procedures::Procedure::graph_access)):
     /// the load procedures do. A name the registry does not hold writes
@@ -4091,6 +4107,38 @@ pub struct ProcedureYield {
     pub field_name: String,
     /// Optional alias (YIELD score AS rank).
     pub alias: Option<String>,
+}
+
+impl ProcedureYield {
+    /// Checks that each output `items` give is a new variable: two may not
+    /// share a name, and none may take a name in `bound`, the variables
+    /// bound before the call.
+    ///
+    /// # Errors
+    ///
+    /// A semantic error (42000) naming the name.
+    pub fn check_names(
+        items: &[Self],
+        bound: &std::collections::HashSet<String>,
+    ) -> grafeo_common::utils::error::Result<()> {
+        use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
+        let mut named = std::collections::HashSet::new();
+        for item in items {
+            let name = item.alias.as_ref().unwrap_or(&item.field_name);
+            let message = if !named.insert(name) {
+                format!("YIELD gives two outputs the name '{name}'")
+            } else if bound.contains(name) {
+                format!("YIELD names '{name}', which is already bound before the CALL")
+            } else {
+                continue;
+            };
+            return Err(Error::from(QueryError::new(
+                QueryErrorKind::Semantic,
+                message,
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Re-export format enum from the physical operator.
@@ -6211,6 +6259,7 @@ mod tests {
                     alias: Some("c".into()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 },
                 AggregateExpr {
                     function: AggregateFunction::Sum,
@@ -6220,6 +6269,7 @@ mod tests {
                     alias: None,
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 },
             ],
             input: leaf_empty(),

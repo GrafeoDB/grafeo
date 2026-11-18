@@ -359,27 +359,20 @@ impl GqlTranslator {
     /// Returns `(aggregates, group_by, post_return)`. The Aggregate operator
     /// outputs its grouping keys first, then its aggregates, named by alias or
     /// [`aggregate_column_name`](crate::query::planner::common::aggregate_column_name).
-    /// `post_return` is `Some(...)` whenever that output differs from what the
-    /// items ask for: an item wraps an aggregate (`count(n) > 0 AS exists`),
-    /// an item has an alias, a grouping key follows an aggregate (so columns
-    /// must be reordered), or `explicit_group_by` is set (the GROUP BY keys may
-    /// not all be returned).
+    /// `post_return` reads that output as the items ask for, always: it reads
+    /// node and edge ids back as nodes and edges (without it, `RETURN n,
+    /// count(n)` gave `n`'s id), unwraps a wrapped aggregate (`count(n) > 0 AS
+    /// exists`), renames, restores the item order, and leaves out GROUP BY keys
+    /// that are not returned.
     pub(super) fn extract_aggregates_and_groups(
         &self,
         items: &[ast::ReturnItem],
-        explicit_group_by: bool,
         input: &mut LogicalOperator,
-    ) -> Result<(
-        Vec<AggregateExpr>,
-        Vec<LogicalExpression>,
-        Option<Vec<ReturnItem>>,
-    )> {
+    ) -> Result<(Vec<AggregateExpr>, Vec<LogicalExpression>, Vec<ReturnItem>)> {
         let mut aggregates = Vec::new();
         let mut group_by = Vec::new();
-        let mut needs_post_return = false;
         let mut post_return_items = Vec::new();
         let mut agg_counter: u32 = 0;
-        let mut seen_aggregate = false;
 
         for item in items {
             if let Some(mut agg_expr) = self.try_extract_aggregate(&item.expression, &item.alias)? {
@@ -395,12 +388,9 @@ impl GqlTranslator {
                     expression: LogicalExpression::Variable(column),
                     alias: item.alias.clone(),
                 });
-                seen_aggregate = true;
             } else if contains_aggregate(&item.expression) {
                 // Wrapped aggregate (e.g. `count(n) > 0 AS exists`,
                 // or `sum(a) + count(b)` with multiple aggregates).
-                needs_post_return = true;
-                seen_aggregate = true;
 
                 let substitute = self.extract_wrapped_aggregates(
                     &item.expression,
@@ -424,9 +414,8 @@ impl GqlTranslator {
                 // The Aggregate operator names its output columns using
                 // expression_to_string, so the post-Return must reference
                 // those column names (not the raw property expression).
-                // Keys come first in the Aggregate's output, so a key after an
-                // aggregate needs the post-Return to restore the item order.
-                needs_post_return |= seen_aggregate;
+                // Keys come first in the Aggregate's output; the post-Return
+                // restores the item order.
                 let expr = self.translate_expression(&item.expression)?;
                 group_by.push(expr.clone());
                 post_return_items.push(ReturnItem {
@@ -436,14 +425,7 @@ impl GqlTranslator {
             }
         }
 
-        // Always produce a post-Return when any item has an alias, so that
-        // output column names reflect the aliases and are visible to ORDER BY.
-        let has_aliases = items.iter().any(|item| item.alias.is_some());
-        if needs_post_return || has_aliases || explicit_group_by {
-            Ok((aggregates, group_by, Some(post_return_items)))
-        } else {
-            Ok((aggregates, group_by, None))
-        }
+        Ok((aggregates, group_by, post_return_items))
     }
 
     /// The grouping keys of the explicit `GROUP BY` `group_by` of the RETURN
@@ -1035,6 +1017,7 @@ impl GqlTranslator {
                             alias: alias.clone(),
                             percentile: None,
                             separator: None,
+                            keep_nulls: false,
                         }
                     } else {
                         // COUNT(x), SUM(x), etc.
@@ -1044,26 +1027,13 @@ impl GqlTranslator {
                         } else {
                             func
                         };
-                        // Extract percentile parameter for percentile functions
+                        // The percentile, as written; the planner evaluates it.
                         let percentile = if matches!(
                             actual_func,
                             AggregateFunction::PercentileDisc | AggregateFunction::PercentileCont
                         ) && args.len() >= 2
                         {
-                            // Second argument is the percentile value
-                            if let ast::Expression::Literal(ast::Literal::Float(p)) = &args[1] {
-                                Some((*p).clamp(0.0, 1.0))
-                            } else if let ast::Expression::Literal(ast::Literal::Decimal(p)) =
-                                &args[1]
-                            {
-                                Some(p.to_f64().clamp(0.0, 1.0))
-                            } else if let ast::Expression::Literal(ast::Literal::Integer(p)) =
-                                &args[1]
-                            {
-                                Some((*p as f64).clamp(0.0, 1.0))
-                            } else {
-                                Some(0.5) // Default to median
-                            }
+                            Some(self.translate_expression(&args[1])?)
                         } else {
                             None
                         };
@@ -1103,6 +1073,7 @@ impl GqlTranslator {
                             alias: alias.clone(),
                             percentile,
                             separator,
+                            keep_nulls: false,
                         }
                     };
                     Ok(Some(agg_expr))

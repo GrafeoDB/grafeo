@@ -66,9 +66,6 @@ tests:
 
   # [2] Filter node with conjunctive multi-part property predicates on multi variables with multiple bindings
   - name: s2_filter_node_with_conjunctive_multi_part_property_predicates_on_multi_variables_with_multiple_bindings
-    xfail:
-      spec: "openCypher TCK 2024.3 MatchWhere2: [2] Filter node with conjunctive multi-part property predicates on multi variables with multiple bindings"
-      issue: fix in 0.6.5
     setup:
       - |
         CREATE (advertiser {name: 'advertiser1', id: 0}),

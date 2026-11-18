@@ -4141,7 +4141,7 @@ impl<'a> Parser<'a> {
     }
 
     /// `a ^ b`, binding tighter than `*` and right associative
-    /// (`2 ^ 3 ^ 2` is `2 ^ 9`), as in Cypher.
+    /// (`2 ^ 3 ^ 2` is `2 ^ 9`).
     fn parse_power_expression(&mut self) -> Result<Expression> {
         let left = self.parse_unary_expression()?;
         if self.current.kind != TokenKind::Caret {

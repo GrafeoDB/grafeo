@@ -96,8 +96,8 @@ def empty(grafeo):
 
 
 def writes(grafeo):
-    """An empty database for the cases that write (sections BR, BS and BU), which no other
-    case reads."""
+    """An empty database for the cases that write (sections BR, BS, BU, ES, EU and EV),
+    which no other case reads."""
     return grafeo.GrafeoDB()
 
 
@@ -444,7 +444,7 @@ def rdf_complex_paths(grafeo):
 
 WRITE_FIXTURES = {
     "rdf_graphs_writes": {"DZ"},
-    "writes": {"BR", "BS", "BU", "CT", "DB"},
+    "writes": {"BR", "BS", "BU", "CT", "DB", "ES", "EU", "EV"},
     "rdf_writes": {"DD"},
     "merges": {"CC"},
     "leads": {"CF"},
@@ -1221,6 +1221,9 @@ for case_id, query, languages in [
     ("AA4", "MATCH (a:Person) RETURN sum(size([(a)-[:KNOWS]->(b) | b])) AS n", CYPHER),
     ("AA5", "MATCH (a:Person) RETURN a.name AS a, size([(a)-[:KNOWS]->(b) | b]) AS n", CYPHER),
     ("AA6", "MATCH (a:Person) RETURN a.name AS a, size(a{.name, knows: [(a)-[:KNOWS]->(b) | b]}.knows) AS n", CYPHER),
+    # A pattern comprehension in a WHERE runs (0.6.4); in 0.6.3 it was an internal error
+    ("AA7", "MATCH (a:Person) WHERE size([(a)-[:KNOWS]->(b) | b]) > 1 RETURN a.name AS a", CYPHER),
+    ("AA8", "MATCH (a:Person) OPTIONAL MATCH (a)-[:LIVES_IN]->(c) WHERE size([(c)<-[:LIVES_IN]-(p) | p]) = 1 RETURN a.name AS a, c.name AS c", CYPHER),
 ]:
     case(case_id, query, languages)
 
@@ -3703,5 +3706,81 @@ case("ER4", "MATCH (a:Person {name: 'Alix'})-[r:LIVES_IN]->(c) RETURN CASE WHEN 
 case("ER5", "MATCH (a:Person {name: 'Alix'})-[r:LIVES_IN]->(c) RETURN coalesce(null, r) AS m")
 case("ER6", "MATCH p = (a:Person {name: 'Gus'})-[:LIVES_IN]->(c) RETURN nodes(p) + [a] AS m", CYPHER)
 case("ER7", "MATCH p = (a:Person {name: 'Gus'})-[:LIVES_IN]->(c) RETURN reduce(acc = [], x IN nodes(p) | acc + [x]) AS m", CYPHER)
+
+# ES: null as openCypher and GQL's three-valued logic give it (0.6.4): a quantifier over a list with
+#     a null item is null where that item could decide it (ES1 to ES4), a slice with a null bound is
+#     null (ES5), nothing is IN an empty list (ES6, and ES11 for an absent property), nodes() of
+#     null is null (ES7), and a SET, REMOVE or DELETE of a null target is a no-op for its row
+#     (ES8 to ES10; they failed)
+case("ES1", "RETURN all(x IN [1, null, 3] WHERE x > 0) AS r")
+case("ES2", "RETURN any(x IN [-1, null] WHERE x > 0) AS r")
+case("ES3", "RETURN none(x IN [-1, null] WHERE x > 0) AS r")
+case("ES4", "RETURN single(x IN [1, null] WHERE x > 0) AS r")
+case("ES5", "RETURN [1, 2, 3][null..2] AS r")
+case("ES6", "RETURN null IN [] AS r")
+case("ES7", "RETURN nodes(null) AS r", CYPHER)
+case("ES8", "OPTIONAL MATCH (a:Robot) SET a.num = 42 RETURN a", BOTH, "writes")
+case("ES9", "OPTIONAL MATCH (a:Robot) REMOVE a:Person RETURN a", BOTH, "writes")
+case("ES10", "OPTIONAL MATCH (a:Robot) DETACH DELETE a RETURN a", BOTH, "writes")
+case("ES11", "MATCH (a:Person {name: 'Alix'}) RETURN a.missing IN [] AS r, NOT a.missing IN [] AS s")
+
+# ET: an aggregating RETURN with no alias gives its nodes and edges as nodes and edges (0.6.4); in
+#     0.6.3 they came back as ids: a node group key (ET1, ET2), an edge one (ET3), collect() of
+#     nodes (ET4, ET5)
+case("ET1", "MATCH (a:Person) RETURN a, count(a)")
+case("ET2", "MATCH (a:Person) OPTIONAL MATCH (a)-[:LIVES_IN]->(c) RETURN a, collect(c)")
+case("ET3", "MATCH (a:Person)-[r:KNOWS]->(b) RETURN r, count(*)")
+case("ET4", "MATCH (c:City) RETURN collect(c)")
+case("ET5", "MATCH (c:City) RETURN count(c), collect(c)")
+
+# EU: Cypher's ^ is left associative (EU1, EU2; 0.6.4, it was read right to left), and SET x = e
+#     and SET x += e copy a node's or relationship's properties (EU3 to EU6; they set nothing)
+case("EU1", "RETURN 2 ^ 3 ^ 2 AS r", CYPHER)
+case("EU2", "RETURN 4 ^ (3 * 2) ^ 3 AS r", CYPHER)
+for case_id, query in [
+    ("EU3", "INSERT (:Robot {name: 'R1', n: 1})-[:BUILT {w: 7}]->(:Robot {name: 'R2'})"),
+    ("EU4", "MATCH (a:Robot {name: 'R1'})-[r:BUILT]->() SET r = a"),
+    ("EU5", "MATCH (a:Robot {name: 'R1'})-[r:BUILT]->(b) SET b += r"),
+    ("EU6", "MATCH (a:Robot)-[r:BUILT]->(b) RETURN properties(r) AS r, properties(b) AS b"),
+]:
+    case(case_id, query, GQL, "writes")
+
+# EV: a stored procedure is called by its whole name (0.6.4; a dotted name was looked up by its last
+#     part, EV2), its arguments are checked against the parameter types (EV3), and one that returns
+#     nothing keeps each row of the query that calls it (EV5, a plain name so 0.6.3 finds it too; the
+#     rows were dropped)
+for case_id, query in [
+    ("EV1", "CREATE PROCEDURE `test.one`(in INT64) RETURNS (x INT64) AS { RETURN $in AS x }"),
+    ("EV2", "CALL test.one(1) YIELD x RETURN x"),
+    ("EV3", "CALL test.one(true) YIELD x RETURN x"),
+    ("EV4", "CREATE PROCEDURE `nothing`() RETURNS () AS { UNWIND [] AS r FINISH }"),
+]:
+    case(case_id, query, GQL, "writes")
+case("EV5", "UNWIND [1, 2, 3] AS i CALL nothing() RETURN count(i) AS c", CYPHER, "writes")
+
+# EW: the WHERE of a Cypher WITH reads the variables bound before the WITH (0.6.4; it failed with an
+#     undefined variable), also beside an ORDER BY (EW3) and after an OPTIONAL MATCH (EW4); a
+#     parameter may be named by a number (EW5); a pattern comprehension in the WHERE reads the row's
+#     variable (EW6, and EW8 inside a list predicate), and in a CALL body the WITH keeps the imports
+#     (EW7)
+case("EW1", "MATCH (a:Person) WITH a.name AS name WHERE a.age > 30 RETURN name", CYPHER)
+case("EW2", "MATCH (a:Person) WITH a.name AS name WHERE name = 'Mia' OR a.age = 40 RETURN name", CYPHER)
+ordered("EW3", "MATCH (a:Person) WITH a.name AS name WHERE a.age > 26 ORDER BY a.age DESC RETURN name", CYPHER)
+case("EW4", "MATCH (p:Person) OPTIONAL MATCH (p)-[r:LIVES_IN]->() WITH p WHERE r IS NULL RETURN p.name AS name", CYPHER)
+case("EW5", "MATCH (a:Person) WITH a WHERE a.age = $1 RETURN a.name AS name", CYPHER, params={"1": 25})
+case("EW6", "MATCH (a:Person) WITH a.name AS name WHERE size([(a)-[:LIVES_IN]->() | 1]) > 0 RETURN name", CYPHER)
+case("EW7", "MATCH (p:Person {name: 'Alix'}) CALL { WITH p MATCH (p)-[:LIVES_IN]->(c) WITH c.name AS city WHERE c.name IS NOT NULL MATCH (p)-[:LIVES_IN]->(d) RETURN city, d.name AS d } RETURN city, d", CYPHER)
+case("EW8", "MATCH (a:Person) WITH a.name AS name WHERE any(x IN [1] WHERE EXISTS { (a)-[:LIVES_IN]->() }) RETURN name", CYPHER)
+
+# EX: the percentile of percentileDisc and percentileCont is a literal, a parameter or an expression
+#     of them, from 0 to 1 (0.6.4): a parameter was read as 0.5 (EX1, EX2) and a literal outside
+#     0 to 1 was moved to its end (EX3, now 22003)
+case("EX1", "MATCH (a:Person) RETURN percentileDisc(a.age, $p) AS p", CYPHER, params={"p": 0.0})
+case("EX2", "MATCH (a:Person) RETURN percentile_cont(a.age, $p) AS p", GQL, params={"p": 1.0})
+case("EX3", "MATCH (a:Person) RETURN percentileDisc(a.age, 1.5) AS p", CYPHER)
+
+# EY: a pattern comprehension has one item per match, a null projection among them (0.6.4; a match
+#     whose projection was null was dropped)
+case("EY1", "MATCH (a:Person {name: 'Alix'}) RETURN [(a)-[:LIVES_IN]->(c) | c.missing] AS l", CYPHER)
 
 # fmt: on

@@ -1214,7 +1214,11 @@ impl Planner {
                 input_column_count,
                 self.read_view(),
             )
-            .with_aggregate_options(ha.distinct, ha.percentile, ha.separator.clone())
+            .with_aggregate_options(
+                ha.distinct,
+                self.constant_percentile(ha.function, ha.percentile.as_ref())?,
+                ha.separator.clone(),
+            )
             .with_temporal(self.session_context.temporal_comparison),
         );
 
@@ -2322,6 +2326,7 @@ mod tests {
                     alias: Some("cnt".to_string()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 }],
                 input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "n".to_string(),
@@ -2355,6 +2360,7 @@ mod tests {
                 alias: Some("cnt".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "n".to_string(),
@@ -2387,6 +2393,7 @@ mod tests {
                 alias: Some("total".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "n".to_string(),
@@ -2419,6 +2426,7 @@ mod tests {
                 alias: Some("average".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "n".to_string(),
@@ -2452,6 +2460,7 @@ mod tests {
                     alias: Some("youngest".to_string()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 },
                 LogicalAggregateExpr {
                     function: LogicalAggregateFunction::Max,
@@ -2464,6 +2473,7 @@ mod tests {
                     alias: Some("oldest".to_string()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 },
             ],
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {

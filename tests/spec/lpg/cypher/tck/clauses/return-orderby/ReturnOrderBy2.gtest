@@ -140,9 +140,6 @@ tests:
 
   # [6] Count star should count everything in scope
   - name: s6_count_star_should_count_everything_in_scope
-    xfail:
-      spec: "openCypher TCK 2024.3 ReturnOrderBy2: [6] Count star should count everything in scope"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (:L1), (:L2), (:L3)

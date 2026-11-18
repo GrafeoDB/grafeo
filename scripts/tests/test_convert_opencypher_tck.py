@@ -145,7 +145,8 @@ def test_a_procedure_becomes_a_gql_procedure_over_its_table():
     (case,) = cases(steps)
     assert case.setup_gql == [
         "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out STRING) AS "
-        "{ UNWIND [{p0: 1, p1: 'one'}] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+        "{ UNWIND [{p0: 1, p1: 'one'}] AS r "
+        "FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS out }"
     ]
 
 

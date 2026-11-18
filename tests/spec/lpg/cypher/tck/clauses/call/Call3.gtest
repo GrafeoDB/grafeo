@@ -43,11 +43,8 @@ tests:
 
   # [1] Standalone call to procedure with argument of type NUMBER accepts value of type INTEGER
   - name: s1_standalone_call_to_procedure_with_argument_of_type_number_accepts_value_of_type_integer
-    xfail:
-      spec: "openCypher TCK 2024.3 Call3: [1] Standalone call to procedure with argument of type NUMBER accepts value of type INTEGER"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in ANY) RETURNS (out STRING) AS { UNWIND [{p0: 42, p1: 'wisdom'}, {p0: 42.3, p1: 'about right'}] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+      - "CREATE PROCEDURE `test.my.proc`(in ANY) RETURNS (out STRING) AS { UNWIND [{p0: 42, p1: 'wisdom'}, {p0: 42.3, p1: 'about right'}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS out }"
     query: |
       CALL test.my.proc(42)
     expect:
@@ -59,11 +56,8 @@ tests:
 
   # [2] In-query call to procedure with argument of type NUMBER accepts value of type INTEGER
   - name: s2_in_query_call_to_procedure_with_argument_of_type_number_accepts_value_of_type_integer
-    xfail:
-      spec: "openCypher TCK 2024.3 Call3: [2] In-query call to procedure with argument of type NUMBER accepts value of type INTEGER"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in ANY) RETURNS (out STRING) AS { UNWIND [{p0: 42, p1: 'wisdom'}, {p0: 42.3, p1: 'about right'}] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+      - "CREATE PROCEDURE `test.my.proc`(in ANY) RETURNS (out STRING) AS { UNWIND [{p0: 42, p1: 'wisdom'}, {p0: 42.3, p1: 'about right'}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS out }"
     query: |
       CALL test.my.proc(42) YIELD out
       RETURN out
@@ -76,11 +70,8 @@ tests:
 
   # [3] Standalone call to procedure with argument of type NUMBER accepts value of type FLOAT
   - name: s3_standalone_call_to_procedure_with_argument_of_type_number_accepts_value_of_type_float
-    xfail:
-      spec: "openCypher TCK 2024.3 Call3: [3] Standalone call to procedure with argument of type NUMBER accepts value of type FLOAT"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in ANY) RETURNS (out STRING) AS { UNWIND [{p0: 42, p1: 'wisdom'}, {p0: 42.3, p1: 'about right'}] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+      - "CREATE PROCEDURE `test.my.proc`(in ANY) RETURNS (out STRING) AS { UNWIND [{p0: 42, p1: 'wisdom'}, {p0: 42.3, p1: 'about right'}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS out }"
     query: |
       CALL test.my.proc(42.3)
     expect:
@@ -92,11 +83,8 @@ tests:
 
   # [4] In-query call to procedure with argument of type NUMBER accepts value of type FLOAT
   - name: s4_in_query_call_to_procedure_with_argument_of_type_number_accepts_value_of_type_float
-    xfail:
-      spec: "openCypher TCK 2024.3 Call3: [4] In-query call to procedure with argument of type NUMBER accepts value of type FLOAT"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in ANY) RETURNS (out STRING) AS { UNWIND [{p0: 42, p1: 'wisdom'}, {p0: 42.3, p1: 'about right'}] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+      - "CREATE PROCEDURE `test.my.proc`(in ANY) RETURNS (out STRING) AS { UNWIND [{p0: 42, p1: 'wisdom'}, {p0: 42.3, p1: 'about right'}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS out }"
     query: |
       CALL test.my.proc(42.3) YIELD out
       RETURN out
@@ -109,11 +97,8 @@ tests:
 
   # [5] Standalone call to procedure with argument of type FLOAT accepts value of type INTEGER
   - name: s5_standalone_call_to_procedure_with_argument_of_type_float_accepts_value_of_type_integer
-    xfail:
-      spec: "openCypher TCK 2024.3 Call3: [5] Standalone call to procedure with argument of type FLOAT accepts value of type INTEGER"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in FLOAT64) RETURNS (out STRING) AS { UNWIND [{p0: 42.0, p1: 'close enough'}] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+      - "CREATE PROCEDURE `test.my.proc`(in FLOAT64) RETURNS (out STRING) AS { UNWIND [{p0: 42.0, p1: 'close enough'}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS out }"
     query: |
       CALL test.my.proc(42)
     expect:
@@ -125,11 +110,8 @@ tests:
 
   # [6] In-query call to procedure with argument of type FLOAT accepts value of type INTEGER
   - name: s6_in_query_call_to_procedure_with_argument_of_type_float_accepts_value_of_type_integer
-    xfail:
-      spec: "openCypher TCK 2024.3 Call3: [6] In-query call to procedure with argument of type FLOAT accepts value of type INTEGER"
-      issue: fix in 0.6.4
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in FLOAT64) RETURNS (out STRING) AS { UNWIND [{p0: 42.0, p1: 'close enough'}] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+      - "CREATE PROCEDURE `test.my.proc`(in FLOAT64) RETURNS (out STRING) AS { UNWIND [{p0: 42.0, p1: 'close enough'}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS out }"
     query: |
       CALL test.my.proc(42) YIELD out
       RETURN out

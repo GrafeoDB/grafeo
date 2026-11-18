@@ -259,9 +259,6 @@ tests:
 
   # [2] Exponentiation takes precedence over numeric multiplicative operations #1
   - name: s2_exponentiation_takes_precedence_over_numeric_multiplicative_operations_1
-    xfail:
-      spec: "openCypher TCK 2024.3 Precedence2: [2] Exponentiation takes precedence over numeric multiplicative operations #1"
-      issue: fix in 0.6.4
     query: |
       RETURN 4 ^ 3 * 2 ^ 3 AS a,
              (4 ^ 3) * (2 ^ 3) AS b,
@@ -274,9 +271,6 @@ tests:
 
   # [2] Exponentiation takes precedence over numeric multiplicative operations #2
   - name: s2_exponentiation_takes_precedence_over_numeric_multiplicative_operations_2
-    xfail:
-      spec: "openCypher TCK 2024.3 Precedence2: [2] Exponentiation takes precedence over numeric multiplicative operations #2"
-      issue: fix in 0.6.4
     query: |
       RETURN 4 ^ 3 / 2 ^ 3 AS a,
              (4 ^ 3) / (2 ^ 3) AS b,
@@ -289,9 +283,6 @@ tests:
 
   # [2] Exponentiation takes precedence over numeric multiplicative operations #3
   - name: s2_exponentiation_takes_precedence_over_numeric_multiplicative_operations_3
-    xfail:
-      spec: "openCypher TCK 2024.3 Precedence2: [2] Exponentiation takes precedence over numeric multiplicative operations #3"
-      issue: fix in 0.6.4
     query: |
       RETURN 4 ^ 3 % 2 ^ 3 AS a,
              (4 ^ 3) % (2 ^ 3) AS b,
@@ -304,9 +295,6 @@ tests:
 
   # [3] Exponentiation takes precedence over numeric additive operations #1
   - name: s3_exponentiation_takes_precedence_over_numeric_additive_operations_1
-    xfail:
-      spec: "openCypher TCK 2024.3 Precedence2: [3] Exponentiation takes precedence over numeric additive operations #1"
-      issue: fix in 0.6.4
     query: |
       RETURN 4 ^ 3 + 2 ^ 3 AS a,
              (4 ^ 3) + (2 ^ 3) AS b,
@@ -319,9 +307,6 @@ tests:
 
   # [3] Exponentiation takes precedence over numeric additive operations #2
   - name: s3_exponentiation_takes_precedence_over_numeric_additive_operations_2
-    xfail:
-      spec: "openCypher TCK 2024.3 Precedence2: [3] Exponentiation takes precedence over numeric additive operations #2"
-      issue: fix in 0.6.4
     query: |
       RETURN 4 ^ 3 - 2 ^ 3 AS a,
              (4 ^ 3) - (2 ^ 3) AS b,

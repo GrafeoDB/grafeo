@@ -45,9 +45,6 @@ tests:
 
   # [1] Standalone call to procedure that takes no arguments and yields no results
   - name: s1_standalone_call_to_procedure_that_takes_no_arguments_and_yields_no_results
-    xfail:
-      spec: "openCypher TCK 2024.3 Call1: [1] Standalone call to procedure that takes no arguments and yields no results"
-      issue: fix in 0.6.4
     setup_gql:
       - "CREATE PROCEDURE `test.doNothing`() RETURNS () AS { UNWIND [] AS r FINISH }"
     query: |
@@ -58,9 +55,6 @@ tests:
 
   # [3] In-query call to procedure that takes no arguments and yields no results
   - name: s3_in_query_call_to_procedure_that_takes_no_arguments_and_yields_no_results
-    xfail:
-      spec: "openCypher TCK 2024.3 Call1: [3] In-query call to procedure that takes no arguments and yields no results"
-      issue: fix in 0.6.4
     setup_gql:
       - "CREATE PROCEDURE `test.doNothing`() RETURNS () AS { UNWIND [] AS r FINISH }"
     query: |
@@ -74,9 +68,6 @@ tests:
 
   # [4] In-query call to procedure that takes no arguments and yields no results and consumes no rows
   - name: s4_in_query_call_to_procedure_that_takes_no_arguments_and_yields_no_results_and_consumes_no_rows
-    xfail:
-      spec: "openCypher TCK 2024.3 Call1: [4] In-query call to procedure that takes no arguments and yields no results and consumes no rows"
-      issue: fix in 0.6.4
     setup_gql:
       - "CREATE PROCEDURE `test.doNothing`() RETURNS () AS { UNWIND [] AS r FINISH }"
     setup:
@@ -98,9 +89,6 @@ tests:
 
   # [5] Standalone call to STRING procedure that takes no arguments
   - name: s5_standalone_call_to_string_procedure_that_takes_no_arguments
-    xfail:
-      spec: "openCypher TCK 2024.3 Call1: [5] Standalone call to STRING procedure that takes no arguments"
-      issue: fix in 0.6.4
     setup_gql:
       - "CREATE PROCEDURE `test.labels`() RETURNS (label STRING) AS { UNWIND [{p0: 'A'}, {p0: 'B'}, {p0: 'C'}] AS r RETURN r.p0 AS label }"
     query: |
@@ -116,9 +104,6 @@ tests:
 
   # [6] In-query call to STRING procedure that takes no arguments
   - name: s6_in_query_call_to_string_procedure_that_takes_no_arguments
-    xfail:
-      spec: "openCypher TCK 2024.3 Call1: [6] In-query call to STRING procedure that takes no arguments"
-      issue: fix in 0.6.4
     setup_gql:
       - "CREATE PROCEDURE `test.labels`() RETURNS (label STRING) AS { UNWIND [{p0: 'A'}, {p0: 'B'}, {p0: 'C'}] AS r RETURN r.p0 AS label }"
     query: |
@@ -137,7 +122,7 @@ tests:
   # TCK: SyntaxError at compile time: InvalidNumberOfArguments
   - name: s7_standalone_call_to_procedure_should_fail_if_explicit_argument_is_missing
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(name STRING, in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER r.p0 = $name AND r.p1 = $in RETURN r.p2 AS out }"
+      - "CREATE PROCEDURE `test.my.proc`(name STRING, in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER (r.p0 = $name OR (r.p0 IS NULL AND $name IS NULL)) AND (r.p1 = $in OR (r.p1 IS NULL AND $in IS NULL)) RETURN r.p2 AS out }"
     query: |
       CALL test.my.proc('Dobby')
     expect:
@@ -148,7 +133,7 @@ tests:
   # TCK: SyntaxError at compile time: InvalidNumberOfArguments
   - name: s8_in_query_call_to_procedure_should_fail_if_explicit_argument_is_missing
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(name STRING, in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER r.p0 = $name AND r.p1 = $in RETURN r.p2 AS out }"
+      - "CREATE PROCEDURE `test.my.proc`(name STRING, in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER (r.p0 = $name OR (r.p0 IS NULL AND $name IS NULL)) AND (r.p1 = $in OR (r.p1 IS NULL AND $in IS NULL)) RETURN r.p2 AS out }"
     query: |
       CALL test.my.proc('Dobby') YIELD out
       RETURN out
@@ -160,7 +145,7 @@ tests:
   # TCK: SyntaxError at compile time: InvalidNumberOfArguments
   - name: s9_standalone_call_to_procedure_should_fail_if_too_many_explicit_argument_are_given
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS out }"
     query: |
       CALL test.my.proc(1, 2, 3, 4)
     expect:
@@ -171,7 +156,7 @@ tests:
   # TCK: SyntaxError at compile time: InvalidNumberOfArguments
   - name: s10_in_query_call_to_procedure_should_fail_if_too_many_explicit_argument_are_given
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS out }"
     query: |
       CALL test.my.proc(1, 2, 3, 4) YIELD out
       RETURN out
@@ -183,7 +168,7 @@ tests:
   # TCK: ParameterMissing at compile time: MissingParameter
   - name: s11_standalone_call_to_procedure_should_fail_if_implicit_argument_is_missing
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(name STRING, in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER r.p0 = $name AND r.p1 = $in RETURN r.p2 AS out }"
+      - "CREATE PROCEDURE `test.my.proc`(name STRING, in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER (r.p0 = $name OR (r.p0 IS NULL AND $name IS NULL)) AND (r.p1 = $in OR (r.p1 IS NULL AND $in IS NULL)) RETURN r.p2 AS out }"
     params:
       name: "Stefan"
     query: |
@@ -196,7 +181,7 @@ tests:
   # TCK: SyntaxError at compile time: UndefinedVariable
   - name: s12_in_query_call_to_procedure_that_has_outputs_fails_if_no_outputs_are_yielded
     setup_gql:
-      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER r.p0 = $in RETURN r.p1 AS out }"
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out INT64) AS { UNWIND [] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS out }"
     query: |
       CALL test.my.proc(1)
       RETURN out
@@ -240,7 +225,7 @@ tests:
   # TCK: SyntaxError at compile time: InvalidAggregation
   - name: s16_in_query_procedure_call_should_fail_if_one_of_the_argument_expressions_uses_an_aggregation_function
     setup_gql:
-      - "CREATE PROCEDURE `test.labels`(in INT64) RETURNS (label STRING) AS { UNWIND [] AS r FILTER r.p0 = $in RETURN r.p1 AS label }"
+      - "CREATE PROCEDURE `test.labels`(in INT64) RETURNS (label STRING) AS { UNWIND [] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS label }"
     query: |
       MATCH (n)
       CALL test.labels(count(n)) YIELD label

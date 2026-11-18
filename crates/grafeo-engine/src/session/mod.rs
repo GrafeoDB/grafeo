@@ -6259,9 +6259,8 @@ impl SessionInner {
         use crate::query::plan::LogicalOperator;
 
         if let LogicalOperator::CallProcedure(call) = op
-            // The planner looks a stored procedure up by its last name part.
-            && let Some(name) = call.name.last()
-            && let Some(procedure) = self.effective_catalog().get_procedure(name)
+            // The planner looks a stored procedure up by its whole name.
+            && let Some(procedure) = self.effective_catalog().get_procedure(&call.stored_name())
         {
             if depth >= crate::query::executor::user_procedure::MAX_CALL_DEPTH {
                 return PlanWrites::from(true);
@@ -6950,9 +6949,8 @@ impl SessionInner {
 
         #[cfg(stored_procedures)]
         if !call.writes()
-            // The planner looks a stored procedure up by its last name part.
-            && let Some(name) = call.name.last()
-            && let Some(procedure) = self.effective_catalog().get_procedure(name)
+            // The planner looks a stored procedure up by its whole name.
+            && let Some(procedure) = self.effective_catalog().get_procedure(&call.stored_name())
         {
             if depth >= crate::query::executor::user_procedure::MAX_CALL_DEPTH {
                 return Some(OutsideReach {

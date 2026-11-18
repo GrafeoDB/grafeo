@@ -513,6 +513,7 @@ impl GraphQLTranslator {
                     alias: Some(alias.clone()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 }],
                 input: Box::new(scan),
                 having: None,
@@ -568,6 +569,7 @@ impl GraphQLTranslator {
                             alias: Some(alias.clone()),
                             percentile: None,
                             separator: None,
+                            keep_nulls: false,
                         });
                         return_items.push(ReturnItem {
                             expression: LogicalExpression::Variable(alias.clone()),
@@ -627,6 +629,7 @@ impl GraphQLTranslator {
                     alias: Some(alias.clone()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 });
                 return_items.push(ReturnItem {
                     expression: LogicalExpression::Variable(alias.clone()),

@@ -216,7 +216,12 @@ def create_procedure(step: gherkin.Step) -> str:
     head = f"CREATE PROCEDURE `{name}`({params}) RETURNS ({returns}) AS {{ UNWIND [{records}] AS r"
     if not outputs:
         return head + " FINISH }"
-    filters = " AND ".join(f"r.p{i} = ${n}" for i, (n, _) in enumerate(inputs))
+    # A row answers the arguments it holds, a null argument the row's null:
+    # the TCK's table matches by equivalence, where `=` gives null.
+    filters = " AND ".join(
+        f"(r.p{i} = ${n} OR (r.p{i} IS NULL AND ${n} IS NULL))"
+        for i, (n, _) in enumerate(inputs)
+    )
     picks = ", ".join(
         f"r.p{len(inputs) + i} AS {n}" for i, (n, _) in enumerate(outputs)
     )

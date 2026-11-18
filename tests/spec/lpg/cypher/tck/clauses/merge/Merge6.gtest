@@ -139,9 +139,6 @@ tests:
 
   # [6] Copying properties from node with ON CREATE
   - name: s6_copying_properties_from_node_with_on_create
-    xfail:
-      spec: "openCypher TCK 2024.3 Merge6: [6] Copying properties from node with ON CREATE"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (:A {name: 'A'}), (:B {name: 'B'})
@@ -157,9 +154,6 @@ tests:
 
   # [6] Copying properties from node with ON CREATE (control query)
   - name: s6_copying_properties_from_node_with_on_create_control
-    xfail:
-      spec: "openCypher TCK 2024.3 Merge6: [6] Copying properties from node with ON CREATE (control query)"
-      issue: fix in 0.6.4
     setup:
       - |
         CREATE (:A {name: 'A'}), (:B {name: 'B'})

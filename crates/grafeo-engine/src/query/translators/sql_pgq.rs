@@ -536,7 +536,7 @@ impl SqlPgqTranslator {
             .map(|a| self.translate_expression(a, None))
             .collect::<Result<Vec<_>>>()?;
 
-        let yield_items = call.yield_items.as_ref().map(|items| {
+        let yield_items: Option<Vec<ProcedureYield>> = call.yield_items.as_ref().map(|items| {
             items
                 .iter()
                 .map(|item| ProcedureYield {
@@ -545,6 +545,10 @@ impl SqlPgqTranslator {
                 })
                 .collect()
         });
+        if let Some(items) = &yield_items {
+            // A standalone CALL has nothing bound before it.
+            ProcedureYield::check_names(items, &Default::default())?;
+        }
 
         let mut plan = LogicalOperator::CallProcedure(CallProcedureOp {
             name: call.procedure_name.clone(),
@@ -679,12 +683,9 @@ impl SqlPgqTranslator {
             function,
             AggregateFunction::PercentileDisc | AggregateFunction::PercentileCont
         )
-        .then(|| match second {
-            Some(ast::Expression::Literal(ast::Literal::Float(p))) => p.clamp(0.0, 1.0),
-            Some(ast::Expression::Literal(ast::Literal::Decimal(p))) => p.to_f64().clamp(0.0, 1.0),
-            Some(ast::Expression::Literal(ast::Literal::Integer(p))) => (*p as f64).clamp(0.0, 1.0),
-            _ => 0.5,
-        });
+        .then(|| second.map(|argument| self.translate_expression(argument, table_alias)))
+        .flatten()
+        .transpose()?;
         let separator = if function == AggregateFunction::GroupConcat {
             match second {
                 Some(ast::Expression::Literal(ast::Literal::String(separator))) => {
@@ -704,6 +705,7 @@ impl SqlPgqTranslator {
             alias,
             percentile,
             separator,
+            keep_nulls: false,
         })
     }
 

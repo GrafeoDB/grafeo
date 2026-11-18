@@ -163,9 +163,6 @@ tests:
 
   # [8] Ignore null when setting property
   - name: s8_ignore_null_when_setting_property
-    xfail:
-      spec: "openCypher TCK 2024.3 Set1: [8] Ignore null when setting property"
-      issue: fix in 0.6.4
     query: |
       OPTIONAL MATCH (a:DoesNotExist)
       SET a.num = 42

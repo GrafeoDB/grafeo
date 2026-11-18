@@ -64,9 +64,6 @@ tests:
 
   # [2] Delete on null path
   - name: s2_delete_on_null_path
-    xfail:
-      spec: "openCypher TCK 2024.3 Delete3: [2] Delete on null path"
-      issue: fix in 0.6.4
     query: |
       OPTIONAL MATCH p = ()-->()
       DETACH DELETE p

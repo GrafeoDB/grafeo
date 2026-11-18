@@ -440,26 +440,35 @@ func TestDurationOverflowIsRefused(t *testing.T) {
 }
 
 // An offset that is not whole minutes (Amsterdam's local mean time before
-// 1937, +00:19:32) is refused with GQLSTATUS 22009, in a named zone and as a
-// FixedZone; a whole-minute offset in a zone the caller chose is kept.
+// 1937, +00:19:32) is refused with GQLSTATUS 22009 as a FixedZone, and in
+// the named zone where the system's zone data gives Amsterdam that offset in
+// 1936 (some give it Brussels' +01:00, a whole-minute offset that is kept);
+// a whole-minute offset in a zone the caller chose is kept.
 func TestAnOffsetThatIsNotWholeMinutesIsRefused(t *testing.T) {
 	db, err := OpenInMemory()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	amsterdam, err := time.LoadLocation("Europe/Amsterdam")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, v := range []time.Time{
-		time.Date(1936, 5, 1, 12, 0, 0, 0, amsterdam),
-		time.Date(1936, 5, 1, 12, 0, 0, 0, time.FixedZone("LMT", 19*60+32)),
-	} {
+	refused := func(v time.Time) {
 		_, err := db.ExecuteParams("RETURN $v AS v", map[string]any{"v": v})
 		var grafeoErr *Error
 		if !errors.As(err, &grafeoErr) || grafeoErr.GQLStatus != "22009" {
 			t.Errorf("%v: got %v, want GQLSTATUS 22009", v, err)
+		}
+	}
+	refused(time.Date(1936, 5, 1, 12, 0, 0, 0, time.FixedZone("LMT", 19*60+32)))
+	amsterdam, err := time.LoadLocation("Europe/Amsterdam")
+	if err != nil {
+		t.Fatal(err)
+	}
+	named := time.Date(1936, 5, 1, 12, 0, 0, 0, amsterdam)
+	if _, offset := named.Zone(); offset%60 != 0 {
+		refused(named)
+	} else {
+		typed, back := typedBack(t, db, "ZONED DATETIME", named)
+		if backTime, ok := back.(time.Time); !typed || !ok || !backTime.Equal(named) {
+			t.Errorf("%v (whole minutes in this zone data) arrived typed %v, came back as %#v", named, typed, back)
 		}
 	}
 	// A whole-minute offset off the hour is kept. No European zone has one

@@ -21,7 +21,10 @@ mod slot;
 mod warning_probe;
 
 pub use slot::Session;
-pub(crate) use slot::{OperatorSlot, Slots};
+// Streams exist with GQL only (`query::executor::stream`).
+#[cfg(feature = "gql")]
+pub(crate) use slot::OperatorSlot;
+pub(crate) use slot::Slots;
 #[cfg(feature = "testing-warning-probe")]
 pub use warning_probe::ProbeStage;
 
@@ -393,6 +396,7 @@ pub(crate) struct PlanOptions {
 pub(crate) struct SessionConfig {
     pub transaction_manager: Arc<TransactionManager>,
     /// Where the session lists the streams it opens, which `close()` empties (#712).
+    #[cfg(feature = "gql")]
     pub slots: Arc<Slots>,
     pub query_cache: Arc<QueryCache>,
     pub catalog: Arc<Catalog>,
@@ -460,6 +464,7 @@ pub(crate) struct SessionInner {
     /// Query cache shared across sessions.
     query_cache: Arc<QueryCache>,
     /// Where the session's streams are listed (#712).
+    #[cfg(feature = "gql")]
     pub(crate) slots: Arc<Slots>,
     /// Current transaction ID (if any). Behind a Mutex so that GQL commands
     /// (`START TRANSACTION`, `COMMIT`, `ROLLBACK`) can manage transactions
@@ -609,6 +614,7 @@ impl SessionInner {
             catalog: cfg.catalog,
             transaction_manager: cfg.transaction_manager,
             query_cache: cfg.query_cache,
+            #[cfg(feature = "gql")]
             slots: cfg.slots,
             current_transaction: parking_lot::Mutex::new(None),
             read_only_tx: parking_lot::Mutex::new(cfg.read_only),
@@ -801,6 +807,7 @@ impl SessionInner {
             rdf_store: Arc::new(RdfStore::new()),
             transaction_manager: cfg.transaction_manager,
             query_cache: cfg.query_cache,
+            #[cfg(feature = "gql")]
             slots: cfg.slots,
             current_transaction: parking_lot::Mutex::new(None),
             read_only_tx: parking_lot::Mutex::new(cfg.read_only),

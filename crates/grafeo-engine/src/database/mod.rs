@@ -2177,6 +2177,7 @@ impl Open {
         let session_cfg = || crate::session::SessionConfig {
             transaction_manager: Arc::clone(&self.transaction_manager),
             query_cache: Arc::clone(&self.query_cache),
+            #[cfg(feature = "gql")]
             slots: Arc::clone(&self.slots),
             catalog: Arc::clone(&self.catalog),
             #[cfg(lpg_language)]

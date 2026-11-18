@@ -19,7 +19,9 @@ use parking_lot::{
     MappedRwLockReadGuard, MappedRwLockWriteGuard, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
 
-use grafeo_core::execution::operators::{Operator, OperatorResult};
+use grafeo_core::execution::operators::Operator;
+#[cfg(feature = "gql")]
+use grafeo_core::execution::operators::OperatorResult;
 
 use super::SessionInner;
 
@@ -67,8 +69,10 @@ type StreamSlot = Mutex<Option<Box<dyn Operator>>>;
 /// The operators of an open stream, in a slot the database's `close()` empties: what they
 /// read (the stores, an operator's buffers) goes with the close, and the stream's next pull
 /// fails with `GRAFEO-T007`. Made only by [`Slots::register_stream`].
+#[cfg(feature = "gql")]
 pub(crate) struct OperatorSlot(Arc<StreamSlot>);
 
+#[cfg(feature = "gql")]
 impl OperatorSlot {
     /// The next chunk of the stream's operators; `None` once the database is closed.
     pub(crate) fn next(&self) -> Option<OperatorResult> {
@@ -112,6 +116,7 @@ impl Slots {
 
     /// A slot holding a stream's `operator`, listed so `close()` empties it: the one way to
     /// make an [`OperatorSlot`].
+    #[cfg(feature = "gql")]
     pub(crate) fn register_stream(&self, operator: Box<dyn Operator>) -> OperatorSlot {
         let slot = Arc::new(Mutex::new(Some(operator)));
         self.streams.lock().push(&slot);

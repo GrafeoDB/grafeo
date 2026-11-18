@@ -549,8 +549,18 @@ fn every_call_on_a_closed_database_fails_with_t007() {
         ]);
     }
 
-    // The table covers every export on a database (all of them in a build with every feature).
-    #[cfg(feature = "full")]
+    // The table covers every export on a database, in a build with every capability a row
+    // above is gated on (the header declares every export, whatever the build).
+    #[cfg(all(
+        feature = "cdc",
+        feature = "cypher",
+        feature = "graphql",
+        feature = "gremlin",
+        feature = "sparql",
+        feature = "sql-pgq",
+        feature = "storage",
+        feature = "vector-index"
+    ))]
     {
         let listed: Vec<&str> = rows.iter().map(|(name, _, _)| *name).collect();
         let unlisted: Vec<String> = exports_on("GrafeoDatabase")

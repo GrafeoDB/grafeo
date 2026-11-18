@@ -39,6 +39,7 @@ impl SessionInner {
             rdf_store,
             transaction_manager: cfg.transaction_manager,
             query_cache: cfg.query_cache,
+            #[cfg(feature = "gql")]
             slots: cfg.slots,
             current_transaction: parking_lot::Mutex::new(None),
             read_only_tx: parking_lot::Mutex::new(cfg.read_only),

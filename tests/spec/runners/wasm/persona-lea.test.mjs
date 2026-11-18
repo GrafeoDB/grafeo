@@ -151,7 +151,7 @@ describe.skipIf(!available)('persona Lea (WASM, edge build)', () => {
 
   it.each([
     ['a commit with no transaction', (db) => db.commitTransaction(), 'No active transaction'],
-    ['a closed database', (db) => { db.close(); db.execute('RETURN 1 AS x') }, 'Database is closed'],
+    ['a closed database', (db) => { db.close(); db.execute('RETURN 1 AS x') }, 'GRAFEO-T007'],
     ['a snapshot signed with another key', (db) => Database.importSnapshotSigned(db.exportSnapshotSigned(new Uint8Array(32).fill(1)), new Uint8Array(32).fill(2)), 'HMAC'],
   ])('gets a GQLSTATUS for %s', (_what, call, words) => {
     const error = thrown(() => call(notes()))

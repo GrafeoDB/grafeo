@@ -183,6 +183,7 @@ mod group_by_names;
 mod group_order_is_first_seen;
 mod guarded_subqueries;
 mod history_retention;
+mod history_retention_limit;
 mod history_survives_compact_and_crash;
 mod home_graph;
 mod hybrid_pushdown_coverage;

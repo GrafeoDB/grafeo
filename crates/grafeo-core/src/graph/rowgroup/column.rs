@@ -1970,6 +1970,15 @@ impl Columns {
             .flat_map(move |updates| updates.kept_stamped(row))
     }
 
+    /// Every value the update chains keep: its row, the stamp of the write over it, and the
+    /// value before (`None`: the row had none).
+    pub(super) fn stamped_kept(&self) -> impl Iterator<Item = (usize, u64, &Option<Value>)> + '_ {
+        self.by_key
+            .values()
+            .filter_map(Column::updates)
+            .flat_map(Updates::stamped)
+    }
+
     /// Restores the update chains of key `key` a load reads from a file's
     /// history (see [`Updates::load`]), thawing its column: a column with
     /// chains is hot (Q9). A key with no value left in the rows (every row

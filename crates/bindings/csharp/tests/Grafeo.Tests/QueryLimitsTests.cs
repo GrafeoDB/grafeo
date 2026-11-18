@@ -83,4 +83,18 @@ public sealed class QueryLimitsTests
         Assert.Contains("GRAFEO-T012", error.Message);
         tx.Rollback();
     }
+
+    // The history retention limit reaches the open: zero fails it; a limit opens.
+    [Fact]
+    public void TheHistoryRetentionLimitReachesTheOpen()
+    {
+        using var zero = new GrafeoOptions().SetHistoryRetentionLimit(0);
+        var error = Assert.ThrowsAny<Exception>(() =>
+        {
+            using var db = GrafeoDB.Open(null, zero);
+        });
+        Assert.Contains("history_retention_limit", error.Message);
+        using var limit = new GrafeoOptions().SetHistoryRetentionLimit(1 << 20);
+        using var opened = GrafeoDB.Open(null, limit);
+    }
 }

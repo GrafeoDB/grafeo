@@ -515,14 +515,15 @@ impl Open {
             self.cdc_log.record_commit(&changes, epoch);
         }
         // What it replaced, in the ledger before its epoch is published, as a commit's is.
-        self.transaction_manager
-            .add_replaced(changes.superseded_bytes() as u64);
+        let replaced = changes.superseded_bytes() as u64;
+        self.transaction_manager.add_replaced(replaced);
         // A build without the log and change data capture keeps no entries.
         #[cfg(not(any(feature = "wal", feature = "cdc")))]
         drop(changes);
         self.transaction_manager.sync_epoch(epoch);
         if let Some(at) = at {
-            self.transaction_manager.record_commit_time(epoch, at);
+            self.transaction_manager
+                .record_commit_time(epoch, at, replaced);
         }
         drop(commits);
         self.prune_versions(&root, store);

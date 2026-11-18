@@ -59,4 +59,11 @@ describe('query limits', () => {
     expect(error.errorCode).toBe('GRAFEO-T012')
     tx.rollback()
   })
+
+  it('refuses a zero historyRetentionLimit and opens with one', () => {
+    expect(() => GrafeoDB.create(undefined, { historyRetentionLimit: 0 })).toThrow(
+      'history_retention_limit',
+    )
+    GrafeoDB.create(undefined, { historyRetentionLimit: 1 << 20 }).close()
+  })
 })

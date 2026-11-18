@@ -11,7 +11,8 @@ use crate::database::{
 use crate::error::{GrafeoStatus, grafeo_last_error};
 use crate::options::{
     GrafeoOptions, grafeo_open_with_options, grafeo_options_free, grafeo_options_new,
-    grafeo_options_set_path_search_budget, grafeo_options_set_snapshot_retention_limit,
+    grafeo_options_set_history_retention_limit, grafeo_options_set_path_search_budget,
+    grafeo_options_set_snapshot_retention_limit,
 };
 use crate::types::GrafeoDatabase;
 
@@ -122,4 +123,28 @@ fn the_snapshot_retention_limit_binds() {
     assert_eq!(grafeo_rollback(tx), GrafeoStatus::Ok);
     grafeo_free_transaction(tx);
     grafeo_free_database(db);
+}
+
+/// The history retention limit reaches the open: zero fails it; a limit opens.
+#[test]
+fn the_history_retention_limit_reaches_the_open() {
+    for (bytes, opens) in [(0, false), (1 << 20, true)] {
+        let options = grafeo_options_new();
+        assert_eq!(
+            grafeo_options_set_history_retention_limit(options, bytes),
+            GrafeoStatus::Ok
+        );
+        let db = grafeo_open_with_options(std::ptr::null(), options);
+        grafeo_options_free(options);
+        assert_eq!(!db.is_null(), opens, "{bytes}: {}", last_error());
+        if opens {
+            grafeo_free_database(db);
+        } else {
+            assert!(
+                last_error().contains("history_retention_limit"),
+                "{}",
+                last_error()
+            );
+        }
+    }
 }

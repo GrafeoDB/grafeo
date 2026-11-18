@@ -147,6 +147,9 @@ const char*     grafeo_version(void);
        open transaction's snapshot may keep; past it the transaction's next
        call fails with the retryable GRAFEO-T012 and rolls it back. Below
        1 MiB grafeo_open_with_options fails.
+     - The history retention limit is how many bytes of replaced data the
+       history window may keep; past it the window's start moves forward.
+       No limit by default; zero fails the open. Not stored with the file.
      - The memory and query memory limits and the path search budget must be
        above zero (another status otherwise); a spill limit of 0 means
        nothing spills, and unlimited spill, once set, wins over a spill limit.
@@ -159,6 +162,7 @@ GrafeoStatus    grafeo_options_set_memory_limit(GrafeoOptions* options, uint64_t
 GrafeoStatus    grafeo_options_set_query_memory_limit(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_path_search_budget(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_snapshot_retention_limit(GrafeoOptions* options, uint64_t bytes);
+GrafeoStatus    grafeo_options_set_history_retention_limit(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_spill_limit(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_unlimited_spill(GrafeoOptions* options);
 GrafeoDatabase* grafeo_open_with_options(const char* path, const GrafeoOptions* options);

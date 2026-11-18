@@ -59,3 +59,22 @@ def test_the_snapshot_retention_limit_binds():
         tx.execute(read_bio)
     assert raised.value.error_code == "GRAFEO-T012", str(raised.value)
     tx.rollback()
+
+
+def test_a_zero_history_retention_limit_is_refused():
+    with pytest.raises(grafeo.GrafeoError, match="history_retention_limit"):
+        grafeo.GrafeoDB(history_retention_limit=0)
+
+
+def test_the_history_retention_limit_moves_the_start_of_the_window():
+    """Forty commits replacing 64 KiB each pass a 1 MiB limit: the first epoch is no longer
+    retained, and the latest reads."""
+    db = grafeo.GrafeoDB(history_retention="forever", history_retention_limit=1 << 20)
+    db.execute("INSERT (:Person {name: 'Alix', bio: 'Amsterdam'})")
+    first = db.current_epoch()
+    bio = "V" * (64 * 1024)
+    for round_ in range(40):
+        db.execute(f"MATCH (p:Person {{name: 'Alix'}}) SET p.bio = '{round_:04}{bio}'")
+    db.gc()
+    with pytest.raises(grafeo.GrafeoError, match="not retained"):
+        db.as_of(first)

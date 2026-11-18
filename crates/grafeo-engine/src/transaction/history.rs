@@ -55,15 +55,25 @@ pub(crate) struct HistoryImage {
     pub times: Vec<(u64, u64)>,
 }
 
+/// One commit of the time index: its epoch, its time in milliseconds, and the bytes of the
+/// labeled property graph's committed state the commits replaced up to and including it (see
+/// [`History::record_replacing`]).
+type CommitTime = (u64, u64, u64);
+
 /// The retention setting and the time index (see the module docs).
 pub(crate) struct History {
     /// Whether history is on: the one test a commit pays while it is off.
     on: AtomicBool,
     /// The retention window, while on.
     retention: Mutex<HistoryRetention>,
+    /// How many bytes the commits since the window's start may have replaced, `u64::MAX` for
+    /// no limit: past it the start moves forward, whichever of time or bytes comes first.
+    limit: AtomicU64,
     /// The commit times, epochs ascending: the newest at or before the floor
     /// first, so a time just after the floor still finds its epoch.
-    times: Mutex<VecDeque<(u64, u64)>>,
+    times: Mutex<VecDeque<CommitTime>>,
+    /// The bytes the commits recorded so far replaced.
+    replaced: AtomicU64,
     /// The last time a commit took, so the next one never goes back.
     last_time: AtomicU64,
     /// The oldest epoch a read may ask for: the newest collect horizon.
@@ -93,7 +103,9 @@ impl History {
         Self {
             on: AtomicBool::new(false),
             retention: Mutex::new(HistoryRetention::Off),
+            limit: AtomicU64::new(u64::MAX),
             times: Mutex::new(VecDeque::new()),
+            replaced: AtomicU64::new(0),
             last_time: AtomicU64::new(0),
             floor: AtomicU64::new(0),
             clock,
@@ -108,6 +120,37 @@ impl History {
     /// The retention setting.
     pub(crate) fn retention(&self) -> HistoryRetention {
         *self.retention.lock()
+    }
+
+    /// Whether the time index counts bytes: history is on and a retention limit is set.
+    pub(crate) fn counts_bytes(&self) -> bool {
+        self.is_on() && self.limit.load(Ordering::Acquire) != u64::MAX
+    }
+
+    /// Counts what the store keeps of replaced state at the end of an open (`kept`: the bytes per
+    /// replacing epoch, see `RowGroupStore::kept_superseded`) into the time index: each commit's
+    /// total holds what the epochs up to it replaced, so the window's byte start reads the loaded
+    /// and replayed history as the commits that made it would have left it.
+    pub(crate) fn count_kept(&self, mut kept: Vec<(u64, usize)>) {
+        kept.sort_unstable_by_key(|(epoch, _)| *epoch);
+        let mut times = self.times.lock();
+        let mut kept = kept.into_iter().peekable();
+        let mut counted = 0u64;
+        for (epoch, _, replaced) in times.iter_mut() {
+            while let Some((_, bytes)) = kept.next_if(|(at, _)| at <= epoch) {
+                counted = counted.saturating_add(bytes as u64);
+            }
+            *replaced = replaced.saturating_add(counted);
+        }
+        counted = counted.saturating_add(kept.map(|(_, bytes)| bytes as u64).sum::<u64>());
+        self.replaced.fetch_add(counted, Ordering::AcqRel);
+    }
+
+    /// Sets how many bytes the commits since the window's start may have replaced (`None`: no
+    /// limit): past it the start moves forward, whichever of time or bytes comes first.
+    pub(crate) fn set_retention_limit(&self, bytes: Option<u64>) {
+        self.limit
+            .store(bytes.unwrap_or(u64::MAX), Ordering::Release);
     }
 
     /// Sets the retention an open starts with, before it loads anything:
@@ -126,7 +169,7 @@ impl History {
         if !self.is_on() {
             return;
         }
-        let newest = self.times.lock().back().map(|(epoch, _)| *epoch);
+        let newest = self.times.lock().back().map(|(epoch, _, _)| *epoch);
         if newest.is_none_or(|newest| newest < published) {
             let now = self.next_time();
             self.record(EpochId::new(published), now);
@@ -143,9 +186,10 @@ impl History {
         let on = retention != HistoryRetention::Off;
         if on && !was_on {
             let now = self.next_time();
+            let replaced = self.replaced.load(Ordering::Acquire);
             let mut times = self.times.lock();
-            if times.back().is_none_or(|(epoch, _)| *epoch < published) {
-                times.push_back((published, now));
+            if times.back().is_none_or(|(epoch, _, _)| *epoch < published) {
+                times.push_back((published, now, replaced));
             }
         } else if !on {
             self.times.lock().clear();
@@ -175,14 +219,27 @@ impl History {
     /// [`commit_time`](Self::commit_time) gave or a WAL group holds; an
     /// epoch at or below the newest recorded one changes nothing.
     pub(crate) fn record(&self, epoch: EpochId, millis: u64) {
+        self.record_replacing(epoch, millis, 0);
+    }
+
+    /// [`record`](Self::record) for a commit that replaced `bytes` of the labeled property
+    /// graph's committed state, which the window keeps for readers before it: the bytes the
+    /// retention limit counts.
+    pub(crate) fn record_replacing(&self, epoch: EpochId, millis: u64, bytes: u64) {
         if !self.is_on() {
             return;
         }
         let epoch = epoch.as_u64();
         let mut times = self.times.lock();
-        let millis = times.back().map_or(millis, |(_, last)| millis.max(*last));
-        if times.back().is_none_or(|(newest, _)| *newest < epoch) {
-            times.push_back((epoch, millis));
+        let millis = times
+            .back()
+            .map_or(millis, |(_, last, _)| millis.max(*last));
+        if times.back().is_none_or(|(newest, _, _)| *newest < epoch) {
+            let replaced = self
+                .replaced
+                .fetch_add(bytes, Ordering::AcqRel)
+                .saturating_add(bytes);
+            times.push_back((epoch, millis, replaced));
         }
         drop(times);
         self.last_time.fetch_max(millis, Ordering::AcqRel);
@@ -197,7 +254,8 @@ impl History {
     /// read horizon decides alone); the floor for `Forever`, and for a
     /// window that reaches back past every recorded commit; else the last
     /// epoch committed at or before now minus the window (a reader there
-    /// reads the state at that time), never below the floor.
+    /// reads the state at that time), never below the floor. Under a retention limit, no
+    /// earlier than the oldest commit after which the commits replaced at most the limit.
     pub(crate) fn retention_horizon(&self) -> Option<u64> {
         // Off: one flag test, no lock, as a collect without history costs.
         if !self.is_on() {
@@ -205,18 +263,28 @@ impl History {
         }
         let retention = *self.retention.lock();
         let floor = self.floor.load(Ordering::Acquire);
-        match retention {
-            HistoryRetention::Off => None,
-            HistoryRetention::Forever => Some(floor),
+        let start = match retention {
+            HistoryRetention::Off => return None,
+            HistoryRetention::Forever => floor,
             HistoryRetention::Duration(window) => {
                 let window = u64::try_from(window.as_millis()).unwrap_or(u64::MAX);
                 let start = (self.clock)().saturating_sub(window);
                 let times = self.times.lock();
-                let at = times.partition_point(|(_, millis)| *millis <= start);
+                let at = times.partition_point(|(_, millis, _)| *millis <= start);
                 let epoch = at.checked_sub(1).map_or(floor, |index| times[index].0);
-                Some(epoch.max(floor))
+                epoch.max(floor)
             }
+        };
+        let limit = self.limit.load(Ordering::Acquire);
+        if limit == u64::MAX {
+            return Some(start);
         }
+        // The bytes replaced since a commit: the newest total less the total at it.
+        let times = self.times.lock();
+        let newest = times.back().map_or(0, |(_, _, replaced)| *replaced);
+        let at = times.partition_point(|(_, _, replaced)| newest - replaced > limit);
+        let by_bytes = times.get(at).map_or(start, |(epoch, _, _)| *epoch);
+        Some(start.max(by_bytes))
     }
 
     /// Moves the floor to `horizon` when it is later, the horizon a collect
@@ -228,7 +296,7 @@ impl History {
         if self.is_on() && horizon.as_u64() > floor {
             let mut times = self.times.lock();
             let keep_from = times
-                .partition_point(|(epoch, _)| *epoch <= horizon.as_u64())
+                .partition_point(|(epoch, _, _)| *epoch <= horizon.as_u64())
                 .saturating_sub(1);
             times.drain(..keep_from);
         }
@@ -246,9 +314,10 @@ impl History {
             return;
         }
         let now = self.next_time();
+        let replaced = self.replaced.load(Ordering::Acquire);
         let mut times = self.times.lock();
         times.clear();
-        times.push_back((published.as_u64(), now));
+        times.push_back((published.as_u64(), now, replaced));
     }
 
     /// The error of a read at `epoch`, before the floor.
@@ -279,9 +348,9 @@ impl History {
         }
         let millis = u64::try_from(timestamp.as_millis()).unwrap_or(0);
         let times = self.times.lock();
-        let at = times.partition_point(|(_, time)| *time <= millis);
+        let at = times.partition_point(|(_, time, _)| *time <= millis);
         let Some(index) = at.checked_sub(1) else {
-            let oldest = times.front().map_or(0, |(_, time)| *time);
+            let oldest = times.front().map_or(0, |(_, time, _)| *time);
             return Err(Error::InvalidValue(format!(
                 "history before {} is not retained: a read at {} asks for older history than \
                  the database keeps",
@@ -304,7 +373,12 @@ impl History {
         }
         Some(HistoryImage {
             floor: self.floor.load(Ordering::Acquire),
-            times: self.times.lock().iter().copied().collect(),
+            times: self
+                .times
+                .lock()
+                .iter()
+                .map(|(epoch, millis, _)| (*epoch, *millis))
+                .collect(),
         })
     }
 
@@ -316,18 +390,39 @@ impl History {
         if !self.is_on() {
             return;
         }
+        // The bytes of what a load gives back are counted at the end of the open (H4).
+        let replaced = self.replaced.load(Ordering::Acquire);
         let mut times = self.times.lock();
         times.clear();
-        times.extend(image.times.iter().copied());
-        if let Some((_, last)) = times.back() {
+        times.extend(
+            image
+                .times
+                .iter()
+                .map(|(epoch, millis)| (*epoch, *millis, replaced)),
+        );
+        if let Some((_, last, _)) = times.back() {
             self.last_time.fetch_max(*last, Ordering::AcqRel);
         }
+    }
+
+    /// Each entry's epoch and the bytes the commits replaced up to it, for tests.
+    #[cfg(test)]
+    pub(crate) fn totals(&self) -> Vec<(u64, u64)> {
+        self.times
+            .lock()
+            .iter()
+            .map(|(epoch, _, replaced)| (*epoch, *replaced))
+            .collect()
     }
 
     /// The commit times, for tests.
     #[cfg(test)]
     pub(crate) fn times(&self) -> Vec<(u64, u64)> {
-        self.times.lock().iter().copied().collect()
+        self.times
+            .lock()
+            .iter()
+            .map(|(epoch, millis, _)| (*epoch, *millis))
+            .collect()
     }
 }
 

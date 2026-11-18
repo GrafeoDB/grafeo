@@ -1357,10 +1357,11 @@ impl Publish<'_> {
         #[cfg(feature = "triple-store")]
         let mut released: Option<KeptRdfWrites> = None;
         let held_past_limit;
+        // What the commit replaced, for the ledger and the history's time index.
+        let mut lpg_replaced = 0;
         {
             let mut transactions = manager.transactions.write();
             let mut ended = None;
-            let mut lpg_replaced = 0;
             if let Some(info) = transactions.get_mut(&self.transaction_id) {
                 info.state = TransactionState::Committed;
                 info.claim_undo = None;
@@ -1416,9 +1417,11 @@ impl Publish<'_> {
         if self.changed {
             manager.change_count.fetch_add(1, Ordering::AcqRel);
         }
-        // In the turn, so the times are recorded in epoch order.
+        // In the turn, so the times are recorded in epoch order, with what the commit replaced.
         if let Some(time) = self.commit_time {
-            manager.history.record(self.epoch, time);
+            manager
+                .history
+                .record_replacing(self.epoch, time, lpg_replaced);
         }
         self.finished = true;
         drop(turn);
@@ -3100,6 +3103,12 @@ impl TransactionManager {
         }
     }
 
+    /// Each time-index entry's epoch and the bytes the commits replaced up to it, for tests.
+    #[cfg(test)]
+    pub(crate) fn history_totals(&self) -> Vec<(u64, u64)> {
+        self.history.totals()
+    }
+
     /// The bytes of the labeled property graph's committed state the commits replaced so far,
     /// for tests.
     #[cfg(test)]
@@ -3262,8 +3271,13 @@ impl TransactionManager {
     #[must_use]
     pub fn collect_horizon(&self) -> EpochId {
         let readers = self.reads.epochs.lock();
+        self.collect_horizon_in(&readers)
+    }
+
+    /// [`collect_horizon`](Self::collect_horizon) with the readers' lock held.
+    fn collect_horizon_in(&self, readers: &Readers) -> EpochId {
         let published = self.published_epoch.load(Ordering::Acquire);
-        let read = ReadPins::oldest(&readers).map_or(published, |oldest| oldest.min(published));
+        let read = ReadPins::oldest(readers).map_or(published, |oldest| oldest.min(published));
         let horizon = match self.history.retention_horizon() {
             Some(start) => read.min(start),
             None => read,
@@ -3288,6 +3302,13 @@ impl TransactionManager {
     pub fn set_history_retention(&self, retention: HistoryRetention) {
         self.history
             .set_retention(retention, self.published_epoch.load(Ordering::Acquire));
+    }
+
+    /// Sets how many bytes of replaced data the history window may keep (`None`: no limit): once
+    /// the commits since its start replaced more, the start moves forward, whichever of time or
+    /// bytes comes first (see [`Config::with_history_retention_limit`](crate::Config::with_history_retention_limit)).
+    pub(crate) fn set_history_retention_limit(&self, bytes: Option<u64>) {
+        self.history.set_retention_limit(bytes);
     }
 
     /// How long the database keeps history.
@@ -3324,8 +3345,10 @@ impl TransactionManager {
     /// Records that `epoch` committed at `millis`: a write outside a
     /// transaction, once published, and a replayed WAL group. Nothing while
     /// history is off.
-    pub(crate) fn record_commit_time(&self, epoch: EpochId, millis: u64) {
-        self.history.record(epoch, millis);
+    /// It replaced `lpg` bytes of the labeled property graph's committed state, which the
+    /// history window keeps: 0 for a replayed group, which the end of the open counts.
+    pub(crate) fn record_commit_time(&self, epoch: EpochId, millis: u64, lpg: u64) {
+        self.history.record_replacing(epoch, millis, lpg);
     }
 
     /// What a checkpoint writes of the history, `None` while it is off.
@@ -3361,6 +3384,48 @@ impl TransactionManager {
         let _readers = self.reads.epochs.lock();
         self.history
             .restart(EpochId::new(self.published_epoch.load(Ordering::Acquire)));
+    }
+
+    /// The epoch a checkpoint writes history from, while the database keeps it: the collect
+    /// horizon now (the later of the window's starts by time and by bytes, never past an open
+    /// reader), which the floor moves to first, so the time index the checkpoint writes starts
+    /// where the history it writes does. `None` while history is off.
+    pub(crate) fn history_checkpoint_floor(&self) -> Option<EpochId> {
+        self.history.is_on().then(|| {
+            // The floor moves to the horizon when it is later: the later of the two.
+            let horizon = self.collect_horizon();
+            horizon.max(self.history.floor())
+        })
+    }
+
+    /// [`history_checkpoint_floor`](Self::history_checkpoint_floor) with a read pinned there,
+    /// under the one lock the floor moves under, so no collect passes it before the image is
+    /// read (`None` while history is off). The pin's epoch is where the history starts.
+    #[cfg(feature = "grafeo-file")]
+    pub(crate) fn pin_history_checkpoint(&self) -> Option<ReadPin> {
+        if !self.history.is_on() {
+            return None;
+        }
+        let mut readers = self.reads.epochs.lock();
+        let floor = self.collect_horizon_in(&readers).max(self.history.floor());
+        ReadPins::hold_at(&mut readers, floor.as_u64());
+        Some(ReadPin {
+            pins: Arc::clone(&self.reads),
+            epoch: floor,
+        })
+    }
+
+    /// Whether the history's time index counts bytes: history is on and a retention limit is
+    /// set (see [`set_history_retention_limit`](Self::set_history_retention_limit)).
+    pub(crate) fn history_counts_bytes(&self) -> bool {
+        self.history.counts_bytes()
+    }
+
+    /// Counts what the store keeps of replaced state (`kept`, see
+    /// `RowGroupStore::kept_superseded`) into the history's time index, at the end of an open:
+    /// the history a load restored and a replay kept counts as the commits that made it did.
+    pub(crate) fn count_kept_history(&self, kept: Vec<(u64, usize)>) {
+        self.history.count_kept(kept);
     }
 
     /// At the end of an open or a new database: a history that is on and

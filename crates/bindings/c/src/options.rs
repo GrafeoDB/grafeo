@@ -19,6 +19,7 @@ pub struct GrafeoOptions {
     query_memory_limit: Option<usize>,
     path_search_budget: Option<usize>,
     snapshot_retention_limit: Option<u64>,
+    history_retention_limit: Option<u64>,
     spill_limit: Option<u64>,
     unlimited_spill: bool,
 }
@@ -37,6 +38,9 @@ impl GrafeoOptions {
         }
         if let Some(bytes) = self.snapshot_retention_limit {
             config = config.with_snapshot_retention_limit(bytes);
+        }
+        if let Some(bytes) = self.history_retention_limit {
+            config = config.with_history_retention_limit(bytes);
         }
         if self.unlimited_spill {
             config = config.with_unlimited_spill();
@@ -153,6 +157,24 @@ pub extern "C" fn grafeo_options_set_snapshot_retention_limit(
     match options_mut(options) {
         Ok(options) => {
             options.snapshot_retention_limit = Some(bytes);
+            GrafeoStatus::Ok
+        }
+        Err(status) => status,
+    }
+}
+
+/// How many bytes of replaced data the history window may keep: once the commits since its start
+/// replaced more, the start moves forward, whichever of time or bytes comes first, and a read
+/// before it is refused. No limit by default; zero fails at the open. Not stored with the
+/// database: pass it at every open.
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_options_set_history_retention_limit(
+    options: *mut GrafeoOptions,
+    bytes: u64,
+) -> GrafeoStatus {
+    match options_mut(options) {
+        Ok(options) => {
+            options.history_retention_limit = Some(bytes);
             GrafeoStatus::Ok
         }
         Err(status) => status,

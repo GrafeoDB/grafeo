@@ -42,3 +42,9 @@ fn a_snapshot_retention_limit_below_1_mib_is_refused() {
     assert!(error.contains("at least 1 MiB"), "{error}");
     assert!(Database::create(Some(options("snapshotRetentionLimit", 1_048_576.0))).is_ok());
 }
+
+#[wasm_bindgen_test]
+fn a_history_retention_limit_opens_and_zero_is_refused() {
+    assert!(Database::create(Some(options("historyRetentionLimit", 0.0))).is_err());
+    assert!(Database::create(Some(options("historyRetentionLimit", 1_048_576.0))).is_ok());
+}

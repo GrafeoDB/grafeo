@@ -33,8 +33,10 @@ use std::sync::atomic::Ordering;
 
 use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, Value};
 
+use grafeo_common::change::{Before, superseded_bytes};
+
 use super::column::Columns;
-use super::{ABSENT, Inner, PENDING, Read, RowGroupStore, RowVersion};
+use super::{ABSENT, Inner, PENDING, ROWS_PER_GROUP, Read, RowGroupStore, RowVersion};
 use crate::graph::lpg::{Edge, Node};
 
 /// Whether `stamp` is a commit epoch (not absent, not a transaction's).
@@ -161,6 +163,22 @@ impl RowGroupStore {
                 graph.set_history_floor(floor);
             }
         }
+    }
+
+    /// What this store and its named graphs keep of committed state that commits replaced, as
+    /// `(epoch, bytes)` per replacing commit, unordered: the values and labels its update chains
+    /// keep and the rows deletes took out, each measured as a transaction's before-image is
+    /// ([`superseded_bytes`](grafeo_common::change::superseded_bytes)). What a load restored and
+    /// what replay kept alike: the history retention limit counts it once an open is done.
+    #[must_use]
+    pub fn kept_superseded(&self) -> Vec<(u64, usize)> {
+        let mut kept = self.inner.read().kept_superseded();
+        for name in self.graph_names() {
+            if let Some(graph) = self.graph(&name) {
+                kept.extend(graph.kept_superseded());
+            }
+        }
+        kept
     }
 
     /// Notes a collect at `horizon`: the floor moves to it.
@@ -307,3 +325,52 @@ fn versions<T>(
 
 #[cfg(test)]
 mod tests;
+
+impl Inner {
+    /// See [`RowGroupStore::kept_superseded`]: this graph's alone.
+    fn kept_superseded(&self) -> Vec<(u64, usize)> {
+        let mut kept = Vec::new();
+        let mut add = |stamp: u64, before: Before| {
+            if committed(stamp) {
+                let bytes = superseded_bytes(&before);
+                if bytes > 0 {
+                    kept.push((stamp, bytes));
+                }
+            }
+        };
+        for (index, group) in &self.nodes {
+            for (_, stamp, value) in group.columns.stamped_kept() {
+                add(stamp, Before::Value(value.clone()));
+            }
+            for (_, stamp, ids) in group.label_updates.stamped() {
+                add(stamp, Before::Labels(self.label_names(ids)));
+            }
+            for (row, deleted) in group.versions.deleted_rows() {
+                // A row its own commit created replaced no committed state (the ledger counts
+                // such a write as 0, and a checkpoint leaves the row out); replay rebuilds it.
+                if deleted <= group.versions.get(row).created {
+                    continue;
+                }
+                if let Some(image) = self.node_image(index * ROWS_PER_GROUP + row as u64) {
+                    add(deleted, Before::Node(Box::new(image)));
+                }
+            }
+        }
+        for (index, group) in &self.edges {
+            for (_, stamp, value) in group.columns.stamped_kept() {
+                add(stamp, Before::Value(value.clone()));
+            }
+            for (row, deleted) in group.versions.deleted_rows() {
+                // A row its own commit created replaced no committed state (the ledger counts
+                // such a write as 0, and a checkpoint leaves the row out); replay rebuilds it.
+                if deleted <= group.versions.get(row).created {
+                    continue;
+                }
+                if let Some(image) = self.edge_image(index * ROWS_PER_GROUP + row as u64) {
+                    add(deleted, Before::Edge(Box::new(image)));
+                }
+            }
+        }
+        kept
+    }
+}

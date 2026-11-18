@@ -1223,6 +1223,13 @@ final class GrafeoBindings {
       int Function(
           Pointer<Void>, int)>('grafeo_options_set_snapshot_retention_limit');
 
+  /// Sets the history retention limit in bytes; zero fails the open. Returns
+  /// GrafeoStatus.
+  late final grafeoOptionsSetHistoryRetentionLimit = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64),
+      int Function(
+          Pointer<Void>, int)>('grafeo_options_set_history_retention_limit');
+
   /// Sets the spill limit in bytes; zero means nothing spills. Returns
   /// GrafeoStatus.
   late final grafeoOptionsSetSpillLimit = library.lookupFunction<

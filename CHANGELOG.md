@@ -15,6 +15,7 @@ Performance and memory release, in progress: this section lists what has landed 
 - **A database says whether it is closed**: `GrafeoDB::is_closed()` is true once `close()` has completed, and false after a `close()` that failed and put the database back.
 - **A Cypher CALL on its own takes `YIELD *`**: it yields every output of the procedure.
 - **Deleting data is documented**: a "Deleting Data" section of the security guide says what deleting removes from the database file and from memory, and when, what stays by design while a database is open (history retention, the change feed, the RDF term dictionary, the plan cache), and what is outside Grafeo.
+- **History can be bounded in bytes**: `Config::with_history_retention_limit` (Python `history_retention_limit`, Node.js and WebAssembly `historyRetentionLimit`, C `grafeo_options_set_history_retention_limit`) keeps at most that many bytes of replaced data in the history, on top of the time window, in memory and in the file; the window then starts at the later of the two. There is no limit by default, and it is not stored with the file, so it is passed at every open.
 
 ### Changed
 

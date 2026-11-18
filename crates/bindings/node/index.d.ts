@@ -1003,6 +1003,14 @@ export interface CreateOptions {
    */
   snapshotRetentionLimit?: number
   /**
+   * How many bytes of replaced data the history window may keep: once the
+   * commits since its start replaced more, the start moves forward,
+   * whichever of time or bytes comes first, and a read before it is
+   * refused. No limit by default; zero throws at the open. Not stored with
+   * the database: pass it at every open.
+   */
+  historyRetentionLimit?: number
+  /**
    * How many bytes may spill to disk (0: nothing spills), half the spill
    * volume's free space by default. An in-memory database spills
    * nothing. For this open only.

@@ -444,6 +444,8 @@ pub enum ConfigError {
     /// [`Config::with_snapshot_retention_limit`] is below
     /// [`MIN_SNAPSHOT_RETENTION_LIMIT`]; holds the bytes given.
     SnapshotRetentionLimitTooSmall(u64),
+    /// [`Config::with_history_retention_limit`] must be greater than zero.
+    ZeroHistoryRetentionLimit,
 }
 
 /// Whether a section of `section_type` can be moved to disk: whether its
@@ -539,6 +541,9 @@ impl fmt::Display for ConfigError {
                 f,
                 "snapshot_retention_limit must be at least 1 MiB, and {bytes} bytes is not"
             ),
+            Self::ZeroHistoryRetentionLimit => {
+                write!(f, "history_retention_limit must be greater than zero")
+            }
         }
     }
 }
@@ -950,6 +955,11 @@ pub struct Config {
     /// never stored.
     snapshot_retention_limit: Option<u64>,
 
+    /// The bytes the history window may keep, when set
+    /// ([`with_history_retention_limit`](Self::with_history_retention_limit)): per open, never
+    /// stored.
+    history_retention_limit: Option<u64>,
+
     /// The plan cache's bound ([`with_plan_cache_limit`](Self::with_plan_cache_limit)): per
     /// open, never stored.
     plan_cache_limit: PlanCacheLimit,
@@ -1097,6 +1107,7 @@ impl Default for Config {
             query_memory_limit: None,
             path_search_budget: None,
             snapshot_retention_limit: None,
+            history_retention_limit: None,
             plan_cache_limit: PlanCacheLimit::Default,
             spill_path: None,
             threads: num_cpus::get(),
@@ -1772,6 +1783,19 @@ impl Config {
         self
     }
 
+    /// Sets how many bytes of replaced data the history window may keep: once the commits since
+    /// the window's start replaced more than this, the start moves forward, whichever of time or
+    /// bytes comes first, and a read before it is refused as one before the window. It counts
+    /// the labeled property graph's replaced and deleted data (RDF keeps no history). Without
+    /// it the window keeps what its retention says. Per open, never stored (the retention
+    /// itself is stored): pass it at every open; 0 fails [`validate`](Self::validate). It bounds
+    /// a window the database keeps: with history off it has nothing to bound.
+    #[must_use]
+    pub fn with_history_retention_limit(mut self, bytes: u64) -> Self {
+        self.history_retention_limit = Some(bytes);
+        self
+    }
+
     /// Encrypts the database at rest with the keys `encryption` derives (see
     /// [`Config::encryption`] for what is encrypted and which settings it
     /// refuses).
@@ -2051,6 +2075,14 @@ impl Config {
         self.history_retention
     }
 
+    /// The history retention limit set with
+    /// [`with_history_retention_limit`](Self::with_history_retention_limit), or `None`: no
+    /// byte limit, the window keeps what its retention says.
+    #[must_use]
+    pub fn history_retention_limit(&self) -> Option<u64> {
+        self.history_retention_limit
+    }
+
     /// The automatic checkpoint triggers this configuration sets.
     #[must_use]
     pub fn checkpoint_triggers(&self) -> crate::admin::CheckpointTriggers {
@@ -2098,6 +2130,9 @@ impl Config {
             && bytes < MIN_SNAPSHOT_RETENTION_LIMIT
         {
             return Err(ConfigError::SnapshotRetentionLimitTooSmall(bytes));
+        }
+        if self.history_retention_limit == Some(0) {
+            return Err(ConfigError::ZeroHistoryRetentionLimit);
         }
         if let Some(fraction) = self.memory_fraction {
             if fraction.is_infinite() {
@@ -2834,6 +2869,7 @@ mod tests {
             .with_query_memory_limit(19 << 20)
             .with_path_search_budget(3 << 20)
             .with_snapshot_retention_limit(5 << 20)
+            .with_history_retention_limit(6 << 20)
             .with_plan_cache_limit(8 << 20);
         #[cfg(feature = "encryption")]
         let config = config.with_encryption(EncryptionConfig::new(std::sync::Arc::new(
@@ -2844,6 +2880,11 @@ mod tests {
             config.snapshot_retention_limit(),
             Some(5 << 20),
             "snapshot_retention_limit() reads the setting"
+        );
+        assert_eq!(
+            config.history_retention_limit(),
+            Some(6 << 20),
+            "history_retention_limit() reads the setting"
         );
         #[expect(
             deprecated,
@@ -2889,6 +2930,7 @@ mod tests {
             query_memory_limit,
             path_search_budget,
             snapshot_retention_limit,
+            history_retention_limit,
             plan_cache_limit,
         } = config;
 
@@ -2911,6 +2953,11 @@ mod tests {
             snapshot_retention_limit,
             Some(5 << 20),
             "with_snapshot_retention_limit sets the limit"
+        );
+        assert_eq!(
+            history_retention_limit,
+            Some(6 << 20),
+            "with_history_retention_limit sets the limit"
         );
         assert_eq!(
             plan_cache_limit,

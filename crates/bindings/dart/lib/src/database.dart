@@ -50,6 +50,13 @@ class GrafeoOptions {
   /// it back. Below 1 MiB fails at the open.
   final int? snapshotRetentionLimit;
 
+  /// How many bytes of replaced data the history window may keep: once the
+  /// commits since its start replaced more, the start moves forward, whichever
+  /// of time or bytes comes first, and a read before it is refused. No limit
+  /// by default; zero fails at the open. Not stored with the database: pass it
+  /// at every open.
+  final int? historyRetentionLimit;
+
   /// How many bytes may spill to disk; zero means nothing spills.
   final int? spillLimit;
 
@@ -62,6 +69,7 @@ class GrafeoOptions {
     this.queryMemoryLimit,
     this.pathSearchBudget,
     this.snapshotRetentionLimit,
+    this.historyRetentionLimit,
     this.spillLimit,
     this.unlimitedSpill = false,
   });
@@ -101,6 +109,14 @@ class GrafeoOptions {
             snapshots, 'snapshotRetentionLimit', 'must not be negative');
       }
       check(bindings.grafeoOptionsSetSnapshotRetentionLimit(native, snapshots));
+    }
+    final history = historyRetentionLimit;
+    if (history != null) {
+      if (history < 0) {
+        throw ArgumentError.value(
+            history, 'historyRetentionLimit', 'must not be negative');
+      }
+      check(bindings.grafeoOptionsSetHistoryRetentionLimit(native, history));
     }
     final spill = spillLimit;
     if (unlimitedSpill) {

@@ -34,6 +34,11 @@ type Options struct {
 	// transaction's next call fails with the retryable GRAFEO-T012 and rolls it back. Below 1 MiB
 	// fails at the open.
 	SnapshotRetentionLimit *uint64
+	// HistoryRetentionLimit is how many bytes of replaced data the history window may keep: once the
+	// commits since its start replaced more, the start moves forward, whichever of time or bytes
+	// comes first, and a read before it is refused. No limit by default; zero fails at the open. Not
+	// stored with the database: pass it at every open.
+	HistoryRetentionLimit *uint64
 	// SpillLimit is how many bytes may spill to disk; zero means nothing spills.
 	SpillLimit *uint64
 	// UnlimitedSpill lifts the spill limit; it wins over SpillLimit. An in-memory database
@@ -61,6 +66,11 @@ func (o *Options) apply(native *C.GrafeoOptions) error {
 	}
 	if o.SnapshotRetentionLimit != nil {
 		if err := statusToError(C.grafeo_options_set_snapshot_retention_limit(native, C.uint64_t(*o.SnapshotRetentionLimit))); err != nil {
+			return err
+		}
+	}
+	if o.HistoryRetentionLimit != nil {
+		if err := statusToError(C.grafeo_options_set_history_retention_limit(native, C.uint64_t(*o.HistoryRetentionLimit))); err != nil {
 			return err
 		}
 	}

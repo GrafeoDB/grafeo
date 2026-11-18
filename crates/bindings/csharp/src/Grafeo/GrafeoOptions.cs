@@ -24,6 +24,7 @@ public sealed class GrafeoOptions : IDisposable
     private ulong? _queryMemoryLimit;
     private ulong? _pathSearchBudget;
     private ulong? _snapshotRetentionLimit;
+    private ulong? _historyRetentionLimit;
     private ulong? _spillLimit;
     private bool _unlimitedSpill;
 
@@ -69,6 +70,18 @@ public sealed class GrafeoOptions : IDisposable
         return this;
     }
 
+    /// <summary>
+    /// How many bytes of replaced data the history window may keep: once the commits since its
+    /// start replaced more, the start moves forward, whichever of time or bytes comes first, and a
+    /// read before it is refused. No limit by default; zero fails at the open. Not stored with the
+    /// database: pass it at every open.
+    /// </summary>
+    public GrafeoOptions SetHistoryRetentionLimit(long bytes)
+    {
+        _historyRetentionLimit = Bytes(bytes);
+        return this;
+    }
+
     /// <summary>How many bytes may spill to disk; zero means nothing spills.</summary>
     public GrafeoOptions SetSpillLimit(long bytes)
     {
@@ -103,6 +116,8 @@ public sealed class GrafeoOptions : IDisposable
             GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_path_search_budget(native, paths));
         if (_snapshotRetentionLimit is { } snapshots)
             GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_snapshot_retention_limit(native, snapshots));
+        if (_historyRetentionLimit is { } history)
+            GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_history_retention_limit(native, history));
         if (_unlimitedSpill)
             GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_unlimited_spill(native));
         else if (_spillLimit is { } spill)

@@ -132,6 +132,12 @@ export interface DatabaseOptions {
    * `GRAFEO-T012` and rolls it back.
    */
   snapshotRetentionLimit?: number;
+  /**
+   * How many bytes of replaced data the history window may keep: once the commits since its start
+   * replaced more, the start moves forward, whichever of time or bytes comes first, and a read
+   * before it is refused. No limit by default; a positive whole number.
+   */
+  historyRetentionLimit?: number;
 }
 
 /**

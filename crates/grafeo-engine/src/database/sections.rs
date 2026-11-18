@@ -131,10 +131,9 @@ impl CheckpointSources {
             move || transaction_manager.current_epoch().as_u64(),
         )));
         let section = RowGroupStoreSection::new(Arc::clone(&self.store)).at(epoch);
-        let section = if self.transaction_manager.history_image().is_some() {
-            section.with_history_from(self.transaction_manager.history_floor())
-        } else {
-            section
+        let section = match self.transaction_manager.history_checkpoint_floor() {
+            Some(floor) => section.with_history_from(floor),
+            None => section,
         };
         sections.push(Box::new(section));
 
@@ -244,14 +243,12 @@ impl CheckpointSources {
         copy: bool,
     ) -> grafeo_common::utils::error::Result<CheckpointImage> {
         let epoch = self.epoch(commits);
-        let history_from = self
-            .transaction_manager
-            .history_image()
-            .is_some()
-            .then(|| self.transaction_manager.history_floor());
-        let pin = self
-            .transaction_manager
-            .pin_read_at(history_from.unwrap_or(epoch))?;
+        // While history is on, the floor moves to the window's start and a read is pinned there
+        // under one lock (see `pin_history_checkpoint`).
+        let (history_from, pin) = match self.transaction_manager.pin_history_checkpoint() {
+            Some(pin) => (Some(pin.epoch()), pin),
+            None => (None, self.transaction_manager.pin_read_at(epoch)?),
+        };
         let mut held: Vec<Box<dyn Section>> = Vec::new();
         let mut after: Vec<Box<dyn Section>> = Vec::new();
         let lpg = Arc::new(if copy {

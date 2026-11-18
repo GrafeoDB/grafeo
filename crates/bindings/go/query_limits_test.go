@@ -96,3 +96,18 @@ func TestSnapshotRetentionLimitBinds(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The history retention limit reaches the open: zero fails it; a limit opens.
+func TestHistoryRetentionLimitReachesTheOpen(t *testing.T) {
+	if db, err := OpenWithOptions("", &Options{HistoryRetentionLimit: ptr(0)}); err == nil {
+		db.Close()
+		t.Error("a zero history retention limit opened")
+	} else if !strings.Contains(err.Error(), "history_retention_limit") {
+		t.Errorf("want the setting named, got %v", err)
+	}
+	db, err := OpenWithOptions("", &Options{HistoryRetentionLimit: ptr(1 << 20)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+}

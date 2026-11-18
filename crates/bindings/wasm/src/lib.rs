@@ -46,7 +46,8 @@ pub(crate) fn js_error(message: &str) -> JsValue {
     JsError::new(message).into()
 }
 
-/// The bytes `options[key]` sets (`memoryLimit`, `pathSearchBudget`, `snapshotRetentionLimit`):
+/// The bytes `options[key]` sets (`memoryLimit`, `pathSearchBudget`, `snapshotRetentionLimit`,
+/// `historyRetentionLimit`):
 /// `None` when the options or the key are left out, an error naming the key for a number that is
 /// not a positive whole number of bytes.
 fn positive_bytes(options: Option<&js_sys::Object>, key: &str) -> Result<Option<usize>, JsValue> {
@@ -74,7 +75,8 @@ fn positive_bytes(options: Option<&js_sys::Object>, key: &str) -> Result<Option<
 }
 
 /// The in-memory configuration `options` set (`historyRetention`, `memoryLimit`,
-/// `pathSearchBudget`, `snapshotRetentionLimit`), the defaults for `None`.
+/// `pathSearchBudget`, `snapshotRetentionLimit`, `historyRetentionLimit`), the defaults for
+/// `None`.
 fn in_memory_config(options: Option<&js_sys::Object>) -> Result<grafeo_engine::Config, JsValue> {
     let mut config = grafeo_engine::Config::in_memory();
     if let Some(options) = options
@@ -90,6 +92,9 @@ fn in_memory_config(options: Option<&js_sys::Object>) -> Result<grafeo_engine::C
     }
     if let Some(bytes) = positive_bytes(options, "snapshotRetentionLimit")? {
         config = config.with_snapshot_retention_limit(bytes as u64);
+    }
+    if let Some(bytes) = positive_bytes(options, "historyRetentionLimit")? {
+        config = config.with_history_retention_limit(bytes as u64);
     }
     Ok(config)
 }

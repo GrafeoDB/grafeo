@@ -1125,6 +1125,22 @@ pub struct WrittenEntities<'a> {
 /// entries share it.
 const SHARED_FROM_BYTES: usize = 256;
 
+/// The bytes of committed state a write with the before-image `before` replaced, as the
+/// snapshot and history retention limits count them: the entry's own size and what the image
+/// holds; nothing for a write that replaced nothing (a create, a value set where there was none).
+/// A store measures each version it keeps with it; a change set counts its entries the same way,
+/// a large payload several of them share once ([`ChangeSet::superseded_bytes`]).
+#[must_use]
+pub fn superseded_bytes(before: &Before) -> usize {
+    if matches!(before, Before::Absent | Before::Value(None)) {
+        return 0;
+    }
+    let mut held = Held::default();
+    held.own(size_of::<Change>(), Count::Add);
+    held.before(before, Count::Add);
+    held.bytes
+}
+
 /// What a set's entries hold on the heap (see [`ChangeSet::approx_bytes`]).
 #[derive(Debug, Default)]
 struct Held {
@@ -1174,7 +1190,9 @@ impl Held {
     }
 
     /// Counts the committed state `change` replaces (see
-    /// [`ChangeSet::superseded_bytes`]), as it joins or leaves the set.
+    /// [`ChangeSet::superseded_bytes`]), as it joins or leaves the set: as [`superseded_bytes`]
+    /// counts one entry, with a large payload that several of the set's entries share counted
+    /// once (it is held once).
     fn superseded(&mut self, change: &Change, count: Count) {
         if let Change::Data {
             before,

@@ -78,4 +78,18 @@ void main() {
       db.close();
     });
   });
+
+  group('history retention limit', () {
+    test('zero fails the open, a limit opens', () {
+      expect(
+        () => GrafeoDB.openWithOptions(
+            null, GrafeoOptions(historyRetentionLimit: 0)),
+        throwsA(isA<GrafeoException>().having((e) => e.message, 'message',
+            contains('history_retention_limit'))),
+      );
+      GrafeoDB.openWithOptions(
+              null, GrafeoOptions(historyRetentionLimit: 1 << 20))
+          .close();
+    });
+  });
 }

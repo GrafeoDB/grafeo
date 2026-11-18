@@ -45,6 +45,10 @@ internal static partial class NativeMethods
     [LibraryImport(LibName)]
     internal static partial int grafeo_options_set_snapshot_retention_limit(OptionsHandle options, ulong bytes);
 
+    /// <summary>Sets the history retention limit in bytes; zero fails the open.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int grafeo_options_set_history_retention_limit(OptionsHandle options, ulong bytes);
+
     /// <summary>Sets the spill limit in bytes; zero means nothing spills.</summary>
     [LibraryImport(LibName)]
     internal static partial int grafeo_options_set_spill_limit(OptionsHandle options, ulong bytes);

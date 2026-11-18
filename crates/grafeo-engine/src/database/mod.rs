@@ -49,6 +49,8 @@ pub use graph_handle::GraphHandle;
 pub use hybrid_search_options::HybridSearchOptions;
 #[cfg(feature = "gql")]
 pub use upsert::{EdgeUpsertOptions, UpsertSummary};
+#[cfg(all(test, feature = "gql", feature = "grafeo-file"))]
+mod history_limit_tests;
 #[cfg(feature = "hybrid-search")]
 mod hybrid_search_options;
 mod import;
@@ -494,6 +496,7 @@ impl Open {
         // keeps what replay replaces while the database keeps history; a
         // load sets it again from the history the file holds.
         transaction_manager.open_history(config.history_retention());
+        transaction_manager.set_history_retention_limit(config.history_retention_limit());
         store.set_keeps_history(transaction_manager.history_image().is_some());
 
         let is_read_only = config.access_mode() == crate::config::AccessMode::ReadOnly;

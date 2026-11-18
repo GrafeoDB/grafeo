@@ -286,6 +286,12 @@ pub struct CreateOptions {
     /// throws. Past it the transaction's next call throws the retryable
     /// `GRAFEO-T012` and rolls it back. For this open only.
     pub snapshot_retention_limit: Option<i64>,
+    /// How many bytes of replaced data the history window may keep: once the
+    /// commits since its start replaced more, the start moves forward,
+    /// whichever of time or bytes comes first, and a read before it is
+    /// refused. No limit by default; zero throws at the open. Not stored with
+    /// the database: pass it at every open.
+    pub history_retention_limit: Option<i64>,
     /// How many bytes may spill to disk (0: nothing spills), half the spill
     /// volume's free space by default. An in-memory database spills
     /// nothing. For this open only.
@@ -320,6 +326,9 @@ fn memory_settings(mut config: Config, options: &CreateOptions) -> Result<Config
     if let Some(bytes) = options.snapshot_retention_limit {
         config =
             config.with_snapshot_retention_limit(size_option(bytes, "snapshotRetentionLimit")?);
+    }
+    if let Some(bytes) = options.history_retention_limit {
+        config = config.with_history_retention_limit(size_option(bytes, "historyRetentionLimit")?);
     }
     if options.unlimited_spill.unwrap_or(false) {
         config = config.with_unlimited_spill();

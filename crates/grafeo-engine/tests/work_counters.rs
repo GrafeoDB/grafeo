@@ -218,6 +218,45 @@ fn a_range_fold_reads_no_node_by_id() {
     );
 }
 
+/// An `ORDER BY ... LIMIT` reads the items no sort key needs for the rows it keeps only: over ten
+/// comments, `ORDER BY id LIMIT 2` reads ten ids and two contents, each node looked up per read,
+/// where the rule off reads ten of each.
+#[cfg(grafeo_work_counters)]
+#[test]
+fn a_top_k_reads_the_deferred_items_for_its_rows_only() {
+    use grafeo_common::work::Work;
+    use grafeo_engine::query::optimizer::{PlannerRule, PlannerRules};
+    let db = GrafeoDB::new_in_memory();
+    db.execute(
+        "FOR i IN range(0, 9) INSERT (:C {id: 'comment_' + toString(i), content: 'text ' + toString(i)})",
+    )
+    .unwrap();
+    let query = "MATCH (m:C) RETURN m.id AS id, m.content AS content ORDER BY id LIMIT 2";
+    let deferred = work_of(&db, query);
+    assert_eq!(
+        deferred.get(Work::ColumnRead),
+        10 + 2,
+        "{}",
+        deferred.describe()
+    );
+    let mut session = db.session();
+    session.set_planner_rules(PlannerRules::all().with(PlannerRule::ProjectAfterTopK, false));
+    let _ = grafeo_common::work::take();
+    session.execute(query).unwrap();
+    let every = grafeo_common::work::take();
+    assert_eq!(every.get(Work::ColumnRead), 10 + 10, "{}", every.describe());
+    assert_eq!(
+        (
+            deferred.get(Work::RowGroupLookup),
+            every.get(Work::RowGroupLookup)
+        ),
+        (10 + 2, 10 + 10),
+        "each read looks its node up: {} against {}",
+        deferred.describe(),
+        every.describe()
+    );
+}
+
 /// A hop reads one adjacency list per source node.
 #[cfg(grafeo_work_counters)]
 #[test]

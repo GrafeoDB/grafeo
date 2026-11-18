@@ -291,6 +291,7 @@ mod procedure_required_arguments;
 mod procedures_declare_what_call_enforces;
 mod profile_lists_the_plan;
 mod profile_without_match;
+mod project_after_top_k;
 mod project_coverage;
 mod property_read_visibility;
 mod published_epoch_visibility;

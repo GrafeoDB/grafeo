@@ -14,6 +14,7 @@ Performance and memory release, in progress: this section lists what has landed 
 - **A call with an empty parameter map reuses its cached plan without parsing**: `execute_with_params`, `execute_cypher_with_params` and `execute_sql_with_params` with an empty map (and a binding's call with `{}`) find the statement's plan before parsing it, as a call without a map does; before, every such call parsed and translated the statement again.
 - **A range filter on a label reads only that label's nodes**: `MATCH (n:L) WHERE n.p > $v` no longer visits every node in the database to find the label's; graph-bench's filtered comment scan takes 23 ms instead of 38 (medium), and its order plus limit 14 ms instead of 18.
 - **An aggregate over a label's range reads each value once**: `MATCH (n:L) WHERE n.p > $v RETURN count(*), avg(n.p)` and its SQL/PGQ twin fold the values in range in one pass, with the same answers; graph-bench's filter plus average takes 7.3 ms instead of 18.5 (medium).
+- **An `ORDER BY ... LIMIT` reads the returned properties for the rows it keeps**: a node's or an edge's property that no sort key reads is read after the top-k instead of for every row, in GQL and Cypher (SQL/PGQ already did); graph-bench's order plus limit takes 12.6 ms instead of 14.4 (medium). A function call, a property of a value `WITH` binds and anything under `DISTINCT` are still computed for every row, so no error moves.
 
 ### Fixed
 

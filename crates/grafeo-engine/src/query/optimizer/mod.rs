@@ -28,6 +28,7 @@ mod rules;
 #[cfg(any(feature = "sparql", feature = "triple-store"))]
 mod same_term;
 mod scanned_labels;
+mod top_k_projection;
 mod turn_cost;
 pub(crate) use cycles::{close_cycles, plan_names};
 pub mod join_order;
@@ -483,6 +484,9 @@ impl Optimizer {
             if self.rules.has(PlannerRule::PinnedFarEnd) {
                 root = self.look_up_pinned_far_ends(root);
             }
+        }
+        if self.rules.has(PlannerRule::ProjectAfterTopK) {
+            Self::project_after_top_k(&mut root);
         }
 
         Ok(LogicalPlan {

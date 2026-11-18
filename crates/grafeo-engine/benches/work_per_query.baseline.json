@@ -413,20 +413,20 @@
       "visibility_tests": 398927
     },
     "changed scan_order_limit": {
-      "allocated_bytes": 21334559,
-      "allocations": 51570,
+      "allocated_bytes": 16480366,
+      "allocations": 51289,
       "chunks_built": 1,
-      "column_reads": 348763,
+      "column_reads": 298862,
       "columns_copied": 60,
       "deadline_checks": 25,
       "plan_cache_hits": 1,
       "plans_built": 1,
-      "rowgroup_lookups": 149763,
+      "rowgroup_lookups": 99862,
       "rows_built": 20,
-      "stamped_reads": 152833,
-      "string_clones": 50337,
+      "stamped_reads": 102950,
+      "string_clones": 50169,
       "value_compares": 51270,
-      "visibility_tests": 349690
+      "visibility_tests": 299789
     },
     "changed scan_order_limit_sql": {
       "allocated_bytes": 18314668,
@@ -866,20 +866,20 @@
       "visibility_tests": 203126
     },
     "loaded scan_order_limit": {
-      "allocated_bytes": 21446242,
-      "allocations": 52151,
+      "allocated_bytes": 16574780,
+      "allocations": 51889,
       "chunks_built": 1,
-      "column_reads": 350471,
+      "column_reads": 300334,
       "columns_copied": 60,
       "deadline_checks": 25,
       "parses": 1,
       "plan_cache_misses": 2,
       "plans_built": 1,
-      "rowgroup_lookups": 150471,
+      "rowgroup_lookups": 100334,
       "rows_built": 20,
-      "string_clones": 50575,
+      "string_clones": 50406,
       "value_compares": 51508,
-      "visibility_tests": 153597
+      "visibility_tests": 103460
     },
     "loaded scan_order_limit_sql": {
       "allocated_bytes": 18416022,

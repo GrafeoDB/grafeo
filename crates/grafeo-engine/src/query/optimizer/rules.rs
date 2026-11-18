@@ -74,11 +74,15 @@ pub enum PlannerRule {
     /// An `EXISTS` that a run without the row answers runs once; off, every `EXISTS` runs per row,
     /// which must give the same answers.
     ExistsRunOnce,
+    /// An `ORDER BY ... LIMIT` computes its sort keys before the top-k and the items that cannot
+    /// raise (properties of what the pattern binds, literals, parameters) after it, for the rows
+    /// the limit keeps; off, every item is computed for every row.
+    ProjectAfterTopK,
 }
 
 impl PlannerRule {
     /// Every rule.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::JoinOrder,
         Self::SoughtEnd,
         Self::FactorizedExecution,
@@ -97,6 +101,7 @@ impl PlannerRule {
         Self::ExistsEdgeCheck,
         Self::KeyColumnLookup,
         Self::ExistsRunOnce,
+        Self::ProjectAfterTopK,
     ];
 
     /// The rule's bit in a [`PlannerRules`].

@@ -14,6 +14,7 @@ Performance and memory release, in progress: this section lists what has landed 
 - **Python has types for the temporals its own cannot hold** (Experimental): `grafeo.Time`, `grafeo.Duration`, `grafeo.Date`, `grafeo.Timestamp` and `grafeo.ZonedDateTime` hold a time with nanoseconds, a duration with months or a part finer than a microsecond, and a date outside years 1 to 9999. Each compares, hashes and gives `to_native()`; all but `grafeo.Timestamp` (microseconds since 1970) take the engine's text.
 - **A database says whether it is closed**: `GrafeoDB::is_closed()` is true once `close()` has completed, and false after a `close()` that failed and put the database back.
 - **A Cypher CALL on its own takes `YIELD *`**: it yields every output of the procedure.
+- **Deleting data is documented**: a "Deleting Data" section of the security guide says what deleting removes from the database file and from memory, and when, what stays by design while a database is open (history retention, the change feed, the RDF term dictionary, the plan cache), and what is outside Grafeo.
 
 ### Changed
 

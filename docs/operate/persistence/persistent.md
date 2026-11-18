@@ -141,6 +141,8 @@ To share a database between processes, run it behind [Grafeo Server](https://git
 
 A transaction still open when `close()` runs is rolled back and left out of the file: the final checkpoint writes the committed state (see above). Its commit then fails with the database-closed error.
 
+What deleting data removes from the file and from memory, and when, is in [Deleting Data](../security.md#deleting-data).
+
 In Rust, the methods of `GrafeoDB` that return no `Result` (`node_count()`, `memory_usage()`, `list_graphs()` and the like) answer an empty value after `close()` instead of an error; they return a `Result` from 0.7.0. Dropping a `GrafeoDB` without `close()` saves it as `close()` does, releases the file and refuses writes; a session, stream or view still held reads on until it is dropped. One exception to "every call fails" in Rust, until 0.7.0: a `Snapshot` taken before `close()` (from `snapshot()`, `projection()`, a graph handle's or a time-travel view's `snapshot()`, and the store its `shared()` hands out) and the iterators of `iter_nodes()` and `iter_edges()` read on, keeping the graph in memory until they are dropped.
 
 ## Reopening a Database

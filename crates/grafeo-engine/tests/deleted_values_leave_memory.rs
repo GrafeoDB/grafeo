@@ -240,6 +240,13 @@ static SERIAL: Mutex<()> = Mutex::new(());
 static NEXT_MARKER: AtomicUsize = AtomicUsize::new(0);
 
 /// A word no other value holds, on the stack: lowercase, so a text index's terms hold it too.
+///
+/// Written in place (`let mut marker = Marker::BLANK; marker.fill();`), never returned by
+/// value: a marker moved out of a constructor leaves a dead copy of its bytes in the caller's
+/// stack frame, and a value later built in that slot (an enum's unused bytes, a struct's
+/// padding) carries them into the heap when it moves there, where the scan counts a copy that
+/// no database made. Under a fixed hash seed (`--cfg grafeo_codspeed`) that copy landed in a
+/// block the setup's statements allocated, before the marker was written (#712).
 struct Marker {
     bytes: [u8; 48],
     len: usize,
@@ -249,14 +256,22 @@ struct Marker {
 }
 
 impl Marker {
-    fn new() -> Self {
+    /// A marker without its bytes yet: [`fill`](Self::fill) writes them.
+    const BLANK: Self = Self {
+        bytes: [0; 48],
+        len: 0,
+        #[cfg(feature = "vector-index")]
+        vector: [0.0; 8],
+    };
+
+    /// Writes a new marker into `self`.
+    fn fill(&mut self) {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("the clock is past 1970")
             .subsec_nanos();
         let count = NEXT_MARKER.fetch_add(1, Ordering::Relaxed);
-        let mut bytes = [0u8; 48];
-        let mut len = 0;
+        self.len = 0;
         for byte in b"zq"
             .iter()
             .chain(nanos.to_string().as_bytes())
@@ -264,25 +279,17 @@ impl Marker {
             .chain(count.to_string().as_bytes())
             .chain(b"vexmarrow")
         {
-            bytes[len] = *byte;
-            len += 1;
+            self.bytes[self.len] = *byte;
+            self.len += 1;
         }
         #[cfg(feature = "vector-index")]
-        let vector = {
+        {
             let base = 1000.0
                 + f32::from(u16::try_from(nanos % 60_000).expect("below 60000")) / 7.0
                 + f32::from(u16::try_from(count % 1000).expect("below 1000")) * 101.0;
-            let mut vector = [0f32; 8];
-            for (step, value) in (0u16..).zip(vector.iter_mut()) {
+            for (step, value) in (0u16..).zip(self.vector.iter_mut()) {
                 *value = base + 0.125 * f32::from(step);
             }
-            vector
-        };
-        Self {
-            bytes,
-            len,
-            #[cfg(feature = "vector-index")]
-            vector,
         }
     }
 
@@ -290,14 +297,13 @@ impl Marker {
         std::str::from_utf8(&self.bytes[..self.len]).expect("the marker is ASCII")
     }
 
-    /// The bytes of the marker vector as a vector column and an index hold them.
+    /// Writes the bytes of the marker vector, as a vector column and an index hold them, into
+    /// `out` (in place, as the marker itself).
     #[cfg(feature = "vector-index")]
-    fn vector_bytes(&self) -> [u8; 32] {
-        let mut bytes = [0u8; 32];
+    fn write_vector_bytes(&self, out: &mut [u8; 32]) {
         for (at, value) in self.vector.iter().enumerate() {
-            bytes[at * 4..at * 4 + 4].copy_from_slice(&value.to_le_bytes());
+            out[at * 4..at * 4 + 4].copy_from_slice(&value.to_le_bytes());
         }
-        bytes
     }
 }
 
@@ -453,9 +459,12 @@ fn config(open: Open, path: &Path) -> Config {
 /// Runs `case` and counts its marker after each step.
 fn counts(case: &Case) -> Counts {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-    let marker = Marker::new();
+    let mut marker = Marker::BLANK;
+    marker.fill();
     #[cfg(feature = "vector-index")]
-    let vector_bytes = marker.vector_bytes();
+    let mut vector_bytes = [0u8; 32];
+    #[cfg(feature = "vector-index")]
+    marker.write_vector_bytes(&mut vector_bytes);
     let needle: &[u8] = match case.needle {
         Needle::Word => &marker.bytes[..marker.len],
         #[cfg(feature = "vector-index")]
@@ -898,7 +907,8 @@ fn close_releases_the_values_before_the_drop() {
 /// stream or a view handed out before the close holds of the database once it is closed.
 fn closed_while_held(hold: fn(&GrafeoDB) -> Box<dyn std::any::Any>) -> usize {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-    let marker = Marker::new();
+    let mut marker = Marker::BLANK;
+    marker.fill();
     let needle = &marker.bytes[..marker.len];
     let dir = tempfile::tempdir().expect("a temporary folder");
     let path = dir.path().join("held.grafeo");
@@ -925,7 +935,8 @@ fn closed_while_held(hold: fn(&GrafeoDB) -> Box<dyn std::any::Any>) -> usize {
 #[test]
 fn close_releases_the_values_a_borrowed_stream_held() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-    let marker = Marker::new();
+    let mut marker = Marker::BLANK;
+    marker.fill();
     let needle = &marker.bytes[..marker.len];
     let dir = tempfile::tempdir().expect("a temporary folder");
     let path = dir.path().join("borrowed.grafeo");
@@ -959,7 +970,8 @@ fn close_releases_the_values_a_borrowed_stream_held() {
 #[test]
 fn dropping_the_database_then_the_session_last_leaves_nothing() {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-    let marker = Marker::new();
+    let mut marker = Marker::BLANK;
+    marker.fill();
     let needle = &marker.bytes[..marker.len];
     let dir = tempfile::tempdir().expect("a temporary folder");
     let db = GrafeoDB::with_config(config(Open::File, &dir.path().join("dropped.grafeo")))
@@ -1401,7 +1413,8 @@ fn a_snapshot_or_iterator_held_across_close_keeps_the_values_until_it_drops() {
     let mut wrong = Vec::new();
     for (way, hold) in holders {
         let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-        let marker = Marker::new();
+        let mut marker = Marker::BLANK;
+        marker.fill();
         let needle = &marker.bytes[..marker.len];
         let dir = tempfile::tempdir().expect("a temporary folder");
         let db = GrafeoDB::with_config(config(Open::File, &dir.path().join("held.grafeo")))

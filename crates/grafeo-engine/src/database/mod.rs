@@ -518,6 +518,8 @@ impl Open {
 
         // Create buffer manager with configured limits
         let (budget, detected_memory) = memory_budget(&config);
+        transaction_manager
+            .set_snapshot_retention_limit(config.snapshot_retention_limit_for(budget));
         let config = config.with_open_memory_budget(budget);
         let buffer_config = BufferManagerConfig {
             spill_path: spill_layout.root.clone(),
@@ -1136,6 +1138,8 @@ impl Open {
         transaction_manager.sync_epoch(store.committed_epoch());
 
         let (budget, detected_memory) = memory_budget(&config);
+        transaction_manager
+            .set_snapshot_retention_limit(config.snapshot_retention_limit_for(budget));
         let config = config.with_open_memory_budget(budget);
         let memory_warning = undetected_memory(budget, detected_memory);
         if let Some(warning) = &memory_warning {
@@ -1245,6 +1249,8 @@ impl Open {
         transaction_manager.sync_epoch(store.committed_epoch());
 
         let (budget, detected_memory) = memory_budget(&config);
+        transaction_manager
+            .set_snapshot_retention_limit(config.snapshot_retention_limit_for(budget));
         let config = config.with_open_memory_budget(budget);
         let memory_warning = undetected_memory(budget, detected_memory);
         if let Some(warning) = &memory_warning {

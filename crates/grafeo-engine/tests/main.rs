@@ -387,6 +387,7 @@ mod snapshot;
 mod snapshot_catalog_errors;
 mod snapshot_file_indexes;
 mod snapshot_isolation;
+mod snapshot_retention_limit;
 mod snapshot_v5;
 mod snapshots;
 mod sparql_aggregate_expressions;

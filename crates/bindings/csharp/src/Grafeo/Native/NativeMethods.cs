@@ -41,6 +41,10 @@ internal static partial class NativeMethods
     [LibraryImport(LibName)]
     internal static partial int grafeo_options_set_path_search_budget(OptionsHandle options, ulong bytes);
 
+    /// <summary>Sets the snapshot retention limit in bytes; below 1 MiB the open fails.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int grafeo_options_set_snapshot_retention_limit(OptionsHandle options, ulong bytes);
+
     /// <summary>Sets the spill limit in bytes; zero means nothing spills.</summary>
     [LibraryImport(LibName)]
     internal static partial int grafeo_options_set_spill_limit(OptionsHandle options, ulong bytes);

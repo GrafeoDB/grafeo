@@ -351,7 +351,7 @@ impl Open {
     /// while no transaction is open commits at once; otherwise the call is a
     /// private transaction; on a read-only or external store, an implicit
     /// transaction of a session.
-    fn write_direct<T>(
+    fn write_direct<T: 'static>(
         &self,
         target: DirectTarget<'_>,
         batch: bool,
@@ -419,7 +419,13 @@ impl Open {
         grafeo_common::testing::commit_hook::run_during_held_change();
 
         let recorder = self.immediate_recorder();
-        recorder.start(epoch, graph, self.reads_committed_rows())?;
+        // The before-images also measure what the call replaces, when a reader or the history
+        // keeps it (see `finish_immediate`).
+        recorder.start(
+            epoch,
+            graph,
+            self.reads_committed_rows() || self.transaction_manager.counts_replaced(),
+        )?;
         let writer = self.direct_writer(
             store,
             graph,
@@ -508,6 +514,9 @@ impl Open {
         if self.cdc_active() {
             self.cdc_log.record_commit(&changes, epoch);
         }
+        // What it replaced, in the ledger before its epoch is published, as a commit's is.
+        self.transaction_manager
+            .add_replaced(changes.superseded_bytes() as u64);
         // A build without the log and change data capture keeps no entries.
         #[cfg(not(any(feature = "wal", feature = "cdc")))]
         drop(changes);
@@ -855,7 +864,7 @@ impl Open {
 }
 
 impl DirectCalls<'_> {
-    fn write<T>(
+    fn write<T: 'static>(
         &self,
         write: impl FnOnce(&GraphWriter) -> std::result::Result<T, OperatorError>,
     ) -> Result<T> {
@@ -866,7 +875,7 @@ impl DirectCalls<'_> {
     /// none, so always a private transaction, which can undo the writes
     /// before a failing one. A call of one write commits at once (see
     /// [`write`](Self::write)): it either applies or does not.
-    fn write_batch<T>(
+    fn write_batch<T: 'static>(
         &self,
         write: impl FnOnce(&GraphWriter) -> std::result::Result<T, OperatorError>,
     ) -> Result<T> {

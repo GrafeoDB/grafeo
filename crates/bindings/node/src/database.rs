@@ -280,6 +280,12 @@ pub struct CreateOptions {
     /// most 256 MiB, and never more than `memoryLimit`. A search over it
     /// throws `GRAFEO-S001`. For this open only.
     pub path_search_budget: Option<i64>,
+    /// How many bytes of replaced data an open transaction's snapshot may
+    /// keep: what the commits since it began replaced that it can still read. By
+    /// default a quarter of `memoryLimit`, at least 1 MiB; below 1 MiB the open
+    /// throws. Past it the transaction's next call throws the retryable
+    /// `GRAFEO-T012` and rolls it back. For this open only.
+    pub snapshot_retention_limit: Option<i64>,
     /// How many bytes may spill to disk (0: nothing spills), half the spill
     /// volume's free space by default. An in-memory database spills
     /// nothing. For this open only.
@@ -310,6 +316,10 @@ fn memory_settings(mut config: Config, options: &CreateOptions) -> Result<Config
     }
     if let Some(bytes) = options.path_search_budget {
         config = config.with_path_search_budget(positive(bytes, "pathSearchBudget")?);
+    }
+    if let Some(bytes) = options.snapshot_retention_limit {
+        config =
+            config.with_snapshot_retention_limit(size_option(bytes, "snapshotRetentionLimit")?);
     }
     if options.unlimited_spill.unwrap_or(false) {
         config = config.with_unlimited_spill();

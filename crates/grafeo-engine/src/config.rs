@@ -441,6 +441,9 @@ pub enum ConfigError {
     /// [`Config::with_memory_fraction`] was given an infinite fraction, which
     /// would make the memory limit unbounded.
     MemoryFractionNotFinite,
+    /// [`Config::with_snapshot_retention_limit`] is below
+    /// [`MIN_SNAPSHOT_RETENTION_LIMIT`]; holds the bytes given.
+    SnapshotRetentionLimitTooSmall(u64),
 }
 
 /// Whether a section of `section_type` can be moved to disk: whether its
@@ -532,6 +535,10 @@ impl fmt::Display for ConfigError {
                 "checkpoint_wal_size must be at least 1 MiB, and {bytes} bytes is not; turn \
                  automatic checkpoints off with Config::without_checkpoint_wal_size() instead"
             ),
+            Self::SnapshotRetentionLimitTooSmall(bytes) => write!(
+                f,
+                "snapshot_retention_limit must be at least 1 MiB, and {bytes} bytes is not"
+            ),
         }
     }
 }
@@ -574,6 +581,10 @@ pub const DEFAULT_WAL_SEGMENT_SIZE: u64 = 64 << 20;
 
 /// The smallest `wal_segment_size`: 1 MiB.
 pub const MIN_WAL_SEGMENT_SIZE: u64 = 1 << 20;
+
+/// The smallest snapshot retention limit, and the least the default comes to: 1 MiB (see
+/// [`Config::with_snapshot_retention_limit`]).
+pub const MIN_SNAPSHOT_RETENTION_LIMIT: u64 = 1 << 20;
 
 /// The largest `wal_segment_size`: 1 GiB.
 pub const MAX_WAL_SEGMENT_SIZE: u64 = 1 << 30;
@@ -934,6 +945,11 @@ pub struct Config {
     /// ([`with_path_search_budget`](Self::with_path_search_budget)): per open, never stored.
     path_search_budget: Option<usize>,
 
+    /// The replaced bytes an open transaction's snapshot may keep, when set
+    /// ([`with_snapshot_retention_limit`](Self::with_snapshot_retention_limit)): per open,
+    /// never stored.
+    snapshot_retention_limit: Option<u64>,
+
     /// The plan cache's bound ([`with_plan_cache_limit`](Self::with_plan_cache_limit)): per
     /// open, never stored.
     plan_cache_limit: PlanCacheLimit,
@@ -1080,6 +1096,7 @@ impl Default for Config {
             spill_limit: SpillLimit::Default,
             query_memory_limit: None,
             path_search_budget: None,
+            snapshot_retention_limit: None,
             plan_cache_limit: PlanCacheLimit::Default,
             spill_path: None,
             threads: num_cpus::get(),
@@ -1199,6 +1216,41 @@ impl Config {
                 (limit / 4).clamp(1, DEFAULT_PATH_SEARCH_BUDGET)
             }),
         }
+    }
+
+    /// Sets how many bytes of replaced committed state an open transaction's snapshot may keep:
+    /// what the commits since it began replaced (or deleted) that it can still read. Past it the
+    /// snapshot expires, and the transaction's next call fails with the retryable
+    /// `GRAFEO-T012` and rolls it back, so the database stops keeping those bytes for it. A
+    /// statement outside an explicit transaction never expires, nor does a snapshot, view,
+    /// stream outside a transaction, iterator or export: one of those held past the limit puts
+    /// a notice (`01Y02`) on the statement whose commit passed it. Without it, a quarter of
+    /// the memory limit, or of the memory the database detected when none is set, and at
+    /// least [`MIN_SNAPSHOT_RETENTION_LIMIT`]. Per open, never stored; below
+    /// [`MIN_SNAPSHOT_RETENTION_LIMIT`] (1 MiB) fails [`validate`](Self::validate).
+    #[must_use]
+    pub fn with_snapshot_retention_limit(mut self, bytes: u64) -> Self {
+        self.snapshot_retention_limit = Some(bytes);
+        self
+    }
+
+    /// The snapshot retention limit set with
+    /// [`with_snapshot_retention_limit`](Self::with_snapshot_retention_limit), or `None` for the
+    /// default: a quarter of the open's memory budget (the memory limit, or the memory the
+    /// database detected when none is set), at least [`MIN_SNAPSHOT_RETENTION_LIMIT`].
+    #[must_use]
+    pub fn snapshot_retention_limit(&self) -> Option<u64> {
+        self.snapshot_retention_limit
+    }
+
+    /// The snapshot retention limit an open with `memory_budget` bytes of memory runs with:
+    /// the [`with_snapshot_retention_limit`](Self::with_snapshot_retention_limit) setting, or a
+    /// quarter of the budget, at least [`MIN_SNAPSHOT_RETENTION_LIMIT`].
+    #[must_use]
+    pub(crate) fn snapshot_retention_limit_for(&self, memory_budget: usize) -> u64 {
+        self.snapshot_retention_limit.unwrap_or_else(|| {
+            (u64::try_from(memory_budget).unwrap_or(u64::MAX) / 4).max(MIN_SNAPSHOT_RETENTION_LIMIT)
+        })
     }
 
     /// Sets the number of worker threads, which has no effect: nothing sizes
@@ -2042,6 +2094,11 @@ impl Config {
         if self.path_search_budget == Some(0) {
             return Err(ConfigError::ZeroPathSearchBudget);
         }
+        if let Some(bytes) = self.snapshot_retention_limit
+            && bytes < MIN_SNAPSHOT_RETENTION_LIMIT
+        {
+            return Err(ConfigError::SnapshotRetentionLimitTooSmall(bytes));
+        }
         if let Some(fraction) = self.memory_fraction {
             if fraction.is_infinite() {
                 return Err(ConfigError::MemoryFractionNotFinite);
@@ -2776,12 +2833,18 @@ mod tests {
             .with_spill_limit(88 << 20)
             .with_query_memory_limit(19 << 20)
             .with_path_search_budget(3 << 20)
+            .with_snapshot_retention_limit(5 << 20)
             .with_plan_cache_limit(8 << 20);
         #[cfg(feature = "encryption")]
         let config = config.with_encryption(EncryptionConfig::new(std::sync::Arc::new(
             grafeo_common::encryption::KeyChain::new([3; 32]),
         )));
 
+        assert_eq!(
+            config.snapshot_retention_limit(),
+            Some(5 << 20),
+            "snapshot_retention_limit() reads the setting"
+        );
         #[expect(
             deprecated,
             reason = "the pattern names every field, the deprecated adaptive one too, until 0.7.0 removes it"
@@ -2825,6 +2888,7 @@ mod tests {
             spill_limit,
             query_memory_limit,
             path_search_budget,
+            snapshot_retention_limit,
             plan_cache_limit,
         } = config;
 
@@ -2842,6 +2906,11 @@ mod tests {
             path_search_budget,
             Some(3 << 20),
             "with_path_search_budget sets the budget"
+        );
+        assert_eq!(
+            snapshot_retention_limit,
+            Some(5 << 20),
+            "with_snapshot_retention_limit sets the limit"
         );
         assert_eq!(
             plan_cache_limit,
@@ -3049,5 +3118,27 @@ mod tests {
         // Other defaults should still apply
         assert!(config.backward_edges());
         assert_eq!(config.graph_model(), GraphModel::Lpg);
+    }
+
+    /// The snapshot retention limit an open runs with: the setting, or a quarter of the open's
+    /// memory budget, at least 1 MiB.
+    #[test]
+    fn the_snapshot_retention_limit_is_a_quarter_of_the_budget_or_the_setting() {
+        let default = Config::in_memory();
+        assert_eq!(
+            default.snapshot_retention_limit(),
+            None,
+            "the default applies"
+        );
+        assert_eq!(default.snapshot_retention_limit_for(16 << 20), 4 << 20);
+        assert_eq!(
+            default.snapshot_retention_limit_for(1 << 20),
+            MIN_SNAPSHOT_RETENTION_LIMIT,
+            "at least 1 MiB"
+        );
+        let set = Config::in_memory().with_snapshot_retention_limit(5 << 20);
+        assert_eq!(set.snapshot_retention_limit(), Some(5 << 20));
+        assert_eq!(set.snapshot_retention_limit_for(16 << 20), 5 << 20);
+        assert_eq!(set.snapshot_retention_limit_for(1 << 40), 5 << 20);
     }
 }

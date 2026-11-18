@@ -132,9 +132,10 @@ const char*     grafeo_version(void);
 /* The memory and spill settings a database opens with. Unset means the default:
    75% of the memory the process may use for the memory limit, the memory limit
    for the query memory limit, a quarter of the memory limit (at most 256 MiB)
-   for the path search budget, half the spill volume's free space for the spill
-   limit. A write past the memory limit fails with GRAFEO-S001, and so does a
-   path search over its budget.
+   for the path search budget, a quarter of the memory limit (at least 1 MiB)
+   for the snapshot retention limit, half the spill volume's free space for the
+   spill limit. A write past the memory limit fails with GRAFEO-S001, and so
+   does a path search over its budget.
      - grafeo_options_new returns an object to free with grafeo_options_free
        (NULL is ignored); it may open several databases and be freed once the
        open returns.
@@ -142,6 +143,10 @@ const char*     grafeo_version(void);
        shortest-path search keeps at once, or what an RDF property path
        search visits; the nodes an ANY SHORTEST or shortestPath search
        visits are not counted yet.
+     - The snapshot retention limit is how many bytes of replaced data an
+       open transaction's snapshot may keep; past it the transaction's next
+       call fails with the retryable GRAFEO-T012 and rolls it back. Below
+       1 MiB grafeo_open_with_options fails.
      - The memory and query memory limits and the path search budget must be
        above zero (another status otherwise); a spill limit of 0 means
        nothing spills, and unlimited spill, once set, wins over a spill limit.
@@ -153,6 +158,7 @@ void            grafeo_options_free(GrafeoOptions* options);
 GrafeoStatus    grafeo_options_set_memory_limit(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_query_memory_limit(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_path_search_budget(GrafeoOptions* options, uint64_t bytes);
+GrafeoStatus    grafeo_options_set_snapshot_retention_limit(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_spill_limit(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_unlimited_spill(GrafeoOptions* options);
 GrafeoDatabase* grafeo_open_with_options(const char* path, const GrafeoOptions* options);

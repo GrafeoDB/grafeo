@@ -1,6 +1,7 @@
 """The path search budget from Python (#492): `GrafeoDB(path_search_budget=...)`. Zero and
 negative values are refused; the budget binds, with its error code and the keyword named in the
-message.
+message. The snapshot retention limit, `GrafeoDB(snapshot_retention_limit=...)`: below 1 MiB is
+refused; past it an open transaction raises GRAFEO-T012.
 """
 
 import pytest
@@ -36,3 +37,25 @@ def test_the_path_search_budget_binds():
         db.execute(PATHS)
     assert raised.value.error_code == "GRAFEO-S001", str(raised.value)
     assert "path_search_budget" in str(raised.value), str(raised.value)
+
+
+def test_a_snapshot_retention_limit_below_1_mib_is_refused():
+    with pytest.raises(grafeo.GrafeoError, match="at least 1 MiB"):
+        grafeo.GrafeoDB(snapshot_retention_limit=512 * 1024)
+
+
+def test_the_snapshot_retention_limit_binds():
+    """Past the limit (20 commits replace 64 KiB each, over 1 MiB) the open transaction that read
+    Alix raises GRAFEO-T012, and rolls back."""
+    db = grafeo.GrafeoDB(snapshot_retention_limit=1 << 20)
+    db.execute("INSERT (:Person {name: 'Alix', bio: 'Amsterdam'})")
+    read_bio = "MATCH (p:Person {name: 'Alix'}) RETURN p.bio AS bio"
+    tx = db.begin_transaction()
+    tx.execute(read_bio)
+    text = "Vincent " * (8 * 1024)
+    for round_ in range(20):
+        db.execute(f"MATCH (p:Person {{name: 'Alix'}}) SET p.bio = '{round_}{text}'")
+    with pytest.raises(grafeo.GrafeoError) as raised:
+        tx.execute(read_bio)
+    assert raised.value.error_code == "GRAFEO-T012", str(raised.value)
+    tx.rollback()

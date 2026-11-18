@@ -995,6 +995,14 @@ export interface CreateOptions {
    */
   pathSearchBudget?: number
   /**
+   * How many bytes of replaced data an open transaction's snapshot may
+   * keep: what the commits since it began replaced that it can still read. By
+   * default a quarter of `memoryLimit`, at least 1 MiB; below 1 MiB the open
+   * throws. Past it the transaction's next call throws the retryable
+   * `GRAFEO-T012` and rolls it back. For this open only.
+   */
+  snapshotRetentionLimit?: number
+  /**
    * How many bytes may spill to disk (0: nothing spills), half the spill
    * volume's free space by default. An in-memory database spills
    * nothing. For this open only.

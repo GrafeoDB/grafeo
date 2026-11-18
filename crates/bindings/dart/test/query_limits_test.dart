@@ -1,6 +1,7 @@
 /// The path search budget through Dart (#492): `GrafeoOptions(pathSearchBudget: ...)`. Zero
 /// fails at the open; the budget binds, with its error code and the setting named in the
-/// message.
+/// message. The snapshot retention limit, `GrafeoOptions(snapshotRetentionLimit: ...)`: below
+/// 1 MiB fails at the open; past it an open transaction throws `GRAFEO-T012`.
 library;
 
 import 'package:grafeo/grafeo.dart';
@@ -40,6 +41,40 @@ void main() {
     test('the path search budget binds', () {
       final db = _opened(GrafeoOptions(pathSearchBudget: 1));
       _refused(db, _paths, 'GRAFEO-S001', 'path_search_budget');
+      db.close();
+    });
+  });
+
+  group('snapshot retention limit', () {
+    test('below 1 MiB is refused at the open', () {
+      expect(
+        () => GrafeoDB.openWithOptions(
+            null, GrafeoOptions(snapshotRetentionLimit: 512 * 1024)),
+        throwsA(isA<GrafeoException>()
+            .having((e) => e.message, 'message', contains('at least 1 MiB'))),
+      );
+    });
+
+    // Past the limit (20 commits replace 64 KiB each, over 1 MiB) the open
+    // transaction that read Alix throws GRAFEO-T012, and rolls back.
+    test('binds an open transaction', () {
+      final db = GrafeoDB.openWithOptions(
+          null, GrafeoOptions(snapshotRetentionLimit: 1 << 20));
+      db.execute("INSERT (:Person {name: 'Alix', bio: 'Amsterdam'})");
+      const readBio = "MATCH (p:Person {name: 'Alix'}) RETURN p.bio AS bio";
+      final tx = db.beginTransaction();
+      tx.execute(readBio);
+      final text = 'Vincent ' * (8 * 1024);
+      for (var round = 0; round < 20; round++) {
+        db.execute(
+            "MATCH (p:Person {name: 'Alix'}) SET p.bio = '$round$text'");
+      }
+      expect(
+        () => tx.execute(readBio),
+        throwsA(isA<GrafeoException>()
+            .having((e) => e.message, 'message', contains('GRAFEO-T012'))),
+      );
+      tx.rollback();
       db.close();
     });
   });

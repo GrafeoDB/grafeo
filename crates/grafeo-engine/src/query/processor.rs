@@ -407,7 +407,7 @@ impl QueryProcessor {
             && optimized_plan.root.has_mutations()
             && self.write_store.is_some()
         {
-            let transaction = self.transaction_manager.begin();
+            let transaction = self.transaction_manager.begin_statement();
             let epoch = self
                 .transaction_manager
                 .start_epoch(transaction)
@@ -446,6 +446,11 @@ impl QueryProcessor {
         let _pin = context
             .is_none()
             .then(|| self.transaction_manager.pin_read());
+        // In a caller's transaction the statement reads at its snapshot, held for its run:
+        // `GRAFEO-T012` once the snapshot expired.
+        let _read = context
+            .map(|(_, transaction_id)| self.transaction_manager.read_in(transaction_id))
+            .transpose()?;
         let planner = if let Some((epoch, transaction_id)) = context {
             Planner::with_context(
                 Arc::clone(&self.graph_store),

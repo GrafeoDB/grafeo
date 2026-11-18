@@ -48,7 +48,7 @@ Categories:
 
 | Code          | Name                     | Retryable | Meaning                                                    |
 | ------------- | ------------------------ | --------- | ---------------------------------------------------------- |
-| `GRAFEO-T001` | TransactionConflict      | **yes**   | Write-write conflict with another transaction, or two MERGEs of one pattern. Retry the statement or the whole transaction. |
+| `GRAFEO-T001` | TransactionConflict      | **yes**   | Write-write conflict with another transaction, or two MERGEs of one pattern. Retry the statement or the whole transaction. A transaction that lost a key or MERGE claim to an older one is rolled back at its next call, a read too, and every call fails with this code until `ROLLBACK` or `COMMIT` ends it: retry the whole transaction. |
 | `GRAFEO-T002` | TransactionTimeout       | **yes**   | Transaction exceeded its TTL. |
 | `GRAFEO-T003` | TransactionReadOnly      | no        | Attempted a write inside `START TRANSACTION READ ONLY`. |
 | `GRAFEO-T004` | TransactionInvalidState  | no        | `COMMIT` / `ROLLBACK` without an active transaction, a transaction command outside GQL, or `START TRANSACTION`, `COMMIT` or `ROLLBACK` run through a transaction object's `execute` (end it with its `commit()` or `rollback()` call). |
@@ -59,6 +59,7 @@ Categories:
 | `GRAFEO-T009` | LogWriteFailed           | **yes**   | The commit could not be written to the write-ahead log (a full disk, an I/O error) and was rolled back: nothing of it is in the log or the database. Retry the transaction once the cause is gone. |
 | `GRAFEO-T010` | CommitOutcomeUnknown     | no        | The commit was written to the write-ahead log, but the log could not be made durable. Nobody sees the commit, and whether it exists is known only after the database is reopened; nothing commits until then. Do not retry before the reopen: the commit may already be there. The C API returns `GRAFEO_ERROR_DATABASE`. |
 | `GRAFEO-T011` | LogUnavailable           | no        | The write-ahead log takes no more writes after an earlier failure. Nothing of this commit was written, and nothing commits until the database is reopened. The C API returns `GRAFEO_ERROR_DATABASE`. |
+| `GRAFEO-T012` | SnapshotExpired          | **yes**   | The transaction's snapshot expired: the commits since it began replaced more data it could still read than the snapshot retention limit allows, so the database stopped keeping that data for it. The transaction is rolled back at this error, so its writes and claims are gone, and every call fails with it until `ROLLBACK` or `COMMIT` ends it. Run it again; the new transaction reads a new snapshot. |
 
 ## Storage (S)
 
@@ -113,7 +114,7 @@ GQLSTATUS says what kind of condition it is, as SQL's SQLSTATE does:
 | `25000`   | invalid transaction state      | a call on a closed database, `START TRANSACTION`, `COMMIT` or `ROLLBACK` inside a transaction object (end it with its `commit()` or `rollback()` call), a commit or rollback of a transaction that already ended, a transaction past its timeout |
 | `08000`   | connection exception           | a database file another handle or process holds open (`GRAFEO-S004`) |
 | `25G03`   | read-only transaction          | a write or DDL in a read-only transaction or database |
-| `40000`   | transaction rollback           | a write conflict, a deadlock, a commit the write-ahead log could not take (`GRAFEO-T009`, `GRAFEO-T011`) |
+| `40000`   | transaction rollback           | a write conflict, a deadlock, a commit the write-ahead log could not take (`GRAFEO-T009`, `GRAFEO-T011`), a transaction whose snapshot expired (`GRAFEO-T012`) |
 | `40003`   | transaction completion unknown | a commit written to the log but not made durable (`GRAFEO-T010`), and every commit after an earlier one that did not complete (`GRAFEO-T008`) |
 | `42001`   | syntax error                   | `MATCH (n RETURN n`                              |
 | `42002`   | invalid reference              | a name that resolves to nothing: an undefined variable, an unknown function, procedure, parameter, graph or type |

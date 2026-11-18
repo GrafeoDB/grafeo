@@ -23,7 +23,15 @@ impl SessionInner {
     /// While the session has a viewing epoch set: RDF data keeps no
     /// history, so a read at an earlier epoch is refused rather than read
     /// at the present.
-    pub(crate) fn rdf_view(&self) -> Result<grafeo_core::graph::rdf::RdfView> {
+    ///
+    /// In a transaction, the read at its snapshot comes with the view, to hold while the view
+    /// is read: `GRAFEO-T012` once the snapshot expired.
+    pub(crate) fn rdf_view(
+        &self,
+    ) -> Result<(
+        grafeo_core::graph::rdf::RdfView,
+        Option<crate::transaction::SnapshotRead>,
+    )> {
         if self.viewing_epoch().is_some() {
             return Err(grafeo_common::utils::error::QueryError::unsupported(
                 "RDF data keeps no history: a SPARQL or RDF read cannot run at a viewing epoch; \
@@ -32,11 +40,19 @@ impl SessionInner {
             .into());
         }
         if let Some(changes) = self.changes.lock().clone() {
-            return changes.rdf_view(&self.rdf_store);
+            // Before the view: an expired snapshot fails with its own error, never as a view
+            // of an epoch the overlay no longer keeps.
+            let read = match *self.current_transaction.lock() {
+                Some(transaction_id) => self.transaction_manager.read_in(transaction_id)?,
+                None => None,
+            };
+            return Ok((changes.rdf_view(&self.rdf_store)?, read));
         }
-        self.rdf_store
+        let view = self
+            .rdf_store
             .view_at(self.transaction_manager.current_epoch())
-            .map_err(|error| grafeo_common::utils::error::Error::Internal(error.to_string()))
+            .map_err(|error| grafeo_common::utils::error::Error::Internal(error.to_string()))?;
+        Ok((view, None))
     }
 
     /// Runs `read`, a read of the RDF store outside a query plan (SHACL
@@ -47,7 +63,10 @@ impl SessionInner {
         &self,
         read: impl FnOnce(&grafeo_core::graph::rdf::RdfView) -> Result<T>,
     ) -> Result<T> {
-        self.in_statement_transaction(false, || read(&self.rdf_view()?))
+        self.in_statement_transaction(false, || {
+            let (view, _read) = self.rdf_view()?;
+            read(&view)
+        })
     }
 
     /// Plans native RDF paths with the session's pending writes and resource
@@ -224,8 +243,10 @@ impl SessionInner {
             // The statement's memory, which its operators capture while it
             // is planned.
             let _memory = self.enter_statement_memory();
+            // Held while the statement runs (see `rdf_view`).
+            let (view, _read) = self.rdf_view()?;
             let planner = self
-                .make_rdf_planner(deadline, self.rdf_view()?, expands_copies)?
+                .make_rdf_planner(deadline, view, expands_copies)?
                 .with_query_values(language == "graphql");
             if optimized_plan.profile {
                 let (mut physical_plan, entries) = planner.plan_profiled(optimized_plan)?;

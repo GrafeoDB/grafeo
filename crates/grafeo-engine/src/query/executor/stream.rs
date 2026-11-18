@@ -29,7 +29,7 @@ use std::sync::Arc;
 use grafeo_common::utils::warning::{QueryWarning, WarningSink};
 
 use crate::database::QueryResult;
-use crate::transaction::ReadPin;
+use crate::transaction::ReadHold;
 
 /// What a stream runs: the pipeline `Session::build_streaming_plan` built, with its columns,
 /// its deadline, its snapshot pin and its warnings.
@@ -37,7 +37,7 @@ pub(crate) struct StreamPlan {
     pub(crate) operator: Box<dyn Operator>,
     pub(crate) columns: Vec<String>,
     pub(crate) deadline: Option<Instant>,
-    pub(crate) pin: Option<ReadPin>,
+    pub(crate) pin: Option<ReadHold>,
     /// Where the statement raises its warnings: its translation's, there when the stream
     /// opens, and its run's, as the rows that raise them are pulled.
     pub(crate) warnings: Arc<WarningSink>,
@@ -114,7 +114,7 @@ pub struct ResultStream<'session> {
     exhausted: bool,
     _guard: StreamGuard<'session>,
     /// The stream's committed snapshot pin, including a historical override.
-    _pin: Option<ReadPin>,
+    _pin: Option<ReadHold>,
     warnings: Arc<WarningSink>,
 }
 
@@ -315,7 +315,7 @@ pub struct OwnedResultStream {
     deadline: Option<Instant>,
     exhausted: bool,
     /// The stream's committed snapshot pin, including a historical override.
-    _pin: Option<ReadPin>,
+    _pin: Option<ReadHold>,
     warnings: Arc<WarningSink>,
     /// The session's active-stream count while the stream is open, when a
     /// session's transaction may be reading through it: let go of when the

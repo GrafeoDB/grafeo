@@ -32,6 +32,8 @@ Performance and memory release, in progress: this section lists what has landed 
 - **C functions without an error return report a closed database**: `grafeo_current_epoch` and nine more (listed in `grafeo.h`) clear the last error on entry and, after `close()`, return their neutral value with `GRAFEO-T007` as the last error.
 - **A GQL `^` chain needs parentheses**: `RETURN 2 ^ 3 ^ 2` is a syntax error that names `POWER(x, y)`, ISO GQL's form, where it was read from the right (512); write `2 ^ (3 ^ 2)` or `POWER(2, POWER(3, 2))`. A single `^` is unchanged; Cypher reads a chain from the left, as openCypher does.
 - **`SET x += <value>` and `SET x = <value>` refuse a value that is neither a map nor null**: `SET n += 5`, a string, a list or a boolean, written or as a parameter, raise invalid value type (`22G12`) in GQL and Cypher, on nodes and relationships. They succeeded and set nothing; so did `SET x += coalesce(m, 1)` and `CASE` forms that mix a node with a plain value, which now raise too.
+- **An open transaction's snapshot is bounded**: once the commits since a transaction began replaced more data it can still read than the snapshot retention limit (`Config::with_snapshot_retention_limit`, Python `snapshot_retention_limit`, Node.js and WebAssembly `snapshotRetentionLimit`, C `grafeo_options_set_snapshot_retention_limit`; a quarter of the memory limit by default, at least 1 MiB), its next call fails with the retryable `GRAFEO-T012` and rolls it back. Before, an idle transaction kept every replaced version until it ended; a snapshot, view or iterator held past the limit is not failed but puts the notice `01Y02` on the statement whose commit passed it.
+- **A transaction that lost a key or MERGE claim is rolled back at its next call**: once an older transaction takes a UNIQUE key or a MERGE pattern from it, its next call, a read too, fails with `GRAFEO-T001` and rolls it back, and every call fails with that error until `ROLLBACK` or `COMMIT` ends it. Before, its reads went on and its writes kept other writers off those entities until it ended.
 
 ### Deprecated
 
@@ -72,6 +74,7 @@ Performance and memory release, in progress: this section lists what has landed 
 - **Read-only opens remove the spill directories of crashed processes**: the first read-only open of a process removes, from the system temp directory, its user's spill directories of read-only opens whose process is gone, before it measures the default spill cap. Directories left by 0.6.3 and earlier stay, with one warning giving their count and size.
 - **`SET x = null` and `SET x += null` no longer lock what they set**: a null map, written or as a parameter, changes nothing on a node or a relationship, and two open transactions running such a SET on one both commit; the second failed with a write conflict (`GRAFEO-T001`).
 - **A long explicit transaction keeps one copy of its write claims**: the log that undoes a failed statement's claims is dropped after each statement once no savepoint is open, so a bulk update in one transaction no longer holds a second copy of every claim until the commit.
+- **The CLI writes engine warnings to standard error**: with `--format json` or `csv` a warning, such as one about old spill directories, went to standard output ahead of the rows; the output now holds only the result.
 
 ## [0.6.3] - 2026-11-15
 

@@ -266,7 +266,8 @@ impl From<&super::error::Error> for GqlStatus {
                 TransactionError::Aborted
                 | TransactionError::Conflict
                 | TransactionError::WriteConflict(_) => GqlStatus::TX_ROLLBACK,
-                TransactionError::SerializationFailure(_) => GqlStatus::TX_ROLLBACK,
+                TransactionError::SerializationFailure(_)
+                | TransactionError::SnapshotExpired { .. } => GqlStatus::TX_ROLLBACK,
                 TransactionError::Deadlock => GqlStatus::TX_ROLLBACK,
                 TransactionError::Timeout | TransactionError::DatabaseClosed => {
                     GqlStatus::INVALID_TX_STATE
@@ -587,6 +588,20 @@ mod tests {
     /// database.
     /// A commit that was rolled back for its log (the write failed, or the
     /// log takes no more writes) is a rollback; one whose log could not be
+    /// A transaction whose snapshot expired is rolled back (`40000`).
+    #[test]
+    fn an_expired_snapshot_is_a_transaction_rollback() {
+        use super::super::error::{Error, TransactionError};
+
+        assert_eq!(
+            GqlStatus::from(&Error::Transaction(TransactionError::SnapshotExpired {
+                kept: 2 << 20,
+                limit: 1 << 20,
+            })),
+            GqlStatus::TX_ROLLBACK
+        );
+    }
+
     /// made durable is the case `40003` exists for.
     #[test]
     fn the_commit_log_errors_say_whether_the_commit_may_exist() {

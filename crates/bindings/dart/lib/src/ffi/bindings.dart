@@ -1216,6 +1216,13 @@ final class GrafeoBindings {
       int Function(
           Pointer<Void>, int)>('grafeo_options_set_path_search_budget');
 
+  /// Sets the snapshot retention limit in bytes; below 1 MiB the open fails.
+  /// Returns GrafeoStatus.
+  late final grafeoOptionsSetSnapshotRetentionLimit = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64),
+      int Function(
+          Pointer<Void>, int)>('grafeo_options_set_snapshot_retention_limit');
+
   /// Sets the spill limit in bytes; zero means nothing spills. Returns
   /// GrafeoStatus.
   late final grafeoOptionsSetSpillLimit = library.lookupFunction<

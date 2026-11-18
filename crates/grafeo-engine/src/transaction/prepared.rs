@@ -66,6 +66,7 @@ pub struct PreparedCommit<'a> {
 impl<'a> PreparedCommit<'a> {
     /// Creates a new prepared commit from a session with an active transaction.
     pub(crate) fn new(session: &'a mut Session) -> Result<Self> {
+        session.inner()?.check_failed()?;
         let transaction_id = session.inner()?.current_transaction_id().ok_or_else(|| {
             Error::Transaction(TransactionError::InvalidState(
                 "No active transaction to prepare".to_string(),

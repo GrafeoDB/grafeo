@@ -616,6 +616,8 @@ pub struct ChangeSet {
     bulk_rows: Vec<(usize, Vec<DataOp>)>,
     /// What the entries and the kept rows hold on the heap.
     held: Held,
+    /// The committed state the entries replace (see [`superseded_bytes`](Self::superseded_bytes)).
+    superseded: Held,
 }
 
 /// The before-image of a row kept with a bulk range: a create replaced
@@ -718,6 +720,7 @@ impl ChangeSet {
             version,
         };
         self.held.change(&change, Count::Add);
+        self.superseded.superseded(&change, Count::Add);
         self.entries.push(change);
         Ok(())
     }
@@ -753,6 +756,7 @@ impl ChangeSet {
         })?;
         let change = Change::RdfGraph { graph, op };
         self.held.change(&change, Count::Add);
+        self.superseded.superseded(&change, Count::Add);
         self.entries.push(change);
         Ok(())
     }
@@ -898,6 +902,7 @@ impl ChangeSet {
         if self.held.shared.capacity() != 0 {
             self.held.shared = GrafeoMap::default();
         }
+        self.superseded = Held::default();
     }
 
     /// How many entries the set holds room for without growing.
@@ -960,6 +965,7 @@ impl ChangeSet {
         let tail = self.entries.split_off(mark.0);
         for change in &tail {
             self.held.change(change, Count::Remove);
+            self.superseded.superseded(change, Count::Remove);
         }
         let kept = self.bulk_rows.partition_point(|(index, _)| *index < mark.0);
         for (_, rows) in self.bulk_rows.drain(kept..) {
@@ -1004,6 +1010,24 @@ impl ChangeSet {
             .saturating_add(entries)
             .saturating_add(shared)
             .saturating_add(self.held.bytes)
+    }
+
+    /// The bytes of committed state the entries replace, which a store keeps
+    /// while a reader that began before the commit may still read them: the
+    /// before-image of each entry that replaced committed state (an old
+    /// value, an old label set, a deleted node or edge with its values),
+    /// with one entry's own size, a large shared payload once, as
+    /// [`approx_bytes`](Self::approx_bytes) counts. An entry that created
+    /// something, or changed what the transaction itself wrote before
+    /// ([`PendingVersion::Replaced`]), replaces no committed state; triples
+    /// and graph operations count nothing here (the RDF overlay counts what
+    /// it keeps). Kept up to date as entries join and leave, so O(1).
+    ///
+    /// It measures what the commit replaced, not what a reader holds: a
+    /// store that keeps fewer versions only makes it conservative.
+    #[must_use]
+    pub fn superseded_bytes(&self) -> usize {
+        self.superseded.bytes
     }
 
     /// The nodes and edges of the labeled property graphs the set wrote, by graph, each
@@ -1146,6 +1170,21 @@ impl Held {
                 };
                 self.own(names, count);
             }
+        }
+    }
+
+    /// Counts the committed state `change` replaces (see
+    /// [`ChangeSet::superseded_bytes`]), as it joins or leaves the set.
+    fn superseded(&mut self, change: &Change, count: Count) {
+        if let Change::Data {
+            before,
+            version: PendingVersion::Created,
+            ..
+        } = change
+            && !matches!(before, Before::Absent | Before::Value(None))
+        {
+            self.own(size_of::<Change>(), count);
+            self.before(before, count);
         }
     }
 
@@ -1900,6 +1939,100 @@ mod tests {
             assert_eq!(set.approx_bytes(), new, "nothing held after reuse");
             assert_eq!(set.held.shared.capacity(), 0);
         }
+    }
+
+    /// The set counts the committed state its entries replace: an old value, an old label set
+    /// and a deleted node's image, a large shared old value once; not a create, a first value
+    /// (nothing was there), what the transaction itself wrote before, a triple or a bulk range.
+    /// A rollback to a mark and `clear` bring it back.
+    #[test]
+    fn superseded_bytes_count_the_committed_state_replaced() {
+        const BIO_BYTES: usize = 65_540;
+        let mut set = ChangeSet::new();
+        let default = set.slot(lpg(None)).unwrap();
+        set.push(
+            default,
+            create_node(3, &["Person"], Vec::new()),
+            Before::Absent,
+            Created,
+        )
+        .unwrap();
+        set.push(
+            default,
+            set_node_property(3, "city", Value::from("Amsterdam")),
+            Before::Value(None),
+            Created,
+        )
+        .unwrap();
+        assert_eq!(set.superseded_bytes(), 0, "a create and a first value");
+        let mark = set.mark();
+
+        let bio = Value::from("Vincent ".repeat(BIO_BYTES / 8).as_str());
+        for id in [19, 88] {
+            set.push(
+                default,
+                set_node_property(id, "bio", Value::from("Paris")),
+                Before::Value(Some(bio.clone())),
+                Created,
+            )
+            .unwrap();
+        }
+        let replaced = set.superseded_bytes();
+        assert!(
+            (BIO_BYTES..2 * BIO_BYTES).contains(&replaced),
+            "a shared old value counts once: {replaced}"
+        );
+        set.push(
+            default,
+            set_node_property(19, "bio", Value::from("Rome")),
+            Before::Value(Some(Value::from("Paris"))),
+            Replaced,
+        )
+        .unwrap();
+        assert_eq!(
+            set.superseded_bytes(),
+            replaced,
+            "its own earlier write replaces no committed state"
+        );
+        set.push(
+            default,
+            DataOp::DeleteNode {
+                id: NodeId::new(23),
+            },
+            node_image(
+                &["Person"],
+                vec![("bio".into(), Value::from("Gus ".repeat(256).as_str()))],
+            ),
+            Created,
+        )
+        .unwrap();
+        let deleted = set.superseded_bytes();
+        assert!(
+            deleted - replaced >= 1024,
+            "a deleted node's values: {replaced} then {deleted}"
+        );
+
+        let rdf = set.slot(rdf(None)).unwrap();
+        set.push(rdf, insert_triple("ex:jules"), Before::Absent, Created)
+            .unwrap();
+        assert_eq!(
+            set.superseded_bytes(),
+            deleted,
+            "a triple counts nothing here"
+        );
+
+        drop(set.split_off(mark));
+        assert_eq!(set.superseded_bytes(), 0, "back to the mark");
+        set.push(
+            default,
+            set_node_property(19, "bio", Value::from("Paris")),
+            Before::Value(Some(bio)),
+            Created,
+        )
+        .unwrap();
+        assert!(set.superseded_bytes() >= BIO_BYTES);
+        set.clear();
+        assert_eq!(set.superseded_bytes(), 0, "cleared");
     }
 
     /// The estimate grows with what entries hold, counts a large payload

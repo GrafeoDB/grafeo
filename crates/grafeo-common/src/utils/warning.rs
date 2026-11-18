@@ -178,6 +178,15 @@ warnings! {
         "ran out before the scores changed by less than `tolerance`; the scores are those of \
          the last iteration",
     );
+    /// A reader that cannot expire (a snapshot, a view, a stream outside a transaction, an
+    /// iterator or an export) holds data the commits since it replaced past the snapshot
+    /// retention limit: raised once per epoch on the statement whose commit crossed it, its
+    /// message naming the epoch and the bytes.
+    SnapshotHeldPastLimit => WarningSpec::notice(
+        *b"01Y02",
+        "a snapshot, view, stream outside a transaction, iterator or export",
+        "holds replaced data past the snapshot retention limit; drop it when done",
+    );
     /// The test probe (`Session::set_warning_probe`), in test builds only.
     #[cfg(feature = "testing-warning-probe")]
     Probe => WarningSpec::notice(
@@ -326,6 +335,20 @@ pub struct QueryWarning {
     pub kind: WarningKind,
     /// What it says, naming the replacement of a deprecated form.
     pub message: String,
+}
+
+impl QueryWarning {
+    /// `warning` with a message of its own, for a notice that names what its registry text
+    /// cannot (numbers of this statement).
+    #[must_use]
+    pub fn with_message(warning: Warning, message: String) -> Self {
+        let spec = warning.spec();
+        Self {
+            code: spec.code,
+            kind: spec.kind,
+            message,
+        }
+    }
 }
 
 impl From<Warning> for QueryWarning {

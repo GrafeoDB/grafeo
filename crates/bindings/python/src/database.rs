@@ -638,6 +638,13 @@ impl PyGrafeoDB {
     /// of memory_limit, at most 256 MiB, and never more than memory_limit. A
     /// search over it raises GRAFEO-S001. For this open only.
     ///
+    /// snapshot_retention_limit is how many bytes of replaced data an open
+    /// transaction's snapshot may keep: what the commits since it began
+    /// replaced that it can still read. By default a quarter of memory_limit,
+    /// at least 1 MiB; below 1 MiB the open raises. Past it the transaction's
+    /// next call raises the retryable GRAFEO-T012 and rolls it back. For this
+    /// open only.
+    ///
     /// spill_limit is how many bytes may spill to disk (0: nothing spills),
     /// half the spill volume's free space by default; unlimited_spill=True
     /// lifts it (and wins over spill_limit). An in-memory database spills
@@ -658,6 +665,7 @@ impl PyGrafeoDB {
         memory_limit=None,
         query_memory_limit=None,
         path_search_budget=None,
+        snapshot_retention_limit=None,
         spill_limit=None,
         unlimited_spill=false
     ))]
@@ -680,6 +688,7 @@ impl PyGrafeoDB {
         memory_limit: Option<usize>,
         query_memory_limit: Option<usize>,
         path_search_budget: Option<usize>,
+        snapshot_retention_limit: Option<u64>,
         spill_limit: Option<u64>,
         unlimited_spill: bool,
         py: Python<'_>,
@@ -718,6 +727,9 @@ impl PyGrafeoDB {
         }
         if let Some(bytes) = path_search_budget {
             config = config.with_path_search_budget(bytes);
+        }
+        if let Some(bytes) = snapshot_retention_limit {
+            config = config.with_snapshot_retention_limit(bytes);
         }
         if unlimited_spill {
             config = config.with_unlimited_spill();

@@ -18,6 +18,7 @@ pub struct GrafeoOptions {
     memory_limit: Option<usize>,
     query_memory_limit: Option<usize>,
     path_search_budget: Option<usize>,
+    snapshot_retention_limit: Option<u64>,
     spill_limit: Option<u64>,
     unlimited_spill: bool,
 }
@@ -33,6 +34,9 @@ impl GrafeoOptions {
         }
         if let Some(bytes) = self.path_search_budget {
             config = config.with_path_search_budget(bytes);
+        }
+        if let Some(bytes) = self.snapshot_retention_limit {
+            config = config.with_snapshot_retention_limit(bytes);
         }
         if self.unlimited_spill {
             config = config.with_unlimited_spill();
@@ -133,6 +137,24 @@ pub extern "C" fn grafeo_options_set_path_search_budget(
         Ok(())
     }) {
         Ok(()) => GrafeoStatus::Ok,
+        Err(status) => status,
+    }
+}
+
+/// Sets how many bytes of replaced data an open transaction's snapshot may keep: what the commits
+/// since it began replaced that it can still read. Past it the transaction's next call fails with
+/// the retryable GRAFEO-T012 and rolls it back. The default is a quarter of the memory limit, at
+/// least 1 MiB; below 1 MiB `grafeo_open_with_options` fails.
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_options_set_snapshot_retention_limit(
+    options: *mut GrafeoOptions,
+    bytes: u64,
+) -> GrafeoStatus {
+    match options_mut(options) {
+        Ok(options) => {
+            options.snapshot_retention_limit = Some(bytes);
+            GrafeoStatus::Ok
+        }
         Err(status) => status,
     }
 }

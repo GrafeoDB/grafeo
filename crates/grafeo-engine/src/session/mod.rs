@@ -540,6 +540,22 @@ pub(crate) struct SessionInner {
     /// of several statements runs its statements inside its own). The claim log is kept while
     /// one does or a savepoint is open.
     statement_marks: std::sync::atomic::AtomicUsize,
+    /// The statements of this session running now (they nest: a write of several statements,
+    /// a procedure's body). A transaction the database gave up on is rolled back only while
+    /// none runs, so no statement restores its savepoint after that rollback.
+    running_statements: std::sync::atomic::AtomicUsize,
+    /// Whether the open transaction is an explicit one, not a statement's own: only an
+    /// explicit one is rolled back when the database gives up on it (a statement's own ends
+    /// with its statement).
+    explicit_transaction: std::sync::atomic::AtomicBool,
+    /// The notice of the commit that just crossed the snapshot retention limit while only
+    /// readers that cannot expire held the oldest epoch, for the statement that made it.
+    limit_notice: parking_lot::Mutex<Option<crate::transaction::HeldPastLimit>>,
+    /// The error of the open transaction the database gave up on: its snapshot expired
+    /// (`GRAFEO-T012`), or it lost a key or MERGE claim (`GRAFEO-T001`). It was rolled back
+    /// at that error, and every call fails with it until `ROLLBACK`, which clears it, or
+    /// `COMMIT`, which clears it and fails with it.
+    failed: parking_lot::Mutex<Option<grafeo_common::utils::error::TransactionError>>,
     /// The catalog's rules as the open transaction began: a commit that finds them
     /// changed checks its writes again.
     rules_at_begin: std::sync::atomic::AtomicU64,
@@ -588,18 +604,19 @@ pub(crate) struct SessionInner {
     warning_probe: parking_lot::Mutex<Option<ProbeStage>>,
 }
 
-/// A statement of the open transaction holding a claim mark: counted in the session's
-/// `statement_marks` while it lives, unwinding included.
-struct OpenStatementMark<'a>(&'a std::sync::atomic::AtomicUsize);
+/// One of a session's counts, held while it lives, unwinding included: a statement of the open
+/// transaction holding a claim mark (`statement_marks`), or a statement running
+/// (`running_statements`).
+struct HeldCount<'a>(&'a std::sync::atomic::AtomicUsize);
 
-impl<'a> OpenStatementMark<'a> {
+impl<'a> HeldCount<'a> {
     fn new(marks: &'a std::sync::atomic::AtomicUsize) -> Self {
         marks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Self(marks)
     }
 }
 
-impl Drop for OpenStatementMark<'_> {
+impl Drop for HeldCount<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
@@ -678,6 +695,10 @@ impl SessionInner {
             viewing_epoch_override: parking_lot::Mutex::new(None),
             savepoints: parking_lot::Mutex::new(Vec::new()),
             statement_marks: std::sync::atomic::AtomicUsize::new(0),
+            running_statements: std::sync::atomic::AtomicUsize::new(0),
+            explicit_transaction: std::sync::atomic::AtomicBool::new(false),
+            limit_notice: parking_lot::Mutex::new(None),
+            failed: parking_lot::Mutex::new(None),
             rules_at_begin: std::sync::atomic::AtomicU64::new(0),
             pending_schema: parking_lot::Mutex::new(None),
             transaction_nesting_depth: parking_lot::Mutex::new(0),
@@ -872,6 +893,10 @@ impl SessionInner {
             viewing_epoch_override: parking_lot::Mutex::new(None),
             savepoints: parking_lot::Mutex::new(Vec::new()),
             statement_marks: std::sync::atomic::AtomicUsize::new(0),
+            running_statements: std::sync::atomic::AtomicUsize::new(0),
+            explicit_transaction: std::sync::atomic::AtomicBool::new(false),
+            limit_notice: parking_lot::Mutex::new(None),
+            failed: parking_lot::Mutex::new(None),
             rules_at_begin: std::sync::atomic::AtomicU64::new(0),
             pending_schema: parking_lot::Mutex::new(None),
             transaction_nesting_depth: parking_lot::Mutex::new(0),
@@ -1805,7 +1830,11 @@ impl SessionInner {
             }
             SessionCommand::Commit => {
                 self.commit_inner()?;
-                Ok(QueryResult::status("Transaction committed"))
+                let mut result = QueryResult::status("Transaction committed");
+                if let Some(notice) = self.limit_notice.lock().take() {
+                    result.warnings.push(notice.query_warning());
+                }
+                Ok(result)
             }
             SessionCommand::Rollback => {
                 self.rollback_inner()?;
@@ -4682,7 +4711,10 @@ impl SessionInner {
         let (view, pin) = match self.read_view()? {
             (view, None) if view.transaction.is_none() => {
                 let pin = self.transaction_manager.pin_read();
-                (ReadView::committed(pin.epoch()), Some(pin))
+                (
+                    ReadView::committed(pin.epoch()),
+                    Some(crate::transaction::ReadHold::Pin { _pin: pin }),
+                )
             }
             read => read,
         };
@@ -5480,7 +5512,26 @@ impl SessionInner {
         read_only: bool,
         isolation_level: Option<crate::transaction::IsolationLevel>,
     ) -> Result<()> {
+        self.begin_transaction_of(read_only, isolation_level, true)
+    }
+
+    /// The transaction one statement (or one write of several, `as_one_write`) runs in outside
+    /// an explicit transaction: its snapshot never expires (see
+    /// `TransactionManager::begin_statement`).
+    fn begin_statement_transaction(&self) -> Result<()> {
+        self.begin_transaction_of(false, None, false)
+    }
+
+    /// Begins a transaction, explicit (its snapshot can expire under the snapshot retention
+    /// limit) or a statement's own.
+    fn begin_transaction_of(
+        &self,
+        read_only: bool,
+        isolation_level: Option<crate::transaction::IsolationLevel>,
+        explicit: bool,
+    ) -> Result<()> {
         let _span = grafeo_debug_span!("grafeo::tx::begin", read_only);
+        self.check_failed()?;
         // Serializable needs the reads of queries recorded to catch write
         // skew, and they are not yet: refuse it rather than run snapshot
         // isolation under its name.
@@ -5509,12 +5560,14 @@ impl SessionInner {
             self.catalog.rules_generation(),
             std::sync::atomic::Ordering::Relaxed,
         );
-        let transaction_id = if let Some(level) = isolation_level {
-            self.transaction_manager.begin_with_isolation(level)
-        } else {
-            self.transaction_manager.begin()
+        let transaction_id = match isolation_level {
+            _ if !explicit => self.transaction_manager.begin_statement(),
+            Some(level) => self.transaction_manager.begin_with_isolation(level),
+            None => self.transaction_manager.begin(),
         };
         *current = Some(transaction_id);
+        self.explicit_transaction
+            .store(explicit, std::sync::atomic::Ordering::Relaxed);
         let changes = self.transaction_manager.changes(transaction_id);
         if let Some(changes) = &changes {
             // The rows of its batch calls are kept for the commit only when
@@ -5534,7 +5587,10 @@ impl SessionInner {
     }
 
     pub(crate) fn commit(&mut self) -> Result<()> {
-        self.commit_inner()
+        let committed = self.commit_inner();
+        // The API returns no result to show it on: `tracing` has it.
+        self.limit_notice.lock().take();
+        committed
     }
 
     /// The epoch the last commit of this session published its changes at:
@@ -5547,6 +5603,10 @@ impl SessionInner {
     fn commit_inner(&self) -> Result<()> {
         let _span = grafeo_debug_span!("grafeo::tx::commit");
         *self.last_commit_epoch.lock() = None;
+        // A transaction the database gave up on was rolled back already: it ends here.
+        if let Some(failed) = self.failed.lock().take() {
+            return Err(grafeo_common::utils::error::Error::Transaction(failed));
+        }
 
         #[cfg(feature = "testing-statement-injection")]
         if let Err(e) = grafeo_common::testing::statement_failure::maybe_fail_commit() {
@@ -5714,7 +5774,9 @@ impl SessionInner {
 
         // In the commit's turn, after every commit below it is published:
         // what must follow the epochs.
-        let published = publish.complete_with(|| {
+        // What the RDF apply adds to the overlay for older readers, for the snapshot retention
+        // ledger (the change set counts the labeled property graph's own).
+        let published = publish.complete_replacing(|| {
             // Commit the changes at the commit epoch, per graph through the
             // backend each was applied to: the row-group store's pending
             // versions become visible at the epoch once it is published, and
@@ -5736,16 +5798,20 @@ impl SessionInner {
             // the commit see them from now on, and readers at an earlier
             // snapshot read around them.
             #[cfg(feature = "triple-store")]
-            if let Some(changes) = &changes
-                && let Err(error) = changes.apply_rdf(
-                    &self.rdf_store,
-                    grafeo_core::graph::rdf::ApplyMode::Publish(commit_epoch),
-                )
-            {
-                return Err(grafeo_common::utils::error::Error::Internal(format!(
-                    "the commit of transaction {transaction_id:?} could not apply its RDF \
-                     changes: {error}"
-                )));
+            let mut replaced = 0;
+            #[cfg(feature = "triple-store")]
+            if let Some(changes) = &changes {
+                replaced = changes
+                    .apply_rdf(
+                        &self.rdf_store,
+                        grafeo_core::graph::rdf::ApplyMode::Publish(commit_epoch),
+                    )
+                    .map_err(|error| {
+                        grafeo_common::utils::error::Error::Internal(format!(
+                            "the commit of transaction {transaction_id:?} could not apply its \
+                             RDF changes: {error}"
+                        ))
+                    })? as u64;
             }
 
             // Its schema statements, after its data: a new index holds it.
@@ -5776,14 +5842,18 @@ impl SessionInner {
             if let Some(root) = self.root_store() {
                 root.sync_epoch(commit_epoch);
             }
-            Ok(())
+            #[cfg(not(feature = "triple-store"))]
+            let replaced = 0;
+            Ok(replaced)
         });
         #[cfg(feature = "wal")]
         let published = published
             .map_err(|error| crate::database::wal_log::publish_error(error, logged.is_some()));
         drop(frozen);
         self.schema_committed(&schema);
-        published?;
+        if let Some(notice) = published? {
+            *self.limit_notice.lock() = Some(notice);
+        }
         *self.last_commit_epoch.lock() = Some(commit_epoch);
         #[cfg(feature = "triple-store")]
         crate::transaction::prune_rdf_overlay(&self.rdf_store, &self.transaction_manager);
@@ -5862,6 +5932,14 @@ impl SessionInner {
     /// on its next pull.
     fn rollback_regardless_of_streams(&self) -> Result<()> {
         let _span = grafeo_debug_span!("grafeo::tx::rollback");
+        // A transaction the database gave up on was rolled back already: it ends here.
+        if self.failed.lock().take().is_some() {
+            return Ok(());
+        }
+        // Given up on since the last call: the whole transaction ends here, at any level.
+        if let Some((_, rolled_back)) = self.roll_back_given_up() {
+            return rolled_back;
+        }
         // Nested transaction: rollback to the auto-savepoint.
         {
             let mut depth = self.transaction_nesting_depth.lock();
@@ -5872,7 +5950,11 @@ impl SessionInner {
                 return self.rollback_to_savepoint(&sp_name);
             }
         }
+        self.rollback_transaction()
+    }
 
+    /// Rolls the whole open transaction back, whatever its nesting level.
+    fn rollback_transaction(&self) -> Result<()> {
         let transaction_id = self.current_transaction.lock().take().ok_or_else(|| {
             grafeo_common::utils::error::Error::Transaction(
                 grafeo_common::utils::error::TransactionError::InvalidState(
@@ -5961,6 +6043,7 @@ impl SessionInner {
     }
 
     pub(crate) fn savepoint(&self, name: &str) -> Result<()> {
+        self.check_live()?;
         let tx_id = self.current_transaction.lock().ok_or_else(|| {
             grafeo_common::utils::error::Error::Transaction(
                 grafeo_common::utils::error::TransactionError::InvalidState(
@@ -5994,6 +6077,7 @@ impl SessionInner {
     }
 
     pub(crate) fn rollback_to_savepoint(&self, name: &str) -> Result<()> {
+        self.check_live()?;
         let transaction_id = self.current_transaction.lock().ok_or_else(|| {
             grafeo_common::utils::error::Error::Transaction(
                 grafeo_common::utils::error::TransactionError::InvalidState(
@@ -6056,6 +6140,7 @@ impl SessionInner {
     }
 
     pub(crate) fn release_savepoint(&self, name: &str) -> Result<()> {
+        self.check_live()?;
         let transaction_id = self.current_transaction.lock().ok_or_else(|| {
             grafeo_common::utils::error::Error::Transaction(
                 grafeo_common::utils::error::TransactionError::InvalidState(
@@ -6098,7 +6183,8 @@ impl SessionInner {
 
     #[must_use]
     pub(crate) fn in_transaction(&self) -> bool {
-        self.current_transaction.lock().is_some()
+        // A failed transaction is open until `ROLLBACK` or `COMMIT`.
+        self.current_transaction.lock().is_some() || self.failed.lock().is_some()
     }
 
     /// Returns the current transaction ID, if any.
@@ -6348,6 +6434,7 @@ impl SessionInner {
     /// [`PlanWrites`]).
     fn with_auto_commit<T, F>(&self, writes: impl Into<PlanWrites>, body: F) -> Result<T>
     where
+        T: 'static,
         F: FnOnce() -> Result<T>,
     {
         let writes = writes.into();
@@ -6356,6 +6443,17 @@ impl SessionInner {
             self.check_writable()?;
         }
         self.in_statement_transaction(writes.any, body)
+            .map(|mut output| {
+                // The notice of this statement's own commit, when it crossed the limit, on
+                // its result; a direct write has none to show it (`tracing` has it).
+                if let Some(notice) = self.limit_notice.lock().take()
+                    && let Some(result) =
+                        (&mut output as &mut dyn std::any::Any).downcast_mut::<QueryResult>()
+                {
+                    result.warnings.push(notice.query_warning());
+                }
+                output
+            })
     }
 
     /// Runs `body`, one statement, as a transaction runs it: a write
@@ -6369,12 +6467,14 @@ impl SessionInner {
     where
         F: FnOnce() -> Result<T>,
     {
+        self.check_failed()?;
         // Refuse a fenced write before creating a savepoint or executing it.
         if has_mutations {
             self.transaction_manager.check_no_incomplete_commit()?;
         }
         if self.needs_auto_commit(has_mutations) {
-            self.begin_transaction_inner(false, None)?;
+            let _running = HeldCount::new(&self.running_statements);
+            self.begin_statement_transaction()?;
             match body() {
                 Ok(result) => {
                     self.commit_inner()?;
@@ -6386,6 +6486,11 @@ impl SessionInner {
             // Inside an open transaction a failed statement undoes its own
             // writes, and the transaction goes on.
             let transaction = *self.current_transaction.lock();
+            // Given up on since the last call (by another session's commit): rolled back now.
+            if transaction.is_some() {
+                self.check_live()?;
+            }
+            let running = HeldCount::new(&self.running_statements);
             // Before `body` reads the published epoch: it reads there or
             // later; a time-travel read at its epoch, refused before the
             // history floor. Dropped when `body` returns or unwinds.
@@ -6398,7 +6503,7 @@ impl SessionInner {
             // one, or one finishing meanwhile on another thread, keeps the log.
             let open = transaction
                 .filter(|_| has_mutations)
-                .map(|_| OpenStatementMark::new(&self.statement_marks));
+                .map(|_| HeldCount::new(&self.statement_marks));
             let start = transaction
                 .filter(|_| has_mutations)
                 .map(|tx| {
@@ -6417,7 +6522,76 @@ impl SessionInner {
             if let Some((tx, _)) = start {
                 self.trim_claims_unless_marked(tx);
             }
-            result
+            drop(running);
+            self.after_given_up(result)
+        }
+    }
+
+    /// Fails with the error the open transaction was given up on, while the session is in it
+    /// (see the `failed` field).
+    pub(crate) fn check_failed(&self) -> Result<()> {
+        match &*self.failed.lock() {
+            Some(failed) => Err(grafeo_common::utils::error::Error::Transaction(
+                failed.clone(),
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// Rolls the open transaction back when the database gave up on it (its snapshot expired,
+    /// or it lost a key or MERGE claim), so its writes and claims go now, and keeps the session
+    /// in the failed transaction until `ROLLBACK`. Returns the error then. While a stream of
+    /// the session is open, which reads the transaction's writes, the rollback waits for the
+    /// next call.
+    fn roll_back_if_given_up(&self) -> Option<grafeo_common::utils::error::Error> {
+        let (failed, rolled_back) = self.roll_back_given_up()?;
+        *self.failed.lock() = Some(failed.clone());
+        Some(with_failed_rollback(
+            grafeo_common::utils::error::Error::Transaction(failed),
+            rolled_back,
+        ))
+    }
+
+    /// The rollback of [`roll_back_if_given_up`](Self::roll_back_if_given_up), without the
+    /// failed state: why the database gave up, and how the rollback went.
+    fn roll_back_given_up(
+        &self,
+    ) -> Option<(grafeo_common::utils::error::TransactionError, Result<()>)> {
+        if self.active_streams.load(Ordering::Acquire) > 0 {
+            return None;
+        }
+        let transaction_id = (*self.current_transaction.lock())?;
+        // A statement's own transaction ends with it; inside a statement, its savepoint is
+        // restored first (the next call does it).
+        if !self
+            .explicit_transaction
+            .load(std::sync::atomic::Ordering::Relaxed)
+            || self
+                .running_statements
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0
+        {
+            return None;
+        }
+        let failed = self.transaction_manager.given_up_on(transaction_id)?;
+        // The whole transaction, not the innermost nested level.
+        *self.transaction_nesting_depth.lock() = 0;
+        Some((failed, self.rollback_transaction()))
+    }
+
+    /// [`check_failed`](Self::check_failed), and the rollback of a transaction the database
+    /// gave up on since the last call (see [`roll_back_if_given_up`](Self::roll_back_if_given_up)).
+    fn check_live(&self) -> Result<()> {
+        self.check_failed()?;
+        self.roll_back_if_given_up().map_or(Ok(()), Err)
+    }
+
+    /// `result`, or, when it failed because the database gave up on the open transaction, that
+    /// error, once the transaction is rolled back.
+    fn after_given_up<T>(&self, result: Result<T>) -> Result<T> {
+        match result {
+            Err(error) => Err(self.roll_back_if_given_up().unwrap_or(error)),
+            ok => ok,
         }
     }
 
@@ -6440,14 +6614,17 @@ impl SessionInner {
     /// one. An error undoes everything `body` wrote; an open transaction
     /// goes on.
     #[cfg(feature = "gql")]
-    pub(crate) fn as_one_write<T>(&self, body: impl FnOnce() -> Result<T>) -> Result<T> {
+    pub(crate) fn as_one_write<T: 'static>(&self, body: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.check_failed()?;
         if self.current_transaction.lock().is_some() {
             return self.with_auto_commit(true, body);
         }
-        self.begin_transaction_inner(false, None)?;
+        self.begin_statement_transaction()?;
         match self.with_auto_commit(true, body) {
             Ok(result) => {
                 self.commit_inner()?;
+                // No result shows it (the caller's API reports a summary): `tracing` has it.
+                self.limit_notice.lock().take();
                 Ok(result)
             }
             Err(error) => {
@@ -6666,38 +6843,67 @@ impl SessionInner {
     ) -> Result<(
         EpochId,
         Option<TransactionId>,
-        Option<crate::transaction::ReadPin>,
+        Option<crate::transaction::ReadHold>,
     )> {
-        let (epoch, transaction_id, historical) = self.statement_epoch();
+        let (epoch, transaction_id, historical, read) = self.statement_epoch()?;
         if historical {
             let pin = self.transaction_manager.pin_read_at(epoch)?;
-            return Ok((pin.epoch(), None, Some(pin)));
+            return Ok((
+                pin.epoch(),
+                None,
+                Some(crate::transaction::ReadHold::Pin { _pin: pin }),
+            ));
         }
-        Ok((epoch, transaction_id, None))
+        Ok((
+            epoch,
+            transaction_id,
+            read.map(|read| crate::transaction::ReadHold::Snapshot { _read: read }),
+        ))
     }
 
     /// The epoch a statement reads at, its transaction, and whether the epoch is a historical
     /// override, which a statement that reads pins (see `get_transaction_context`).
-    fn statement_epoch(&self) -> (EpochId, Option<TransactionId>, bool) {
+    ///
+    /// # Errors
+    ///
+    /// `GRAFEO-T012` once the transaction's snapshot expired: the read in it is held, with
+    /// its epoch, while the statement runs.
+    fn statement_epoch(
+        &self,
+    ) -> Result<(
+        EpochId,
+        Option<TransactionId>,
+        bool,
+        Option<crate::transaction::SnapshotRead>,
+    )> {
+        self.check_failed()?;
         let viewing = *self.viewing_epoch_override.lock();
         let transaction = *self.current_transaction.lock();
         // A historical override reads committed data, excluding pending
         // writes, and inside a transaction no later than its snapshot.
         if let Some(epoch) = viewing {
+            // Checked, not held: the historical read pins its own epoch.
+            if let Some(transaction_id) = transaction {
+                drop(self.transaction_manager.read_in(transaction_id)?);
+            }
             let epoch = transaction
                 .and_then(|transaction_id| self.transaction_manager.start_epoch(transaction_id))
                 .map_or(epoch, |start| epoch.min(start));
-            return (epoch, None, true);
+            return Ok((epoch, None, true, None));
         }
 
         if let Some(transaction_id) = transaction {
-            let epoch = self
-                .transaction_manager
-                .start_epoch(transaction_id)
-                .unwrap_or_else(|| self.transaction_manager.current_epoch());
-            (epoch, Some(transaction_id), false)
+            Ok(match self.transaction_manager.read_in(transaction_id)? {
+                Some(read) => (read.epoch(), Some(transaction_id), false, Some(read)),
+                None => (
+                    self.transaction_manager.current_epoch(),
+                    Some(transaction_id),
+                    false,
+                    None,
+                ),
+            })
         } else {
-            (self.transaction_manager.current_epoch(), None, false)
+            Ok((self.transaction_manager.current_epoch(), None, false, None))
         }
     }
 
@@ -6720,8 +6926,8 @@ impl SessionInner {
     /// transaction at its snapshot, committed at the published epoch, or
     /// committed at a viewing epoch, which the returned pin holds until the
     /// read is done (see [`get_transaction_context`](Self::get_transaction_context)).
-    fn read_view(&self) -> Result<(ReadView, Option<crate::transaction::ReadPin>)> {
-        let (epoch, transaction_id, pin) = self.get_transaction_context()?;
+    fn read_view(&self) -> Result<(ReadView, Option<crate::transaction::ReadHold>)> {
+        let (epoch, transaction_id, pin) = self.after_given_up(self.get_transaction_context())?;
         Ok((ReadView::new(epoch, transaction_id), pin))
     }
 
@@ -6778,7 +6984,8 @@ impl SessionInner {
         if crate::query::processor::has_unresolved_parameters(plan) {
             return Ok(());
         }
-        let (viewing_epoch, transaction_id, _historical) = self.statement_epoch();
+        let (viewing_epoch, transaction_id, _historical, _read) =
+            self.after_given_up(self.statement_epoch())?;
         let mut planning = self.statement_planning(viewing_epoch, transaction_id, false, language);
         planning.session.plan_only = true;
         let planner = planning.planner(Arc::clone(active))?;
@@ -7062,7 +7269,7 @@ impl SessionInner {
     ///
     /// Returns the error of `write` (a constraint violation or a write
     /// conflict), `ReadOnly` on a read-only session, or the commit's error.
-    pub(crate) fn write<T>(
+    pub(crate) fn write<T: 'static>(
         &self,
         write: impl FnOnce(
             &grafeo_core::execution::operators::GraphWriter,
@@ -9578,6 +9785,431 @@ mod tests {
 
             // Second column should be the name
             assert_eq!(result.rows[0][1], Value::String("Alix".into()));
+        }
+
+        /// Sets the snapshot retention limit of `db`'s transaction manager (Config's setting
+        /// comes with a later patch).
+        fn retention_limit(db: &GrafeoDB, bytes: u64) {
+            db.session()
+                .inner()
+                .unwrap()
+                .transaction_manager
+                .set_snapshot_retention_limit(bytes);
+        }
+
+        /// Replaces Alix's 64 KiB `bio` `times` times, each in a commit of its own.
+        fn rewrite_bio(db: &GrafeoDB, times: usize) {
+            for round in 0..times {
+                let bio = Value::from(format!("{round}{}", "Vincent ".repeat(8 * 1024)).as_str());
+                db.execute_with_params(
+                    "MATCH (p:Person {name: 'Alix'}) SET p.bio = $bio",
+                    std::collections::HashMap::from([("bio".to_string(), bio)]),
+                )
+                .unwrap();
+            }
+        }
+
+        fn assert_expired<T: std::fmt::Debug>(
+            result: grafeo_common::utils::error::Result<T>,
+            what: &str,
+        ) {
+            match result {
+                Err(error) => assert_eq!(
+                    error.error_code().as_str(),
+                    "GRAFEO-T012",
+                    "{what}: {error}"
+                ),
+                Ok(value) => panic!("{what}: answered {value:?}"),
+            }
+        }
+
+        /// An open transaction whose snapshot the commits since it began replaced 1 MiB past:
+        /// its next statement, an `EXPLAIN` of one and a direct read fail with `GRAFEO-T012`
+        /// (rows 1, 5, 6); under the limit it reads its own state (row 2).
+        #[test]
+        fn an_expired_transaction_fails_its_statements_explain_and_direct_reads() {
+            let db = GrafeoDB::new_in_memory();
+            db.execute("INSERT (:Person {name: 'Alix', bio: 'Amsterdam'})")
+                .unwrap();
+            retention_limit(&db, 1 << 20);
+            let mut reader = db.session();
+            reader.begin_transaction().unwrap();
+            let alix = reader
+                .execute("MATCH (p:Person {name: 'Alix'}) RETURN id(p) AS id")
+                .unwrap()
+                .rows()[0][0]
+                .as_int64()
+                .unwrap();
+            rewrite_bio(&db, 10);
+            let bio = reader
+                .execute("MATCH (p:Person {name: 'Alix'}) RETURN p.bio AS bio")
+                .unwrap();
+            assert_eq!(
+                bio.rows()[0][0],
+                Value::from("Amsterdam"),
+                "under the limit"
+            );
+            rewrite_bio(&db, 10);
+            assert_expired(
+                reader.execute("MATCH (p:Person {name: 'Alix'}) RETURN p.bio AS bio"),
+                "a statement",
+            );
+            assert_expired(
+                reader.execute("EXPLAIN MATCH (p:Person) RETURN p.bio"),
+                "an EXPLAIN",
+            );
+            assert_expired(
+                reader.get_node(grafeo_common::types::NodeId::new(
+                    u64::try_from(alix).unwrap(),
+                )),
+                "a direct read",
+            );
+            assert_expired(reader.commit(), "the commit");
+        }
+
+        /// A stream opened in the transaction before the expiry reads its snapshot to the end;
+        /// once it is dropped, the next statement fails (row 10).
+        #[test]
+        fn a_stream_opened_before_the_expiry_reads_its_snapshot() {
+            let db = GrafeoDB::new_in_memory();
+            db.execute("UNWIND range(1, 3) AS i INSERT (:Person {name: 'Alix', n: i})")
+                .unwrap();
+            retention_limit(&db, 1 << 20);
+            let mut reader = db.session();
+            reader.begin_transaction().unwrap();
+            let mut stream = reader
+                .execute_streaming("MATCH (p:Person) RETURN p.n AS n")
+                .unwrap();
+            let manager = std::sync::Arc::clone(&reader.inner().unwrap().transaction_manager);
+            let held = manager.read_horizon();
+            rewrite_bio(&db, 20);
+            assert_eq!(
+                manager.read_horizon(),
+                held,
+                "the open stream holds the expired snapshot"
+            );
+            let mut rows = 0;
+            while let Some(chunk) = stream.next_chunk().unwrap() {
+                rows += chunk.len();
+            }
+            assert_eq!(rows, 3, "the stream read its snapshot");
+            drop(stream);
+            assert_eq!(
+                manager.read_horizon(),
+                manager.current_epoch(),
+                "released when the stream drops"
+            );
+            assert_expired(
+                reader.execute("MATCH (p:Person) RETURN count(p) AS n"),
+                "after the stream",
+            );
+            reader.rollback().unwrap();
+        }
+
+        /// A history window keeps the labeled property graph's versions anyway: a reader inside
+        /// it does not expire on what they replaced (row 16).
+        #[test]
+        fn a_reader_inside_the_history_window_keeps_its_snapshot() {
+            let db = GrafeoDB::with_config(
+                crate::config::Config::in_memory()
+                    .with_history_retention(crate::config::HistoryRetention::Forever),
+            )
+            .unwrap();
+            db.execute("INSERT (:Person {name: 'Alix', bio: 'Amsterdam'})")
+                .unwrap();
+            retention_limit(&db, 1 << 20);
+            let mut reader = db.session();
+            reader.begin_transaction().unwrap();
+            rewrite_bio(&db, 20);
+            let bio = reader
+                .execute("MATCH (p:Person {name: 'Alix'}) RETURN p.bio AS bio")
+                .unwrap();
+            assert_eq!(bio.rows()[0][0], Value::from("Amsterdam"));
+            reader.rollback().unwrap();
+        }
+
+        /// A statement outside an explicit transaction never expires (row 20): a write of
+        /// several statements running in a transaction of its own commits, while another
+        /// session's commits replace past the limit meanwhile.
+        #[test]
+        fn a_statement_outside_a_transaction_never_expires() {
+            let db = GrafeoDB::new_in_memory();
+            db.execute("INSERT (:Person {name: 'Alix', bio: 'Amsterdam'})")
+                .unwrap();
+            retention_limit(&db, 1 << 20);
+            let session = db.session();
+            {
+                let inner = session.inner().unwrap();
+                inner
+                    .as_one_write(|| {
+                        rewrite_bio(&db, 20);
+                        inner.execute("INSERT (:Person {name: 'Gus'})")
+                    })
+                    .expect("a statement's own transaction commits");
+            }
+            let gus = db
+                .execute("MATCH (p:Person {name: 'Gus'}) RETURN count(p) AS n")
+                .unwrap();
+            assert_eq!(gus.rows()[0][0], Value::Int64(1));
+        }
+
+        /// A reader that cannot expire (a held `db.snapshot()`) past the limit: the commit that
+        /// crosses it carries exactly one notice (`01Y02`) naming the bytes, and a later commit
+        /// at the same oldest epoch none (once per epoch).
+        #[test]
+        fn a_held_snapshot_past_the_limit_is_noticed_once_on_the_crossing_statement() {
+            let db = GrafeoDB::new_in_memory();
+            db.execute("INSERT (:Person {name: 'Alix', bio: 'Amsterdam'})")
+                .unwrap();
+            retention_limit(&db, 1 << 20);
+            let snapshot = db.snapshot().unwrap();
+            let mut notices = Vec::new();
+            for round in 0..20 {
+                let bio = Value::from(format!("{round}{}", "Vincent ".repeat(8 * 1024)).as_str());
+                let result = db
+                    .execute_with_params(
+                        "MATCH (p:Person {name: 'Alix'}) SET p.bio = $bio",
+                        std::collections::HashMap::from([("bio".to_string(), bio)]),
+                    )
+                    .unwrap();
+                for warning in &result.warnings {
+                    notices.push((
+                        round,
+                        warning.code.as_str().to_string(),
+                        warning.message.clone(),
+                    ));
+                }
+            }
+            assert_eq!(notices.len(), 1, "{notices:?}");
+            let (_, code, message) = &notices[0];
+            assert_eq!(code, "01Y02");
+            assert!(
+                message.contains("bytes") && message.contains("drop it when done"),
+                "{message}"
+            );
+            drop(snapshot);
+        }
+
+        /// After its first `GRAFEO-T012` the transaction is rolled back (row 9): every call
+        /// fails with the error (a read, a write, a savepoint, a `BEGIN`) until `ROLLBACK`, and
+        /// the session is in the transaction meanwhile. A writer of the key it claimed goes on
+        /// at once at the expiry; a writer of an entity it wrote fails until its next call, then
+        /// goes on, and a reopen holds that writer's value.
+        #[cfg(feature = "grafeo-file")]
+        #[test]
+        fn an_expired_transaction_is_rolled_back_at_its_first_error() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("expired.grafeo");
+            let paris = "MATCH (p:Person {name: 'Vincent'}) SET p.city = 'Paris'";
+            {
+                let db = GrafeoDB::open(&path).unwrap();
+                db.execute("CREATE CONSTRAINT person_name FOR (p:Person) ON (p.name) UNIQUE")
+                    .unwrap();
+                db.execute(
+                    "INSERT (:Person {name: 'Alix', bio: 'Amsterdam'}), (:Person {name: 'Vincent'})",
+                )
+                .unwrap();
+                retention_limit(&db, 1 << 20);
+                let mut expired = db.session();
+                expired.begin_transaction().unwrap();
+                expired.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+                expired
+                    .execute("MATCH (p:Person {name: 'Vincent'}) SET p.city = 'Rome'")
+                    .unwrap();
+                rewrite_bio(&db, 20);
+                db.execute("INSERT (:Person {name: 'Gus', city: 'Berlin'})")
+                    .expect("the expired transaction's key claim does not count");
+                let conflict = db
+                    .execute(paris)
+                    .expect_err("its write claim holds until its next call");
+                assert_eq!(conflict.error_code().as_str(), "GRAFEO-T001", "{conflict}");
+                assert_expired(
+                    expired.execute("MATCH (p:Person) RETURN count(p) AS n"),
+                    "its first statement",
+                );
+                db.execute(paris).expect("rolled back: the entity is free");
+                assert_expired(expired.execute("INSERT (:Person {name: 'Mia'})"), "a write");
+                assert_expired(expired.savepoint("again"), "a savepoint");
+                assert_expired(expired.begin_transaction(), "a BEGIN");
+                assert!(
+                    expired.in_transaction(),
+                    "in the failed transaction until ROLLBACK"
+                );
+                expired.rollback().expect("ROLLBACK ends it");
+                assert!(!expired.in_transaction());
+                let people = expired
+                    .execute("MATCH (p:Person) RETURN count(p) AS n")
+                    .unwrap();
+                assert_eq!(
+                    people.rows()[0][0],
+                    Value::Int64(3),
+                    "Alix, Vincent, Berlin's Gus"
+                );
+            }
+            let db = GrafeoDB::open(&path).unwrap();
+            let city = |name: &str| {
+                db.execute_with_params(
+                    "MATCH (p:Person {name: $name}) RETURN p.city AS city",
+                    std::collections::HashMap::from([("name".to_string(), Value::from(name))]),
+                )
+                .unwrap()
+                .rows()
+                .iter()
+                .map(|row| row[0].clone())
+                .collect::<Vec<_>>()
+            };
+            assert_eq!(city("Vincent"), [Value::from("Paris")]);
+            assert_eq!(city("Gus"), [Value::from("Berlin")]);
+        }
+
+        /// A transaction doomed by an older one's MERGE claim (`GRAFEO-T001`) is rolled back at
+        /// its next call, a read too, and fails every call until `ROLLBACK` (Q6b). A writer of
+        /// an entity it wrote fails until then, and goes on after; the older one commits.
+        #[test]
+        fn a_doomed_transaction_is_rolled_back_at_its_next_call() {
+            let db = GrafeoDB::new_in_memory();
+            db.execute("INSERT (:Person {name: 'Vincent'})").unwrap();
+            let mut older = db.session();
+            older.begin_transaction().unwrap();
+            let mut doomed = db.session();
+            doomed.begin_transaction().unwrap();
+            doomed.execute("MERGE (:Memory {key: 'ssi'})").unwrap();
+            doomed
+                .execute("MATCH (p:Person {name: 'Vincent'}) SET p.city = 'Rome'")
+                .unwrap();
+            older
+                .execute("MERGE (:Memory {key: 'ssi'})")
+                .expect("the older takes the claim and dooms the younger");
+            let paris = "MATCH (p:Person {name: 'Vincent'}) SET p.city = 'Paris'";
+            let conflict = db
+                .execute(paris)
+                .expect_err("its write claim holds until its next call");
+            assert_eq!(conflict.error_code().as_str(), "GRAFEO-T001", "{conflict}");
+            let read = doomed
+                .execute("MATCH (m:Memory) RETURN count(m) AS n")
+                .expect_err("a doomed transaction's read fails");
+            assert_eq!(read.error_code().as_str(), "GRAFEO-T001", "{read}");
+            assert!(read.to_string().contains("lost this claim"), "{read}");
+            db.execute(paris).expect("rolled back: the entity is free");
+            let again = doomed
+                .execute("MATCH (m:Memory) RETURN count(m) AS n")
+                .expect_err("every call fails until ROLLBACK");
+            assert_eq!(again.error_code().as_str(), "GRAFEO-T001", "{again}");
+            assert!(doomed.in_transaction());
+            doomed.rollback().expect("ROLLBACK ends it");
+            older.commit().unwrap();
+            let memories = db
+                .execute("MATCH (m:Memory {key: 'ssi'}) RETURN count(m) AS n")
+                .unwrap();
+            assert_eq!(memories.rows()[0][0], Value::Int64(1));
+            let city = db
+                .execute("MATCH (p:Person {name: 'Vincent'}) RETURN p.city AS city")
+                .unwrap();
+            assert_eq!(city.rows()[0][0], Value::from("Paris"));
+        }
+
+        /// A nested `ROLLBACK` of a transaction given up on ends the whole transaction, and a
+        /// nested `COMMIT` fails with its error and leaves the session in it until `ROLLBACK`.
+        #[test]
+        fn a_nested_end_of_an_expired_transaction_ends_it() {
+            for nested_commit in [false, true] {
+                let db = GrafeoDB::new_in_memory();
+                db.execute("INSERT (:Person {name: 'Alix', bio: 'Amsterdam'})")
+                    .unwrap();
+                retention_limit(&db, 1 << 20);
+                let mut expired = db.session();
+                expired.begin_transaction().unwrap();
+                expired.begin_transaction().unwrap();
+                expired.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+                rewrite_bio(&db, 20);
+                if nested_commit {
+                    assert_expired(expired.commit(), "the nested COMMIT");
+                    assert!(expired.in_transaction());
+                }
+                expired.rollback().expect("ROLLBACK ends it");
+                assert!(!expired.in_transaction(), "nested_commit: {nested_commit}");
+                let gus = db
+                    .execute("MATCH (p:Person {name: 'Gus'}) RETURN count(p) AS n")
+                    .unwrap();
+                assert_eq!(gus.rows()[0][0], Value::Int64(0));
+            }
+        }
+
+        /// Sets Alix's `bio` to a fresh string of `bytes` bytes `times` times, as direct calls
+        /// (`direct`) or as statements.
+        fn replace_bio(
+            db: &GrafeoDB,
+            alix: grafeo_common::types::NodeId,
+            direct: bool,
+            times: usize,
+            bytes: usize,
+        ) {
+            for round in 0..times {
+                let bio = Value::from(format!("{round}{}", "Vincent ".repeat(bytes / 8)).as_str());
+                if direct {
+                    db.set_node_property(alix, "bio", bio).unwrap();
+                } else {
+                    db.execute_with_params(
+                        "MATCH (p:Person {name: 'Alix'}) SET p.bio = $bio",
+                        std::collections::HashMap::from([("bio".to_string(), bio)]),
+                    )
+                    .unwrap();
+                }
+            }
+        }
+
+        /// A direct call that commits at once counts what it replaces as a statement's commit
+        /// does (H5): while a snapshot is held, the same writes give the same ledger total.
+        #[test]
+        fn direct_writes_count_what_they_replace_as_statements_do() {
+            let totals: Vec<u64> = [true, false]
+                .into_iter()
+                .map(|direct| {
+                    let db = GrafeoDB::new_in_memory();
+                    let alix = db
+                        .create_node_with_props(&["Person"], [("name", Value::from("Alix"))])
+                        .unwrap();
+                    let snapshot = db.snapshot().unwrap();
+                    replace_bio(&db, alix, direct, 5, 8 * 1024);
+                    drop(snapshot);
+                    db.session()
+                        .inner()
+                        .unwrap()
+                        .transaction_manager
+                        .replaced_lpg()
+                })
+                .collect();
+            assert!(
+                totals[0] >= 4 * 8 * 1024,
+                "four replaced values: {totals:?}"
+            );
+            assert_eq!(totals[0], totals[1], "direct, then statements");
+        }
+
+        /// Direct writes count toward a held snapshot's notice: sixteen replace "Amsterdam" and
+        /// then 64 KiB fifteen times, under a 1 MiB limit, and the one statement that passes it
+        /// carries `01Y02`, which its 64 KiB alone would not.
+        #[test]
+        fn direct_writes_count_toward_the_held_snapshot_notice() {
+            let db = GrafeoDB::new_in_memory();
+            let alix = db
+                .create_node_with_props(&["Person"], [("name", Value::from("Alix"))])
+                .unwrap();
+            db.set_node_property(alix, "bio", Value::from("Amsterdam"))
+                .unwrap();
+            retention_limit(&db, 1 << 20);
+            let snapshot = db.snapshot().unwrap();
+            replace_bio(&db, alix, true, 16, 64 * 1024);
+            let bio = Value::from(format!("last{}", "Vincent ".repeat(8 * 1024)).as_str());
+            let result = db
+                .execute_with_params(
+                    "MATCH (p:Person {name: 'Alix'}) SET p.bio = $bio",
+                    std::collections::HashMap::from([("bio".to_string(), bio)]),
+                )
+                .unwrap();
+            let codes: Vec<&str> = result.warnings.iter().map(|w| w.code.as_str()).collect();
+            assert_eq!(codes, ["01Y02"]);
+            drop(snapshot);
         }
 
         /// The open transaction's claim log length (`None`: no log) and write-set size.

@@ -125,6 +125,13 @@ export interface DatabaseOptions {
    * A search over it throws `GRAFEO-S001`.
    */
   pathSearchBudget?: number;
+  /**
+   * How many bytes of replaced data an open transaction's snapshot may keep, a whole number of at
+   * least 1 MiB: what the commits since it began replaced that it can still read. A quarter of
+   * `memoryLimit` by default. Past it the transaction's next call throws the retryable
+   * `GRAFEO-T012` and rolls it back.
+   */
+  snapshotRetentionLimit?: number;
 }
 
 /**

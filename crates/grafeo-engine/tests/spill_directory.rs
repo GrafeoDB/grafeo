@@ -134,19 +134,28 @@ fn a_spilling_query_of_a_read_only_open_leaves_nothing() {
         .spill_path
         .clone()
         .expect("a read-only open can spill");
-    // The open made the directory, empty; a spilling query makes it again,
-    // which shows that it spilled.
-    std::fs::remove_dir(&spill).unwrap();
+    // The open made the directory, holding only its owner lock (#450); a
+    // spilling query makes and removes its own subdirectory in it, which
+    // changes the directory's modification time: that shows it spilled.
+    let modified = || std::fs::metadata(&spill).unwrap().modified().unwrap();
+    let before = modified();
+    // Past a one-second timestamp resolution (FAT, HFS+, some network mounts).
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     let rows = db
         .execute("UNWIND range(1, 3000) AS i RETURN i ORDER BY i DESC")
         .unwrap();
     assert_eq!(rows.rows().len(), 3000);
     assert_eq!(rows.rows()[0][0], Value::Int64(3000));
-    assert!(spill.is_dir(), "the query spilled into {}", spill.display());
+    assert!(
+        modified() > before,
+        "the query spilled into {}",
+        spill.display()
+    );
     let left: Vec<_> = std::fs::read_dir(&spill)
         .unwrap()
         .flatten()
-        .map(|e| e.path())
+        .map(|e| e.file_name())
+        .filter(|name| name != "owner.lock")
         .collect();
     assert!(left.is_empty(), "the query left {left:?}");
     drop(db);

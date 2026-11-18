@@ -510,11 +510,15 @@ fn a_read_only_open_spills_to_the_temp_directory() {
     db.buffer_manager().spill_all();
     let temp = temp_dirs();
     assert_eq!(temp.len(), 1, "the read-only cache");
+    // The one cache file, and the open's `owner.lock` (held while the database is open, #450).
+    let mut cache = names_in(&std::env::temp_dir().join(&temp[0]));
+    cache.sort();
     assert_eq!(
-        names_in(&std::env::temp_dir().join(&temp[0])).len(),
-        1,
-        "the cache file"
+        cache.len(),
+        2,
+        "the cache file and the owner lock: {cache:?}"
     );
+    assert!(cache.contains(&"owner.lock".to_string()), "{cache:?}");
     assert_eq!(embeddings(&db), all_three());
     assert!(db.reload_eligible(1.0) > 0);
     assert_eq!(embeddings(&db), all_three());

@@ -29,6 +29,7 @@ Performance and memory release, in progress: this section lists what has landed 
 - **Dropping a persistent database without `close()` refuses writes through what it handed out**: it persists and releases the file as before; a session, stream or view still held reads on until it drops.
 - **C# throws `ObjectDisposedException` after `Dispose()`**, with the `GRAFEO-T007` text; what the database handed out throws `GrafeoException` with `GRAFEO-T007`, and so do C#'s `AsOfView.Epoch` and Dart's `AsOfView.epoch`, which answered the epoch they had.
 - **C functions without an error return report a closed database**: `grafeo_current_epoch` and nine more (listed in `grafeo.h`) clear the last error on entry and, after `close()`, return their neutral value with `GRAFEO-T007` as the last error.
+- **A GQL `^` chain needs parentheses**: `RETURN 2 ^ 3 ^ 2` is a syntax error that names `POWER(x, y)`, ISO GQL's form, where it was read from the right (512); write `2 ^ (3 ^ 2)` or `POWER(2, POWER(3, 2))`. A single `^` is unchanged; Cypher reads a chain from the left, as openCypher does.
 
 ### Deprecated
 

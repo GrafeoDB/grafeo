@@ -207,6 +207,7 @@ Per the standard, minimum conformance requires:
 | IN list membership | Supported | |
 | STARTS WITH / ENDS WITH / CONTAINS | Supported | |
 | Regular expression match `=~` | Supported | Extension, as in Cypher (see below) |
+| Power `^` | Supported | Extension; `POWER(b, x)` is the conformant form, and a chain such as `2 ^ 3 ^ 2` needs parentheses (see [Numeric functions](functions-numeric.md#power)) |
 
 `s =~ pattern` is a Grafeo extension: ISO GQL has no regular expressions. It has the
 meaning and the precedence of Cypher's `=~`: true when the pattern matches the whole

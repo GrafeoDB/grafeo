@@ -3783,4 +3783,9 @@ case("EX3", "MATCH (a:Person) RETURN percentileDisc(a.age, 1.5) AS p", CYPHER)
 #     whose projection was null was dropped)
 case("EY1", "MATCH (a:Person {name: 'Alix'}) RETURN [(a)-[:LIVES_IN]->(c) | c.missing] AS l", CYPHER)
 
+# EZ: a GQL ^ chain without parentheses is a syntax error naming POWER (0.6.4; it was read from the
+#     right), a single ^ and POWER work as before
+case("EZ1", "RETURN 2 ^ 3 ^ 2 AS r", GQL)
+case("EZ2", "RETURN (2 ^ 3) ^ 2 AS r, POWER(2, POWER(3, 2)) AS s", GQL)
+
 # fmt: on

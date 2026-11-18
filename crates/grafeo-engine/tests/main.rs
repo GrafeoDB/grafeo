@@ -164,6 +164,7 @@ mod generated_names;
 mod golden_format;
 mod gql_label_expressions;
 mod gql_non_reserved_words;
+mod gql_power_chain;
 mod gql_quoted_names_and_strings;
 mod gql_spec_compliance;
 mod gql_statement_order;

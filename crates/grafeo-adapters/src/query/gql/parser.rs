@@ -4140,20 +4140,23 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    /// `a ^ b`, binding tighter than `*` and right associative
-    /// (`2 ^ 3 ^ 2` is `2 ^ 9`).
+    /// `a ^ b`, binding tighter than `*`: a Grafeo extension, `POWER(a, b)`
+    /// in ISO GQL. GQL has no power operator, so it says nothing of how a
+    /// chain groups: `2 ^ 3 ^ 2` is a syntax error that names `POWER`, and
+    /// parentheses group it.
     fn parse_power_expression(&mut self) -> Result<Expression> {
         let left = self.parse_unary_expression()?;
         if self.current.kind != TokenKind::Caret {
             return Ok(left);
         }
         self.advance();
-        // Each `^` nests one level (right associative): bound the depth so a
-        // long chain is an error, not a stack overflow.
-        self.enter_nesting()?;
-        let right = self.parse_power_expression();
-        self.exit_nesting();
-        let right = right?;
+        let right = self.parse_unary_expression()?;
+        if self.current.kind == TokenKind::Caret {
+            return Err(self.error(
+                "a chain of ^ needs parentheses, as (a ^ b) ^ c or a ^ (b ^ c); \
+                 POWER(x, y) is the ISO GQL form",
+            ));
+        }
         Ok(Expression::Binary {
             left: Box::new(left),
             op: BinaryOp::Pow,
@@ -9114,11 +9117,14 @@ mod tests {
     }
 
     #[test]
-    fn test_power_operator_is_right_associative() {
-        let Statement::Query(query) = Parser::new("RETURN 2 ^ 3 ^ 2 * 4").parse().unwrap() else {
+    fn test_power_chain_needs_parentheses() {
+        // ISO GQL has no `^`: a chain is refused, naming POWER.
+        let error = Parser::new("RETURN 2 ^ 3 ^ 2 * 4").parse().unwrap_err();
+        assert!(error.to_string().contains("POWER"), "{error}");
+        // Parenthesized, it parses as written: (2 ^ (3 ^ 2)) * 4.
+        let Statement::Query(query) = Parser::new("RETURN 2 ^ (3 ^ 2) * 4").parse().unwrap() else {
             panic!("expected a query");
         };
-        // (2 ^ (3 ^ 2)) * 4
         let Expression::Binary { left, op, .. } = &query.return_clause.items[0].expression else {
             panic!("expected a binary expression");
         };
@@ -12499,7 +12505,6 @@ mod tests {
     #[test]
     fn test_long_power_and_sign_chains_error_not_stack_overflow() {
         for query in [
-            format!("RETURN 2{}", " ^ 2".repeat(50_000)),
             format!("RETURN {}1", "- ".repeat(50_000)),
             format!("RETURN {}1", "+ ".repeat(50_000)),
             format!("RETURN {}true", "NOT ".repeat(50_000)),
@@ -12507,12 +12512,14 @@ mod tests {
             let err = Parser::new(&query).parse().unwrap_err().to_string();
             assert!(err.contains("nesting depth"), "got: {err}");
         }
+        // A `^` chain is refused at its second `^`, without recursing.
+        let err = Parser::new(&format!("RETURN 2{}", " ^ 2".repeat(50_000)))
+            .parse()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("POWER"), "got: {err}");
         // Short chains are unaffected.
-        assert!(
-            Parser::new(&format!("RETURN 2{}", " ^ 1".repeat(20)))
-                .parse()
-                .is_ok()
-        );
+        assert!(Parser::new("RETURN 2 ^ 1").parse().is_ok());
         assert!(Parser::new("RETURN - - 1").parse().is_ok());
         assert!(Parser::new("RETURN NOT NOT true").parse().is_ok());
     }

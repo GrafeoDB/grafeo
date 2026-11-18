@@ -499,18 +499,21 @@ impl GraphWriter {
     /// `assignments` are `(key, value)` pairs, where a `("*", map)` pair
     /// assigns every entry of the map and a null map entry removes the
     /// property. With `replace`, a map assignment also removes the
-    /// properties the map leaves out (`SET n = {...}`).
+    /// properties the map leaves out (`SET n = {...}`). A null map changes
+    /// nothing.
     ///
     /// # Errors
     ///
-    /// Returns an error for a node the transaction deleted, a write conflict
-    /// or the first constraint violated.
+    /// Returns an error for a map assignment of a value that is neither a
+    /// map nor null (invalid value type), a node the transaction deleted, a
+    /// write conflict or the first constraint violated.
     pub fn set_node_properties(
         &self,
         id: NodeId,
         assignments: &[(String, Value)],
         replace: bool,
     ) -> Result<(), OperatorError> {
+        refuse_non_map(assignments)?;
         refuse_too_deep(assigned_values(assignments))?;
         self.require_node(id)?;
         // A list that can change no property writes nothing, so it claims
@@ -839,6 +842,7 @@ impl GraphWriter {
         assignments: &[(String, Value)],
         replace: bool,
     ) -> Result<(), OperatorError> {
+        refuse_non_map(assignments)?;
         refuse_too_deep(assigned_values(assignments))?;
         self.require_edge(id)?;
         // As for a node: a list that can change no property claims nothing.
@@ -1434,8 +1438,8 @@ impl GraphWriter {
 /// Whether a property set of `assignments` can change no property: every
 /// assignment is a map assignment of null (`SET n = null`, `SET n += null`,
 /// which write nothing) or, without `replace`, merges an empty map
-/// (`SET n += {}`). A named property, a map with entries, a replace with a
-/// map and a value that is neither a map nor null can.
+/// (`SET n += {}`). A named property, a map with entries and a replace with
+/// a map can; a value that is neither a map nor null was refused before.
 fn changes_no_property(assignments: &[(String, Value)], replace: bool) -> bool {
     // A replace without assignments keeps the conservative answer it had.
     (!replace || !assignments.is_empty())
@@ -1653,6 +1657,21 @@ fn property_list(properties: &PropertyMap) -> Vec<(String, Value)> {
         .iter()
         .map(|(key, value)| (key.as_str().to_string(), value.clone()))
         .collect()
+}
+
+/// Refuses a map assignment of a value that is neither a map nor null
+/// (`SET n += 5`), before anything is claimed: invalid value type (22G12).
+fn refuse_non_map(assignments: &[(String, Value)]) -> Result<(), OperatorError> {
+    match assignments.iter().find(|(name, value)| {
+        name == MAP_ASSIGNMENT && !matches!(value, Value::Map(_) | Value::Null)
+    }) {
+        // The type alone says what is wrong; the value may be long.
+        Some((_, value)) => Err(OperatorError::wrong_kind(format!(
+            "SET of all properties takes a map or null, not a value of type {}",
+            value.type_name()
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// Refuses a property value nested deeper than a database can store

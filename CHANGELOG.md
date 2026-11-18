@@ -31,6 +31,7 @@ Performance and memory release, in progress: this section lists what has landed 
 - **C# throws `ObjectDisposedException` after `Dispose()`**, with the `GRAFEO-T007` text; what the database handed out throws `GrafeoException` with `GRAFEO-T007`, and so do C#'s `AsOfView.Epoch` and Dart's `AsOfView.epoch`, which answered the epoch they had.
 - **C functions without an error return report a closed database**: `grafeo_current_epoch` and nine more (listed in `grafeo.h`) clear the last error on entry and, after `close()`, return their neutral value with `GRAFEO-T007` as the last error.
 - **A GQL `^` chain needs parentheses**: `RETURN 2 ^ 3 ^ 2` is a syntax error that names `POWER(x, y)`, ISO GQL's form, where it was read from the right (512); write `2 ^ (3 ^ 2)` or `POWER(2, POWER(3, 2))`. A single `^` is unchanged; Cypher reads a chain from the left, as openCypher does.
+- **`SET x += <value>` and `SET x = <value>` refuse a value that is neither a map nor null**: `SET n += 5`, a string, a list or a boolean, written or as a parameter, raise invalid value type (`22G12`) in GQL and Cypher, on nodes and relationships. They succeeded and set nothing; so did `SET x += coalesce(m, 1)` and `CASE` forms that mix a node with a plain value, which now raise too.
 
 ### Deprecated
 

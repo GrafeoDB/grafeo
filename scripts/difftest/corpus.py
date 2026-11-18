@@ -96,7 +96,7 @@ def empty(grafeo):
 
 
 def writes(grafeo):
-    """An empty database for the cases that write (sections BR, BS, BU, ES, EU and EV),
+    """An empty database for the cases that write (sections BR, BS, BU, ES, EU, EV and FA),
     which no other case reads."""
     return grafeo.GrafeoDB()
 
@@ -444,7 +444,7 @@ def rdf_complex_paths(grafeo):
 
 WRITE_FIXTURES = {
     "rdf_graphs_writes": {"DZ"},
-    "writes": {"BR", "BS", "BU", "CT", "DB", "ES", "EU", "EV"},
+    "writes": {"BR", "BS", "BU", "CT", "DB", "ES", "EU", "EV", "FA"},
     "rdf_writes": {"DD"},
     "merges": {"CC"},
     "leads": {"CF"},
@@ -3787,5 +3787,10 @@ case("EY1", "MATCH (a:Person {name: 'Alix'}) RETURN [(a)-[:LIVES_IN]->(c) | c.mi
 #     right), a single ^ and POWER work as before
 case("EZ1", "RETURN 2 ^ 3 ^ 2 AS r", GQL)
 case("EZ2", "RETURN (2 ^ 3) ^ 2 AS r, POWER(2, POWER(3, 2)) AS s", GQL)
+
+# FA: SET of all properties with a value that is neither a map nor null raises invalid value type
+#     (22G12, 0.6.4; it succeeded and set nothing), in GQL and Cypher, on the robot EU3 inserts
+case("FA1", "MATCH (r:Robot {name: 'R1'}) SET r += 5 RETURN r.name AS n", CYPHER, "writes")
+case("FA2", "MATCH (r:Robot {name: 'R1'}) SET r = 'x' RETURN r.name AS n", GQL, "writes")
 
 # fmt: on

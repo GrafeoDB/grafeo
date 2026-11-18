@@ -223,3 +223,44 @@ fn a_null_map_assignment_changes_and_counts_nothing() {
         assert_eq!(contents(&db), before, "{language}: {query}");
     }
 }
+
+/// A map assignment of a value that is neither a map nor null (`SET a += 5`,
+/// a string, a list, a boolean, written or as a parameter, also in a MERGE)
+/// raises invalid value type (22G12) on a node and a relationship, in both
+/// languages, and changes nothing. It succeeded and set nothing.
+#[test]
+fn a_map_assignment_of_a_non_map_raises() {
+    let params = || std::collections::HashMap::from([("m".to_string(), Value::Int64(5))]);
+    for (language, query) in [
+        ("cypher", "MATCH (a:A {k: 1}) SET a += 5"),
+        ("cypher", "MATCH (a:A {k: 1}) SET a = 'x'"),
+        ("cypher", "MATCH (a:A {k: 1}) SET a += [1, 2]"),
+        ("cypher", "MATCH (a:A {k: 1}) SET a = true"),
+        ("cypher", "MATCH (a:A {k: 1}) SET a += $m"),
+        ("cypher", "MATCH (a:A {k: 1}) SET a = $m"),
+        ("cypher", "MATCH ()-[r:R]->() SET r += $m"),
+        ("cypher", "MATCH ()-[r:R]->() SET r = 'x'"),
+        ("cypher", "MERGE (a:A {k: 1}) ON MATCH SET a += $m"),
+        ("gql", "MATCH (a:A {k: 1}) SET a = 5"),
+        ("gql", "MATCH (a:A {k: 1}) SET a = $m"),
+        ("gql", "MATCH (a:A {k: 1}) SET a += $m"),
+        ("gql", "MATCH ()-[r:R]->() SET r = $m"),
+    ] {
+        let db = database();
+        let before = contents(&db);
+        let error = match language {
+            "gql" => db.execute_with_params(query, params()),
+            _ => db.execute_cypher_with_params(query, params()),
+        }
+        .expect_err(query);
+        let status = grafeo_common::utils::gqlstatus::GqlStatus::from(&error);
+        assert_eq!(status.as_str(), "22G12", "{language}: {query}: {error}");
+        assert!(
+            error
+                .to_string()
+                .contains("SET of all properties takes a map or null, not a value of type"),
+            "{language}: {query}: {error}"
+        );
+        assert_eq!(contents(&db), before, "{language}: {query}");
+    }
+}

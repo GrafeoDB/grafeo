@@ -1584,15 +1584,19 @@ func TestSpec(t *testing.T) {
 // variantQuery overrides tc.Query.
 func runSingleTest(t *testing.T, gf *GtestFile, tc TestCase, variantLang, variantQuery string, datasetsDir string) {
 	t.Helper()
+	// Every skip counts in the summary, whichever check skips the case
+	defer func() {
+		if t.Skipped() {
+			summary.skipped.Add(1)
+		}
+	}()
 
 	// Skip if test has a skip field
 	if tc.Skip != "" {
-		summary.skipped.Add(1)
 		t.Skipf("skipped in .gtest: %s", tc.Skip)
 	}
 	// A gap of this binding (`runner_gap:`) skips the case here, as `skip:` does
 	if tc.RunnerGap != nil && containsString(tc.RunnerGap.Runners, "go") {
-		summary.skipped.Add(1)
 		t.Skipf("runner gap: %s (%s)", tc.RunnerGap.Reason, tc.RunnerGap.Issue)
 	}
 	// An xfail that names this runner in `passes_in` does not hold here: the case runs
@@ -1798,9 +1802,6 @@ func runCase(t specT, gf *GtestFile, tc TestCase, variantLang, variantQuery stri
 			_, fireErr = executeQuery(db, language, q)
 		}
 		if fireErr != nil {
-			if isUnsupportedLanguageError(fireErr) {
-				t.Skipf("Language %q not available: %v", language, fireErr)
-			}
 			t.Fatalf("Statement failed: %v\nQuery: %s", fireErr, q)
 		}
 	}
@@ -1813,9 +1814,6 @@ func runCase(t specT, gf *GtestFile, tc TestCase, variantLang, variantQuery stri
 		result, err = executeQuery(db, language, queries[len(queries)-1])
 	}
 	if err != nil {
-		if isUnsupportedLanguageError(err) {
-			t.Skipf("Language %q not available: %v", language, err)
-		}
 		t.Fatalf("Query failed: %v\nQuery: %s", err, queries[len(queries)-1])
 	}
 
@@ -1876,9 +1874,6 @@ func runErrorTest(t specT, db *grafeo.Database, language string, queries []strin
 			_, setupErr = executeQuery(db, language, q)
 		}
 		if setupErr != nil {
-			if isUnsupportedLanguageError(setupErr) {
-				t.Skipf("Language %q not available: %v", language, setupErr)
-			}
 			t.Fatalf("Pre-error statement failed unexpectedly: %v\nQuery: %s", setupErr, q)
 		}
 	}
@@ -1927,16 +1922,6 @@ func describeError(expectedSubstr *string, expectedStatus *string) string {
 		parts = append(parts, "with GQLSTATUS "+*expectedStatus)
 	}
 	return strings.Join(parts, " ")
-}
-
-// isUnsupportedLanguageError checks if an error indicates the language is not
-// compiled into the grafeo-c library.
-func isUnsupportedLanguageError(err error) bool {
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "unsupported language") ||
-		strings.Contains(msg, "not available") ||
-		strings.Contains(msg, "not supported") ||
-		strings.Contains(msg, "unknown language")
 }
 
 // ---------------------------------------------------------------------------

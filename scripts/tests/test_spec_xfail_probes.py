@@ -28,12 +28,16 @@ def test_the_summary_line_is_read_wherever_it_stands():
 
 
 @pytest.mark.parametrize("runner", RUNNERS)
-def test_the_assertion_probe_passes_with_two_xfails(runner):
-    good = "gtest summary: skipped=0 xfailed=2\n"
+def test_the_assertion_probe_passes_with_three_xfails(runner):
+    good = "gtest summary: skipped=0 xfailed=3\n"
     assert probes.judge("assertion", runner, 0, good) == []
     assert probes.judge("assertion", runner, 1, good) != []
     assert (
-        probes.judge("assertion", runner, 0, "gtest summary: skipped=0 xfailed=1") != []
+        probes.judge("assertion", runner, 0, "gtest summary: skipped=0 xfailed=2") != []
+    )
+    # The unsupported statement skipped instead of failing as expected
+    assert (
+        probes.judge("assertion", runner, 0, "gtest summary: skipped=1 xfailed=2") != []
     )
     assert probes.judge("assertion", runner, 0, "all passed") != []
     twice = good + good
@@ -118,6 +122,7 @@ def test_the_fixtures_hold_the_cases_the_judge_expects():
     assert sorted(gtest_cases(texts["assertion"])) == [
         "probe_xfail_on_a_row_mismatch",
         "probe_xfail_on_a_statement_error",
+        "probe_xfail_on_an_unsupported_statement",
     ]
     assert all("xfail:" in case for case in gtest_cases(texts["assertion"]).values())
     xpass = gtest_cases(texts["xpass"])["probe_xpass"]

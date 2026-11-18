@@ -1,10 +1,11 @@
-# Both cases fail as expected: the run passes and its summary says xfailed=2.
+# All three cases fail as expected: the run passes and its summary says xfailed=3.
+# An unsupported statement is a failure like any other, never a skip.
 
 meta:
   language: gql
   model: lpg
   section: probes
-  title: "xfail probe: a failing assertion and a failing statement"
+  title: "xfail probe: a failing assertion, a failing statement and an unsupported one"
   dataset: empty
 
 tests:
@@ -23,6 +24,15 @@ tests:
       spec: "harness probe: the statement fails"
       issue: "fix in 0.6.2"
     query: "RETURN 1 / 0 AS v"
+    expect:
+      rows:
+        - [1]
+
+  - name: probe_xfail_on_an_unsupported_statement
+    xfail:
+      spec: "harness probe: the statement is not supported"
+      issue: "fix in 0.6.2"
+    query: "MATCH ((a)-[]->()-[]->(b)){1,} RETURN a"
     expect:
       rows:
         - [1]

@@ -1934,6 +1934,60 @@ fn counters_to_js(counters: &grafeo_engine::database::WriteCounters) -> JsValue 
     obj.into()
 }
 
+/// The cell types of a result as `grafeo_bindings_common::entity::cell_types_to_json`
+/// writes them, built as JS values directly (JSON text would bring `serde_json`
+/// into every build).
+fn cell_types_to_js(types: &grafeo_engine::database::CellTypes) -> JsValue {
+    let columns = |types: &[grafeo_common::types::LogicalType]| -> JsValue {
+        types.iter().map(type_to_js).collect::<Array>().into()
+    };
+    let runs: Array = types
+        .runs()
+        .iter()
+        .map(|(from, types)| {
+            let run = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(&run, &"from".into(), &JsValue::from_f64(*from as f64));
+            let _ = js_sys::Reflect::set(&run, &"columns".into(), &columns(types));
+            JsValue::from(run)
+        })
+        .collect();
+    let obj = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&obj, &"columns".into(), &columns(types.columns()));
+    let _ = js_sys::Reflect::set(&obj, &"runs".into(), &runs);
+    obj.into()
+}
+
+/// A cell type as `grafeo_bindings_common::entity::type_to_json` writes it.
+fn type_to_js(ty: &grafeo_common::types::LogicalType) -> JsValue {
+    use grafeo_common::types::LogicalType;
+    let tagged = |key: &str, value: JsValue| -> JsValue {
+        let obj = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&obj, &key.into(), &value);
+        obj.into()
+    };
+    match ty {
+        LogicalType::Node => "node".into(),
+        LogicalType::Edge => "edge".into(),
+        LogicalType::Path => "path".into(),
+        LogicalType::Any => "any".into(),
+        LogicalType::List(item) => tagged("list", type_to_js(item)),
+        LogicalType::Tuple(items) => tagged(
+            "tuple",
+            items.iter().map(type_to_js).collect::<Array>().into(),
+        ),
+        LogicalType::Struct(fields) => {
+            let obj = js_sys::Object::new();
+            for (name, ty) in fields {
+                let _ = js_sys::Reflect::set(&obj, &name.as_str().into(), &type_to_js(ty));
+            }
+            tagged("struct", obj.into())
+        }
+        LogicalType::Map { value, .. } => tagged("map", type_to_js(value)),
+        LogicalType::Records(shape) => type_to_js(shape),
+        other => other.to_string().to_lowercase().into(),
+    }
+}
+
 /// Converts a query result to `{ columns: string[], rows: any[][], cellTypes, kind,
 /// boolean?, executionTimeMs?: number, counters, profile? }`, the shape of the
 /// `executeRaw*` methods (`kind` `"rows"`, `"boolean"` for a SPARQL ASK with its `boolean`,
@@ -1965,11 +2019,7 @@ fn raw_result_to_js(result: &grafeo_engine::database::QueryResult) -> Result<JsV
     let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("rows"), &rows);
 
     // cellTypes: the type each cell was built with (Experimental, 0.6.4)
-    // Through JSON text: the workspace's `arbitrary_precision` numbers would
-    // reach JavaScript wrapped.
-    let cell_types = js_sys::JSON::parse(
-        &grafeo_bindings_common::entity::cell_types_to_json(&result.cell_types()).to_string(),
-    )?;
+    let cell_types = cell_types_to_js(&result.cell_types());
     let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("cellTypes"), &cell_types);
 
     // kind: "rows" | "boolean" | "graph", and boolean for a SPARQL ASK

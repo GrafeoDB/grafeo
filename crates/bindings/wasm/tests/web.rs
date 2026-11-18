@@ -776,6 +776,36 @@ fn test_execute_raw_gives_the_cell_types() {
     );
 }
 
+/// `cellTypes` says what the C binding's `grafeo_result_types_json` says
+/// (`cell_types_to_json`), for every kind of type: scalars, entities, a
+/// path, lists, tuples, maps and runs.
+#[wasm_bindgen_test]
+fn test_cell_types_match_the_shared_json() {
+    let insert =
+        "INSERT (:Person {name: 'Alix', age: 19})-[:KNOWS {w: 3}]->(:Person {name: 'Gus'})";
+    let queries = [
+        "MATCH p = (a:Person {name: 'Alix'})-[r:KNOWS]->(b) \
+         RETURN a, r, p, 1 AS i, 1.5 AS f, 'x' AS s, true AS t, null AS n, \
+         date('2024-01-02') AS d, [a, b] AS nodes, [a, 1] AS tuple, [[1], [2]] AS nested, \
+         {k: a, v: 1} AS st, properties(a) AS props, collect(b) AS bs",
+        "MATCH (a:Person) RETURN a AS x UNION ALL MATCH ()-[r]->() RETURN r AS x \
+         UNION ALL RETURN 1 AS x",
+    ];
+    let db = Database::new().expect("create db");
+    db.execute(insert).expect("insert");
+    let native = grafeo_engine::GrafeoDB::new_in_memory();
+    native.execute(insert).expect("insert");
+    for query in queries {
+        let raw = db.execute_raw(query).expect("query");
+        let text = js_sys::JSON::stringify(&field(&raw, "cellTypes")).expect("stringify");
+        let js: serde_json::Value = serde_json::from_str(&String::from(text)).expect("json");
+        let expected = grafeo_bindings_common::entity::cell_types_to_json(
+            &native.execute(query).expect("native").cell_types(),
+        );
+        assert_eq!(js, expected, "{query}");
+    }
+}
+
 /// `hybridSearch` keeps only the nodes its `filters` option matches, and
 /// still returns up to `k` of them (#397). Without options it searches as
 /// before.

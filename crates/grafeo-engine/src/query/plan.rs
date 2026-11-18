@@ -4122,10 +4122,16 @@ impl ProcedureYield {
         bound: &std::collections::HashSet<String>,
     ) -> grafeo_common::utils::error::Result<()> {
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
-        let mut named = std::collections::HashSet::new();
-        for item in items {
-            let name = item.alias.as_ref().unwrap_or(&item.field_name);
-            let message = if !named.insert(name) {
+        fn name_of(item: &ProcedureYield) -> &String {
+            item.alias.as_ref().unwrap_or(&item.field_name)
+        }
+        // A YIELD list is a handful of names: a scan of the earlier ones, no set.
+        for (position, item) in items.iter().enumerate() {
+            let name = name_of(item);
+            let message = if items[..position]
+                .iter()
+                .any(|earlier| name_of(earlier) == name)
+            {
                 format!("YIELD gives two outputs the name '{name}'")
             } else if bound.contains(name) {
                 format!("YIELD names '{name}', which is already bound before the CALL")

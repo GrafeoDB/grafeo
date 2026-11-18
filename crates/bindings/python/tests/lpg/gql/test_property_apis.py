@@ -578,9 +578,9 @@ class TestErrorHandling:
 
     def test_execute_on_closed_in_memory_db(self, db):
         db.close()
-        # In-memory DB close is a no-op; operations still work
-        result = db.execute("MATCH (n) RETURN n")
-        assert list(result) == []
+        # close() releases an in-memory database too: a later call fails.
+        with pytest.raises(grafeo.DatabaseClosedError):
+            db.execute("MATCH (n) RETURN n")
 
     def test_get_node_nonexistent(self, db):
         node = db.get_node(999999)

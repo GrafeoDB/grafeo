@@ -3006,12 +3006,12 @@ mod tests {
             let mut session = db.session();
             session.begin_transaction().unwrap();
             session.execute("INSERT (:Item {v: 0})").unwrap();
-            let tx = session.current_transaction_id().unwrap();
-            let mgr = session.transaction_manager();
-            seed_claims(mgr, tx, 100);
+            let tx = session.inner().unwrap().current_transaction_id().unwrap();
+            let mgr = Arc::clone(&db.live().unwrap().transaction_manager);
+            seed_claims(&mgr, tx, 100);
             session.savepoint("before").unwrap();
             session.execute("INSERT (:Item {v: 1})").unwrap();
-            seed_claims(mgr, tx, 200);
+            seed_claims(&mgr, tx, 200);
             let before = {
                 let txns = mgr.transactions.read();
                 let info = &txns[&tx];
@@ -3058,9 +3058,9 @@ mod tests {
             let mut session = db.session();
             session.execute("INSERT (:Item {v: 0})").unwrap();
             session.begin_transaction().unwrap();
-            let tx = session.current_transaction_id().unwrap();
-            let mgr = session.transaction_manager();
-            seed_claims(mgr, tx, 100);
+            let tx = session.inner().unwrap().current_transaction_id().unwrap();
+            let mgr = Arc::clone(&db.live().unwrap().transaction_manager);
+            seed_claims(&mgr, tx, 100);
             let earlier_writes = mgr.get_write_set(tx).unwrap();
             store.refuse.store(true, Ordering::Relaxed);
             let error = session

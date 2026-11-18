@@ -13,13 +13,13 @@ use grafeo_core::graph::rowgroup::RowGroupStore;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use super::Session;
 use super::SessionConfig;
+use super::SessionInner;
 
 #[cfg(rdf_language)]
 mod query;
 
-impl Session {
+impl SessionInner {
     /// Creates a session that reads and writes `store` and `rdf_store`.
     pub(crate) fn with_rdf_store(
         store: Arc<RowGroupStore>,
@@ -39,6 +39,7 @@ impl Session {
             rdf_store,
             transaction_manager: cfg.transaction_manager,
             query_cache: cfg.query_cache,
+            slots: cfg.slots,
             current_transaction: parking_lot::Mutex::new(None),
             read_only_tx: parking_lot::Mutex::new(cfg.read_only),
             db_read_only: cfg.read_only,

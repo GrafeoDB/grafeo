@@ -4,13 +4,13 @@ use grafeo_common::utils::error::Result;
 
 use super::{FromValue, QueryResult};
 
-impl super::GrafeoDB {
+impl super::Open {
     /// Executes a closure with a one-shot session, syncing graph context back
     /// to the database afterward. This ensures `USE GRAPH`, `SESSION SET GRAPH`,
     /// and `SESSION RESET` persist across one-shot `execute()` calls.
     fn with_session<F>(&self, func: F) -> Result<QueryResult>
     where
-        F: FnOnce(&crate::session::Session) -> Result<QueryResult>,
+        F: FnOnce(&crate::session::SessionInner) -> Result<QueryResult>,
     {
         self.with_configured_session(|_| {}, func)
     }
@@ -19,10 +19,10 @@ impl super::GrafeoDB {
     /// up by `configure` first.
     fn with_configured_session<C, F>(&self, configure: C, func: F) -> Result<QueryResult>
     where
-        C: FnOnce(&mut crate::session::Session),
-        F: FnOnce(&crate::session::Session) -> Result<QueryResult>,
+        C: FnOnce(&mut crate::session::SessionInner),
+        F: FnOnce(&crate::session::SessionInner) -> Result<QueryResult>,
     {
-        let mut session = self.session();
+        let mut session = self.session_unlisted();
         // One-shot calls share the database's graph context like one long session,
         // whose home stays the default graph and schema.
         session.set_home(None, None);
@@ -38,6 +38,132 @@ impl super::GrafeoDB {
         result
     }
 
+    pub(crate) fn execute(&self, query: &str) -> Result<QueryResult> {
+        self.with_session(|s| s.execute(query))
+    }
+
+    #[cfg(feature = "gql")]
+    pub(crate) fn execute_streaming(
+        &self,
+        query: &str,
+    ) -> Result<crate::query::executor::stream::OwnedResultStream> {
+        use crate::query::executor::stream::OwnedResultStream;
+        let session = self.session_unlisted();
+        let plan = session.build_streaming_plan(query)?;
+        // Sync graph/schema state back (parser may have changed the session's
+        // view, although streaming rejects session commands so this is a
+        // defensive no-op today).
+        *self.current_graph.write() = session.current_graph();
+        *self.current_schema.write() = session.current_schema();
+        // The session ends here, and with it any transaction of its own: no
+        // commit or rollback can meet the stream.
+        OwnedResultStream::new(plan, &self.slots, None)
+    }
+
+    #[cfg(feature = "gql")]
+    pub(crate) fn execute_at_epoch(
+        &self,
+        query: &str,
+        epoch: grafeo_common::types::EpochId,
+    ) -> Result<QueryResult> {
+        self.with_session(|s| s.execute_at_epoch(query, epoch))
+    }
+
+    pub(crate) fn execute_with_params(
+        &self,
+        query: &str,
+        params: std::collections::HashMap<String, grafeo_common::types::Value>,
+    ) -> Result<QueryResult> {
+        self.with_session(|s| s.execute_with_params(query, params))
+    }
+
+    #[cfg(feature = "cypher")]
+    pub(crate) fn execute_cypher(&self, query: &str) -> Result<QueryResult> {
+        self.with_session(|s| s.execute_cypher(query))
+    }
+
+    #[cfg(feature = "cypher")]
+    pub(crate) fn execute_cypher_with_params(
+        &self,
+        query: &str,
+        params: std::collections::HashMap<String, grafeo_common::types::Value>,
+    ) -> Result<QueryResult> {
+        self.with_session(|s| s.execute_language(query, "cypher", Some(params)))
+    }
+
+    #[cfg(feature = "gremlin")]
+    pub(crate) fn execute_gremlin(&self, query: &str) -> Result<QueryResult> {
+        self.with_session(|s| s.execute_gremlin(query))
+    }
+
+    #[cfg(feature = "gremlin")]
+    pub(crate) fn execute_gremlin_with_params(
+        &self,
+        query: &str,
+        params: std::collections::HashMap<String, grafeo_common::types::Value>,
+    ) -> Result<QueryResult> {
+        self.with_session(|s| s.execute_gremlin_with_params(query, params))
+    }
+
+    #[cfg(feature = "graphql")]
+    pub(crate) fn execute_graphql(&self, query: &str) -> Result<QueryResult> {
+        self.with_session(|s| s.execute_graphql(query))
+    }
+
+    #[cfg(feature = "graphql")]
+    pub(crate) fn execute_graphql_with_params(
+        &self,
+        query: &str,
+        params: std::collections::HashMap<String, grafeo_common::types::Value>,
+    ) -> Result<QueryResult> {
+        self.with_session(|s| s.execute_graphql_with_params(query, params))
+    }
+
+    #[cfg(feature = "sql-pgq")]
+    pub(crate) fn execute_sql(&self, query: &str) -> Result<QueryResult> {
+        self.with_session(|s| s.execute_sql(query))
+    }
+
+    #[cfg(feature = "sql-pgq")]
+    pub(crate) fn execute_sql_with_params(
+        &self,
+        query: &str,
+        params: std::collections::HashMap<String, grafeo_common::types::Value>,
+    ) -> Result<QueryResult> {
+        self.with_session(|s| s.execute_sql_with_params(query, params))
+    }
+
+    pub(crate) fn execute_language(
+        &self,
+        query: &str,
+        language: &str,
+        params: Option<std::collections::HashMap<String, grafeo_common::types::Value>>,
+    ) -> Result<QueryResult> {
+        self.with_session(|s| s.execute_language(query, language, params))
+    }
+
+    #[cfg(query_language)]
+    pub(crate) fn execute_language_with_timeout(
+        &self,
+        query: &str,
+        language: &str,
+        params: Option<std::collections::HashMap<String, grafeo_common::types::Value>>,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<QueryResult> {
+        self.with_configured_session(
+            |session| session.set_query_timeout(timeout),
+            |s| s.execute_language(query, language, params),
+        )
+    }
+
+    pub(crate) fn query_scalar<T: FromValue>(&self, query: &str) -> Result<T> {
+        let result = self.execute(query)?;
+        result.scalar()
+    }
+}
+
+// The database's public methods: each reaches the open state for its call (#712).
+impl super::GrafeoDB {
     /// Runs a query directly on the database.
     ///
     /// A convenience method that creates a temporary session behind the
@@ -54,7 +180,7 @@ impl super::GrafeoDB {
     ///
     /// Returns an error if parsing or execution fails.
     pub fn execute(&self, query: &str) -> Result<QueryResult> {
-        self.with_session(|s| s.execute(query))
+        self.live()?.execute(query)
     }
 
     /// Runs a read-only GQL query and returns a lazy result stream.
@@ -79,17 +205,7 @@ impl super::GrafeoDB {
         &self,
         query: &str,
     ) -> Result<crate::query::executor::stream::OwnedResultStream> {
-        use crate::query::executor::stream::OwnedResultStream;
-        let session = self.session();
-        let plan = session.build_streaming_plan(query)?;
-        // Sync graph/schema state back (parser may have changed the session's
-        // view, although streaming rejects session commands so this is a
-        // defensive no-op today).
-        *self.current_graph.write() = session.current_graph();
-        *self.current_schema.write() = session.current_schema();
-        // The session ends here, and with it any transaction of its own: no
-        // commit or rollback can meet the stream.
-        OwnedResultStream::new(plan, None)
+        self.live()?.execute_streaming(query)
     }
 
     /// Executes a GQL query with visibility at the specified epoch.
@@ -107,7 +223,7 @@ impl super::GrafeoDB {
         query: &str,
         epoch: grafeo_common::types::EpochId,
     ) -> Result<QueryResult> {
-        self.with_session(|s| s.execute_at_epoch(query, epoch))
+        self.live()?.execute_at_epoch(query, epoch)
     }
 
     /// Executes a query with parameters and returns the result.
@@ -120,7 +236,7 @@ impl super::GrafeoDB {
         query: &str,
         params: std::collections::HashMap<String, grafeo_common::types::Value>,
     ) -> Result<QueryResult> {
-        self.with_session(|s| s.execute_with_params(query, params))
+        self.live()?.execute_with_params(query, params)
     }
 
     /// Executes a Cypher query and returns the result.
@@ -130,7 +246,7 @@ impl super::GrafeoDB {
     /// Returns an error if the query fails.
     #[cfg(feature = "cypher")]
     pub fn execute_cypher(&self, query: &str) -> Result<QueryResult> {
-        self.with_session(|s| s.execute_cypher(query))
+        self.live()?.execute_cypher(query)
     }
 
     /// Executes a Cypher query with parameters and returns the result.
@@ -144,7 +260,7 @@ impl super::GrafeoDB {
         query: &str,
         params: std::collections::HashMap<String, grafeo_common::types::Value>,
     ) -> Result<QueryResult> {
-        self.with_session(|s| s.execute_language(query, "cypher", Some(params)))
+        self.live()?.execute_cypher_with_params(query, params)
     }
 
     /// Executes a Gremlin query and returns the result.
@@ -154,7 +270,7 @@ impl super::GrafeoDB {
     /// Returns an error if the query fails.
     #[cfg(feature = "gremlin")]
     pub fn execute_gremlin(&self, query: &str) -> Result<QueryResult> {
-        self.with_session(|s| s.execute_gremlin(query))
+        self.live()?.execute_gremlin(query)
     }
 
     /// Executes a Gremlin query with parameters and returns the result.
@@ -168,7 +284,7 @@ impl super::GrafeoDB {
         query: &str,
         params: std::collections::HashMap<String, grafeo_common::types::Value>,
     ) -> Result<QueryResult> {
-        self.with_session(|s| s.execute_gremlin_with_params(query, params))
+        self.live()?.execute_gremlin_with_params(query, params)
     }
 
     /// Executes a GraphQL query and returns the result.
@@ -178,7 +294,7 @@ impl super::GrafeoDB {
     /// Returns an error if the query fails.
     #[cfg(feature = "graphql")]
     pub fn execute_graphql(&self, query: &str) -> Result<QueryResult> {
-        self.with_session(|s| s.execute_graphql(query))
+        self.live()?.execute_graphql(query)
     }
 
     /// Executes a GraphQL query with parameters and returns the result.
@@ -192,7 +308,7 @@ impl super::GrafeoDB {
         query: &str,
         params: std::collections::HashMap<String, grafeo_common::types::Value>,
     ) -> Result<QueryResult> {
-        self.with_session(|s| s.execute_graphql_with_params(query, params))
+        self.live()?.execute_graphql_with_params(query, params)
     }
 
     /// Executes a SQL/PGQ query (SQL:2023 GRAPH_TABLE) and returns the result.
@@ -202,7 +318,7 @@ impl super::GrafeoDB {
     /// Returns an error if the query fails.
     #[cfg(feature = "sql-pgq")]
     pub fn execute_sql(&self, query: &str) -> Result<QueryResult> {
-        self.with_session(|s| s.execute_sql(query))
+        self.live()?.execute_sql(query)
     }
 
     /// Executes a SQL/PGQ query with parameters and returns the result.
@@ -216,7 +332,7 @@ impl super::GrafeoDB {
         query: &str,
         params: std::collections::HashMap<String, grafeo_common::types::Value>,
     ) -> Result<QueryResult> {
-        self.with_session(|s| s.execute_sql_with_params(query, params))
+        self.live()?.execute_sql_with_params(query, params)
     }
 
     /// Executes a query in the specified language by name.
@@ -234,7 +350,7 @@ impl super::GrafeoDB {
         language: &str,
         params: Option<std::collections::HashMap<String, grafeo_common::types::Value>>,
     ) -> Result<QueryResult> {
-        self.with_session(|s| s.execute_language(query, language, params))
+        self.live()?.execute_language(query, language, params)
     }
 
     /// Executes a query in the specified language by name, as
@@ -253,10 +369,8 @@ impl super::GrafeoDB {
         params: Option<std::collections::HashMap<String, grafeo_common::types::Value>>,
         timeout: Option<std::time::Duration>,
     ) -> Result<QueryResult> {
-        self.with_configured_session(
-            |session| session.set_query_timeout(timeout),
-            |s| s.execute_language(query, language, params),
-        )
+        self.live()?
+            .execute_language_with_timeout(query, language, params, timeout)
     }
 
     /// Executes a query and returns a single scalar value.
@@ -265,7 +379,6 @@ impl super::GrafeoDB {
     ///
     /// Returns an error if the query fails or doesn't return exactly one row.
     pub fn query_scalar<T: FromValue>(&self, query: &str) -> Result<T> {
-        let result = self.execute(query)?;
-        result.scalar()
+        self.live()?.query_scalar(query)
     }
 }

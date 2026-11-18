@@ -680,7 +680,7 @@ use super::encryption::DatabaseKeys;
 /// Size of a page (and of each header) of a `.grafeo` file, in bytes.
 const PAGE_BYTES: usize = 4096;
 
-impl super::GrafeoDB {
+impl super::Open {
     /// The log position a full backup of this database covers when it has no
     /// WAL to start a segment in: for a read-only database, the end of the
     /// sidecar WAL its open replayed, whose commits the image holds (the

@@ -383,9 +383,11 @@ impl StatementPlanning {
             language,
             statement_clock,
             db_info: LazyValue::new(move || {
-                super::Session::build_info_value(&*info_store, info_view)
+                super::SessionInner::build_info_value(&*info_store, info_view)
             }),
-            schema_info: LazyValue::new(move || super::Session::build_schema_value(&*schema_store)),
+            schema_info: LazyValue::new(move || {
+                super::SessionInner::build_schema_value(&*schema_store)
+            }),
             warnings,
         };
 

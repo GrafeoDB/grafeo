@@ -740,8 +740,10 @@ fn corrupt_snapshot_detected_on_open() {
         let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
         let session = db.session();
         session.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+        // Taken before the close: the database answers no file after it.
+        let file = db.file_manager().unwrap();
         db.close().unwrap();
-        db.file_manager().unwrap().active_header().root.offset
+        file.active_header().root.offset
     };
 
     // Corrupt the directory block the active database header points at.

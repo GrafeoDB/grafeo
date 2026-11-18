@@ -443,7 +443,7 @@ fn test_import_lpg_snapshot_roundtrip() {
 fn test_begin_commit_transaction_persists_writes() {
     let db = Database::new().expect("create db");
     db.begin_transaction().expect("begin");
-    assert!(db.is_transaction_active());
+    assert!(db.is_transaction_active().unwrap());
 
     db.execute("CREATE (:T {x: 1})").expect("insert in tx");
     assert_eq!(
@@ -453,7 +453,7 @@ fn test_begin_commit_transaction_persists_writes() {
     );
 
     db.commit_transaction().expect("commit");
-    assert!(!db.is_transaction_active());
+    assert!(!db.is_transaction_active().unwrap());
     assert_eq!(db.node_count().unwrap(), 1, "writes visible after commit");
 }
 
@@ -464,7 +464,10 @@ fn test_transaction_statements_with_no_transaction_are_refused() {
     let db = Database::new().expect("create db");
     for statement in ["START TRANSACTION", "COMMIT", "ROLLBACK"] {
         assert!(db.execute(statement).is_err(), "{statement} was accepted");
-        assert!(!db.is_transaction_active(), "{statement} left one open");
+        assert!(
+            !db.is_transaction_active().unwrap(),
+            "{statement} left one open"
+        );
     }
     db.execute("INSERT (:T {x: 1})").expect("insert");
     assert!(db.execute("ROLLBACK").is_err());
@@ -484,7 +487,7 @@ fn test_transaction_statements_in_a_transaction_are_refused_and_it_goes_on() {
     db.execute("INSERT (:T {x: 1})").expect("insert");
     for statement in ["START TRANSACTION", "COMMIT", "ROLLBACK"] {
         assert!(db.execute(statement).is_err(), "{statement} was accepted");
-        assert!(db.is_transaction_active(), "{statement} ended it");
+        assert!(db.is_transaction_active().unwrap(), "{statement} ended it");
     }
     assert_eq!(db.node_count().unwrap(), 0, "not committed");
     db.commit_transaction().expect("commit");
@@ -498,7 +501,7 @@ fn test_rollback_transaction_discards_writes() {
     db.execute("CREATE (:T {x: 1})").expect("insert in tx");
 
     db.rollback_transaction().expect("rollback");
-    assert!(!db.is_transaction_active());
+    assert!(!db.is_transaction_active().unwrap());
     assert_eq!(db.node_count().unwrap(), 0, "rollback discards writes");
 }
 
@@ -521,7 +524,7 @@ fn test_commit_without_active_errors() {
 fn test_close_blocks_subsequent_operations() {
     let db = Database::new().expect("create db");
     db.execute("CREATE (:T)").expect("insert");
-    db.close();
+    db.close().expect("close");
 
     assert!(db.execute("CREATE (:T)").is_err(), "execute after close");
     assert!(db.export_snapshot().is_err(), "export after close");
@@ -542,7 +545,7 @@ fn first_raw_number(raw: &wasm_bindgen::JsValue) -> f64 {
 #[wasm_bindgen_test]
 fn test_execute_raw_with_language_after_close_errors() {
     let db = Database::new().expect("create db");
-    db.close();
+    db.close().expect("close");
     assert!(
         db.execute_raw_with_language("MATCH (n) RETURN count(n) AS c", "gql")
             .is_err(),
@@ -569,9 +572,9 @@ fn test_close_rolls_back_active_transaction() {
     let db = Database::new().expect("create db");
     db.begin_transaction().expect("begin");
     db.execute("CREATE (:T)").expect("insert in tx");
-    db.close();
+    db.close().expect("close");
     // Second close is a no-op.
-    db.close();
+    db.close().expect("close");
 }
 
 // ==========================================================================
@@ -1030,7 +1033,7 @@ fn test_graph_handle_works_in_its_graph() {
     assert!(db.graph("nowhere").is_err());
 
     let trips = db.graph("trips").unwrap();
-    assert_eq!(trips.name(), "trips");
+    assert_eq!(trips.name().unwrap(), "trips");
     trips
         .execute("INSERT (:City {name: 'Prague'})-[:ROUTE {km: 350}]->(:City {name: 'Berlin'})")
         .unwrap();
@@ -1078,7 +1081,7 @@ fn test_graph_handle_works_in_its_graph() {
 
     db.execute("DROP GRAPH trips").unwrap();
     assert!(trips.execute("RETURN 1").is_err());
-    db.close();
+    db.close().expect("close");
     let message = error_text(trips.execute("RETURN 1"));
     assert!(message.contains("closed"), "{message}");
 }
@@ -1352,7 +1355,7 @@ fn test_set_schema_of_a_missing_schema_fails_and_keeps_the_schema() {
         message.contains("Schema 'missing' does not exist"),
         "{message}"
     );
-    assert_eq!(db.current_schema(), None);
+    assert_eq!(db.current_schema().unwrap(), None);
 }
 
 /// A `BigInt` from its decimal text.
@@ -1786,4 +1789,250 @@ fn a_build_with_the_rdf_model_imports_rdf() {
             "the triple reads back"
         );
     }
+}
+
+// ==========================================================================
+// Every call on a closed database fails with GRAFEO-T007
+// ==========================================================================
+
+/// The rows whose call did not fail with `GRAFEO-T007`.
+fn calls_that_answered(rows: Vec<(&str, Result<(), wasm_bindgen::JsValue>)>) -> Vec<String> {
+    rows.into_iter()
+        .filter_map(|(name, result)| match result {
+            Ok(()) => Some(format!("{name}: answered")),
+            Err(error) => {
+                let message: String = js_sys::Error::from(error).message().into();
+                (!message.contains("GRAFEO-T007")).then(|| format!("{name}: {message}"))
+            }
+        })
+        .collect()
+}
+
+/// `close()` releases the database: every method of `Database` fails with
+/// `GRAFEO-T007` after it, getters and `memoryUsage()` included, and a
+/// second `close()` does nothing.
+#[wasm_bindgen_test]
+fn test_every_method_after_close_fails_with_t007() {
+    use wasm_bindgen::JsValue;
+    let db = Database::new().unwrap();
+    db.execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
+        .unwrap();
+    db.close().expect("close");
+    db.close().expect("a second close does nothing");
+
+    let query = "MATCH (p:Person) RETURN p.name";
+    let undefined = || JsValue::UNDEFINED;
+    let mut rows: Vec<(&str, Result<(), JsValue>)> = vec![
+        ("begin_transaction", db.begin_transaction()),
+        ("commit_transaction", db.commit_transaction()),
+        ("rollback_transaction", db.rollback_transaction()),
+        (
+            "is_transaction_active",
+            db.is_transaction_active().map(drop),
+        ),
+        ("execute", db.execute(query).map(drop)),
+        ("execute_raw", db.execute_raw(query).map(drop)),
+        ("detach_delete_node", db.detach_delete_node(0.0).map(drop)),
+        ("node_count", db.node_count().map(drop)),
+        ("edge_count", db.edge_count().map(drop)),
+        ("clear_plan_cache", db.clear_plan_cache()),
+        (
+            "execute_with_language",
+            db.execute_with_language(query, "gql").map(drop),
+        ),
+        ("export_snapshot", db.export_snapshot().map(drop)),
+        (
+            "export_snapshot_signed",
+            db.export_snapshot_signed(&[7; 32]).map(drop),
+        ),
+        ("schema", db.schema().map(drop)),
+        (
+            "execute_with_params",
+            db.execute_with_params(query, undefined()).map(drop),
+        ),
+        (
+            "execute_with_language_and_params",
+            db.execute_with_language_and_params(query, "gql", undefined())
+                .map(drop),
+        ),
+        (
+            "execute_raw_with_language",
+            db.execute_raw_with_language(query, "gql").map(drop),
+        ),
+        (
+            "execute_raw_with_params",
+            db.execute_raw_with_params(query, undefined()).map(drop),
+        ),
+        (
+            "execute_raw_with_language_and_params",
+            db.execute_raw_with_language_and_params(query, "gql", undefined())
+                .map(drop),
+        ),
+        ("import_lpg", db.import_lpg(undefined()).map(drop)),
+        ("memory_usage", db.memory_usage().map(drop)),
+        ("info", db.info().map(drop)),
+        ("compact", db.compact().map(drop)),
+        (
+            "import_rows",
+            db.import_rows(undefined(), undefined()).map(drop),
+        ),
+        ("set_schema", db.set_schema("berlin")),
+        ("reset_schema", db.reset_schema()),
+        ("current_schema", db.current_schema().map(drop)),
+        (
+            "create_projection",
+            db.create_projection("people", None, None).map(drop),
+        ),
+        ("drop_projection", db.drop_projection("people").map(drop)),
+        ("list_projections", db.list_projections().map(drop)),
+        ("current_epoch", db.current_epoch().map(drop)),
+        (
+            "epoch_as_of",
+            db.epoch_as_of(JsValue::from(0_u64)).map(drop),
+        ),
+        ("as_of", db.as_of(JsValue::from(0_u64)).map(drop)),
+    ];
+    #[cfg(feature = "lpg-model")]
+    rows.push((
+        "get_node_edges",
+        db.get_node_edges(0.0, undefined()).map(drop),
+    ));
+    #[cfg(feature = "text-index")]
+    rows.extend([
+        (
+            "create_text_index",
+            db.create_text_index("Person", "name", None),
+        ),
+        (
+            "drop_text_index",
+            db.drop_text_index("Person", "name").map(drop),
+        ),
+        (
+            "rebuild_text_index",
+            db.rebuild_text_index("Person", "name"),
+        ),
+        (
+            "text_search",
+            db.text_search("Person", "name", "Alix", 1, None).map(drop),
+        ),
+    ]);
+    #[cfg(feature = "hybrid-search")]
+    rows.push((
+        "hybrid_search",
+        db.hybrid_search("Item", "name", "embedding", "Alix", 1, None)
+            .map(drop),
+    ));
+    #[cfg(feature = "vector-index")]
+    rows.extend([
+        (
+            "create_vector_index",
+            db.create_vector_index("Item", "embedding", undefined()),
+        ),
+        (
+            "drop_vector_index",
+            db.drop_vector_index("Item", "embedding").map(drop),
+        ),
+        (
+            "rebuild_vector_index",
+            db.rebuild_vector_index("Item", "embedding"),
+        ),
+        (
+            "vector_search",
+            db.vector_search("Item", "embedding", &[0.1, 0.2], 1, undefined())
+                .map(drop),
+        ),
+        (
+            "batch_vector_search",
+            db.batch_vector_search("Item", "embedding", undefined(), 1, undefined())
+                .map(drop),
+        ),
+        (
+            "mmr_search",
+            db.mmr_search("Item", "embedding", &[0.1, 0.2], 1, undefined())
+                .map(drop),
+        ),
+    ]);
+    #[cfg(feature = "cypher")]
+    rows.push(("execute_cypher", db.execute_cypher(query).map(drop)));
+    #[cfg(feature = "gremlin")]
+    rows.push(("execute_gremlin", db.execute_gremlin("g.V()").map(drop)));
+    #[cfg(feature = "graphql")]
+    rows.push((
+        "execute_graphql",
+        db.execute_graphql("{ Person { name } }").map(drop),
+    ));
+    #[cfg(feature = "sparql")]
+    rows.push((
+        "execute_sparql",
+        db.execute_sparql("SELECT ?s WHERE { ?s ?p ?o }").map(drop),
+    ));
+    #[cfg(feature = "sql-pgq")]
+    rows.push((
+        "execute_sql",
+        db.execute_sql("SELECT * FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.name AS name))")
+            .map(drop),
+    ));
+    #[cfg(feature = "rdf-model")]
+    rows.push(("import_rdf", db.import_rdf(undefined()).map(drop)));
+    #[cfg(feature = "direct-api")]
+    rows.extend([
+        ("graph", db.graph("berlin").map(drop)),
+        (
+            "batch_create_nodes_with_props",
+            db.batch_create_nodes_with_props(undefined(), undefined())
+                .map(drop),
+        ),
+        (
+            "batch_create_edges",
+            db.batch_create_edges(undefined()).map(drop),
+        ),
+        (
+            "upsert_nodes",
+            db.upsert_nodes(undefined(), undefined(), undefined())
+                .map(drop),
+        ),
+        (
+            "upsert_edges",
+            db.upsert_edges("KNOWS", undefined(), undefined()).map(drop),
+        ),
+    ]);
+    assert_eq!(calls_that_answered(rows), Vec::<String>::new());
+}
+
+/// A view held across `close()` fails every call with `GRAFEO-T007`, its
+/// epoch included; so does a graph handle.
+#[wasm_bindgen_test]
+fn test_what_the_database_handed_out_fails_after_close() {
+    use wasm_bindgen::JsValue;
+    let db = Database::new().unwrap();
+    db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+    let epoch = db.current_epoch().unwrap();
+    let view = db.as_of(JsValue::from(epoch)).unwrap();
+    #[cfg(feature = "direct-api")]
+    let graph = {
+        db.execute("CREATE GRAPH berlin").unwrap();
+        db.graph("berlin").unwrap()
+    };
+    db.close().expect("close");
+
+    let query = "MATCH (p:Person) RETURN p.name";
+    #[cfg_attr(
+        not(feature = "direct-api"),
+        expect(
+            unused_mut,
+            reason = "the graph rows join only in a build with the direct API"
+        )
+    )]
+    let mut rows: Vec<(&str, Result<(), JsValue>)> = vec![
+        ("view.epoch", view.epoch().map(drop)),
+        ("view.execute", view.execute(query).map(drop)),
+        ("view.execute_raw", view.execute_raw(query).map(drop)),
+    ];
+    #[cfg(feature = "direct-api")]
+    rows.extend([
+        ("graph.name", graph.name().map(drop)),
+        ("graph.execute", graph.execute(query).map(drop)),
+        ("graph.execute_raw", graph.execute_raw(query).map(drop)),
+    ]);
+    assert_eq!(calls_that_answered(rows), Vec::<String>::new());
 }

@@ -12,6 +12,7 @@ use hashbrown::HashSet;
 
 use crate::config::Config;
 
+use super::Open;
 use crate::catalog::{GraphTypeDefinition, ProcedureDefinition};
 
 /// Current snapshot version: 5 holds the catalog as its records (the
@@ -719,37 +720,13 @@ fn restore_schema_from_snapshot<S: super::catalog_section::CatalogStore>(
     Ok(())
 }
 
-impl super::GrafeoDB {
+impl super::Open {
     // =========================================================================
     // ADMIN API: Persistence Control
     // =========================================================================
 
-    /// Saves a copy of the database to a new single file at `path`, whatever
-    /// its extension (`.grafeo`, `.db` or none): a database of its own, with
-    /// every graph, the schema and the indexes, and no sidecar WAL. Works the
-    /// same for an in-memory and a persistent database; the original stays
-    /// as it is. Like a checkpoint, the copy holds the committed state: a
-    /// transaction still open is left out of it (see [`close`](Self::close)).
-    /// Commits wait only while the copy takes its snapshot and the catalog
-    /// and RDF data, and go on while it writes the graphs. The file is
-    /// written as `<path>.partial` and renamed to `path` once complete.
-    ///
-    /// The copy of an encrypted database (`Config::encryption`) is encrypted
-    /// with the same key chain: it has a new database id and so its own
-    /// keys.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `path` already exists, if the file cannot be
-    /// written, after a commit that did not complete (see
-    /// [`TransactionManager`](crate::transaction::TransactionManager)), and
-    /// the database-closed error after `close()` of a persistent database;
-    /// the unsupported error on a database on a backend of its own
-    /// ([`with_store`](Self::with_store)), whose rows the backend keeps.
-    ///
-    /// Requires the `wal` feature for persistence support.
     #[cfg(feature = "wal")]
-    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+    pub(crate) fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         // `close()` waits for the save, and none runs after it.
         let _open = self.hold_open()?;
         // The spelling every open uses (see `normalize_path`): `copy/` names
@@ -812,34 +789,7 @@ impl super::GrafeoDB {
         .map(drop)
     }
 
-    /// Creates an in-memory copy of this database.
-    ///
-    /// The copy is independent of this database and holds what reopening
-    /// it from a checkpoint would: every graph with its data, the schema and
-    /// constraints, and the property, vector and text indexes. It is built
-    /// from the checkpoint sections and loaded as a `.grafeo` file is, except
-    /// that nodes and edges are copied from store to store, which is much
-    /// faster than encoding them (while no transaction is open).
-    ///
-    /// Like a checkpoint, the copy holds the committed state: what a
-    /// transaction still open deleted is in it, with the values and labels
-    /// it changed as they were committed, and nothing it created is.
-    ///
-    /// Useful for:
-    /// - Testing modifications without affecting the original
-    /// - Faster operations when persistence isn't needed
-    ///
-    /// The copy of an encrypted database has no key (an in-memory database
-    /// cannot carry `Config::encryption`), so a copy saved from it with
-    /// [`save`](Self::save) is not encrypted. For an encrypted copy, call
-    /// `save` on the encrypted database itself.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the copy operation fails, or after a commit that
-    /// did not complete; the unsupported error on a database on a backend of
-    /// its own ([`with_store`](Self::with_store)).
-    pub fn to_memory(&self) -> Result<Self> {
+    pub(crate) fn to_memory(&self) -> Result<Self> {
         // The copy keeps the backward edges this database keeps (10b), and
         // its history retention, with the history its sections hold.
         let mut config = Config::in_memory()
@@ -944,29 +894,8 @@ impl super::GrafeoDB {
         Ok(image)
     }
 
-    /// Opens a database file and loads it entirely into memory.
-    ///
-    /// The returned database has no connection to the original file.
-    /// Changes will NOT be written back to the file.
-    ///
-    /// This takes no key, so an encrypted database fails to open here: open
-    /// it with its key ([`with_config`](Self::with_config)) and call
-    /// [`to_memory`](Self::to_memory).
-    ///
-    /// An existing database is read as [`open_read_only`](Self::open_read_only)
-    /// reads it, and nothing on disk changes: a 0.6 file under a shared lock
-    /// (other readers may hold it too) with its sidecar WAL replayed, and no
-    /// checkpoint or WAL removal when it is closed; a database written by 0.5.x
-    /// (a `.grafeo` file or a WAL directory) with its WAL replayed, and not
-    /// migrated. A path whose migration was cut off fails as a read-only open
-    /// does. At a missing path a new, empty database file is created, as
-    /// [`open`](Self::open) creates one.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the file can't be opened or loaded.
     #[cfg(feature = "wal")]
-    pub fn open_in_memory(path: impl AsRef<Path>) -> Result<Self> {
+    pub(crate) fn open_in_memory(path: impl AsRef<Path>) -> Result<Self> {
         use grafeo_storage::file::detect::{OnDisk, detect};
 
         // The spelling every open uses (see `normalize_path`).
@@ -987,7 +916,7 @@ impl super::GrafeoDB {
         }
 
         // A missing path becomes a new, empty database, as `open` creates.
-        let source = Self::open(path)?;
+        let source = Self::open_at(path)?;
 
         // Create in-memory copy
         let target = source.to_memory()?;
@@ -1002,32 +931,7 @@ impl super::GrafeoDB {
     // ADMIN API: Snapshot Export/Import
     // =========================================================================
 
-    /// Exports the entire database to a binary snapshot.
-    ///
-    /// The returned bytes can be stored (e.g. in IndexedDB) and later
-    /// restored with [`import_snapshot()`](Self::import_snapshot).
-    /// Includes all named graph data.
-    ///
-    /// The bytes are never encrypted, also for a database with
-    /// `Config::encryption`: they are the plaintext data, to be stored as
-    /// safely as the data itself. For an encrypted copy, use
-    /// [`save`](Self::save) with a `.grafeo` path.
-    ///
-    /// Properties are stored as version-history lists, each holding the
-    /// value a reader at the export's epoch sees, at epoch 0. The snapshot
-    /// holds the export's epoch, which an import or restore continues at.
-    ///
-    /// The snapshot holds the committed state: what a transaction still open
-    /// deleted is in it, with the values and labels it changed as they were
-    /// committed, and nothing it created is. Every graph is read as a
-    /// committed reader at the export's epoch sees it, so no copy is made.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if serialization fails, or after a commit that did
-    /// not complete; the unsupported error on a database on a backend of its
-    /// own ([`with_store`](Self::with_store)).
-    pub fn export_snapshot(&self) -> Result<Vec<u8>> {
+    pub(crate) fn export_snapshot(&self) -> Result<Vec<u8>> {
         // The snapshot holds every commit whole, none that did not complete
         // (whose stamped part the store holds), and nothing of a transaction
         // still open (the hold also holds its writes).
@@ -1061,50 +965,14 @@ impl super::GrafeoDB {
         }
     }
 
-    /// Creates a new in-memory database from a binary snapshot.
-    ///
-    /// The `data` must have been produced by [`export_snapshot()`](Self::export_snapshot),
-    /// so it is plaintext (snapshots are never encrypted).
-    ///
-    /// A snapshot holds the state, not the history: the database continues
-    /// at the snapshot's epoch, and a time-travel read before it is refused
-    /// ("history before ... is not retained"), whatever the history retention.
-    ///
-    /// All edge references are validated before any data is inserted: every
-    /// edge's source and destination must reference a node present in the
-    /// snapshot, and duplicate node/edge IDs are rejected. If validation
-    /// fails, no database is created.
-    ///
-    /// A build without the `triple-store`, `vector-index` or `text-index`
-    /// feature refuses a snapshot that holds RDF triples, or vector or text
-    /// index definitions: it would create the database without them.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the snapshot is invalid, contains dangling edge
-    /// references, has duplicate IDs, holds an RDF term that is not an
-    /// N-Triples term, or deserialization fails; and, naming the data and the
-    /// feature, if it holds data this build cannot read.
-    pub fn import_snapshot(data: &[u8]) -> Result<Self> {
+    pub(crate) fn import_snapshot(data: &[u8]) -> Result<Self> {
         Self::import_snapshot_with_config(data, crate::config::Config::in_memory())
     }
 
-    /// Creates a new in-memory database with `config` (its memory limit among the settings)
-    /// from a binary snapshot, as [`import_snapshot`](Self::import_snapshot) does with the
-    /// defaults. The settings are the configuration's, never the snapshot's: a snapshot carries
-    /// data only.
-    ///
-    /// An import never refuses for memory: data past the memory limit opens, reads, and lists
-    /// `MEMORY_LIMIT_PASSED` in [`open_warnings`](Self::open_warnings), and writes that need
-    /// memory fail with `GRAFEO-S001` until the limit is raised.
-    ///
-    /// # Errors
-    ///
-    /// As [`import_snapshot`](Self::import_snapshot), and an invalid-input error
-    /// (`GRAFEO-V001`) for a configuration with a path: an import opens in memory, and a
-    /// database file opens with [`with_config`](Self::with_config) of
-    /// [`Config::persistent`](crate::config::Config::persistent).
-    pub fn import_snapshot_with_config(data: &[u8], config: crate::config::Config) -> Result<Self> {
+    pub(crate) fn import_snapshot_with_config(
+        data: &[u8],
+        config: crate::config::Config,
+    ) -> Result<Self> {
         if let Some(path) = config.path() {
             return Err(Error::InvalidValue(format!(
                 "a snapshot import opens in memory, and the configuration names the file {}:                  open a database file with GrafeoDB::with_config(Config::persistent(path))",
@@ -1148,40 +1016,7 @@ impl super::GrafeoDB {
         Ok(db)
     }
 
-    /// Replaces the current database contents with data from a binary snapshot.
-    ///
-    /// The `data` must have been produced by
-    /// [`export_snapshot()`](Self::export_snapshot), so it is plaintext
-    /// (snapshots are never encrypted).
-    ///
-    /// A snapshot holds the state, not the history: the history the database
-    /// kept goes with the state it replaces, and a time-travel read before
-    /// the restore, by epoch or by time, is refused ("history before ... is
-    /// not retained"), whatever the history retention.
-    ///
-    /// All validation (duplicate IDs, dangling edge references, RDF terms,
-    /// data this build cannot read) is performed before any data is
-    /// modified. If validation fails, the current database
-    /// is left unchanged. If validation passes, the store is cleared and
-    /// rebuilt from the snapshot atomically (from the perspective of
-    /// subsequent queries).
-    ///
-    /// A build without the `triple-store`, `vector-index` or `text-index`
-    /// feature refuses a snapshot that holds RDF triples, or vector or text
-    /// index definitions, and leaves the database as it was: it would restore
-    /// the database without them.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the snapshot is invalid, contains dangling edge
-    /// references, has duplicate IDs, holds an RDF term that is not an
-    /// N-Triples term or data this build cannot read (naming the data and the
-    /// feature), or deserialization fails, after a commit that did not
-    /// complete (the restored database could never be checkpointed, see
-    /// [`TransactionManager`](crate::transaction::TransactionManager)),
-    /// on a read-only database, and the database-closed error after `close()`
-    /// of a persistent database (read-only or not).
-    pub fn restore_snapshot(&self, data: &[u8]) -> Result<()> {
+    pub(crate) fn restore_snapshot(&self, data: &[u8]) -> Result<()> {
         // A restore writes no WAL record but a checkpoint: after `close()`
         // (which releases the file) nothing would persist it, so it fails
         // then, and `close()` waits for one in progress.
@@ -1234,19 +1069,9 @@ impl super::GrafeoDB {
     // ADMIN API: Iteration
     // =========================================================================
 
-    /// Returns an iterator over all nodes in the database, as of the current
-    /// epoch (see [`current_epoch`](Self::current_epoch)), in id order.
-    ///
-    /// Useful for dump/export operations.
-    ///
-    /// The read is pinned at its epoch while the iterator lives, so a
-    /// collect between two steps keeps every node it still reads.
-    ///
-    /// # Errors
-    ///
-    /// The unsupported error on a database on a store of its own: it walks
-    /// the built-in store.
-    pub fn iter_nodes(&self) -> Result<impl Iterator<Item = grafeo_core::graph::lpg::Node> + '_> {
+    pub(crate) fn iter_nodes(
+        &self,
+    ) -> Result<impl Iterator<Item = grafeo_core::graph::lpg::Node> + use<>> {
         use grafeo_core::graph::GraphStore;
 
         let store = self.lpg_store()?;
@@ -1260,18 +1085,9 @@ impl super::GrafeoDB {
         }))
     }
 
-    /// Returns an iterator over all edges in the database, as of the current
-    /// epoch (see [`current_epoch`](Self::current_epoch)), in id order.
-    ///
-    /// Useful for dump/export operations.
-    ///
-    /// The read is pinned at its epoch while the iterator lives (see
-    /// [`iter_nodes`](Self::iter_nodes)).
-    ///
-    /// # Errors
-    ///
-    /// As [`iter_nodes`](Self::iter_nodes).
-    pub fn iter_edges(&self) -> Result<impl Iterator<Item = grafeo_core::graph::lpg::Edge> + '_> {
+    pub(crate) fn iter_edges(
+        &self,
+    ) -> Result<impl Iterator<Item = grafeo_core::graph::lpg::Edge> + use<>> {
         use grafeo_core::graph::GraphStore;
 
         let store = self.lpg_store()?;
@@ -1607,6 +1423,240 @@ pub(super) mod row_groups {
     }
 }
 
+// The database's public methods: each reaches the open state for its call (#712).
+impl super::GrafeoDB {
+    /// Saves a copy of the database to a new single file at `path`, whatever
+    /// its extension (`.grafeo`, `.db` or none): a database of its own, with
+    /// every graph, the schema and the indexes, and no sidecar WAL. Works the
+    /// same for an in-memory and a persistent database; the original stays
+    /// as it is. Like a checkpoint, the copy holds the committed state: a
+    /// transaction still open is left out of it (see [`close`](Self::close)).
+    /// Commits wait only while the copy takes its snapshot and the catalog
+    /// and RDF data, and go on while it writes the graphs. The file is
+    /// written as `<path>.partial` and renamed to `path` once complete.
+    ///
+    /// The copy of an encrypted database (`Config::encryption`) is encrypted
+    /// with the same key chain: it has a new database id and so its own
+    /// keys.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `path` already exists, if the file cannot be
+    /// written, after a commit that did not complete (see
+    /// [`TransactionManager`](crate::transaction::TransactionManager)), and
+    /// the database-closed error after `close()`;
+    /// the unsupported error on a database on a backend of its own
+    /// ([`with_store`](Self::with_store)), whose rows the backend keeps.
+    ///
+    /// Requires the `wal` feature for persistence support.
+    #[cfg(feature = "wal")]
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.live()?.save(path)
+    }
+
+    /// Creates an in-memory copy of this database.
+    ///
+    /// The copy is independent of this database and holds what reopening
+    /// it from a checkpoint would: every graph with its data, the schema and
+    /// constraints, and the property, vector and text indexes. It is built
+    /// from the checkpoint sections and loaded as a `.grafeo` file is, except
+    /// that nodes and edges are copied from store to store, which is much
+    /// faster than encoding them (while no transaction is open).
+    ///
+    /// Like a checkpoint, the copy holds the committed state: what a
+    /// transaction still open deleted is in it, with the values and labels
+    /// it changed as they were committed, and nothing it created is.
+    ///
+    /// Useful for:
+    /// - Testing modifications without affecting the original
+    /// - Faster operations when persistence isn't needed
+    ///
+    /// The copy of an encrypted database has no key (an in-memory database
+    /// cannot carry `Config::encryption`), so a copy saved from it with
+    /// [`save`](Self::save) is not encrypted. For an encrypted copy, call
+    /// `save` on the encrypted database itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the copy operation fails, or after a commit that
+    /// did not complete; the unsupported error on a database on a backend of
+    /// its own ([`with_store`](Self::with_store)).
+    pub fn to_memory(&self) -> Result<Self> {
+        self.live()?.to_memory().map(Self::from_open)
+    }
+
+    /// Opens a database file and loads it entirely into memory.
+    ///
+    /// The returned database has no connection to the original file.
+    /// Changes will NOT be written back to the file.
+    ///
+    /// This takes no key, so an encrypted database fails to open here: open
+    /// it with its key ([`with_config`](Self::with_config)) and call
+    /// [`to_memory`](Self::to_memory).
+    ///
+    /// An existing database is read as [`open_read_only`](Self::open_read_only)
+    /// reads it, and nothing on disk changes: a 0.6 file under a shared lock
+    /// (other readers may hold it too) with its sidecar WAL replayed, and no
+    /// checkpoint or WAL removal when it is closed; a database written by 0.5.x
+    /// (a `.grafeo` file or a WAL directory) with its WAL replayed, and not
+    /// migrated. A path whose migration was cut off fails as a read-only open
+    /// does. At a missing path a new, empty database file is created, as
+    /// [`open`](Self::open) creates one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file can't be opened or loaded.
+    #[cfg(feature = "wal")]
+    pub fn open_in_memory(path: impl AsRef<Path>) -> Result<Self> {
+        Open::open_in_memory(path).map(Self::from_open)
+    }
+
+    /// Exports the entire database to a binary snapshot.
+    ///
+    /// The returned bytes can be stored (e.g. in IndexedDB) and later
+    /// restored with [`import_snapshot()`](Self::import_snapshot).
+    /// Includes all named graph data.
+    ///
+    /// The bytes are never encrypted, also for a database with
+    /// `Config::encryption`: they are the plaintext data, to be stored as
+    /// safely as the data itself. For an encrypted copy, use
+    /// [`save`](Self::save) with a `.grafeo` path.
+    ///
+    /// Properties are stored as version-history lists, each holding the
+    /// value a reader at the export's epoch sees, at epoch 0. The snapshot
+    /// holds the export's epoch, which an import or restore continues at.
+    ///
+    /// The snapshot holds the committed state: what a transaction still open
+    /// deleted is in it, with the values and labels it changed as they were
+    /// committed, and nothing it created is. Every graph is read as a
+    /// committed reader at the export's epoch sees it, so no copy is made.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization fails, or after a commit that did
+    /// not complete; the unsupported error on a database on a backend of its
+    /// own ([`with_store`](Self::with_store)).
+    pub fn export_snapshot(&self) -> Result<Vec<u8>> {
+        self.live()?.export_snapshot()
+    }
+
+    /// Creates a new in-memory database from a binary snapshot.
+    ///
+    /// The `data` must have been produced by [`export_snapshot()`](Self::export_snapshot),
+    /// so it is plaintext (snapshots are never encrypted).
+    ///
+    /// A snapshot holds the state, not the history: the database continues
+    /// at the snapshot's epoch, and a time-travel read before it is refused
+    /// ("history before ... is not retained"), whatever the history retention.
+    ///
+    /// All edge references are validated before any data is inserted: every
+    /// edge's source and destination must reference a node present in the
+    /// snapshot, and duplicate node/edge IDs are rejected. If validation
+    /// fails, no database is created.
+    ///
+    /// A build without the `triple-store`, `vector-index` or `text-index`
+    /// feature refuses a snapshot that holds RDF triples, or vector or text
+    /// index definitions: it would create the database without them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot is invalid, contains dangling edge
+    /// references, has duplicate IDs, holds an RDF term that is not an
+    /// N-Triples term, or deserialization fails; and, naming the data and the
+    /// feature, if it holds data this build cannot read.
+    pub fn import_snapshot(data: &[u8]) -> Result<Self> {
+        Open::import_snapshot(data).map(Self::from_open)
+    }
+
+    /// Creates a new in-memory database with `config` (its memory limit among the settings)
+    /// from a binary snapshot, as [`import_snapshot`](Self::import_snapshot) does with the
+    /// defaults. The settings are the configuration's, never the snapshot's: a snapshot carries
+    /// data only.
+    ///
+    /// An import never refuses for memory: data past the memory limit opens, reads, and lists
+    /// `MEMORY_LIMIT_PASSED` in [`open_warnings`](Self::open_warnings), and writes that need
+    /// memory fail with `GRAFEO-S001` until the limit is raised.
+    ///
+    /// # Errors
+    ///
+    /// As [`import_snapshot`](Self::import_snapshot), and an invalid-input error
+    /// (`GRAFEO-V001`) for a configuration with a path: an import opens in memory, and a
+    /// database file opens with [`with_config`](Self::with_config) of
+    /// [`Config::persistent`](crate::config::Config::persistent).
+    pub fn import_snapshot_with_config(data: &[u8], config: crate::config::Config) -> Result<Self> {
+        Open::import_snapshot_with_config(data, config).map(Self::from_open)
+    }
+
+    /// Replaces the current database contents with data from a binary snapshot.
+    ///
+    /// The `data` must have been produced by
+    /// [`export_snapshot()`](Self::export_snapshot), so it is plaintext
+    /// (snapshots are never encrypted).
+    ///
+    /// A snapshot holds the state, not the history: the history the database
+    /// kept goes with the state it replaces, and a time-travel read before
+    /// the restore, by epoch or by time, is refused ("history before ... is
+    /// not retained"), whatever the history retention.
+    ///
+    /// All validation (duplicate IDs, dangling edge references, RDF terms,
+    /// data this build cannot read) is performed before any data is
+    /// modified. If validation fails, the current database
+    /// is left unchanged. If validation passes, the store is cleared and
+    /// rebuilt from the snapshot atomically (from the perspective of
+    /// subsequent queries).
+    ///
+    /// A build without the `triple-store`, `vector-index` or `text-index`
+    /// feature refuses a snapshot that holds RDF triples, or vector or text
+    /// index definitions, and leaves the database as it was: it would restore
+    /// the database without them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot is invalid, contains dangling edge
+    /// references, has duplicate IDs, holds an RDF term that is not an
+    /// N-Triples term or data this build cannot read (naming the data and the
+    /// feature), or deserialization fails, after a commit that did not
+    /// complete (the restored database could never be checkpointed, see
+    /// [`TransactionManager`](crate::transaction::TransactionManager)),
+    /// on a read-only database, and the database-closed error after `close()`.
+    pub fn restore_snapshot(&self, data: &[u8]) -> Result<()> {
+        self.live()?.restore_snapshot(data)
+    }
+
+    /// Returns an iterator over all nodes in the database, as of the current
+    /// epoch (see [`current_epoch`](Self::current_epoch)), in id order.
+    ///
+    /// Useful for dump/export operations.
+    ///
+    /// The read is pinned at its epoch while the iterator lives, so a
+    /// collect between two steps keeps every node it still reads. Holding it keeps the graph alive
+    /// past `close()`, and the spill files it reads stay until it drops.
+    ///
+    /// # Errors
+    ///
+    /// The unsupported error on a database on a store of its own: it walks
+    /// the built-in store.
+    pub fn iter_nodes(&self) -> Result<impl Iterator<Item = grafeo_core::graph::lpg::Node> + '_> {
+        self.live()?.iter_nodes()
+    }
+
+    /// Returns an iterator over all edges in the database, as of the current
+    /// epoch (see [`current_epoch`](Self::current_epoch)), in id order.
+    ///
+    /// Useful for dump/export operations.
+    ///
+    /// The read is pinned at its epoch while the iterator lives (see
+    /// [`iter_nodes`](Self::iter_nodes)). Holding it keeps the graph alive past `close()`, and the
+    /// spill files it reads stay until it drops.
+    ///
+    /// # Errors
+    ///
+    /// As [`iter_nodes`](Self::iter_nodes).
+    pub fn iter_edges(&self) -> Result<impl Iterator<Item = grafeo_core::graph::lpg::Edge> + '_> {
+        self.live()?.iter_edges()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use grafeo_common::types::ReadView;
@@ -1702,7 +1752,9 @@ mod tests {
             .execute("INSERT (:Person {name: 'Vincent'})")
             .unwrap();
         assert_eq!(
-            db.lpg_store()
+            db.live()
+                .unwrap()
+                .lpg_store()
                 .unwrap()
                 .node_count(ReadView::latest())
                 .unwrap(),
@@ -1713,7 +1765,9 @@ mod tests {
         db.restore_snapshot(&snapshot).unwrap();
 
         assert_eq!(
-            db.lpg_store()
+            db.live()
+                .unwrap()
+                .lpg_store()
                 .unwrap()
                 .node_count(ReadView::latest())
                 .unwrap(),
@@ -1736,7 +1790,9 @@ mod tests {
 
         // DB should be unchanged
         assert_eq!(
-            db.lpg_store()
+            db.live()
+                .unwrap()
+                .lpg_store()
                 .unwrap()
                 .node_count(ReadView::latest())
                 .unwrap(),
@@ -1754,7 +1810,9 @@ mod tests {
         let session = db.session();
         session.execute("INSERT (:Person {name: 'Alix'})").unwrap();
         assert_eq!(
-            db.lpg_store()
+            db.live()
+                .unwrap()
+                .lpg_store()
                 .unwrap()
                 .node_count(ReadView::latest())
                 .unwrap(),
@@ -1763,7 +1821,9 @@ mod tests {
 
         db.restore_snapshot(&empty_snapshot).unwrap();
         assert_eq!(
-            db.lpg_store()
+            db.live()
+                .unwrap()
+                .lpg_store()
                 .unwrap()
                 .node_count(ReadView::latest())
                 .unwrap(),
@@ -1786,7 +1846,9 @@ mod tests {
 
         let snapshot = db.export_snapshot().unwrap();
         assert_eq!(
-            db.lpg_store()
+            db.live()
+                .unwrap()
+                .lpg_store()
                 .unwrap()
                 .edge_count(ReadView::latest())
                 .unwrap(),
@@ -1801,14 +1863,18 @@ mod tests {
         // Restore
         db.restore_snapshot(&snapshot).unwrap();
         assert_eq!(
-            db.lpg_store()
+            db.live()
+                .unwrap()
+                .lpg_store()
                 .unwrap()
                 .node_count(ReadView::latest())
                 .unwrap(),
             2
         );
         assert_eq!(
-            db.lpg_store()
+            db.live()
+                .unwrap()
+                .lpg_store()
                 .unwrap()
                 .edge_count(ReadView::latest())
                 .unwrap(),
@@ -1878,7 +1944,7 @@ mod tests {
         let copy = db.to_memory().unwrap();
         let imported = GrafeoDB::import_snapshot(&db.export_snapshot().unwrap()).unwrap();
         for (what, copy) in [("to_memory", &copy), ("export_snapshot", &imported)] {
-            let store = copy.lpg_store().unwrap();
+            let store = copy.live().unwrap().lpg_store().unwrap();
             let ids = store.node_ids(ReadView::latest()).unwrap();
             assert_eq!(ids.len(), 1, "{what}: Alix");
             let mut history = store.node_property_history(ids[0]);
@@ -1912,14 +1978,18 @@ mod tests {
         let db = GrafeoDB::new_in_memory();
         let copy = db.to_memory().unwrap();
         assert_eq!(
-            copy.lpg_store()
+            copy.live()
+                .unwrap()
+                .lpg_store()
                 .unwrap()
                 .node_count(ReadView::latest())
                 .unwrap(),
             0
         );
         assert_eq!(
-            copy.lpg_store()
+            copy.live()
+                .unwrap()
+                .lpg_store()
                 .unwrap()
                 .edge_count(ReadView::latest())
                 .unwrap(),
@@ -1940,7 +2010,9 @@ mod tests {
 
         let copy = db.to_memory().unwrap();
         assert_eq!(
-            copy.lpg_store()
+            copy.live()
+                .unwrap()
+                .lpg_store()
                 .unwrap()
                 .node_count(ReadView::latest())
                 .unwrap(),
@@ -1969,14 +2041,18 @@ mod tests {
 
         let copy = db.to_memory().unwrap();
         assert_eq!(
-            copy.lpg_store()
+            copy.live()
+                .unwrap()
+                .lpg_store()
                 .unwrap()
                 .node_count(ReadView::latest())
                 .unwrap(),
             2
         );
         assert_eq!(
-            copy.lpg_store()
+            copy.live()
+                .unwrap()
+                .lpg_store()
                 .unwrap()
                 .edge_count(ReadView::latest())
                 .unwrap(),
@@ -1999,14 +2075,18 @@ mod tests {
         // Mutating original should not affect copy
         session.execute("INSERT (:Person {name: 'Gus'})").unwrap();
         assert_eq!(
-            db.lpg_store()
+            db.live()
+                .unwrap()
+                .lpg_store()
                 .unwrap()
                 .node_count(ReadView::latest())
                 .unwrap(),
             2
         );
         assert_eq!(
-            copy.lpg_store()
+            copy.live()
+                .unwrap()
+                .lpg_store()
                 .unwrap()
                 .node_count(ReadView::latest())
                 .unwrap(),
@@ -2097,7 +2177,9 @@ mod tests {
 
         // DB unchanged
         assert_eq!(
-            db.lpg_store()
+            db.live()
+                .unwrap()
+                .lpg_store()
                 .unwrap()
                 .node_count(ReadView::latest())
                 .unwrap(),
@@ -2160,7 +2242,9 @@ mod tests {
             let error = db.restore_snapshot(bytes).unwrap_err().to_string();
             assert!(error.contains(words), "{words}: {error}");
             assert_eq!(
-                db.lpg_store()
+                db.live()
+                    .unwrap()
+                    .lpg_store()
                     .unwrap()
                     .node_count(ReadView::latest())
                     .unwrap(),
@@ -2252,7 +2336,9 @@ mod tests {
         let err = result.unwrap_err().to_string();
         assert!(err.contains("duplicate node ID"), "got: {err}");
         assert_eq!(
-            db.lpg_store()
+            db.live()
+                .unwrap()
+                .lpg_store()
                 .unwrap()
                 .node_count(ReadView::latest())
                 .unwrap(),
@@ -2497,14 +2583,14 @@ mod tests {
             "checkpoint:before_trim",
         ];
         for (count, point) in (1..).zip(points) {
-            let error = with_failure_at(count, || db.write_image(&path))
+            let error = with_failure_at(count, || db.live().unwrap().write_image(&path))
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(point), "the original error: {error}");
             assert!(!path.exists(), "{point}: the failed image is removed");
         }
 
-        db.write_image(&path).unwrap();
+        db.live().unwrap().write_image(&path).unwrap();
         let written = GrafeoDB::open(&path).unwrap();
         assert_eq!(written.node_count().unwrap(), 1);
         written.close().unwrap();

@@ -14,6 +14,10 @@ import (
 // CreateNode creates a node with the given labels and optional properties.
 func (db *Database) CreateNode(labels []string, properties map[string]any) (*Node, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 *Node
+		return zero0, err
+	}
 	labelsJSON, err := json.Marshal(labels)
 	if err != nil {
 		return nil, err
@@ -50,6 +54,10 @@ func (db *Database) CreateNode(labels []string, properties map[string]any) (*Nod
 // another error for a read that fails.
 func (db *Database) GetNode(id uint64) (*Node, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 *Node
+		return zero0, err
+	}
 	var cNode *C.GrafeoNode
 	if err := lockAndCheckStatus(func() C.GrafeoStatus {
 		return C.grafeo_get_node(db.handle, C.uint64_t(id), &cNode)
@@ -90,6 +98,10 @@ func nodeFromC(cNode *C.GrafeoNode) *Node {
 // DeleteNode deletes a node by ID. Returns true if the node existed.
 func (db *Database) DeleteNode(id uint64) (bool, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 bool
+		return zero0, err
+	}
 	runtime.LockOSThread()
 	result := int(C.grafeo_delete_node(db.handle, C.uint64_t(id)))
 	if result < 0 {
@@ -105,6 +117,10 @@ func (db *Database) DeleteNode(id uint64) (bool, error) {
 // Returns true if the node existed; the node and its edges are one change.
 func (db *Database) DetachDeleteNode(id uint64) (bool, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 bool
+		return zero0, err
+	}
 	runtime.LockOSThread()
 	result := int(C.grafeo_detach_delete_node(db.handle, C.uint64_t(id)))
 	if result < 0 {
@@ -119,6 +135,9 @@ func (db *Database) DetachDeleteNode(id uint64) (bool, error) {
 // SetNodeProperty sets a property on a node.
 func (db *Database) SetNodeProperty(id uint64, key string, value any) error {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		return err
+	}
 	cKey := C.CString(key)
 	defer C.free(unsafe.Pointer(cKey))
 	valueJSON, err := marshalJSON(value)
@@ -135,6 +154,10 @@ func (db *Database) SetNodeProperty(id uint64, key string, value any) error {
 // RemoveNodeProperty removes a property from a node.
 func (db *Database) RemoveNodeProperty(id uint64, key string) (bool, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 bool
+		return zero0, err
+	}
 	cKey := C.CString(key)
 	defer C.free(unsafe.Pointer(cKey))
 	runtime.LockOSThread()
@@ -151,6 +174,10 @@ func (db *Database) RemoveNodeProperty(id uint64, key string) (bool, error) {
 // AddNodeLabel adds a label to a node. Returns true if the label was newly added.
 func (db *Database) AddNodeLabel(id uint64, label string) (bool, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 bool
+		return zero0, err
+	}
 	cLabel := C.CString(label)
 	defer C.free(unsafe.Pointer(cLabel))
 	runtime.LockOSThread()
@@ -167,6 +194,10 @@ func (db *Database) AddNodeLabel(id uint64, label string) (bool, error) {
 // RemoveNodeLabel removes a label from a node. Returns true if the label was present.
 func (db *Database) RemoveNodeLabel(id uint64, label string) (bool, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 bool
+		return zero0, err
+	}
 	cLabel := C.CString(label)
 	defer C.free(unsafe.Pointer(cLabel))
 	runtime.LockOSThread()
@@ -184,6 +215,10 @@ func (db *Database) RemoveNodeLabel(id uint64, label string) (bool, error) {
 // does not exist.
 func (db *Database) GetNodeLabels(id uint64) ([]string, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 []string
+		return zero0, err
+	}
 	var cLabels *C.char
 	if err := lockAndCheckStatus(func() C.GrafeoStatus {
 		return C.grafeo_get_node_labels(db.handle, C.uint64_t(id), &cLabels)

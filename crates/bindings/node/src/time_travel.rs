@@ -10,10 +10,9 @@ use std::time::Duration;
 use napi::bindgen_prelude::*;
 use napi::{JsDate, JsValue, ValueType};
 use napi_derive::napi;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 
 use grafeo_common::types::{EpochId, Timestamp};
-use grafeo_engine::database::GrafeoDB;
 use grafeo_engine::{AsOfView, HistoryRetention, TimePoint};
 
 use crate::error::NodeGrafeoError;
@@ -131,16 +130,17 @@ pub(crate) fn epoch_bigint(epoch: EpochId) -> BigInt {
 #[napi(js_name = "AsOfView")]
 pub struct JsAsOfView {
     /// Keeps the database open while the view lives.
-    _db: Arc<RwLock<GrafeoDB>>,
+    /// The database the view reads; every call fails with `GRAFEO-T007` once it is closed.
+    db: crate::database::SharedDb,
     view: Arc<Mutex<Option<AsOfView>>>,
     epoch: EpochId,
 }
 
 impl JsAsOfView {
-    pub(crate) fn new(db: Arc<RwLock<GrafeoDB>>, view: AsOfView) -> Self {
+    pub(crate) fn new(db: crate::database::SharedDb, view: AsOfView) -> Self {
         let epoch = view.epoch();
         Self {
-            _db: db,
+            db,
             view: Arc::new(Mutex::new(Some(view))),
             epoch,
         }
@@ -153,6 +153,7 @@ impl JsAsOfView {
     }
 
     fn with_view<T>(&self, read: impl FnOnce(&AsOfView) -> T) -> Result<T> {
+        self.db.check()?;
         let view = self.view.lock();
         Ok(read(view.as_ref().ok_or_else(Self::closed)?))
     }
@@ -162,8 +163,9 @@ impl JsAsOfView {
 impl JsAsOfView {
     /// The epoch the view reads at.
     #[napi(getter)]
-    pub fn epoch(&self) -> BigInt {
-        epoch_bigint(self.epoch)
+    pub fn epoch(&self) -> Result<BigInt> {
+        self.db.check()?;
+        Ok(epoch_bigint(self.epoch))
     }
 
     /// Runs a GQL query as the database was at the view's epoch. Returns a
@@ -235,7 +237,7 @@ impl JsAsOfView {
 /// `db.executeAsOf(query, point, params)`: the query runs off the event
 /// loop, at the epoch the point named when the call was made.
 pub struct ExecuteAsOf {
-    pub(crate) db: Arc<RwLock<GrafeoDB>>,
+    pub(crate) db: crate::database::SharedDb,
     pub(crate) query: String,
     pub(crate) point: TimePoint,
     pub(crate) params: Option<crate::types::Params>,
@@ -251,7 +253,7 @@ impl Task for ExecuteAsOf {
             .take()
             .map(crate::types::Params::into_map)
             .transpose()?;
-        let db = self.db.read();
+        let db = self.db.read()?;
         let epoch = db.epoch_as_of(self.point).map_err(NodeGrafeoError::from)?;
         db.session()
             .execute_at_epoch_with_params(&self.query, epoch, params)

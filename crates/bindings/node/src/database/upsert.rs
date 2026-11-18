@@ -118,10 +118,10 @@ impl JsGrafeoDB {
     ) -> Result<UpsertSummary> {
         let rows = crate::types::Properties::rows(rows)?;
         let (key, replace) = node_options(options);
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
             let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-            db.read()
+            db.read()?
                 .upsert_nodes(&labels, &key, rows, replace)
                 .map(UpsertSummary::from)
                 .map_err(|e| NodeGrafeoError::from(e).into())
@@ -148,9 +148,9 @@ impl JsGrafeoDB {
     ) -> Result<UpsertSummary> {
         let rows = crate::types::Properties::rows(rows)?;
         let options = options.map_or_else(EdgeUpsertOptions::new, edge_options);
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
-            db.read()
+            db.read()?
                 .upsert_edges(&edge_type, rows, &options)
                 .map(UpsertSummary::from)
                 .map_err(|e| NodeGrafeoError::from(e).into())

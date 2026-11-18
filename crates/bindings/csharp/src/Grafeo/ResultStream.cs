@@ -39,14 +39,38 @@ public sealed class ResultStream : IDisposable, IAsyncDisposable
         _columns = columns;
     }
 
-    /// <summary>Column names in the order they appear in each row dictionary.</summary>
-    public IReadOnlyList<string> Columns => _columns;
+    /// <summary>
+    /// Column names in the order they appear in each row dictionary. Throws a
+    /// <see cref="GrafeoException"/> with GRAFEO-T007 once the database that handed the stream
+    /// out is closed; after the stream's own <see cref="Dispose"/> it answers what it had.
+    /// </summary>
+    public IReadOnlyList<string> Columns
+    {
+        get
+        {
+            lock (_sync)
+            {
+                if (!_handle.IsClosed) ThrowIfDatabaseClosed();
+                return _columns;
+            }
+        }
+    }
+
+    // GRAFEO-T007 once the database is closed: the native layer refuses the columns then. The
+    // caller holds _sync.
+    private void ThrowIfDatabaseClosed()
+    {
+        var columns = NativeMethods.grafeo_stream_columns_json(_handle);
+        if (columns == nint.Zero) throw GrafeoException.FromLastError();
+        NativeMethods.grafeo_free_string(columns);
+    }
 
     /// <summary>
     /// The warnings the statement raised so far, ordered by code: its
     /// translation's from the open, its run's as the rows that raise them are
     /// pulled, all of them once <see cref="Next"/> returned <c>null</c>. After
-    /// <see cref="Dispose"/> it holds what the stream had then.
+    /// <see cref="Dispose"/> it holds what the stream had then; once the database that handed
+    /// the stream out is closed it throws a <see cref="GrafeoException"/> with GRAFEO-T007.
     /// Experimental (0.6.2+).
     /// </summary>
     public IReadOnlyList<QueryWarning> Warnings
@@ -55,7 +79,9 @@ public sealed class ResultStream : IDisposable, IAsyncDisposable
         {
             lock (_sync)
             {
-                return _handle.IsClosed ? _warnings : ReadWarnings();
+                if (_handle.IsClosed) return _warnings;
+                ThrowIfDatabaseClosed();
+                return ReadWarnings();
             }
         }
     }

@@ -1143,9 +1143,18 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         }
     }
 
+    /// <summary>The message of every call on a disposed database (GRAFEO-T007).</summary>
+    internal const string ClosedMessage = "GRAFEO-T007: the database is closed: open it again";
+
+    /// <summary>
+    /// Every call after <see cref="Dispose"/> throws <see cref="ObjectDisposedException"/>, as the
+    /// .NET contract asks, with the GRAFEO-T007 text; what the database handed out throws a
+    /// <see cref="GrafeoException"/> with GRAFEO-T007 from the native layer.
+    /// </summary>
     private void ThrowIfDisposed()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_disposed)
+            throw new ObjectDisposedException(nameof(GrafeoDB), ClosedMessage);
     }
 
     /// <summary>Parse a string isolation level name to the integer value expected by the C API.</summary>

@@ -64,7 +64,7 @@ pub enum ErrorCode {
     TransactionSerialization,
     /// Deadlock detected.
     TransactionDeadlock,
-    /// The database is closed: it takes no more writes.
+    /// The database is closed: it takes no more calls.
     DatabaseClosed,
     /// A commit did not complete: nothing commits, checkpoints or saves until
     /// the database is reopened.
@@ -524,8 +524,8 @@ pub enum TransactionError {
     /// transaction goes on.
     ActiveTransaction(String),
 
-    /// The database is closed: `close()` of a persistent database started,
-    /// so it takes no more writes. Open it again to write.
+    /// The database is closed: `close()` started, so it takes no more calls,
+    /// reads included. Open it again.
     DatabaseClosed,
 
     /// An earlier commit did not complete (it panicked between its commit
@@ -592,10 +592,7 @@ impl fmt::Display for TransactionError {
             TransactionError::ActiveTransaction(msg) => {
                 write!(f, "Invalid in an active transaction: {msg}")
             }
-            TransactionError::DatabaseClosed => write!(
-                f,
-                "the database is closed, so it takes no more writes: open it again to write"
-            ),
+            TransactionError::DatabaseClosed => write!(f, "the database is closed: open it again"),
             TransactionError::IncompleteCommit => write!(
                 f,
                 "an earlier commit did not complete, so no transaction can commit and nothing \
@@ -1207,7 +1204,7 @@ mod tests {
         assert!(!err.error_code().is_retryable());
         assert_eq!(
             err.to_string(),
-            "GRAFEO-T007: the database is closed, so it takes no more writes: open it again to write"
+            "GRAFEO-T007: the database is closed: open it again"
         );
     }
 

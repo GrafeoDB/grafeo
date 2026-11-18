@@ -38,6 +38,10 @@ var ErrStreamClosed = errors.New("grafeo: stream is closed")
 // ExecuteStream opens a lazy cursor over a read-only GQL query.
 func (db *Database) ExecuteStream(query string) (*ResultStream, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 *ResultStream
+		return zero0, err
+	}
 	cQuery := C.CString(query)
 	defer C.free(unsafe.Pointer(cQuery))
 
@@ -62,6 +66,8 @@ func (db *Database) ExecuteStream(query string) (*ResultStream, error) {
 }
 
 // Columns returns the column names in the order they appear in each row map.
+// It answers the names the stream had at its open, also after the database's
+// Close, as it has no error to return; Next returns the GRAFEO-T007 error then.
 func (s *ResultStream) Columns() []string {
 	return s.columns
 }
@@ -69,7 +75,8 @@ func (s *ResultStream) Columns() []string {
 // Warnings returns the warnings the statement raised so far, ordered by
 // code: its translation's from the open, its run's as the rows that raise
 // them are pulled, all of them once Next returned (nil, nil). After Close it
-// returns what the stream had when it was closed.
+// returns what the stream had when it was closed. After the database's Close it
+// returns none, as it has no error to return; Next returns the GRAFEO-T007 error.
 //
 // Experimental (0.6.2+).
 func (s *ResultStream) Warnings() []QueryWarning {

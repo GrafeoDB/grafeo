@@ -25,7 +25,7 @@
 ))]
 #![allow(
     deprecated,
-    reason = "the test reaches the row-group store itself, which only the deprecated GrafeoDB::store() gives, until 0.7.0 removes it"
+    reason = "the test reaches the row-group store and the buffer manager themselves, which only the deprecated GrafeoDB::store() and GrafeoDB::buffer_manager() give, until 0.7.0 removes them"
 )]
 
 use std::path::{Path, PathBuf};
@@ -64,6 +64,14 @@ fn indexed_items(db: &GrafeoDB) -> Vec<NodeId> {
     db.create_vector_index("Item", "embedding", Some(4), None, None, None, None)
         .unwrap();
     ids
+}
+
+/// Checks that reading the embeddings of the closed `db` fails with `GRAFEO-T007`.
+fn assert_read_closed(db: &GrafeoDB) {
+    let error = db
+        .execute("MATCH (n:Item) RETURN n.embedding AS e ORDER BY id(n)")
+        .expect_err("a read after close() fails");
+    assert_eq!(error.error_code().as_str(), "GRAFEO-T007", "{error}");
 }
 
 /// The embeddings of the `:Item` nodes as GQL returns them, in id order
@@ -380,8 +388,9 @@ fn a_crash_while_spilled_keeps_embeddings_and_the_next_open_removes_the_cache() 
 
 // ── Where the cache lives ──────────────────────────────────────────
 
-/// The cache goes with the database: a closed database still reads its
-/// spilled values, and dropping it removes the cache and `<file>.spill`.
+/// The cache goes with the database: `close()` releases the spilled values
+/// with the rest, removing the cache and `<file>.spill`, and a read after it
+/// fails; the next open reads the values from the file.
 #[test]
 fn the_cache_goes_with_the_database() {
     let dir = tempfile::tempdir().unwrap();
@@ -389,15 +398,21 @@ fn the_cache_goes_with_the_database() {
     let (db, _) = spilled(&path);
     assert_eq!(names_in(&cache_dir(&path)).len(), 1, "the cache file");
     db.close().unwrap();
-    assert_eq!(embeddings(&db), all_three(), "reads after close");
+    assert!(!spill_dir(&path).exists(), "{:?}", names_in(dir.path()));
+    assert_read_closed(&db);
     drop(db);
     assert!(!spill_dir(&path).exists(), "{:?}", names_in(dir.path()));
+    let reopened = GrafeoDB::open(&path).unwrap();
+    assert_eq!(
+        embeddings(&reopened),
+        all_three(),
+        "the file holds the values"
+    );
 }
 
-/// After `close()` a handle still reads (and reloads) its spilled
-/// embeddings but spills no more: the next read-write open owns
-/// `<file>.spill/cache/`, and dropping the closed handle leaves that open's
-/// cache file alone.
+/// After `close()` a handle reads nothing and spills nothing: the next
+/// read-write open owns `<file>.spill/cache/`, and dropping the closed
+/// handle leaves that open's cache file alone.
 #[test]
 fn a_closed_handle_spills_no_more_and_leaves_the_next_open_alone() {
     let dir = tempfile::tempdir().unwrap();
@@ -405,6 +420,8 @@ fn a_closed_handle_spills_no_more_and_leaves_the_next_open_alone() {
     let (first, _) = spilled(&path);
     let first_files = names_in(&cache_dir(&path));
     assert_eq!(first_files.len(), 1);
+    // Taken before the close: what the closed handle's buffer manager could still spill.
+    let first_buffers = first.buffer_manager();
     first.close().unwrap();
 
     let second = GrafeoDB::with_config(force_disk(Config::persistent(&path))).unwrap();
@@ -414,15 +431,15 @@ fn a_closed_handle_spills_no_more_and_leaves_the_next_open_alone() {
         .collect();
     assert_eq!(second_files.len(), 1, "the second open spilled at open");
 
-    assert_eq!(embeddings(&first), all_three(), "the closed handle reads");
-    first.reload_eligible(1.0);
+    assert_read_closed(&first);
     assert_eq!(
-        first.buffer_manager().spill_all(),
+        first_buffers.spill_all(),
         0,
-        "no spill after close"
+        "the closed handle's buffer manager has nothing left to spill"
     );
-    assert_eq!(embeddings(&first), all_three());
+    assert_eq!(embeddings(&second), all_three(), "the second open reads");
     drop(first);
+    drop(first_buffers);
     let left = names_in(&cache_dir(&path));
     assert!(
         second_files.iter().all(|name| left.contains(name)),

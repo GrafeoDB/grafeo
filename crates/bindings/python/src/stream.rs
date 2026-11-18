@@ -9,13 +9,9 @@
 //! New in 0.5.40. It may change or be removed in any release, with a
 //! CHANGELOG entry: see <https://grafeo.dev/stability/>.
 
-use std::sync::Arc;
-
-use parking_lot::RwLock;
 use pyo3::prelude::*;
 
 use grafeo_engine::OwnedRowIterator;
-use grafeo_engine::database::GrafeoDB;
 
 use crate::error::PyGrafeoError;
 use crate::types::PyValue;
@@ -30,8 +26,8 @@ use crate::types::PyValue;
 /// # Stability: Experimental
 #[pyclass(name = "ResultStream")]
 pub struct PyResultStream {
-    /// Keepalive for the database: underlying stores must outlive the stream.
-    _database: Arc<RwLock<GrafeoDB>>,
+    /// The database the stream reads; every call fails with `GRAFEO-T007` once it is closed.
+    database: crate::database::SharedDb,
     columns: Vec<String>,
     iter: Option<OwnedRowIterator>,
     /// The warnings raised through `warnings.warn` so far: at the open, and
@@ -44,12 +40,12 @@ impl PyResultStream {
     /// GQL has it).
     #[cfg(feature = "gql")]
     pub(crate) fn new(
-        database: Arc<RwLock<GrafeoDB>>,
+        database: crate::database::SharedDb,
         stream: grafeo_engine::OwnedResultStream,
     ) -> Self {
         let columns = stream.columns().to_vec();
         Self {
-            _database: database,
+            database,
             columns,
             iter: Some(stream.into_row_iter()),
             warned: Vec::new(),
@@ -86,8 +82,9 @@ impl PyResultStream {
 impl PyResultStream {
     /// Column names in the order they appear in each row dict.
     #[getter]
-    fn columns(&self) -> Vec<String> {
-        self.columns.clone()
+    fn columns(&self) -> PyResult<Vec<String>> {
+        self.database.check()?;
+        Ok(self.columns.clone())
     }
 
     /// The warnings the statement raised so far, ordered by code: its
@@ -96,8 +93,9 @@ impl PyResultStream {
     /// at the open are raised through `warnings.warn` by `execute_lazy`,
     /// the rest when the stream is exhausted.
     #[getter]
-    fn warnings(&self) -> Vec<crate::warning::PyQueryWarning> {
-        crate::warning::to_py(&self.current())
+    fn warnings(&self) -> PyResult<Vec<crate::warning::PyQueryWarning>> {
+        self.database.check()?;
+        Ok(crate::warning::to_py(&self.current()))
     }
 
     /// Returns self for `iter()`.
@@ -111,6 +109,7 @@ impl PyResultStream {
     /// it to construct the row dict. Returns `None` when the stream is
     /// exhausted (which Python's iterator protocol turns into `StopIteration`).
     fn __next__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        slf.database.check()?;
         let Some(iter) = slf.iter.as_mut() else {
             return Ok(None);
         };

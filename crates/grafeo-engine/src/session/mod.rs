@@ -16,8 +16,12 @@ mod planning;
 mod prepared;
 #[cfg(feature = "triple-store")]
 mod rdf;
+mod slot;
 #[cfg(feature = "testing-warning-probe")]
 mod warning_probe;
+
+pub use slot::Session;
+pub(crate) use slot::{OperatorSlot, Slots};
 #[cfg(feature = "testing-warning-probe")]
 pub use warning_probe::ProbeStage;
 
@@ -88,7 +92,7 @@ pub(crate) fn graph_storage_key(schema: Option<&str>, graph: Option<&str>) -> Op
 /// the outer one's).
 #[cfg(feature = "gql")]
 struct StatementFocus<'a> {
-    session: &'a Session,
+    session: &'a SessionInner,
     previous: Option<String>,
 }
 
@@ -388,6 +392,8 @@ pub(crate) struct PlanOptions {
 /// call sites readable and avoiding long argument lists.
 pub(crate) struct SessionConfig {
     pub transaction_manager: Arc<TransactionManager>,
+    /// Where the session lists the streams it opens, which `close()` empties (#712).
+    pub slots: Arc<Slots>,
     pub query_cache: Arc<QueryCache>,
     pub catalog: Arc<Catalog>,
     #[cfg(lpg_language)]
@@ -438,12 +444,9 @@ pub(crate) enum TransactionStatements {
     OneCall,
 }
 
-/// Your handle to the database - execute queries and manage transactions.
-///
-/// Get one from [`GrafeoDB::session()`](crate::GrafeoDB::session). Each session
-/// tracks its own transaction state, so you can have multiple concurrent
-/// sessions without them interfering.
-pub struct Session {
+/// What a session holds: its database's stores, catalog, logs and caches, and its own state.
+/// It lives in the slot of a [`Session`], which the database's `close()` takes (#712).
+pub(crate) struct SessionInner {
     /// The built-in store, which holds the named graphs (read it through
     /// [`root_store`](Self::root_store)), and the default graph's stores.
     stores: GraphStores,
@@ -456,6 +459,8 @@ pub struct Session {
     transaction_manager: Arc<TransactionManager>,
     /// Query cache shared across sessions.
     query_cache: Arc<QueryCache>,
+    /// Where the session's streams are listed (#712).
+    pub(crate) slots: Arc<Slots>,
     /// Current transaction ID (if any). Behind a Mutex so that GQL commands
     /// (`START TRANSACTION`, `COMMIT`, `ROLLBACK`) can manage transactions
     /// from within `execute(&self)`.
@@ -587,7 +592,7 @@ struct SavepointState {
     schema_ops: usize,
 }
 
-impl Session {
+impl SessionInner {
     /// Creates a session that reads and writes `store`. A build with the
     /// triple store uses `with_rdf_store` instead.
     #[cfg(not(feature = "triple-store"))]
@@ -604,6 +609,7 @@ impl Session {
             catalog: cfg.catalog,
             transaction_manager: cfg.transaction_manager,
             query_cache: cfg.query_cache,
+            slots: cfg.slots,
             current_transaction: parking_lot::Mutex::new(None),
             read_only_tx: parking_lot::Mutex::new(cfg.read_only),
             db_read_only: cfg.read_only,
@@ -795,6 +801,7 @@ impl Session {
             rdf_store: Arc::new(RdfStore::new()),
             transaction_manager: cfg.transaction_manager,
             query_cache: cfg.query_cache,
+            slots: cfg.slots,
             current_transaction: parking_lot::Mutex::new(None),
             read_only_tx: parking_lot::Mutex::new(cfg.read_only),
             db_read_only: cfg.read_only,
@@ -854,43 +861,28 @@ impl Session {
         })
     }
 
-    /// Returns the graph model this session operates on.
     #[must_use]
-    pub fn graph_model(&self) -> GraphModel {
+    pub(crate) fn graph_model(&self) -> GraphModel {
         self.graph_model
-    }
-
-    /// Returns the identity bound to this session.
-    #[must_use]
-    pub fn identity(&self) -> &crate::auth::Identity {
-        &self.identity
     }
 
     // === Session State Management ===
 
-    /// Sets the current graph for this session (USE GRAPH).
-    pub fn use_graph(&self, name: &str) {
+    pub(crate) fn use_graph(&self, name: &str) {
         *self.current_graph.lock() = Some(name.to_string());
     }
 
-    /// Returns the current graph name, if any.
     #[must_use]
-    pub fn current_graph(&self) -> Option<String> {
+    pub(crate) fn current_graph(&self) -> Option<String> {
         self.current_graph.lock().clone()
     }
 
-    /// Sets the current schema for this session (SESSION SET SCHEMA).
-    ///
-    /// Per ISO/IEC 39075 Section 7.1 GR1, this is independent of the session graph.
-    pub fn set_schema(&self, name: &str) {
+    pub(crate) fn set_schema(&self, name: &str) {
         *self.current_schema.lock() = Some(name.to_string());
     }
 
-    /// Returns the current schema name, if any.
-    ///
-    /// `None` means "not set", which resolves to the default schema.
     #[must_use]
-    pub fn current_schema(&self) -> Option<String> {
+    pub(crate) fn current_schema(&self) -> Option<String> {
         self.current_schema.lock().clone()
     }
 
@@ -1205,15 +1197,7 @@ impl Session {
         }
     }
 
-    /// Sets the session time zone: a UTC offset (`+01:00`, `-05:30`, `Z` or
-    /// `UTC`), ISO GQL's time zone displacement. GQL and SQL/PGQ read a local
-    /// datetime or time at this offset when they compare it with a zoned one.
-    ///
-    /// # Errors
-    ///
-    /// An invalid time zone displacement (GQLSTATUS 22009) for any other
-    /// text, a named zone such as `Europe/Amsterdam` included.
-    pub fn set_time_zone(&self, tz: &str) -> Result<()> {
+    pub(crate) fn set_time_zone(&self, tz: &str) -> Result<()> {
         use grafeo_common::types::TemporalComparison;
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 
@@ -1257,26 +1241,21 @@ impl Session {
         TemporalComparison::LocalAt(offset)
     }
 
-    /// Returns the session time zone, if set.
     #[must_use]
-    pub fn time_zone(&self) -> Option<String> {
+    pub(crate) fn time_zone(&self) -> Option<String> {
         self.time_zone.lock().clone()
     }
 
-    /// Sets a session parameter.
-    pub fn set_parameter(&self, key: &str, value: grafeo_common::types::Value) {
+    pub(crate) fn set_parameter(&self, key: &str, value: grafeo_common::types::Value) {
         self.session_params.lock().insert(key.to_string(), value);
     }
 
-    /// Gets a session parameter by cloning it.
     #[must_use]
-    pub fn get_parameter(&self, key: &str) -> Option<grafeo_common::types::Value> {
+    pub(crate) fn get_parameter(&self, key: &str) -> Option<grafeo_common::types::Value> {
         self.session_params.lock().get(key).cloned()
     }
 
-    /// Resets all session state (ISO/IEC 39075 Section 7.2): the schema and
-    /// graph back to the session's home, everything else to its default.
-    pub fn reset_session(&self) {
+    pub(crate) fn reset_session(&self) {
         self.reset_schema();
         self.reset_graph();
         *self.time_zone.lock() = None;
@@ -1284,69 +1263,48 @@ impl Session {
         *self.viewing_epoch_override.lock() = None;
     }
 
-    /// Resets only the session schema, to the home schema (Section 7.2 GR1).
-    pub fn reset_schema(&self) {
+    pub(crate) fn reset_schema(&self) {
         self.current_schema.lock().clone_from(&self.home_schema);
     }
 
-    /// Resets only the session graph, to the home graph (Section 7.2 GR2).
-    pub fn reset_graph(&self) {
+    pub(crate) fn reset_graph(&self) {
         self.current_graph.lock().clone_from(&self.home_graph);
     }
 
-    /// Resets only the session time zone (Section 7.2 GR3).
-    pub fn reset_time_zone(&self) {
+    pub(crate) fn reset_time_zone(&self) {
         *self.time_zone.lock() = None;
     }
 
-    /// Resets only session parameters (Section 7.2 GR4).
-    pub fn reset_parameters(&self) {
+    pub(crate) fn reset_parameters(&self) {
         self.session_params.lock().clear();
     }
 
     // --- Time-travel API ---
 
-    /// Sets a viewing epoch override for time-travel queries.
-    ///
-    /// While set, all queries on this session see the database as it existed
-    /// at the given epoch; an epoch after the current one reads at the
-    /// current one, so a commit that is not complete stays out of sight. Use
-    /// [`clear_viewing_epoch`](Self::clear_viewing_epoch) to return to normal
-    /// behavior.
-    pub fn set_viewing_epoch(&self, epoch: EpochId) {
+    pub(crate) fn set_viewing_epoch(&self, epoch: EpochId) {
         *self.viewing_epoch_override.lock() = Some(epoch);
     }
 
-    /// Clears the viewing epoch override, returning to normal behavior.
-    pub fn clear_viewing_epoch(&self) {
+    pub(crate) fn clear_viewing_epoch(&self) {
         *self.viewing_epoch_override.lock() = None;
     }
 
-    /// Returns the current viewing epoch override, if any.
     #[must_use]
-    pub fn viewing_epoch(&self) -> Option<EpochId> {
+    pub(crate) fn viewing_epoch(&self) -> Option<EpochId> {
         *self.viewing_epoch_override.lock()
     }
 
-    /// Returns all versions of a node with their creation/deletion epochs.
-    ///
-    /// Properties and labels reflect the current state (not versioned per-epoch).
-    ///
-    /// # Errors
-    ///
-    /// The error of a read the store cannot do.
-    pub fn get_node_history(&self, id: NodeId) -> Result<Vec<(EpochId, Option<EpochId>, Node)>> {
+    pub(crate) fn get_node_history(
+        &self,
+        id: NodeId,
+    ) -> Result<Vec<(EpochId, Option<EpochId>, Node)>> {
         self.active_store().node_history(id)
     }
 
-    /// Returns all versions of an edge with their creation/deletion epochs.
-    ///
-    /// Properties reflect the current state (not versioned per-epoch).
-    ///
-    /// # Errors
-    ///
-    /// The error of a read the store cannot do.
-    pub fn get_edge_history(&self, id: EdgeId) -> Result<Vec<(EpochId, Option<EpochId>, Edge)>> {
+    pub(crate) fn get_edge_history(
+        &self,
+        id: EdgeId,
+    ) -> Result<Vec<(EpochId, Option<EpochId>, Edge)>> {
         self.active_store().edge_history(id)
     }
 
@@ -1894,7 +1852,7 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// The database-closed error after `close()` of a persistent database,
+    /// The database-closed error after `close()`,
     /// and the incomplete-commit error after a commit that did not complete.
     fn hold_for_standalone(&self, writes_too: bool) -> Result<crate::transaction::CommitsHeld<'_>> {
         crate::database::standalone::hold(&self.transaction_manager, writes_too)
@@ -4348,34 +4306,8 @@ impl Session {
         })
     }
 
-    /// Executes a GQL query.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query fails to parse or execute.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// use grafeo_engine::GrafeoDB;
-    ///
-    /// let db = GrafeoDB::new_in_memory();
-    /// let session = db.session();
-    ///
-    /// // Create a node
-    /// session.execute("INSERT (:Person {name: 'Alix', age: 30})")?;
-    ///
-    /// // Query nodes
-    /// let result = session.execute("MATCH (n:Person) RETURN n.name, n.age")?;
-    /// for row in result.rows() {
-    ///     println!("{:?}", row);
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
     #[cfg(feature = "gql")]
-    pub fn execute(&self, query: &str) -> Result<QueryResult> {
+    pub(crate) fn execute(&self, query: &str) -> Result<QueryResult> {
         self.timed(|| self.execute_gql(query, None))
     }
 
@@ -4593,56 +4525,8 @@ impl Session {
         result
     }
 
-    /// Executes a GQL query and returns a lazy result stream.
-    ///
-    /// The stream pulls chunks from the operator pipeline on demand. Use it
-    /// when the result set is too large to fit in memory or when you want
-    /// first-row latency (process rows as they arrive rather than waiting
-    /// for the whole query to complete).
-    ///
-    /// This is the read-only, pull-only path: `execute_streaming` rejects
-    /// mutations (INSERT/DELETE/SET), schema/session commands, EXPLAIN,
-    /// PROFILE, and queries whose planner emits a push-based pipeline. Run
-    /// those via [`execute`](Self::execute) instead.
-    ///
-    /// # Stability: Experimental
-    ///
-    /// New in 0.5.40. It may change or be removed in any release, with a
-    /// CHANGELOG entry: see <https://grafeo.dev/stability/>.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if parsing or planning fails, if the query is a
-    /// kind that cannot be streamed, or if permission checks fail.
     #[cfg(feature = "gql")]
-    pub fn execute_streaming(
-        &self,
-        query: &str,
-    ) -> Result<crate::query::executor::stream::ResultStream<'_>> {
-        use crate::query::executor::stream::{ResultStream, StreamGuard};
-
-        let plan = self.build_streaming_plan(query)?;
-        let guard = StreamGuard::new(&self.active_streams);
-        ResultStream::new(plan, guard)
-    }
-
-    /// [`execute_streaming`](Self::execute_streaming) as a stream that owns
-    /// what it reads, as [`GrafeoDB::execute_streaming`](crate::GrafeoDB::execute_streaming)
-    /// gives: for a caller that keeps the stream past this borrow of the
-    /// session (a binding's stream handle). The session's permissions, its
-    /// external access included, apply as they do to `execute`, and its
-    /// transaction cannot commit or roll back while the stream is open.
-    ///
-    /// # Stability: Experimental
-    ///
-    /// New in 0.6.2. It may change or be removed in any release, with a
-    /// CHANGELOG entry: see <https://grafeo.dev/stability/>.
-    ///
-    /// # Errors
-    ///
-    /// As [`execute_streaming`](Self::execute_streaming).
-    #[cfg(feature = "gql")]
-    pub fn execute_streaming_owned(
+    pub(crate) fn execute_streaming_owned(
         &self,
         query: &str,
     ) -> Result<crate::query::executor::stream::OwnedResultStream> {
@@ -4651,6 +4535,7 @@ impl Session {
         let plan = self.build_streaming_plan(query)?;
         OwnedResultStream::new(
             plan,
+            &self.slots,
             Some(OwnedStreamGuard::new(&self.active_streams, &self.ended)),
         )
     }
@@ -4825,32 +4710,16 @@ impl Session {
         })
     }
 
-    /// Executes a GQL query with visibility at the specified epoch.
-    ///
-    /// This enables time-travel queries: the query sees the database
-    /// as it existed at the given epoch. An epoch after the current one reads
-    /// at the current one.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if parsing or execution fails.
     #[cfg(feature = "gql")]
-    pub fn execute_at_epoch(&self, query: &str, epoch: EpochId) -> Result<QueryResult> {
+    pub(crate) fn execute_at_epoch(&self, query: &str, epoch: EpochId) -> Result<QueryResult> {
         let previous = self.viewing_epoch_override.lock().replace(epoch);
         let result = self.execute(query);
         *self.viewing_epoch_override.lock() = previous;
         result
     }
 
-    /// Executes a GQL query at a specific epoch with optional parameters.
-    ///
-    /// Combines epoch-based time travel with parameterized queries.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if parsing or execution fails.
     #[cfg(feature = "gql")]
-    pub fn execute_at_epoch_with_params(
+    pub(crate) fn execute_at_epoch_with_params(
         &self,
         query: &str,
         epoch: EpochId,
@@ -4866,13 +4735,8 @@ impl Session {
         result
     }
 
-    /// Executes a GQL query with parameters.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "gql")]
-    pub fn execute_with_params(
+    pub(crate) fn execute_with_params(
         &self,
         query: &str,
         params: std::collections::HashMap<String, Value>,
@@ -4881,13 +4745,8 @@ impl Session {
         self.timed(|| self.execute_gql(query, Some(&params)))
     }
 
-    /// Executes a GQL query with parameters.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if no query language is enabled.
     #[cfg(not(any(feature = "gql", feature = "cypher")))]
-    pub fn execute_with_params(
+    pub(crate) fn execute_with_params(
         &self,
         _query: &str,
         _params: std::collections::HashMap<String, Value>,
@@ -4899,13 +4758,8 @@ impl Session {
         ))
     }
 
-    /// Executes a GQL query.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if no query language is enabled.
     #[cfg(not(any(feature = "gql", feature = "cypher")))]
-    pub fn execute(&self, _query: &str) -> Result<QueryResult> {
+    pub(crate) fn execute(&self, _query: &str) -> Result<QueryResult> {
         Err(grafeo_common::utils::error::Error::from(
             grafeo_common::utils::error::QueryError::unsupported(
                 "this build has no query language (the `gql` or `cypher` feature)",
@@ -4913,23 +4767,13 @@ impl Session {
         ))
     }
 
-    /// Executes a Cypher query.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "cypher")]
-    pub fn execute_cypher(&self, query: &str) -> Result<QueryResult> {
+    pub(crate) fn execute_cypher(&self, query: &str) -> Result<QueryResult> {
         self.timed(|| self.execute_cypher_inner(query, None))
     }
 
-    /// Executes a Cypher query with parameters.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "cypher")]
-    pub fn execute_cypher_with_params(
+    pub(crate) fn execute_cypher_with_params(
         &self,
         query: &str,
         params: std::collections::HashMap<String, Value>,
@@ -5081,31 +4925,8 @@ impl Session {
         result
     }
 
-    /// Executes a Gremlin query.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query fails to parse or execute.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// use grafeo_engine::GrafeoDB;
-    ///
-    /// let db = GrafeoDB::new_in_memory();
-    /// let session = db.session();
-    ///
-    /// // Create some nodes first
-    /// session.create_node(&["Person"]).unwrap();
-    ///
-    /// // Query using Gremlin
-    /// let result = session.execute_gremlin("g.V().hasLabel('Person')")?;
-    /// # Ok(())
-    /// # }
-    /// ```
     #[cfg(feature = "gremlin")]
-    pub fn execute_gremlin(&self, query: &str) -> Result<QueryResult> {
+    pub(crate) fn execute_gremlin(&self, query: &str) -> Result<QueryResult> {
         self.timed(|| self.execute_gremlin_untimed(query))
     }
 
@@ -5176,13 +4997,8 @@ impl Session {
         result
     }
 
-    /// Executes a Gremlin query with parameters.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "gremlin")]
-    pub fn execute_gremlin_with_params(
+    pub(crate) fn execute_gremlin_with_params(
         &self,
         query: &str,
         params: std::collections::HashMap<String, Value>,
@@ -5257,31 +5073,8 @@ impl Session {
         result
     }
 
-    /// Executes a GraphQL query against the LPG store.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query fails to parse or execute.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// use grafeo_engine::GrafeoDB;
-    ///
-    /// let db = GrafeoDB::new_in_memory();
-    /// let session = db.session();
-    ///
-    /// // Create some nodes first
-    /// session.create_node(&["User"]).unwrap();
-    ///
-    /// // Query using GraphQL
-    /// let result = session.execute_graphql("query { user { id name } }")?;
-    /// # Ok(())
-    /// # }
-    /// ```
     #[cfg(feature = "graphql")]
-    pub fn execute_graphql(&self, query: &str) -> Result<QueryResult> {
+    pub(crate) fn execute_graphql(&self, query: &str) -> Result<QueryResult> {
         self.timed(|| self.execute_graphql_untimed(query))
     }
 
@@ -5338,13 +5131,8 @@ impl Session {
         result
     }
 
-    /// Executes a GraphQL query with parameters.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "graphql")]
-    pub fn execute_graphql_with_params(
+    pub(crate) fn execute_graphql_with_params(
         &self,
         query: &str,
         params: std::collections::HashMap<String, Value>,
@@ -5418,32 +5206,8 @@ impl Session {
         result
     }
 
-    /// Executes a SQL/PGQ query (SQL:2023 GRAPH_TABLE).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query fails to parse or execute.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// use grafeo_engine::GrafeoDB;
-    ///
-    /// let db = GrafeoDB::new_in_memory();
-    /// let session = db.session();
-    ///
-    /// let result = session.execute_sql(
-    ///     "SELECT * FROM GRAPH_TABLE (
-    ///         MATCH (n:Person)
-    ///         COLUMNS (n.name AS name)
-    ///     )"
-    /// )?;
-    /// # Ok(())
-    /// # }
-    /// ```
     #[cfg(feature = "sql-pgq")]
-    pub fn execute_sql(&self, query: &str) -> Result<QueryResult> {
+    pub(crate) fn execute_sql(&self, query: &str) -> Result<QueryResult> {
         self.timed(|| self.execute_sql_inner(query, None))
     }
 
@@ -5584,13 +5348,8 @@ impl Session {
         result
     }
 
-    /// Executes a SQL/PGQ query with parameters.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "sql-pgq")]
-    pub fn execute_sql_with_params(
+    pub(crate) fn execute_sql_with_params(
         &self,
         query: &str,
         params: std::collections::HashMap<String, Value>,
@@ -5599,15 +5358,7 @@ impl Session {
         self.timed(|| self.execute_sql_inner(query, Some(&params)))
     }
 
-    /// Executes a query in the specified language by name.
-    ///
-    /// Supported language names: `"gql"`, `"cypher"`, `"gremlin"`, `"graphql"`,
-    /// `"graphql-rdf"`, `"sparql"`, `"sql"`. Each requires the corresponding feature flag.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the language is unknown/disabled or the query fails.
-    pub fn execute_language(
+    pub(crate) fn execute_language(
         &self,
         query: &str,
         language: &str,
@@ -5678,55 +5429,15 @@ impl Session {
         }
     }
 
-    /// Begins a new transaction.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a transaction is already active.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// use grafeo_engine::GrafeoDB;
-    ///
-    /// let db = GrafeoDB::new_in_memory();
-    /// let mut session = db.session();
-    ///
-    /// session.begin_transaction()?;
-    /// session.execute("INSERT (:Person {name: 'Alix'})")?;
-    /// session.execute("INSERT (:Person {name: 'Gus'})")?;
-    /// session.commit()?; // Both inserts committed atomically
-    /// # Ok(())
-    /// # }
-    /// ```
-    /// Clears all cached query plans.
-    ///
-    /// The plan cache is shared across all sessions on the same database,
-    /// so clearing from one session affects all sessions.
-    pub fn clear_plan_cache(&self) {
+    pub(crate) fn clear_plan_cache(&self) {
         self.query_cache.advance();
     }
 
-    /// Begins a new transaction on this session.
-    ///
-    /// Uses the default isolation level (`SnapshotIsolation`).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a transaction is already active.
-    pub fn begin_transaction(&mut self) -> Result<()> {
+    pub(crate) fn begin_transaction(&mut self) -> Result<()> {
         self.begin_transaction_inner(false, None)
     }
 
-    /// Begins a transaction with a specific isolation level.
-    ///
-    /// See [`begin_transaction`](Self::begin_transaction) for the default (`SnapshotIsolation`).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a transaction is already active.
-    pub fn begin_transaction_with_isolation(
+    pub(crate) fn begin_transaction_with_isolation(
         &mut self,
         isolation_level: crate::transaction::IsolationLevel,
     ) -> Result<()> {
@@ -5792,14 +5503,7 @@ impl Session {
         Ok(())
     }
 
-    /// Commits the current transaction.
-    ///
-    /// Makes all changes since [`begin_transaction`](Self::begin_transaction) permanent.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if no transaction is active.
-    pub fn commit(&mut self) -> Result<()> {
+    pub(crate) fn commit(&mut self) -> Result<()> {
         self.commit_inner()
     }
 
@@ -6113,30 +5817,7 @@ impl Session {
         Ok(())
     }
 
-    /// Aborts the current transaction.
-    ///
-    /// Discards all changes since [`begin_transaction`](Self::begin_transaction).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if no transaction is active.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// use grafeo_engine::GrafeoDB;
-    ///
-    /// let db = GrafeoDB::new_in_memory();
-    /// let mut session = db.session();
-    ///
-    /// session.begin_transaction()?;
-    /// session.execute("INSERT (:Person {name: 'Alix'})")?;
-    /// session.rollback()?; // Insert is discarded
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn rollback(&mut self) -> Result<()> {
+    pub(crate) fn rollback(&mut self) -> Result<()> {
         self.rollback_inner()
     }
 
@@ -6249,17 +5930,7 @@ impl Session {
         grafeo_common::utils::error::Error::Internal(message)
     }
 
-    /// Creates a named savepoint within the current transaction.
-    ///
-    /// The savepoint records how far the transaction's changes reach, in
-    /// every graph at once, so
-    /// [`rollback_to_savepoint`](Self::rollback_to_savepoint) can undo the
-    /// changes made after this point.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if no transaction is active.
-    pub fn savepoint(&self, name: &str) -> Result<()> {
+    pub(crate) fn savepoint(&self, name: &str) -> Result<()> {
         let tx_id = self.current_transaction.lock().ok_or_else(|| {
             grafeo_common::utils::error::Error::Transaction(
                 grafeo_common::utils::error::TransactionError::InvalidState(
@@ -6292,14 +5963,7 @@ impl Session {
         })
     }
 
-    /// Rolls back to a named savepoint, undoing all writes made after it.
-    ///
-    /// The savepoint and any savepoints created after it are removed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if no transaction is active or the savepoint does not exist.
-    pub fn rollback_to_savepoint(&self, name: &str) -> Result<()> {
+    pub(crate) fn rollback_to_savepoint(&self, name: &str) -> Result<()> {
         let transaction_id = self.current_transaction.lock().ok_or_else(|| {
             grafeo_common::utils::error::Error::Transaction(
                 grafeo_common::utils::error::TransactionError::InvalidState(
@@ -6359,12 +6023,7 @@ impl Session {
         self.schema_back_to(sp_state.schema_ops)
     }
 
-    /// Releases (removes) a named savepoint without rolling back.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if no transaction is active or the savepoint does not exist.
-    pub fn release_savepoint(&self, name: &str) -> Result<()> {
+    pub(crate) fn release_savepoint(&self, name: &str) -> Result<()> {
         let _tx_id = self.current_transaction.lock().ok_or_else(|| {
             grafeo_common::utils::error::Error::Transaction(
                 grafeo_common::utils::error::TransactionError::InvalidState(
@@ -6388,13 +6047,7 @@ impl Session {
         Ok(())
     }
 
-    /// Refuses the statements that start or end a transaction (`START
-    /// TRANSACTION`, `COMMIT` and `ROLLBACK`) from now on, with an invalid
-    /// transaction state (GQLSTATUS 25000). For the session of a binding's transaction object, which
-    /// commits or rolls back with its own call: a `COMMIT` run through it
-    /// would end the transaction behind the object's back. Savepoints stay
-    /// allowed.
-    pub fn refuse_transaction_statements(&mut self) {
+    pub(crate) fn refuse_transaction_statements(&mut self) {
         self.transaction_statements = TransactionStatements::Refused;
     }
 
@@ -6404,16 +6057,13 @@ impl Session {
         self.transaction_statements = TransactionStatements::OneCall;
     }
 
-    /// Sets the query timeout of this session's queries, in place of the
-    /// database's (`None`: no timeout).
     #[cfg(query_language)]
-    pub fn set_query_timeout(&mut self, timeout: Option<Duration>) {
+    pub(crate) fn set_query_timeout(&mut self, timeout: Option<Duration>) {
         self.query_timeout = timeout;
     }
 
-    /// Returns whether a transaction is active.
     #[must_use]
-    pub fn in_transaction(&self) -> bool {
+    pub(crate) fn in_transaction(&self) -> bool {
         self.current_transaction.lock().is_some()
     }
 
@@ -6434,68 +6084,12 @@ impl Session {
         self.changes.lock().clone()
     }
 
-    /// Prepares the current transaction for a two-phase commit.
-    ///
-    /// Returns a [`PreparedCommit`](crate::transaction::PreparedCommit) that
-    /// lets you inspect pending changes and attach metadata before finalizing.
-    /// The mutable borrow prevents concurrent operations while the commit is
-    /// pending.
-    ///
-    /// If the `PreparedCommit` is dropped without calling `commit()` or
-    /// `abort()`, the transaction is automatically rolled back.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if no transaction is active.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// use grafeo_engine::GrafeoDB;
-    ///
-    /// let db = GrafeoDB::new_in_memory();
-    /// let mut session = db.session();
-    ///
-    /// session.begin_transaction()?;
-    /// session.execute("INSERT (:Person {name: 'Alix'})")?;
-    ///
-    /// let mut prepared = session.prepare_commit()?;
-    /// println!("Nodes written: {}", prepared.info().nodes_written);
-    /// prepared.set_metadata("audit_user", "admin");
-    /// prepared.commit()?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn prepare_commit(&mut self) -> Result<crate::transaction::PreparedCommit<'_>> {
-        crate::transaction::PreparedCommit::new(self)
-    }
-
-    /// Sets auto-commit mode, which no longer changes how writes run.
-    ///
-    /// With no transaction open, every write statement and direct write
-    /// runs as a transaction of its own in either mode (#536): it commits
-    /// when it succeeds, and one that fails leaves nothing. Open a
-    /// transaction with [`begin_transaction`](Self::begin_transaction) to
-    /// make several writes commit together.
-    #[deprecated(
-        since = "0.6.0",
-        note = "writes outside a transaction always commit on their own (#536); \
-                use `begin_transaction` to group writes. Removed in 0.7.0"
-    )]
-    pub fn set_auto_commit(&mut self, auto_commit: bool) {
+    pub(crate) fn set_auto_commit(&mut self, auto_commit: bool) {
         self.auto_commit = auto_commit;
     }
 
-    /// Returns the auto-commit setting, which no longer changes how writes
-    /// run (see [`set_auto_commit`](Self::set_auto_commit)).
-    #[deprecated(
-        since = "0.6.0",
-        note = "writes outside a transaction always commit on their own (#536). \
-                Removed in 0.7.0"
-    )]
     #[must_use]
-    pub fn auto_commit(&self) -> bool {
+    pub(crate) fn auto_commit(&self) -> bool {
         self.auto_commit
     }
 
@@ -6539,39 +6133,8 @@ impl Session {
         self.procedure_writes(root, 0)
     }
 
-    /// Whether `query`, in `language` (as [`execute_language`](Self::execute_language)
-    /// names it), writes: whether a read-only database or transaction
-    /// refuses it. It translates the statement as running it would, and runs
-    /// nothing. A write in the plan, a call of a stored procedure whose body
-    /// writes, schema DDL, `CREATE GRAPH`, `DROP GRAPH` and projections write;
-    /// a query, `EXPLAIN` of anything, `SHOW` and the session and transaction
-    /// commands do not. `PROFILE` runs its statement, so it writes when the
-    /// statement does.
-    ///
-    /// The command line tool opens a database read-only for a statement that
-    /// does not write.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the statement does not parse or translate, as running it
-    /// would, or when the build has no such language.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// # use grafeo_engine::GrafeoDB;
-    /// let db = GrafeoDB::new_in_memory();
-    /// let session = db.session();
-    /// assert!(!session.statement_writes("MATCH (n) RETURN n", "gql")?);
-    /// assert!(session.statement_writes("INSERT (:Person {name: 'Alix'})", "gql")?);
-    /// # Ok::<(), grafeo_common::utils::error::Error>(())
-    /// ```
-    ///
-    /// # Stability: Experimental
-    ///
-    /// New in 0.6.0.
     #[cfg(query_language)]
-    pub fn statement_writes(&self, query: &str, language: &str) -> Result<bool> {
+    pub(crate) fn statement_writes(&self, query: &str, language: &str) -> Result<bool> {
         let plan: crate::query::plan::LogicalPlan = match language {
             #[cfg(feature = "gql")]
             "gql" => {
@@ -7117,13 +6680,9 @@ impl Session {
             .with(crate::query::optimizer::PlannerRule::Reachability, enabled);
     }
 
-    /// Plans this session's queries with only the rules `rules` turns on, so
-    /// that a test can compare the plans: a rule changes how a query runs,
-    /// never what it answers. Not for tuning: every rule is on by default and
-    /// this may change in any release.
     #[doc(hidden)]
     #[cfg(query_language)]
-    pub fn set_planner_rules(&mut self, rules: crate::query::optimizer::PlannerRules) {
+    pub(crate) fn set_planner_rules(&mut self, rules: crate::query::optimizer::PlannerRules) {
         self.plan_options.rules = rules;
     }
 
@@ -7558,23 +7117,11 @@ impl Session {
     // reported to CDC exactly like the same write in a statement. The writes
     // themselves are shared with the database's direct API (`database::direct`).
 
-    /// Creates a node with the given labels and returns its ID.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the node violates the schema, for example a label
-    /// a closed graph type does not allow or a `NOT NULL` property it lacks.
-    pub fn create_node(&self, labels: &[&str]) -> Result<NodeId> {
+    pub(crate) fn create_node(&self, labels: &[&str]) -> Result<NodeId> {
         self.create_node_with_props(labels, std::iter::empty::<(PropertyKey, Value)>())
     }
 
-    /// Creates a node with labels and properties and returns its ID.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the node violates the schema or a constraint, for
-    /// example a `UNIQUE` value another node already has.
-    pub fn create_node_with_props(
+    pub(crate) fn create_node_with_props(
         &self,
         labels: &[&str],
         properties: impl IntoIterator<Item = (impl Into<PropertyKey>, impl Into<Value>)>,
@@ -7584,13 +7131,7 @@ impl Session {
         self.write(|writer| writer.create_node(&labels, properties))
     }
 
-    /// Creates an edge between two existing nodes and returns its ID.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if an endpoint does not exist or the edge violates the
-    /// schema (its type or its endpoints' labels).
-    pub fn create_edge(&self, src: NodeId, dst: NodeId, edge_type: &str) -> Result<EdgeId> {
+    pub(crate) fn create_edge(&self, src: NodeId, dst: NodeId, edge_type: &str) -> Result<EdgeId> {
         self.create_edge_with_props(
             src,
             dst,
@@ -7599,13 +7140,7 @@ impl Session {
         )
     }
 
-    /// Creates an edge with properties between two existing nodes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if an endpoint does not exist or the edge violates the
-    /// schema.
-    pub fn create_edge_with_props(
+    pub(crate) fn create_edge_with_props(
         &self,
         src: NodeId,
         dst: NodeId,
@@ -7616,109 +7151,43 @@ impl Session {
         self.write(|writer| direct::create_edge(writer, src, dst, edge_type, properties))
     }
 
-    /// Sets a property on a node.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the node does not exist or the value violates a
-    /// constraint of its labels (type, `NOT NULL`, `UNIQUE`, size limit,
-    /// vector index size).
-    pub fn set_node_property(&self, id: NodeId, key: &str, value: Value) -> Result<()> {
+    pub(crate) fn set_node_property(&self, id: NodeId, key: &str, value: Value) -> Result<()> {
         self.write(|writer| direct::set_node_property(writer, id, key, value))
     }
 
-    /// Sets a property on an edge.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the edge does not exist or the value violates its
-    /// type.
-    pub fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) -> Result<()> {
+    pub(crate) fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) -> Result<()> {
         self.write(|writer| direct::set_edge_property(writer, id, key, value))
     }
 
-    /// Removes a property from a node. Returns whether the node had it.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a constraint requires the property (`NOT NULL`,
-    /// `NODE KEY`).
-    pub fn remove_node_property(&self, id: NodeId, key: &str) -> Result<bool> {
+    pub(crate) fn remove_node_property(&self, id: NodeId, key: &str) -> Result<bool> {
         self.write(|writer| writer.remove_node_property(id, key))
     }
 
-    /// Removes a property from an edge. Returns whether the edge had it.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the edge's type requires the property.
-    pub fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<bool> {
+    pub(crate) fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<bool> {
         self.write(|writer| writer.remove_edge_property(id, key))
     }
 
-    /// Adds a label to a node. Returns `true` if the label was added, `false`
-    /// if the node doesn't exist or already has it.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the node violates a constraint of the new label.
-    pub fn add_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
+    pub(crate) fn add_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
         self.write(|writer| direct::add_node_label(writer, id, label))
     }
 
-    /// Removes a label from a node. Returns `true` if the label was removed,
-    /// `false` if the node doesn't exist or doesn't have it.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if another transaction is writing the node.
-    pub fn remove_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
+    pub(crate) fn remove_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
         self.write(|writer| direct::remove_node_label(writer, id, label))
     }
 
-    /// Deletes a node and returns whether it existed.
-    ///
-    /// A node that still has edges is not deleted: delete them first with
-    /// [`delete_edge`](Self::delete_edge), or use `DETACH DELETE` in a query.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the node still has edges.
-    pub fn delete_node(&self, id: NodeId) -> Result<bool> {
+    pub(crate) fn delete_node(&self, id: NodeId) -> Result<bool> {
         self.write(|writer| writer.delete_node(id, false))
     }
 
-    /// Deletes a node with all its edges, as `DETACH DELETE` does, and
-    /// returns whether the node existed: one change of the write, so the
-    /// node and its edges commit, roll back and replay together. Change data
-    /// capture reports a Delete event per edge, each naming the node in
-    /// `deleted_with`, then the node's.
-    ///
-    /// # Errors
-    ///
-    /// Returns a write conflict with another transaction that writes the
-    /// node or one of its edges, or creates an edge to it.
-    pub fn detach_delete_node(&self, id: NodeId) -> Result<bool> {
+    pub(crate) fn detach_delete_node(&self, id: NodeId) -> Result<bool> {
         self.write(|writer| writer.delete_node(id, true))
     }
 
-    /// Deletes an edge and returns whether it existed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if another transaction is writing the edge.
-    pub fn delete_edge(&self, id: EdgeId) -> Result<bool> {
+    pub(crate) fn delete_edge(&self, id: EdgeId) -> Result<bool> {
         self.write(|writer| writer.delete_edge(id))
     }
 
-    /// Creates one node per vector, each with `label` and the vector as
-    /// `property`, in one transaction. Returns the IDs in input order.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first node's error (for example a vector of another size
-    /// than the property's vector index); nothing of the batch is created then.
-    pub fn batch_create_nodes(
+    pub(crate) fn batch_create_nodes(
         &self,
         label: &str,
         property: &str,
@@ -7727,15 +7196,7 @@ impl Session {
         self.write(|writer| direct::create_vector_nodes(writer, label, property, vectors))
     }
 
-    /// Creates one node with `label` per property map, in one transaction.
-    /// Returns the IDs in input order.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first node's error (for example a `UNIQUE` value that
-    /// another node, or an earlier node of the batch, already has); nothing of
-    /// the batch is created then.
-    pub fn batch_create_nodes_with_props(
+    pub(crate) fn batch_create_nodes_with_props(
         &self,
         label: &str,
         properties_list: Vec<std::collections::HashMap<PropertyKey, Value>>,
@@ -7743,13 +7204,7 @@ impl Session {
         self.batch_create_nodes_with_labels(&[label], properties_list)
     }
 
-    /// Creates one node with all of `labels` per property map, in one
-    /// transaction. Returns the IDs in input order.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first node's error; nothing of the batch is created then.
-    pub fn batch_create_nodes_with_labels(
+    pub(crate) fn batch_create_nodes_with_labels(
         &self,
         labels: &[&str],
         properties_list: Vec<std::collections::HashMap<PropertyKey, Value>>,
@@ -7757,29 +7212,11 @@ impl Session {
         self.write(|writer| direct::create_nodes(writer, labels, properties_list))
     }
 
-    /// Creates the edges, each with its own endpoints, type and properties,
-    /// in one transaction. Returns the IDs in input order.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first edge's error (an endpoint that does not exist, or a
-    /// schema violation); nothing of the batch is created then.
-    pub fn batch_create_edges(&self, edges: Vec<direct::BatchEdge>) -> Result<Vec<EdgeId>> {
+    pub(crate) fn batch_create_edges(&self, edges: Vec<direct::BatchEdge>) -> Result<Vec<EdgeId>> {
         self.write(|writer| direct::create_edges(writer, edges))
     }
 
-    /// Loads the CSV file at `path` as nodes, as `spec` describes (see
-    /// [`GrafeoDB::load_nodes_csv`](crate::GrafeoDB::load_nodes_csv)), in
-    /// the session's open transaction, or in one of its own.
-    ///
-    /// # Errors
-    ///
-    /// As [`GrafeoDB::load_nodes_csv`](crate::GrafeoDB::load_nodes_csv).
-    ///
-    /// # Stability: Experimental
-    ///
-    /// New in 0.6.1.
-    pub fn load_nodes_csv(
+    pub(crate) fn load_nodes_csv(
         &self,
         path: impl AsRef<std::path::Path>,
         spec: &crate::loader::NodeLoad,
@@ -7787,18 +7224,7 @@ impl Session {
         self.write(|writer| crate::loader::load_nodes(writer, path.as_ref(), spec))
     }
 
-    /// Loads the CSV file at `path` as edges, as `spec` describes (see
-    /// [`GrafeoDB::load_edges_csv`](crate::GrafeoDB::load_edges_csv)), in
-    /// the session's open transaction, or in one of its own.
-    ///
-    /// # Errors
-    ///
-    /// As [`GrafeoDB::load_edges_csv`](crate::GrafeoDB::load_edges_csv).
-    ///
-    /// # Stability: Experimental
-    ///
-    /// New in 0.6.1.
-    pub fn load_edges_csv(
+    pub(crate) fn load_edges_csv(
         &self,
         path: impl AsRef<std::path::Path>,
         spec: &crate::loader::EdgeLoad,
@@ -7806,30 +7232,17 @@ impl Session {
         self.write(|writer| crate::loader::load_edges(writer, path.as_ref(), spec))
     }
 
-    /// Finds the nodes of the session's graph that have a property value.
-    ///
-    /// With a property index on `property` this is a lookup, otherwise a scan
-    /// of the committed nodes. Returns the nodes the session sees: in a
-    /// transaction, its own writes found through the index included.
-    ///
-    /// # Errors
-    ///
-    /// The error of a read the store cannot do.
-    pub fn find_nodes_by_property(&self, property: &str, value: &Value) -> Result<Vec<NodeId>> {
+    pub(crate) fn find_nodes_by_property(
+        &self,
+        property: &str,
+        value: &Value,
+    ) -> Result<Vec<NodeId>> {
         let (view, _pin) = self.read_view()?;
         self.active_store()
             .find_nodes_by_property(property, value, view)
     }
 
-    /// Creates an index on a node property of the session's graph. Commits
-    /// are held off while it is built, as for `CREATE INDEX`.
-    ///
-    /// # Errors
-    ///
-    /// Returns the database-closed error after `close()` of a persistent
-    /// database, and the incomplete-commit error after a commit that did not
-    /// complete.
-    pub fn create_property_index(&self, property: &str) -> Result<()> {
+    pub(crate) fn create_property_index(&self, property: &str) -> Result<()> {
         let held = self.hold_for_standalone(false)?;
         if self
             .active_lpg_store()
@@ -7847,13 +7260,7 @@ impl Session {
         self.commit_standalone(change, &held)
     }
 
-    /// Drops every index on a node property of the session's graph: the one on every label and
-    /// each one on a label. Returns whether there was one.
-    ///
-    /// # Errors
-    ///
-    /// As [`create_property_index`](Self::create_property_index).
-    pub fn drop_property_index(&self, property: &str) -> Result<bool> {
+    pub(crate) fn drop_property_index(&self, property: &str) -> Result<bool> {
         let held = self.hold_for_standalone(false)?;
         let graph = self.active_lpg_graph_key();
         let drops = self.active_lpg_store().map(|store| {
@@ -7874,9 +7281,8 @@ impl Session {
         Ok(true)
     }
 
-    /// Returns whether a node property of the session's graph has an index.
     #[must_use]
-    pub fn has_property_index(&self, property: &str) -> bool {
+    pub(crate) fn has_property_index(&self, property: &str) -> bool {
         self.active_lpg_store()
             .is_some_and(|store| store.has_property_index(property))
     }
@@ -7884,6 +7290,1289 @@ impl Session {
     // =========================================================================
     // Direct Lookup APIs (bypass query planning for O(1) point reads)
     // =========================================================================
+
+    pub(crate) fn get_node(&self, id: NodeId) -> Result<Option<Node>> {
+        let (view, _pin) = self.read_view()?;
+        self.active_store().node(id, view)
+    }
+
+    pub(crate) fn get_node_property(&self, id: NodeId, key: &str) -> Result<Option<Value>> {
+        let (view, _pin) = self.read_view()?;
+        self.active_store().node_property(id, key, view)
+    }
+
+    pub(crate) fn get_edge(&self, id: EdgeId) -> Result<Option<Edge>> {
+        let (view, _pin) = self.read_view()?;
+        self.active_store().edge(id, view)
+    }
+
+    pub(crate) fn get_node_edges(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        edge_types: &[&str],
+    ) -> Result<Vec<(NodeId, EdgeId)>> {
+        let (view, _pin) = self.read_view()?;
+        crate::database::direct::node_edges(
+            &*self.active_store(),
+            node,
+            direction,
+            edge_types,
+            view,
+        )
+    }
+
+    pub(crate) fn get_neighbors_outgoing(&self, node: NodeId) -> Result<Vec<(NodeId, EdgeId)>> {
+        self.get_node_edges(node, Direction::Outgoing, &[])
+    }
+
+    pub(crate) fn get_neighbors_incoming(&self, node: NodeId) -> Result<Vec<(NodeId, EdgeId)>> {
+        self.get_node_edges(node, Direction::Incoming, &[])
+    }
+
+    pub(crate) fn get_neighbors_outgoing_by_type(
+        &self,
+        node: NodeId,
+        edge_type: &str,
+    ) -> Result<Vec<(NodeId, EdgeId)>> {
+        self.get_node_edges(node, Direction::Outgoing, &[edge_type])
+    }
+
+    pub(crate) fn node_exists(&self, id: NodeId) -> Result<bool> {
+        let (view, _pin) = self.read_view()?;
+        self.active_store().is_node_visible(id, view)
+    }
+
+    pub(crate) fn edge_exists(&self, id: EdgeId) -> Result<bool> {
+        let (view, _pin) = self.read_view()?;
+        self.active_store().is_edge_visible(id, view)
+    }
+
+    pub(crate) fn get_degree(&self, node: NodeId) -> Result<(usize, usize)> {
+        let (view, _pin) = self.read_view()?;
+        let active = self.active_store();
+        let out = active.degree(node, Direction::Outgoing, view)?;
+        let in_degree = active.degree(node, Direction::Incoming, view)?;
+        Ok((out, in_degree))
+    }
+
+    pub(crate) fn get_nodes_batch(&self, ids: &[NodeId]) -> Result<Vec<Option<Node>>> {
+        let (view, _pin) = self.read_view()?;
+        let active = self.active_store();
+        ids.iter().map(|&id| active.node(id, view)).collect()
+    }
+
+    // ── Change Data Capture ─────────────────────────────────────────────
+
+    #[cfg(feature = "cdc")]
+    pub(crate) fn history(
+        &self,
+        entity_id: impl Into<crate::cdc::EntityId>,
+    ) -> Result<Vec<crate::cdc::ChangeEvent>> {
+        self.require_permission(crate::auth::StatementKind::Read)?;
+        let epoch = self.transaction_manager.current_epoch();
+        let mut events = self
+            .cdc_log
+            .history_in(self.active_graph_storage_key().as_deref(), entity_id.into());
+        events.retain(|event| event.epoch <= epoch);
+        Ok(events)
+    }
+
+    #[cfg(feature = "cdc")]
+    pub(crate) fn history_since(
+        &self,
+        entity_id: impl Into<crate::cdc::EntityId>,
+        since_epoch: EpochId,
+    ) -> Result<Vec<crate::cdc::ChangeEvent>> {
+        self.require_permission(crate::auth::StatementKind::Read)?;
+        let epoch = self.transaction_manager.current_epoch();
+        let mut events = self.cdc_log.history_since_in(
+            self.active_graph_storage_key().as_deref(),
+            entity_id.into(),
+            since_epoch,
+        );
+        events.retain(|event| event.epoch <= epoch);
+        Ok(events)
+    }
+
+    #[cfg(feature = "cdc")]
+    pub(crate) fn changes_between(
+        &self,
+        start_epoch: EpochId,
+        end_epoch: EpochId,
+    ) -> Result<Vec<crate::cdc::ChangeEvent>> {
+        self.require_permission(crate::auth::StatementKind::Read)?;
+        let end_epoch = self.transaction_manager.readable_epoch(end_epoch);
+        Ok(self.cdc_log.changes_between(start_epoch, end_epoch))
+    }
+}
+
+/// `error`, the error of a statement whose writes were rolled back by
+/// `rollback`, telling also that the rollback failed (which poisoned the
+/// database) when it did. The statement's error is the one to report either
+/// way.
+fn with_failed_rollback(
+    error: grafeo_common::utils::error::Error,
+    rollback: Result<()>,
+) -> grafeo_common::utils::error::Error {
+    match rollback {
+        Err(failed) => grafeo_common::utils::error::Error::Internal(format!(
+            "{error}; the statement's writes could not be rolled back: {failed}"
+        )),
+        Ok(()) => error,
+    }
+}
+
+impl Drop for SessionInner {
+    fn drop(&mut self) {
+        // Auto-rollback any active transaction to prevent leaked MVCC state,
+        // dangling write locks, and uncommitted versions lingering in the store.
+        // With a transaction open, an owned stream still open reads it no
+        // more: it fails on its next pull, so the rollback goes ahead under
+        // it. A nested transaction rolls back level by level, so every level
+        // goes. Without one, a stream holds its own snapshot pin and reads on
+        // after the session is gone (a binding's lazy stream does).
+        if self.in_transaction() {
+            self.ended.store(true, std::sync::atomic::Ordering::Release);
+        }
+        while self.in_transaction() {
+            if self.rollback_regardless_of_streams().is_err() {
+                break;
+            }
+        }
+
+        #[cfg(feature = "metrics")]
+        if let Some(ref reg) = self.metrics {
+            reg.session_active
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// The memory of one statement of `session`: its cap and the buffer manager
+/// its operators take their grants from (see
+/// [`Session::make_operator_memory_context`]).
+#[cfg(all(feature = "spill", any(lpg_language, rdf_language)))]
+fn statement_memory(session: &SessionInner) -> grafeo_core::execution::StatementMemory {
+    grafeo_core::execution::StatementMemory::of(session.make_operator_memory_context())
+}
+
+/// The memory of one statement: without spilling, operators take no grants.
+#[cfg(all(not(feature = "spill"), any(lpg_language, rdf_language)))]
+fn statement_memory(_session: &SessionInner) -> grafeo_core::execution::StatementMemory {
+    grafeo_core::execution::StatementMemory::Unbudgeted
+}
+
+/// The parameter values to fill into `plan`: `None` for an empty map when the
+/// plan has no defaults either, after checking that the plan names no
+/// parameter (it fails like any missing value). A statement without
+/// parameters then uses its cached plan, like the same call without a map.
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq"))]
+fn params_to_fill<'a>(
+    plan: &mut crate::query::plan::LogicalPlan,
+    params: Option<&'a std::collections::HashMap<String, Value>>,
+) -> Result<Option<&'a std::collections::HashMap<String, Value>>> {
+    match params {
+        Some(values) if values.is_empty() && plan.default_params.is_empty() => {
+            crate::query::processor::substitute_params(plan, values)?;
+            Ok(None)
+        }
+        // An EXPLAIN without parameters shows the plan with them unresolved.
+        None if plan.explain && plan.default_params.is_empty() => Ok(None),
+        // No parameters: the plan's defaults fill what they can, and a
+        // parameter nobody supplied fails here, before planning.
+        None => {
+            let defaults = plan.default_params.clone();
+            crate::query::processor::substitute_params(plan, &defaults)?;
+            Ok(None)
+        }
+        other => Ok(other),
+    }
+}
+
+// The session's public methods: each reaches the session's slot for its call (#712).
+impl Session {
+    /// Returns the graph model this session operates on. After `close()` it returns
+    /// `GraphModel::Lpg`; it returns a `Result` from 0.7.0.
+    #[must_use]
+    pub fn graph_model(&self) -> GraphModel {
+        self.inner()
+            .map_or_else(|_| Default::default(), |inner| inner.graph_model())
+    }
+
+    /// Returns the identity bound to this session.
+    #[must_use]
+    pub fn identity(&self) -> &crate::auth::Identity {
+        &self.identity
+    }
+
+    /// Sets the current graph for this session (USE GRAPH). After `close()` it does nothing; it
+    /// returns a `Result` from 0.7.0.
+    pub fn use_graph(&self, name: &str) {
+        if let Ok(inner) = self.inner() {
+            inner.use_graph(name);
+        }
+    }
+
+    /// Returns the current graph name, if any. After `close()` it returns `None`; it returns a
+    /// `Result` from 0.7.0.
+    #[must_use]
+    pub fn current_graph(&self) -> Option<String> {
+        self.inner()
+            .map_or_else(|_| Default::default(), |inner| inner.current_graph())
+    }
+
+    /// Sets the current schema for this session (SESSION SET SCHEMA). After `close()` it does
+    /// nothing; it returns a `Result` from 0.7.0.
+    ///
+    /// Per ISO/IEC 39075 Section 7.1 GR1, this is independent of the session graph.
+    pub fn set_schema(&self, name: &str) {
+        if let Ok(inner) = self.inner() {
+            inner.set_schema(name);
+        }
+    }
+
+    /// Returns the current schema name, if any. After `close()` it returns `None`; it returns a
+    /// `Result` from 0.7.0.
+    ///
+    /// `None` means "not set", which resolves to the default schema.
+    #[must_use]
+    pub fn current_schema(&self) -> Option<String> {
+        self.inner()
+            .map_or_else(|_| Default::default(), |inner| inner.current_schema())
+    }
+
+    /// Sets the session time zone: a UTC offset (`+01:00`, `-05:30`, `Z` or
+    /// `UTC`), ISO GQL's time zone displacement. GQL and SQL/PGQ read a local
+    /// datetime or time at this offset when they compare it with a zoned one.
+    ///
+    /// # Errors
+    ///
+    /// An invalid time zone displacement (GQLSTATUS 22009) for any other
+    /// text, a named zone such as `Europe/Amsterdam` included.
+    pub fn set_time_zone(&self, tz: &str) -> Result<()> {
+        self.inner()?.set_time_zone(tz)
+    }
+
+    /// Returns the session time zone, if set. After `close()` it returns `None`; it returns a
+    /// `Result` from 0.7.0.
+    #[must_use]
+    pub fn time_zone(&self) -> Option<String> {
+        self.inner()
+            .map_or_else(|_| Default::default(), |inner| inner.time_zone())
+    }
+
+    /// Sets a session parameter. After `close()` it does nothing; it returns a `Result` from 0.7.0.
+    pub fn set_parameter(&self, key: &str, value: grafeo_common::types::Value) {
+        if let Ok(inner) = self.inner() {
+            inner.set_parameter(key, value);
+        }
+    }
+
+    /// Gets a session parameter by cloning it. After `close()` it returns `None`; it returns a
+    /// `Result` from 0.7.0.
+    #[must_use]
+    pub fn get_parameter(&self, key: &str) -> Option<grafeo_common::types::Value> {
+        self.inner()
+            .map_or_else(|_| Default::default(), |inner| inner.get_parameter(key))
+    }
+
+    /// Resets all session state (ISO/IEC 39075 Section 7.2): the schema and
+    /// graph back to the session's home, everything else to its default. After `close()` it does
+    /// nothing; it returns a `Result` from 0.7.0.
+    pub fn reset_session(&self) {
+        if let Ok(inner) = self.inner() {
+            inner.reset_session();
+        }
+    }
+
+    /// Resets only the session schema, to the home schema (Section 7.2 GR1). After `close()` it
+    /// does nothing; it returns a `Result` from 0.7.0.
+    pub fn reset_schema(&self) {
+        if let Ok(inner) = self.inner() {
+            inner.reset_schema();
+        }
+    }
+
+    /// Resets only the session graph, to the home graph (Section 7.2 GR2). After `close()` it does
+    /// nothing; it returns a `Result` from 0.7.0.
+    pub fn reset_graph(&self) {
+        if let Ok(inner) = self.inner() {
+            inner.reset_graph();
+        }
+    }
+
+    /// Resets only the session time zone (Section 7.2 GR3). After `close()` it does nothing; it
+    /// returns a `Result` from 0.7.0.
+    pub fn reset_time_zone(&self) {
+        if let Ok(inner) = self.inner() {
+            inner.reset_time_zone();
+        }
+    }
+
+    /// Resets only session parameters (Section 7.2 GR4). After `close()` it does nothing; it
+    /// returns a `Result` from 0.7.0.
+    pub fn reset_parameters(&self) {
+        if let Ok(inner) = self.inner() {
+            inner.reset_parameters();
+        }
+    }
+
+    /// Sets a viewing epoch override for time-travel queries. After `close()` it does nothing; it
+    /// returns a `Result` from 0.7.0.
+    ///
+    /// While set, all queries on this session see the database as it existed
+    /// at the given epoch; an epoch after the current one reads at the
+    /// current one, so a commit that is not complete stays out of sight. Use
+    /// [`clear_viewing_epoch`](Self::clear_viewing_epoch) to return to normal
+    /// behavior.
+    pub fn set_viewing_epoch(&self, epoch: EpochId) {
+        if let Ok(inner) = self.inner() {
+            inner.set_viewing_epoch(epoch);
+        }
+    }
+
+    /// Clears the viewing epoch override, returning to normal behavior. After `close()` it does
+    /// nothing; it returns a `Result` from 0.7.0.
+    pub fn clear_viewing_epoch(&self) {
+        if let Ok(inner) = self.inner() {
+            inner.clear_viewing_epoch();
+        }
+    }
+
+    /// Returns the current viewing epoch override, if any. After `close()` it returns `None`; it
+    /// returns a `Result` from 0.7.0.
+    #[must_use]
+    pub fn viewing_epoch(&self) -> Option<EpochId> {
+        self.inner()
+            .map_or_else(|_| Default::default(), |inner| inner.viewing_epoch())
+    }
+
+    /// Returns all versions of a node with their creation/deletion epochs.
+    ///
+    /// Properties and labels reflect the current state (not versioned per-epoch).
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do.
+    pub fn get_node_history(&self, id: NodeId) -> Result<Vec<(EpochId, Option<EpochId>, Node)>> {
+        self.inner()?.get_node_history(id)
+    }
+
+    /// Returns all versions of an edge with their creation/deletion epochs.
+    ///
+    /// Properties reflect the current state (not versioned per-epoch).
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do.
+    pub fn get_edge_history(&self, id: EdgeId) -> Result<Vec<(EpochId, Option<EpochId>, Edge)>> {
+        self.inner()?.get_edge_history(id)
+    }
+
+    /// Executes a GQL query.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails to parse or execute.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use grafeo_engine::GrafeoDB;
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let session = db.session();
+    ///
+    /// // Create a node
+    /// session.execute("INSERT (:Person {name: 'Alix', age: 30})")?;
+    ///
+    /// // Query nodes
+    /// let result = session.execute("MATCH (n:Person) RETURN n.name, n.age")?;
+    /// for row in result.rows() {
+    ///     println!("{:?}", row);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "gql")]
+    pub fn execute(&self, query: &str) -> Result<QueryResult> {
+        self.inner()?.execute(query)
+    }
+
+    /// Executes a GQL query and returns a lazy result stream.
+    ///
+    /// The stream pulls chunks from the operator pipeline on demand. Use it
+    /// when the result set is too large to fit in memory or when you want
+    /// first-row latency (process rows as they arrive rather than waiting
+    /// for the whole query to complete).
+    ///
+    /// This is the read-only, pull-only path: `execute_streaming` rejects
+    /// mutations (INSERT/DELETE/SET), schema/session commands, EXPLAIN,
+    /// PROFILE, and queries whose planner emits a push-based pipeline. Run
+    /// those via [`execute`](Self::execute) instead.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.5.40. It may change or be removed in any release, with a
+    /// CHANGELOG entry: see <https://grafeo.dev/stability/>.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if parsing or planning fails, if the query is a
+    /// kind that cannot be streamed, or if permission checks fail.
+    #[cfg(feature = "gql")]
+    pub fn execute_streaming(
+        &self,
+        query: &str,
+    ) -> Result<crate::query::executor::stream::ResultStream<'_>> {
+        use crate::query::executor::stream::{ResultStream, StreamGuard};
+
+        let inner = self.inner()?;
+        let plan = inner.build_streaming_plan(query)?;
+        ResultStream::new(plan, &inner.slots, StreamGuard::new(&inner.active_streams))
+    }
+
+    /// [`execute_streaming`](Self::execute_streaming) as a stream that owns
+    /// what it reads, as [`GrafeoDB::execute_streaming`](crate::GrafeoDB::execute_streaming)
+    /// gives: for a caller that keeps the stream past this borrow of the
+    /// session (a binding's stream handle). The session's permissions, its
+    /// external access included, apply as they do to `execute`, and its
+    /// transaction cannot commit or roll back while the stream is open.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.2. It may change or be removed in any release, with a
+    /// CHANGELOG entry: see <https://grafeo.dev/stability/>.
+    ///
+    /// # Errors
+    ///
+    /// As [`execute_streaming`](Self::execute_streaming).
+    #[cfg(feature = "gql")]
+    pub fn execute_streaming_owned(
+        &self,
+        query: &str,
+    ) -> Result<crate::query::executor::stream::OwnedResultStream> {
+        self.inner()?.execute_streaming_owned(query)
+    }
+
+    /// Executes a GQL query with visibility at the specified epoch.
+    ///
+    /// This enables time-travel queries: the query sees the database
+    /// as it existed at the given epoch. An epoch after the current one reads
+    /// at the current one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if parsing or execution fails.
+    #[cfg(feature = "gql")]
+    pub fn execute_at_epoch(&self, query: &str, epoch: EpochId) -> Result<QueryResult> {
+        self.inner()?.execute_at_epoch(query, epoch)
+    }
+
+    /// Executes a GQL query at a specific epoch with optional parameters.
+    ///
+    /// Combines epoch-based time travel with parameterized queries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if parsing or execution fails.
+    #[cfg(feature = "gql")]
+    pub fn execute_at_epoch_with_params(
+        &self,
+        query: &str,
+        epoch: EpochId,
+        params: Option<std::collections::HashMap<String, Value>>,
+    ) -> Result<QueryResult> {
+        self.inner()?
+            .execute_at_epoch_with_params(query, epoch, params)
+    }
+
+    /// Executes a GQL query with parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails to parse or execute.
+    #[cfg(feature = "gql")]
+    pub fn execute_with_params(
+        &self,
+        query: &str,
+        params: std::collections::HashMap<String, Value>,
+    ) -> Result<QueryResult> {
+        self.inner()?.execute_with_params(query, params)
+    }
+
+    /// Executes a GQL query with parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no query language is enabled.
+    #[cfg(not(any(feature = "gql", feature = "cypher")))]
+    pub fn execute_with_params(
+        &self,
+        _query: &str,
+        _params: std::collections::HashMap<String, Value>,
+    ) -> Result<QueryResult> {
+        self.inner()?.execute_with_params(_query, _params)
+    }
+
+    /// Executes a GQL query.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no query language is enabled.
+    #[cfg(not(any(feature = "gql", feature = "cypher")))]
+    pub fn execute(&self, _query: &str) -> Result<QueryResult> {
+        self.inner()?.execute(_query)
+    }
+
+    /// Executes a Cypher query.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails to parse or execute.
+    #[cfg(feature = "cypher")]
+    pub fn execute_cypher(&self, query: &str) -> Result<QueryResult> {
+        self.inner()?.execute_cypher(query)
+    }
+
+    /// Executes a Cypher query with parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails to parse or execute.
+    #[cfg(feature = "cypher")]
+    pub fn execute_cypher_with_params(
+        &self,
+        query: &str,
+        params: std::collections::HashMap<String, Value>,
+    ) -> Result<QueryResult> {
+        self.inner()?.execute_cypher_with_params(query, params)
+    }
+
+    /// Executes a Gremlin query.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails to parse or execute.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use grafeo_engine::GrafeoDB;
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let session = db.session();
+    ///
+    /// // Create some nodes first
+    /// session.create_node(&["Person"]).unwrap();
+    ///
+    /// // Query using Gremlin
+    /// let result = session.execute_gremlin("g.V().hasLabel('Person')")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "gremlin")]
+    pub fn execute_gremlin(&self, query: &str) -> Result<QueryResult> {
+        self.inner()?.execute_gremlin(query)
+    }
+
+    /// Executes a Gremlin query with parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails to parse or execute.
+    #[cfg(feature = "gremlin")]
+    pub fn execute_gremlin_with_params(
+        &self,
+        query: &str,
+        params: std::collections::HashMap<String, Value>,
+    ) -> Result<QueryResult> {
+        self.inner()?.execute_gremlin_with_params(query, params)
+    }
+
+    /// Executes a GraphQL query against the LPG store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails to parse or execute.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use grafeo_engine::GrafeoDB;
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let session = db.session();
+    ///
+    /// // Create some nodes first
+    /// session.create_node(&["User"]).unwrap();
+    ///
+    /// // Query using GraphQL
+    /// let result = session.execute_graphql("query { user { id name } }")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "graphql")]
+    pub fn execute_graphql(&self, query: &str) -> Result<QueryResult> {
+        self.inner()?.execute_graphql(query)
+    }
+
+    /// Executes a GraphQL query with parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails to parse or execute.
+    #[cfg(feature = "graphql")]
+    pub fn execute_graphql_with_params(
+        &self,
+        query: &str,
+        params: std::collections::HashMap<String, Value>,
+    ) -> Result<QueryResult> {
+        self.inner()?.execute_graphql_with_params(query, params)
+    }
+
+    /// Executes a SQL/PGQ query (SQL:2023 GRAPH_TABLE).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails to parse or execute.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use grafeo_engine::GrafeoDB;
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let session = db.session();
+    ///
+    /// let result = session.execute_sql(
+    ///     "SELECT * FROM GRAPH_TABLE (
+    ///         MATCH (n:Person)
+    ///         COLUMNS (n.name AS name)
+    ///     )"
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "sql-pgq")]
+    pub fn execute_sql(&self, query: &str) -> Result<QueryResult> {
+        self.inner()?.execute_sql(query)
+    }
+
+    /// Executes a SQL/PGQ query with parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails to parse or execute.
+    #[cfg(feature = "sql-pgq")]
+    pub fn execute_sql_with_params(
+        &self,
+        query: &str,
+        params: std::collections::HashMap<String, Value>,
+    ) -> Result<QueryResult> {
+        self.inner()?.execute_sql_with_params(query, params)
+    }
+
+    /// Executes a query in the specified language by name.
+    ///
+    /// Supported language names: `"gql"`, `"cypher"`, `"gremlin"`, `"graphql"`,
+    /// `"graphql-rdf"`, `"sparql"`, `"sql"`. Each requires the corresponding feature flag.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the language is unknown/disabled or the query fails.
+    pub fn execute_language(
+        &self,
+        query: &str,
+        language: &str,
+        params: Option<std::collections::HashMap<String, Value>>,
+    ) -> Result<QueryResult> {
+        self.inner()?.execute_language(query, language, params)
+    }
+
+    /// Begins a new transaction. After `close()` it does nothing; it returns a `Result` from 0.7.0.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a transaction is already active.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use grafeo_engine::GrafeoDB;
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let mut session = db.session();
+    ///
+    /// session.begin_transaction()?;
+    /// session.execute("INSERT (:Person {name: 'Alix'})")?;
+    /// session.execute("INSERT (:Person {name: 'Gus'})")?;
+    /// session.commit()?; // Both inserts committed atomically
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// Clears all cached query plans.
+    ///
+    /// The plan cache is shared across all sessions on the same database,
+    /// so clearing from one session affects all sessions.
+    pub fn clear_plan_cache(&self) {
+        if let Ok(inner) = self.inner() {
+            inner.clear_plan_cache();
+        }
+    }
+
+    /// Begins a new transaction on this session.
+    ///
+    /// Uses the default isolation level (`SnapshotIsolation`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a transaction is already active.
+    pub fn begin_transaction(&mut self) -> Result<()> {
+        self.inner_mut()?.begin_transaction()
+    }
+
+    /// Begins a transaction with a specific isolation level.
+    ///
+    /// See [`begin_transaction`](Self::begin_transaction) for the default (`SnapshotIsolation`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a transaction is already active.
+    pub fn begin_transaction_with_isolation(
+        &mut self,
+        isolation_level: crate::transaction::IsolationLevel,
+    ) -> Result<()> {
+        self.inner_mut()?
+            .begin_transaction_with_isolation(isolation_level)
+    }
+
+    /// Commits the current transaction.
+    ///
+    /// Makes all changes since [`begin_transaction`](Self::begin_transaction) permanent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no transaction is active.
+    pub fn commit(&mut self) -> Result<()> {
+        self.inner_mut()?.commit()
+    }
+
+    /// Aborts the current transaction.
+    ///
+    /// Discards all changes since [`begin_transaction`](Self::begin_transaction).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no transaction is active.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use grafeo_engine::GrafeoDB;
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let mut session = db.session();
+    ///
+    /// session.begin_transaction()?;
+    /// session.execute("INSERT (:Person {name: 'Alix'})")?;
+    /// session.rollback()?; // Insert is discarded
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn rollback(&mut self) -> Result<()> {
+        self.inner_mut()?.rollback()
+    }
+
+    /// Creates a named savepoint within the current transaction.
+    ///
+    /// The savepoint records how far the transaction's changes reach, in
+    /// every graph at once, so
+    /// [`rollback_to_savepoint`](Self::rollback_to_savepoint) can undo the
+    /// changes made after this point.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no transaction is active.
+    pub fn savepoint(&self, name: &str) -> Result<()> {
+        self.inner()?.savepoint(name)
+    }
+
+    /// Rolls back to a named savepoint, undoing all writes made after it.
+    ///
+    /// The savepoint and any savepoints created after it are removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no transaction is active or the savepoint does not exist.
+    pub fn rollback_to_savepoint(&self, name: &str) -> Result<()> {
+        self.inner()?.rollback_to_savepoint(name)
+    }
+
+    /// Releases (removes) a named savepoint without rolling back.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no transaction is active or the savepoint does not exist.
+    pub fn release_savepoint(&self, name: &str) -> Result<()> {
+        self.inner()?.release_savepoint(name)
+    }
+
+    /// Refuses the statements that start or end a transaction (`START
+    /// TRANSACTION`, `COMMIT` and `ROLLBACK`) from now on, with an invalid
+    /// transaction state (GQLSTATUS 25000). For the session of a binding's transaction object, which
+    /// commits or rolls back with its own call: a `COMMIT` run through it
+    /// would end the transaction behind the object's back. Savepoints stay
+    /// allowed. After `close()` it does nothing; it returns a `Result` from 0.7.0.
+    pub fn refuse_transaction_statements(&mut self) {
+        if let Ok(mut inner) = self.inner_mut() {
+            inner.refuse_transaction_statements();
+        }
+    }
+
+    /// Sets the query timeout of this session's queries, in place of the
+    /// database's (`None`: no timeout). After `close()` it does nothing; it returns a `Result` from
+    /// 0.7.0.
+    #[cfg(query_language)]
+    pub fn set_query_timeout(&mut self, timeout: Option<Duration>) {
+        if let Ok(mut inner) = self.inner_mut() {
+            inner.set_query_timeout(timeout);
+        }
+    }
+
+    /// Returns whether a transaction is active. After `close()` it returns `false`; it returns a
+    /// `Result` from 0.7.0.
+    #[must_use]
+    pub fn in_transaction(&self) -> bool {
+        self.inner()
+            .map_or_else(|_| Default::default(), |inner| inner.in_transaction())
+    }
+
+    /// Prepares the current transaction for a two-phase commit.
+    ///
+    /// Returns a [`PreparedCommit`](crate::transaction::PreparedCommit) that
+    /// lets you inspect pending changes and attach metadata before finalizing.
+    /// The mutable borrow prevents concurrent operations while the commit is
+    /// pending.
+    ///
+    /// If the `PreparedCommit` is dropped without calling `commit()` or
+    /// `abort()`, the transaction is automatically rolled back.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no transaction is active.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use grafeo_engine::GrafeoDB;
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let mut session = db.session();
+    ///
+    /// session.begin_transaction()?;
+    /// session.execute("INSERT (:Person {name: 'Alix'})")?;
+    ///
+    /// let mut prepared = session.prepare_commit()?;
+    /// println!("Nodes written: {}", prepared.info().nodes_written);
+    /// prepared.set_metadata("audit_user", "admin");
+    /// prepared.commit()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn prepare_commit(&mut self) -> Result<crate::transaction::PreparedCommit<'_>> {
+        crate::transaction::PreparedCommit::new(self)
+    }
+
+    /// Sets auto-commit mode, which no longer changes how writes run. After `close()` it does
+    /// nothing; it returns a `Result` from 0.7.0.
+    ///
+    /// With no transaction open, every write statement and direct write
+    /// runs as a transaction of its own in either mode (#536): it commits
+    /// when it succeeds, and one that fails leaves nothing. Open a
+    /// transaction with [`begin_transaction`](Self::begin_transaction) to
+    /// make several writes commit together.
+    #[deprecated(
+        since = "0.6.0",
+        note = "writes outside a transaction always commit on their own (#536); \
+                use `begin_transaction` to group writes. Removed in 0.7.0"
+    )]
+    pub fn set_auto_commit(&mut self, auto_commit: bool) {
+        if let Ok(mut inner) = self.inner_mut() {
+            inner.set_auto_commit(auto_commit);
+        }
+    }
+
+    /// Returns the auto-commit setting, which no longer changes how writes
+    /// run (see [`set_auto_commit`](Self::set_auto_commit)). After `close()` it returns `false`; it
+    /// returns a `Result` from 0.7.0.
+    #[deprecated(
+        since = "0.6.0",
+        note = "writes outside a transaction always commit on their own (#536). \
+                Removed in 0.7.0"
+    )]
+    #[must_use]
+    pub fn auto_commit(&self) -> bool {
+        self.inner()
+            .map_or_else(|_| Default::default(), |inner| inner.auto_commit())
+    }
+
+    /// Whether `query`, in `language` (as [`execute_language`](Self::execute_language)
+    /// names it), writes: whether a read-only database or transaction
+    /// refuses it. It translates the statement as running it would, and runs
+    /// nothing. A write in the plan, a call of a stored procedure whose body
+    /// writes, schema DDL, `CREATE GRAPH`, `DROP GRAPH` and projections write;
+    /// a query, `EXPLAIN` of anything, `SHOW` and the session and transaction
+    /// commands do not. `PROFILE` runs its statement, so it writes when the
+    /// statement does.
+    ///
+    /// The command line tool opens a database read-only for a statement that
+    /// does not write.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the statement does not parse or translate, as running it
+    /// would, or when the build has no such language.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use grafeo_engine::GrafeoDB;
+    /// let db = GrafeoDB::new_in_memory();
+    /// let session = db.session();
+    /// assert!(!session.statement_writes("MATCH (n) RETURN n", "gql")?);
+    /// assert!(session.statement_writes("INSERT (:Person {name: 'Alix'})", "gql")?);
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
+    /// ```
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.0.
+    #[cfg(query_language)]
+    pub fn statement_writes(&self, query: &str, language: &str) -> Result<bool> {
+        self.inner()?.statement_writes(query, language)
+    }
+
+    /// Plans this session's queries with only the rules `rules` turns on, so
+    /// that a test can compare the plans: a rule changes how a query runs,
+    /// never what it answers. Not for tuning: every rule is on by default and
+    /// this may change in any release. After `close()` it does nothing; it returns a `Result` from
+    /// 0.7.0.
+    #[doc(hidden)]
+    #[cfg(query_language)]
+    pub fn set_planner_rules(&mut self, rules: crate::query::optimizer::PlannerRules) {
+        if let Ok(mut inner) = self.inner_mut() {
+            inner.set_planner_rules(rules);
+        }
+    }
+
+    /// Creates a node with the given labels and returns its ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the node violates the schema, for example a label
+    /// a closed graph type does not allow or a `NOT NULL` property it lacks.
+    pub fn create_node(&self, labels: &[&str]) -> Result<NodeId> {
+        self.inner()?.create_node(labels)
+    }
+
+    /// Creates a node with labels and properties and returns its ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the node violates the schema or a constraint, for
+    /// example a `UNIQUE` value another node already has.
+    pub fn create_node_with_props(
+        &self,
+        labels: &[&str],
+        properties: impl IntoIterator<Item = (impl Into<PropertyKey>, impl Into<Value>)>,
+    ) -> Result<NodeId> {
+        // The caller's iterator runs before the slot's lock: one that calls the database
+        // cannot deadlock against a close() waiting for it. A closed session pulls nothing.
+        drop(self.inner()?);
+        let properties: Vec<(PropertyKey, Value)> = properties
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+        self.inner()?.create_node_with_props(labels, properties)
+    }
+
+    /// Creates an edge between two existing nodes and returns its ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an endpoint does not exist or the edge violates the
+    /// schema (its type or its endpoints' labels).
+    pub fn create_edge(&self, src: NodeId, dst: NodeId, edge_type: &str) -> Result<EdgeId> {
+        self.inner()?.create_edge(src, dst, edge_type)
+    }
+
+    /// Creates an edge with properties between two existing nodes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an endpoint does not exist or the edge violates the
+    /// schema.
+    pub fn create_edge_with_props(
+        &self,
+        src: NodeId,
+        dst: NodeId,
+        edge_type: &str,
+        properties: impl IntoIterator<Item = (impl Into<PropertyKey>, impl Into<Value>)>,
+    ) -> Result<EdgeId> {
+        // As `create_node_with_props`: the caller's iterator runs before the slot's lock.
+        drop(self.inner()?);
+        let properties: Vec<(PropertyKey, Value)> = properties
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+        self.inner()?
+            .create_edge_with_props(src, dst, edge_type, properties)
+    }
+
+    /// Sets a property on a node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the node does not exist or the value violates a
+    /// constraint of its labels (type, `NOT NULL`, `UNIQUE`, size limit,
+    /// vector index size).
+    pub fn set_node_property(&self, id: NodeId, key: &str, value: Value) -> Result<()> {
+        self.inner()?.set_node_property(id, key, value)
+    }
+
+    /// Sets a property on an edge.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the edge does not exist or the value violates its
+    /// type.
+    pub fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) -> Result<()> {
+        self.inner()?.set_edge_property(id, key, value)
+    }
+
+    /// Removes a property from a node. Returns whether the node had it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a constraint requires the property (`NOT NULL`,
+    /// `NODE KEY`).
+    pub fn remove_node_property(&self, id: NodeId, key: &str) -> Result<bool> {
+        self.inner()?.remove_node_property(id, key)
+    }
+
+    /// Removes a property from an edge. Returns whether the edge had it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the edge's type requires the property.
+    pub fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<bool> {
+        self.inner()?.remove_edge_property(id, key)
+    }
+
+    /// Adds a label to a node. Returns `true` if the label was added, `false`
+    /// if the node doesn't exist or already has it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the node violates a constraint of the new label.
+    pub fn add_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
+        self.inner()?.add_node_label(id, label)
+    }
+
+    /// Removes a label from a node. Returns `true` if the label was removed,
+    /// `false` if the node doesn't exist or doesn't have it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if another transaction is writing the node.
+    pub fn remove_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
+        self.inner()?.remove_node_label(id, label)
+    }
+
+    /// Deletes a node and returns whether it existed.
+    ///
+    /// A node that still has edges is not deleted: delete them first with
+    /// [`delete_edge`](Self::delete_edge), or use `DETACH DELETE` in a query.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the node still has edges.
+    pub fn delete_node(&self, id: NodeId) -> Result<bool> {
+        self.inner()?.delete_node(id)
+    }
+
+    /// Deletes a node with all its edges, as `DETACH DELETE` does, and
+    /// returns whether the node existed: one change of the write, so the
+    /// node and its edges commit, roll back and replay together. Change data
+    /// capture reports a Delete event per edge, each naming the node in
+    /// `deleted_with`, then the node's.
+    ///
+    /// # Errors
+    ///
+    /// Returns a write conflict with another transaction that writes the
+    /// node or one of its edges, or creates an edge to it.
+    pub fn detach_delete_node(&self, id: NodeId) -> Result<bool> {
+        self.inner()?.detach_delete_node(id)
+    }
+
+    /// Deletes an edge and returns whether it existed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if another transaction is writing the edge.
+    pub fn delete_edge(&self, id: EdgeId) -> Result<bool> {
+        self.inner()?.delete_edge(id)
+    }
+
+    /// Creates one node per vector, each with `label` and the vector as
+    /// `property`, in one transaction. Returns the IDs in input order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first node's error (for example a vector of another size
+    /// than the property's vector index); nothing of the batch is created then.
+    pub fn batch_create_nodes(
+        &self,
+        label: &str,
+        property: &str,
+        vectors: Vec<Vec<f32>>,
+    ) -> Result<Vec<NodeId>> {
+        self.inner()?.batch_create_nodes(label, property, vectors)
+    }
+
+    /// Creates one node with `label` per property map, in one transaction.
+    /// Returns the IDs in input order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first node's error (for example a `UNIQUE` value that
+    /// another node, or an earlier node of the batch, already has); nothing of
+    /// the batch is created then.
+    pub fn batch_create_nodes_with_props(
+        &self,
+        label: &str,
+        properties_list: Vec<std::collections::HashMap<PropertyKey, Value>>,
+    ) -> Result<Vec<NodeId>> {
+        self.inner()?
+            .batch_create_nodes_with_props(label, properties_list)
+    }
+
+    /// Creates one node with all of `labels` per property map, in one
+    /// transaction. Returns the IDs in input order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first node's error; nothing of the batch is created then.
+    pub fn batch_create_nodes_with_labels(
+        &self,
+        labels: &[&str],
+        properties_list: Vec<std::collections::HashMap<PropertyKey, Value>>,
+    ) -> Result<Vec<NodeId>> {
+        self.inner()?
+            .batch_create_nodes_with_labels(labels, properties_list)
+    }
+
+    /// Creates the edges, each with its own endpoints, type and properties,
+    /// in one transaction. Returns the IDs in input order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first edge's error (an endpoint that does not exist, or a
+    /// schema violation); nothing of the batch is created then.
+    pub fn batch_create_edges(&self, edges: Vec<direct::BatchEdge>) -> Result<Vec<EdgeId>> {
+        self.inner()?.batch_create_edges(edges)
+    }
+
+    /// Loads the CSV file at `path` as nodes, as `spec` describes (see
+    /// [`GrafeoDB::load_nodes_csv`](crate::GrafeoDB::load_nodes_csv)), in
+    /// the session's open transaction, or in one of its own.
+    ///
+    /// # Errors
+    ///
+    /// As [`GrafeoDB::load_nodes_csv`](crate::GrafeoDB::load_nodes_csv).
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.1.
+    pub fn load_nodes_csv(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        spec: &crate::loader::NodeLoad,
+    ) -> Result<crate::loader::LoadReport> {
+        self.inner()?.load_nodes_csv(path, spec)
+    }
+
+    /// Loads the CSV file at `path` as edges, as `spec` describes (see
+    /// [`GrafeoDB::load_edges_csv`](crate::GrafeoDB::load_edges_csv)), in
+    /// the session's open transaction, or in one of its own.
+    ///
+    /// # Errors
+    ///
+    /// As [`GrafeoDB::load_edges_csv`](crate::GrafeoDB::load_edges_csv).
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.1.
+    pub fn load_edges_csv(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        spec: &crate::loader::EdgeLoad,
+    ) -> Result<crate::loader::LoadReport> {
+        self.inner()?.load_edges_csv(path, spec)
+    }
+
+    /// Finds the nodes of the session's graph that have a property value.
+    ///
+    /// With a property index on `property` this is a lookup, otherwise a scan
+    /// of the committed nodes. Returns the nodes the session sees: in a
+    /// transaction, its own writes found through the index included.
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do.
+    pub fn find_nodes_by_property(&self, property: &str, value: &Value) -> Result<Vec<NodeId>> {
+        self.inner()?.find_nodes_by_property(property, value)
+    }
+
+    /// Creates an index on a node property of the session's graph. Commits
+    /// are held off while it is built, as for `CREATE INDEX`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database-closed error after `close()`, and the incomplete-commit error after a
+    /// commit that did not complete.
+    pub fn create_property_index(&self, property: &str) -> Result<()> {
+        self.inner()?.create_property_index(property)
+    }
+
+    /// Drops every index on a node property of the session's graph: the one on every label and
+    /// each one on a label. Returns whether there was one.
+    ///
+    /// # Errors
+    ///
+    /// As [`create_property_index`](Self::create_property_index).
+    pub fn drop_property_index(&self, property: &str) -> Result<bool> {
+        self.inner()?.drop_property_index(property)
+    }
+
+    /// Returns whether a node property of the session's graph has an index. After `close()` it
+    /// returns `false`; it returns a `Result` from 0.7.0.
+    #[must_use]
+    pub fn has_property_index(&self, property: &str) -> bool {
+        self.inner().map_or_else(
+            |_| Default::default(),
+            |inner| inner.has_property_index(property),
+        )
+    }
 
     /// Gets a node by ID directly, bypassing query planning.
     ///
@@ -7914,8 +8603,7 @@ impl Session {
     /// The error of a read the store cannot do, or an epoch before retained
     /// history. A read that fails is never an absent node.
     pub fn get_node(&self, id: NodeId) -> Result<Option<Node>> {
-        let (view, _pin) = self.read_view()?;
-        self.active_store().node(id, view)
+        self.inner()?.get_node(id)
     }
 
     /// Gets a single property from a node by ID, bypassing query planning.
@@ -7946,8 +8634,7 @@ impl Session {
     ///
     /// As [`get_node`](Self::get_node).
     pub fn get_node_property(&self, id: NodeId, key: &str) -> Result<Option<Value>> {
-        let (view, _pin) = self.read_view()?;
-        self.active_store().node_property(id, key, view)
+        self.inner()?.get_node_property(id, key)
     }
 
     /// Gets an edge by ID directly, bypassing query planning.
@@ -7961,8 +8648,7 @@ impl Session {
     ///
     /// As [`get_node`](Self::get_node).
     pub fn get_edge(&self, id: EdgeId) -> Result<Option<Edge>> {
-        let (view, _pin) = self.read_view()?;
-        self.active_store().edge(id, view)
+        self.inner()?.get_edge(id)
     }
 
     /// The edges of a node in `direction` as `(neighbor, edge)` pairs, as the
@@ -7980,14 +8666,7 @@ impl Session {
         direction: Direction,
         edge_types: &[&str],
     ) -> Result<Vec<(NodeId, EdgeId)>> {
-        let (view, _pin) = self.read_view()?;
-        crate::database::direct::node_edges(
-            &*self.active_store(),
-            node,
-            direction,
-            edge_types,
-            view,
-        )
+        self.inner()?.get_node_edges(node, direction, edge_types)
     }
 
     /// Gets outgoing neighbors of a node directly, bypassing query planning.
@@ -8020,7 +8699,7 @@ impl Session {
     ///
     /// As [`get_node`](Self::get_node).
     pub fn get_neighbors_outgoing(&self, node: NodeId) -> Result<Vec<(NodeId, EdgeId)>> {
-        self.get_node_edges(node, Direction::Outgoing, &[])
+        self.inner()?.get_neighbors_outgoing(node)
     }
 
     /// Gets incoming neighbors of a node directly, bypassing query planning.
@@ -8036,7 +8715,7 @@ impl Session {
     ///
     /// As [`get_node`](Self::get_node).
     pub fn get_neighbors_incoming(&self, node: NodeId) -> Result<Vec<(NodeId, EdgeId)>> {
-        self.get_node_edges(node, Direction::Incoming, &[])
+        self.inner()?.get_neighbors_incoming(node)
     }
 
     /// Gets outgoing neighbors filtered by edge type, bypassing query planning.
@@ -8059,7 +8738,8 @@ impl Session {
         node: NodeId,
         edge_type: &str,
     ) -> Result<Vec<(NodeId, EdgeId)>> {
-        self.get_node_edges(node, Direction::Outgoing, &[edge_type])
+        self.inner()?
+            .get_neighbors_outgoing_by_type(node, edge_type)
     }
 
     /// Checks if a node exists, bypassing query planning.
@@ -8073,8 +8753,7 @@ impl Session {
     ///
     /// As [`get_node`](Self::get_node).
     pub fn node_exists(&self, id: NodeId) -> Result<bool> {
-        let (view, _pin) = self.read_view()?;
-        self.active_store().is_node_visible(id, view)
+        self.inner()?.node_exists(id)
     }
 
     /// Checks if an edge exists, bypassing query planning.
@@ -8083,8 +8762,7 @@ impl Session {
     ///
     /// As [`get_node`](Self::get_node).
     pub fn edge_exists(&self, id: EdgeId) -> Result<bool> {
-        let (view, _pin) = self.read_view()?;
-        self.active_store().is_edge_visible(id, view)
+        self.inner()?.edge_exists(id)
     }
 
     /// Gets the degree (number of edges) of a node.
@@ -8095,11 +8773,7 @@ impl Session {
     ///
     /// As [`get_node`](Self::get_node).
     pub fn get_degree(&self, node: NodeId) -> Result<(usize, usize)> {
-        let (view, _pin) = self.read_view()?;
-        let active = self.active_store();
-        let out = active.degree(node, Direction::Outgoing, view)?;
-        let in_degree = active.degree(node, Direction::Incoming, view)?;
-        Ok((out, in_degree))
+        self.inner()?.get_degree(node)
     }
 
     /// Batch lookup of multiple nodes by ID.
@@ -8116,12 +8790,8 @@ impl Session {
     ///
     /// As [`get_node`](Self::get_node).
     pub fn get_nodes_batch(&self, ids: &[NodeId]) -> Result<Vec<Option<Node>>> {
-        let (view, _pin) = self.read_view()?;
-        let active = self.active_store();
-        ids.iter().map(|&id| active.node(id, view)).collect()
+        self.inner()?.get_nodes_batch(ids)
     }
-
-    // ── Change Data Capture ─────────────────────────────────────────────
 
     /// Returns the full change history for an entity (node or edge) of the
     /// session's current graph, up to the current epoch: a commit's events
@@ -8135,13 +8805,7 @@ impl Session {
         &self,
         entity_id: impl Into<crate::cdc::EntityId>,
     ) -> Result<Vec<crate::cdc::ChangeEvent>> {
-        self.require_permission(crate::auth::StatementKind::Read)?;
-        let epoch = self.transaction_manager.current_epoch();
-        let mut events = self
-            .cdc_log
-            .history_in(self.active_graph_storage_key().as_deref(), entity_id.into());
-        events.retain(|event| event.epoch <= epoch);
-        Ok(events)
+        self.inner()?.history(entity_id)
     }
 
     /// Returns change events for an entity of the session's current graph
@@ -8156,15 +8820,7 @@ impl Session {
         entity_id: impl Into<crate::cdc::EntityId>,
         since_epoch: EpochId,
     ) -> Result<Vec<crate::cdc::ChangeEvent>> {
-        self.require_permission(crate::auth::StatementKind::Read)?;
-        let epoch = self.transaction_manager.current_epoch();
-        let mut events = self.cdc_log.history_since_in(
-            self.active_graph_storage_key().as_deref(),
-            entity_id.into(),
-            since_epoch,
-        );
-        events.retain(|event| event.epoch <= epoch);
-        Ok(events)
+        self.inner()?.history_since(entity_id, since_epoch)
     }
 
     /// Returns all change events across all entities and graphs in an epoch
@@ -8179,92 +8835,7 @@ impl Session {
         start_epoch: EpochId,
         end_epoch: EpochId,
     ) -> Result<Vec<crate::cdc::ChangeEvent>> {
-        self.require_permission(crate::auth::StatementKind::Read)?;
-        let end_epoch = self.transaction_manager.readable_epoch(end_epoch);
-        Ok(self.cdc_log.changes_between(start_epoch, end_epoch))
-    }
-}
-
-/// `error`, the error of a statement whose writes were rolled back by
-/// `rollback`, telling also that the rollback failed (which poisoned the
-/// database) when it did. The statement's error is the one to report either
-/// way.
-fn with_failed_rollback(
-    error: grafeo_common::utils::error::Error,
-    rollback: Result<()>,
-) -> grafeo_common::utils::error::Error {
-    match rollback {
-        Err(failed) => grafeo_common::utils::error::Error::Internal(format!(
-            "{error}; the statement's writes could not be rolled back: {failed}"
-        )),
-        Ok(()) => error,
-    }
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        // Auto-rollback any active transaction to prevent leaked MVCC state,
-        // dangling write locks, and uncommitted versions lingering in the store.
-        // With a transaction open, an owned stream still open reads it no
-        // more: it fails on its next pull, so the rollback goes ahead under
-        // it. A nested transaction rolls back level by level, so every level
-        // goes. Without one, a stream holds its own snapshot pin and reads on
-        // after the session is gone (a binding's lazy stream does).
-        if self.in_transaction() {
-            self.ended.store(true, std::sync::atomic::Ordering::Release);
-        }
-        while self.in_transaction() {
-            if self.rollback_regardless_of_streams().is_err() {
-                break;
-            }
-        }
-
-        #[cfg(feature = "metrics")]
-        if let Some(ref reg) = self.metrics {
-            reg.session_active
-                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-}
-
-/// The memory of one statement of `session`: its cap and the buffer manager
-/// its operators take their grants from (see
-/// [`Session::make_operator_memory_context`]).
-#[cfg(all(feature = "spill", any(lpg_language, rdf_language)))]
-fn statement_memory(session: &Session) -> grafeo_core::execution::StatementMemory {
-    grafeo_core::execution::StatementMemory::of(session.make_operator_memory_context())
-}
-
-/// The memory of one statement: without spilling, operators take no grants.
-#[cfg(all(not(feature = "spill"), any(lpg_language, rdf_language)))]
-fn statement_memory(_session: &Session) -> grafeo_core::execution::StatementMemory {
-    grafeo_core::execution::StatementMemory::Unbudgeted
-}
-
-/// The parameter values to fill into `plan`: `None` for an empty map when the
-/// plan has no defaults either, after checking that the plan names no
-/// parameter (it fails like any missing value). A statement without
-/// parameters then uses its cached plan, like the same call without a map.
-#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq"))]
-fn params_to_fill<'a>(
-    plan: &mut crate::query::plan::LogicalPlan,
-    params: Option<&'a std::collections::HashMap<String, Value>>,
-) -> Result<Option<&'a std::collections::HashMap<String, Value>>> {
-    match params {
-        Some(values) if values.is_empty() && plan.default_params.is_empty() => {
-            crate::query::processor::substitute_params(plan, values)?;
-            Ok(None)
-        }
-        // An EXPLAIN without parameters shows the plan with them unresolved.
-        None if plan.explain && plan.default_params.is_empty() => Ok(None),
-        // No parameters: the plan's defaults fill what they can, and a
-        // parameter nobody supplied fails here, before planning.
-        None => {
-            let defaults = plan.default_params.clone();
-            crate::query::processor::substitute_params(plan, &defaults)?;
-            Ok(None)
-        }
-        other => Ok(other),
+        self.inner()?.changes_between(start_epoch, end_epoch)
     }
 }
 
@@ -8371,19 +8942,21 @@ mod tests {
         let mut session = db.session();
 
         // Without transaction - context should have current epoch and no transaction_id
-        let (_epoch1, transaction_id1, _pin1) = session.get_transaction_context().unwrap();
+        let (_epoch1, transaction_id1, _pin1) =
+            session.inner().unwrap().get_transaction_context().unwrap();
         assert!(transaction_id1.is_none());
 
         // Start a transaction
         session.begin_transaction().unwrap();
-        let (epoch2, transaction_id2, _pin2) = session.get_transaction_context().unwrap();
+        let (epoch2, transaction_id2, _pin2) =
+            session.inner().unwrap().get_transaction_context().unwrap();
         assert!(transaction_id2.is_some());
         // Transaction should have a valid epoch
         let _ = epoch2; // Use the variable
 
         // Commit and verify
         session.commit().unwrap();
-        let (epoch3, tx_id3, _pin3) = session.get_transaction_context().unwrap();
+        let (epoch3, tx_id3, _pin3) = session.inner().unwrap().get_transaction_context().unwrap();
         assert!(tx_id3.is_none());
         // Epoch should have advanced after commit
         assert!(epoch3.as_u64() >= epoch2.as_u64());
@@ -8401,9 +8974,11 @@ mod tests {
         let db = GrafeoDB::new_in_memory();
         let (session, other) = (db.session(), db.session());
         other.execute("INSERT (:Person {name: 'Alix'})").unwrap();
-        let manager = &db.transaction_manager;
+        let manager = &db.live().unwrap().transaction_manager;
         let pinned = manager.current_epoch();
         session
+            .inner()
+            .unwrap()
             .in_statement_transaction(false, || {
                 other.execute("INSERT (:Person {name: 'Gus'})").unwrap();
                 assert!(manager.current_epoch() > pinned, "the insert published");
@@ -8413,11 +8988,14 @@ mod tests {
             .unwrap();
         assert_eq!(manager.read_horizon(), manager.current_epoch());
 
-        let failed: Result<()> = session.in_statement_transaction(false, || {
-            other.execute("INSERT (:Person {name: 'Mia'})").unwrap();
-            assert!(manager.read_horizon() < manager.current_epoch());
-            Err(Error::Internal("the read fails".to_string()))
-        });
+        let failed: Result<()> = session
+            .inner()
+            .unwrap()
+            .in_statement_transaction(false, || {
+                other.execute("INSERT (:Person {name: 'Mia'})").unwrap();
+                assert!(manager.read_horizon() < manager.current_epoch());
+                Err(Error::Internal("the read fails".to_string()))
+            });
         assert!(failed.is_err());
         assert_eq!(manager.read_horizon(), manager.current_epoch());
     }
@@ -8438,21 +9016,24 @@ mod tests {
             let mut session = db.session();
             session.begin_transaction().unwrap();
             session.set_viewing_epoch(earlier);
-            let manager = &db.transaction_manager;
+            let manager = &db.live().unwrap().transaction_manager;
 
             let result = catch_unwind(AssertUnwindSafe(|| {
-                session.in_statement_transaction(false, || -> Result<()> {
-                    drop(bootstrap);
-                    db.execute("INSERT (:Person {name: 'Mia'})").unwrap();
-                    db.gc();
-                    assert_eq!(manager.read_horizon(), earlier, "the historical statement");
-                    assert_eq!(manager.history_floor(), earlier);
-                    match outcome {
-                        0 => Ok(()),
-                        1 => Err(Error::Internal("read failed".to_string())),
-                        _ => panic!("historical statement unwinds"),
-                    }
-                })
+                session
+                    .inner()
+                    .unwrap()
+                    .in_statement_transaction(false, || -> Result<()> {
+                        drop(bootstrap);
+                        db.execute("INSERT (:Person {name: 'Mia'})").unwrap();
+                        db.gc();
+                        assert_eq!(manager.read_horizon(), earlier, "the historical statement");
+                        assert_eq!(manager.history_floor(), earlier);
+                        match outcome {
+                            0 => Ok(()),
+                            1 => Err(Error::Internal("read failed".to_string())),
+                            _ => panic!("historical statement unwinds"),
+                        }
+                    })
             }));
             match outcome {
                 0 => result.unwrap().unwrap(),
@@ -8501,14 +9082,20 @@ mod tests {
         session.begin_transaction().unwrap();
         session.set_viewing_epoch(earlier);
         {
-            let (epoch, transaction, _pin) = session.get_transaction_context().unwrap();
+            let (epoch, transaction, _pin) =
+                session.inner().unwrap().get_transaction_context().unwrap();
             drop(bootstrap);
             session.clear_viewing_epoch();
             db.execute("MATCH (p:Person) SET p.age = 3").unwrap();
             db.gc();
-            assert_eq!(db.transaction_manager.history_floor(), earlier);
             assert_eq!(
-                db.lpg_store()
+                db.live().unwrap().transaction_manager.history_floor(),
+                earlier
+            );
+            assert_eq!(
+                db.live()
+                    .unwrap()
+                    .lpg_store()
                     .unwrap()
                     .node_property(id, "age", ReadView::new(epoch, transaction))
                     .unwrap(),
@@ -8516,7 +9103,10 @@ mod tests {
             );
         }
         db.gc();
-        assert_eq!(db.transaction_manager.history_floor(), snapshot);
+        assert_eq!(
+            db.live().unwrap().transaction_manager.history_floor(),
+            snapshot
+        );
         session.rollback().unwrap();
     }
 
@@ -8527,7 +9117,7 @@ mod tests {
     fn a_stream_outside_a_transaction_holds_the_read_horizon_while_it_lives() {
         let db = GrafeoDB::new_in_memory();
         db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
-        let manager = &db.transaction_manager;
+        let manager = &db.live().unwrap().transaction_manager;
         let pinned = manager.current_epoch();
         let session = db.session();
         let stream = session
@@ -8575,7 +9165,7 @@ mod tests {
         // Start a transaction and create a node through the session
         let mut session = db.session();
         session.begin_transaction().unwrap();
-        let transaction_id = session.current_transaction.lock().unwrap();
+        let transaction_id = session.inner().unwrap().current_transaction.lock().unwrap();
 
         // Create a node through session.create_node() - should be versioned with tx
         let node_in_tx = session.create_node(&["Person"]).unwrap();
@@ -8588,9 +9178,11 @@ mod tests {
             1,
             "PENDING nodes should be invisible to non-versioned node_count()"
         );
-        let epoch = db.lpg_store().unwrap().current_epoch();
+        let epoch = db.live().unwrap().lpg_store().unwrap().current_epoch();
         assert!(
-            db.lpg_store()
+            db.live()
+                .unwrap()
+                .lpg_store()
                 .unwrap()
                 .node(node_in_tx, ReadView::transaction(transaction_id, epoch))
                 .unwrap()
@@ -8627,7 +9219,7 @@ mod tests {
         // Start a transaction and create a node with properties
         let mut session = db.session();
         session.begin_transaction().unwrap();
-        let transaction_id = session.current_transaction.lock().unwrap();
+        let transaction_id = session.inner().unwrap().current_transaction.lock().unwrap();
 
         let node_in_tx = session
             .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
@@ -8641,9 +9233,11 @@ mod tests {
             1,
             "PENDING nodes should be invisible to non-versioned node_count()"
         );
-        let epoch = db.lpg_store().unwrap().current_epoch();
+        let epoch = db.live().unwrap().lpg_store().unwrap().current_epoch();
         assert!(
-            db.lpg_store()
+            db.live()
+                .unwrap()
+                .lpg_store()
                 .unwrap()
                 .node(node_in_tx, ReadView::transaction(transaction_id, epoch))
                 .unwrap()
@@ -8679,11 +9273,22 @@ mod tests {
                 crate::config::Config::in_memory().with_spill_path(dir.path().join("spill"));
             let db = GrafeoDB::with_config(config).unwrap();
             let session = db.session();
-            let before = session.commit_counter.load(Ordering::Relaxed);
+            let before = session
+                .inner()
+                .unwrap()
+                .commit_counter
+                .load(Ordering::Relaxed);
             for _ in 0..5 {
                 session.execute("MATCH (n) RETURN count(n) AS c").unwrap();
             }
-            assert_eq!(session.commit_counter.load(Ordering::Relaxed), before);
+            assert_eq!(
+                session
+                    .inner()
+                    .unwrap()
+                    .commit_counter
+                    .load(Ordering::Relaxed),
+                before
+            );
             assert!(!dir.path().join("spill").exists());
         }
 
@@ -9323,7 +9928,7 @@ mod tests {
         let session = db.session();
 
         // Verify the session has a query deadline (timeout was set)
-        assert!(session.query_deadline().is_some());
+        assert!(session.inner().unwrap().query_deadline().is_some());
     }
 
     #[cfg(query_language)]
@@ -9333,7 +9938,7 @@ mod tests {
         let session = db.session();
 
         // Default config has 30s timeout
-        assert!(session.query_deadline().is_some());
+        assert!(session.inner().unwrap().query_deadline().is_some());
     }
 
     #[cfg(query_language)]
@@ -9345,7 +9950,7 @@ mod tests {
         let db = GrafeoDB::with_config(config).unwrap();
         let session = db.session();
 
-        assert!(session.query_deadline().is_none());
+        assert!(session.inner().unwrap().query_deadline().is_none());
     }
 
     #[test]
@@ -9912,6 +10517,8 @@ mod tests {
 
         assert_eq!(
             session
+                .inner()
+                .unwrap()
                 .active_store()
                 .node_count(ReadView::latest())
                 .unwrap(),
@@ -9919,8 +10526,16 @@ mod tests {
         );
         assert!(
             session
+                .inner()
+                .unwrap()
                 .stores
-                .write_store_for_key(session.active_graph_storage_key().as_deref())
+                .write_store_for_key(
+                    session
+                        .inner()
+                        .unwrap()
+                        .active_graph_storage_key()
+                        .as_deref()
+                )
                 .is_none()
         );
     }
@@ -9944,6 +10559,8 @@ mod tests {
         let mut session = db.session();
         session.begin_transaction().unwrap();
         let recording = session
+            .inner()
+            .unwrap()
             .graph_access(true)
             .recording(Some("trips"))
             .unwrap()
@@ -9990,6 +10607,8 @@ mod tests {
 
         // Written first: the drop is refused, and the write commits.
         session
+            .inner()
+            .unwrap()
             .write(|writer| {
                 writer.create_node(&city(), Vec::new())?;
                 let refused = db.drop_graph("trips").unwrap_err();
@@ -10001,6 +10620,8 @@ mod tests {
 
         // Dropped first: the write is refused and leaves nothing.
         let refused = session
+            .inner()
+            .unwrap()
             .write(|writer| {
                 assert!(
                     db.drop_graph("trips").unwrap(),
@@ -10017,7 +10638,12 @@ mod tests {
             "nothing landed in the default graph instead"
         );
 
-        let wal = db.wal().expect("a persistent database logs");
+        let wal = db
+            .live()
+            .unwrap()
+            .wal()
+            .cloned()
+            .expect("a persistent database logs");
         wal.sync().unwrap();
         let mut records = Vec::new();
         let mut scan = WalScan::open(wal.dir(), wal.scan_options(0)).unwrap();

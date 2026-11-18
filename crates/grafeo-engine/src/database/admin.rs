@@ -8,61 +8,31 @@ use grafeo_common::utils::error::Result;
 use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
-impl super::GrafeoDB {
+impl super::Open {
     // =========================================================================
     // ADMIN API: Counts
     // =========================================================================
 
-    /// Returns the number of nodes in the database, as of the current epoch
-    /// (see [`current_epoch`](Self::current_epoch)).
-    ///
-    /// # Errors
-    ///
-    /// The error of a read the store cannot do (an external store's own).
-    pub fn node_count(&self) -> Result<usize> {
+    pub(crate) fn node_count(&self) -> Result<usize> {
         let snapshot = self.default_snapshot();
         snapshot.store().node_count(snapshot.view())
     }
 
-    /// Returns the number of edges in the database, as of the current epoch
-    /// (see [`current_epoch`](Self::current_epoch)).
-    ///
-    /// # Errors
-    ///
-    /// As [`node_count`](Self::node_count).
-    pub fn edge_count(&self) -> Result<usize> {
+    pub(crate) fn edge_count(&self) -> Result<usize> {
         let snapshot = self.default_snapshot();
         snapshot.store().edge_count(snapshot.view())
     }
 
-    /// Returns the number of distinct labels in the database.
-    ///
-    /// # Errors
-    ///
-    /// As [`node_count`](Self::node_count).
-    pub fn label_count(&self) -> Result<usize> {
+    pub(crate) fn label_count(&self) -> Result<usize> {
         let snapshot = self.default_snapshot();
         Ok(snapshot.store().labels_in_use(snapshot.view())?.len())
     }
 
-    /// Returns the number of distinct property keys ever written to the
-    /// database, of nodes and edges together: not the keys in use now. A key
-    /// stays counted after every value of it is removed or deleted, and
-    /// after the transaction that wrote it rolled back.
-    ///
-    /// # Errors
-    ///
-    /// As [`node_count`](Self::node_count).
-    pub fn property_key_count(&self) -> Result<usize> {
+    pub(crate) fn property_key_count(&self) -> Result<usize> {
         Ok(self.graph_store().all_property_keys()?.len())
     }
 
-    /// Returns the number of distinct edge types in the database.
-    ///
-    /// # Errors
-    ///
-    /// As [`node_count`](Self::node_count).
-    pub fn edge_type_count(&self) -> Result<usize> {
+    pub(crate) fn edge_type_count(&self) -> Result<usize> {
         let snapshot = self.default_snapshot();
         Ok(snapshot.store().edge_types_in_use(snapshot.view())?.len())
     }
@@ -71,30 +41,12 @@ impl super::GrafeoDB {
     // ADMIN API: Introspection
     // =========================================================================
 
-    /// Returns true if this database is backed by a file (persistent).
-    ///
-    /// In-memory databases return false.
     #[must_use]
-    pub fn is_persistent(&self) -> bool {
+    pub(crate) fn is_persistent(&self) -> bool {
         self.config.path().is_some()
     }
 
-    /// Returns the database file path, if persistent.
-    ///
-    /// In-memory databases return None.
-    #[must_use]
-    pub fn path(&self) -> Option<&Path> {
-        self.config.path()
-    }
-
-    /// Returns high-level database information.
-    ///
-    /// Includes node/edge counts, persistence status, and mode (LPG/RDF).
-    ///
-    /// # Errors
-    ///
-    /// As [`node_count`](Self::node_count).
-    pub fn info(&self) -> Result<crate::admin::DatabaseInfo> {
+    pub(crate) fn info(&self) -> Result<crate::admin::DatabaseInfo> {
         // One pinned state for both counts.
         let snapshot = self.default_snapshot();
         let (store, view) = (snapshot.store(), snapshot.view());
@@ -146,18 +98,8 @@ impl super::GrafeoDB {
         })
     }
 
-    /// Returns a hierarchical memory usage breakdown.
-    ///
-    /// The store, its indexes, its versions and its dictionaries come from
-    /// the store's account (counted as they grow, so the report takes time
-    /// independent of the store's size), the rest from the caches, string
-    /// pools and buffer manager, each as estimated heap bytes. Safe to call
-    /// concurrently with queries. On a database on a backend of its own the
-    /// store, its indexes and its versions are the backend's, which the
-    /// engine does not measure: they count as zero, and the rest (caches,
-    /// buffers, the catalog) is the engine's own.
     #[must_use]
-    pub fn memory_usage(&self) -> crate::memory_usage::MemoryUsage {
+    pub(crate) fn memory_usage(&self) -> crate::memory_usage::MemoryUsage {
         use crate::memory_usage::{BufferManagerMemory, CacheMemory, MemoryUsage};
         use grafeo_common::memory::MemoryRegion;
 
@@ -242,14 +184,7 @@ impl super::GrafeoDB {
         usage
     }
 
-    /// Returns detailed database statistics.
-    ///
-    /// Includes counts, memory usage, and index information.
-    ///
-    /// # Errors
-    ///
-    /// As [`node_count`](Self::node_count).
-    pub fn detailed_stats(&self) -> Result<crate::admin::DatabaseStats> {
+    pub(crate) fn detailed_stats(&self) -> Result<crate::admin::DatabaseStats> {
         #[cfg(feature = "wal")]
         let disk_bytes = self.config.path().as_ref().and_then(|p| {
             // The spelling the files are named after: the caller's (`db/`)
@@ -340,30 +275,14 @@ impl super::GrafeoDB {
         })
     }
 
-    /// Returns schema information: the labels, edge types and property keys
-    /// in use, each label and edge type with its count and its properties'
-    /// value types, and the labels each edge type connects.
-    ///
-    /// It reads the whole graph, as a committed reader at the current epoch
-    /// sees it, all of the report in one pinned state.
-    ///
-    /// # Errors
-    ///
-    /// As [`node_count`](Self::node_count).
-    pub fn schema(&self) -> Result<crate::admin::SchemaInfo> {
+    pub(crate) fn schema(&self) -> Result<crate::admin::SchemaInfo> {
         let snapshot = self.default_snapshot();
         let summary = crate::admin::LpgSchemaInfo::in_use(snapshot.store(), snapshot.view())?;
         Ok(crate::admin::SchemaInfo::Lpg(summary))
     }
 
-    /// Returns detailed information about the current graph's indexes: the
-    /// ones `CREATE INDEX` made, by the name it gave them, as `SHOW INDEXES`
-    /// lists them, and the ones made through the API, whose `name` is empty.
-    /// A name whose index only another graph has is not listed. The target
-    /// of a property index made through the API, which covers every label,
-    /// has an empty label (`:age`).
     #[must_use]
-    pub fn list_indexes(&self) -> Vec<crate::admin::IndexInfo> {
+    pub(crate) fn list_indexes(&self) -> Vec<crate::admin::IndexInfo> {
         let store = self.current_lpg_store().ok();
         super::index::listed_indexes(&self.catalog, store.as_deref(), |target| {
             store
@@ -382,14 +301,9 @@ impl super::GrafeoDB {
         .collect()
     }
 
-    /// The types whose rules an older release applied in graphs not bound to their graph
-    /// type: since 0.6.2 a type a graph type lists applies only in its graphs, so a database
-    /// written before may hold elements those rules no longer check. One warning per type,
-    /// from the counts the store keeps, so no scan. For [`validate`](Self::validate), and
-    /// for a binding to tell at open.
     #[doc(hidden)]
     #[must_use]
-    pub fn graph_type_scope_warnings(&self) -> Vec<crate::admin::ValidationWarning> {
+    pub(crate) fn graph_type_scope_warnings(&self) -> Vec<crate::admin::ValidationWarning> {
         type Listed<'a> = &'a dyn Fn(&crate::catalog::GraphTypeDefinition) -> bool;
         type Held<'a> = &'a dyn Fn(&grafeo_core::graph::rowgroup::RowGroupStore) -> bool;
 
@@ -605,20 +519,7 @@ impl super::GrafeoDB {
         Ok(warnings)
     }
 
-    /// Validates database integrity.
-    ///
-    /// Checks for:
-    /// - Dangling edge references (edges pointing to non-existent nodes)
-    /// - Internal index consistency
-    ///
-    /// Returns a list of errors and warnings. Empty errors = valid. Reads
-    /// the database as of the current epoch.
-    ///
-    /// # Errors
-    ///
-    /// As [`node_count`](Self::node_count): a read that fails is an error,
-    /// not a finding.
-    pub fn validate(&self) -> Result<crate::admin::ValidationResult> {
+    pub(crate) fn validate(&self) -> Result<crate::admin::ValidationResult> {
         let mut result = crate::admin::ValidationResult::default();
         // The graph as queries see it at the current epoch, one pinned state
         // for every check.
@@ -691,23 +592,7 @@ impl super::GrafeoDB {
         None
     }
 
-    /// Changes when this database checkpoints by itself (#426): when the
-    /// interval has passed since its last automatic checkpoint, or once the
-    /// WAL holds the given bytes since the last checkpoint. The new triggers
-    /// replace the ones in force (from
-    /// [`Config::with_checkpoint_interval`](crate::Config::with_checkpoint_interval)
-    /// and [`Config::with_checkpoint_wal_size`](crate::Config::with_checkpoint_wal_size),
-    /// or an earlier call), until the database closes; the file does not
-    /// store them. [`CheckpointTriggers::none`](crate::admin::CheckpointTriggers::none)
-    /// turns automatic checkpoints off.
-    ///
-    /// # Errors
-    ///
-    /// A zero interval, a size below 1 MiB (the error an open gives for
-    /// such a `Config::with_checkpoint_wal_size`), a database without a file
-    /// (in memory) or opened read-only, which never checkpoints, and the
-    /// database-closed error after `close()`.
-    pub fn set_checkpoint_triggers(
+    pub(crate) fn set_checkpoint_triggers(
         &self,
         triggers: crate::admin::CheckpointTriggers,
     ) -> Result<()> {
@@ -738,12 +623,8 @@ impl super::GrafeoDB {
         ))
     }
 
-    /// How the automatic checkpoints fare: the triggers in force, the last
-    /// checkpoint of any kind, and the automatic ones that failed since the
-    /// last that succeeded, with the last error. A failed automatic
-    /// checkpoint is also logged as a warning, and retried after a pause.
     #[must_use]
-    pub fn checkpoint_status(&self) -> crate::admin::CheckpointStatus {
+    pub(crate) fn checkpoint_status(&self) -> crate::admin::CheckpointStatus {
         let status = crate::admin::CheckpointStatus {
             last_checkpoint: self.last_checkpoint_seconds(),
             ..crate::admin::CheckpointStatus::default()
@@ -763,11 +644,8 @@ impl super::GrafeoDB {
         status
     }
 
-    /// Returns WAL (Write-Ahead Log) status.
-    ///
-    /// Returns None if WAL is not enabled.
     #[must_use]
-    pub fn wal_status(&self) -> crate::admin::WalStatus {
+    pub(crate) fn wal_status(&self) -> crate::admin::WalStatus {
         #[cfg(feature = "wal")]
         if let Some(ref wal) = self.wal {
             return crate::admin::WalStatus {
@@ -799,17 +677,7 @@ impl super::GrafeoDB {
         }
     }
 
-    /// Forces a WAL checkpoint.
-    ///
-    /// Flushes all pending WAL records to the database file.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the checkpoint fails, after a commit that did not
-    /// complete (see [`TransactionManager`](crate::transaction::TransactionManager)),
-    /// and the database-closed error after `close()` of a persistent database
-    /// (its file is released: another handle may have written it since).
-    pub fn wal_checkpoint(&self) -> Result<()> {
+    pub(crate) fn wal_checkpoint(&self) -> Result<()> {
         self.checkpoint_now().map(|_| ())
     }
 
@@ -880,29 +748,316 @@ impl super::GrafeoDB {
         spill
     }
 
-    /// The database's change log, for tests and explicit checks of its
-    /// memory account (`CdcLog::account_mismatches`).
     #[doc(hidden)]
     #[cfg(feature = "cdc")]
     #[must_use]
-    pub fn cdc_log(&self) -> &std::sync::Arc<crate::cdc::CdcLog> {
+    pub(crate) fn cdc_log(&self) -> &std::sync::Arc<crate::cdc::CdcLog> {
         &self.cdc_log
     }
 
-    /// Returns whether CDC is enabled by default for new sessions.
     #[cfg(feature = "cdc")]
     #[must_use]
-    pub fn is_cdc_enabled(&self) -> bool {
+    pub(crate) fn is_cdc_enabled(&self) -> bool {
         self.cdc_active()
     }
 
-    /// Sets whether CDC is enabled by default for new sessions.
+    #[cfg(feature = "cdc")]
+    pub(crate) fn set_cdc_enabled(&self, enabled: bool) {
+        self.cdc_enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "cdc")]
+    pub(crate) fn history(
+        &self,
+        entity_id: impl Into<crate::cdc::EntityId>,
+    ) -> Result<Vec<crate::cdc::ChangeEvent>> {
+        let epoch = self.read_epoch();
+        let mut events = self.cdc_log.history(entity_id.into());
+        events.retain(|event| event.epoch <= epoch);
+        Ok(events)
+    }
+
+    #[cfg(feature = "cdc")]
+    pub(crate) fn history_since(
+        &self,
+        entity_id: impl Into<crate::cdc::EntityId>,
+        since_epoch: grafeo_common::types::EpochId,
+    ) -> Result<Vec<crate::cdc::ChangeEvent>> {
+        let epoch = self.read_epoch();
+        let mut events = self.cdc_log.history_since(entity_id.into(), since_epoch);
+        events.retain(|event| event.epoch <= epoch);
+        Ok(events)
+    }
+
+    #[cfg(feature = "cdc")]
+    pub(crate) fn changes_between(
+        &self,
+        start_epoch: grafeo_common::types::EpochId,
+        end_epoch: grafeo_common::types::EpochId,
+    ) -> Result<Vec<crate::cdc::ChangeEvent>> {
+        let end_epoch = end_epoch.min(self.read_epoch());
+        Ok(self.cdc_log.changes_between(start_epoch, end_epoch))
+    }
+}
+
+// The database's public methods: each reaches the open state for its call (#712).
+impl super::GrafeoDB {
+    /// Returns the number of nodes in the database, as of the current epoch
+    /// (see [`current_epoch`](Self::current_epoch)).
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do (an external store's own).
+    pub fn node_count(&self) -> Result<usize> {
+        self.live()?.node_count()
+    }
+
+    /// Returns the number of edges in the database, as of the current epoch
+    /// (see [`current_epoch`](Self::current_epoch)).
+    ///
+    /// # Errors
+    ///
+    /// As [`node_count`](Self::node_count).
+    pub fn edge_count(&self) -> Result<usize> {
+        self.live()?.edge_count()
+    }
+
+    /// Returns the number of distinct labels in the database.
+    ///
+    /// # Errors
+    ///
+    /// As [`node_count`](Self::node_count).
+    pub fn label_count(&self) -> Result<usize> {
+        self.live()?.label_count()
+    }
+
+    /// Returns the number of distinct property keys ever written to the
+    /// database, of nodes and edges together: not the keys in use now. A key
+    /// stays counted after every value of it is removed or deleted, and
+    /// after the transaction that wrote it rolled back.
+    ///
+    /// # Errors
+    ///
+    /// As [`node_count`](Self::node_count).
+    pub fn property_key_count(&self) -> Result<usize> {
+        self.live()?.property_key_count()
+    }
+
+    /// Returns the number of distinct edge types in the database.
+    ///
+    /// # Errors
+    ///
+    /// As [`node_count`](Self::node_count).
+    pub fn edge_type_count(&self) -> Result<usize> {
+        self.live()?.edge_type_count()
+    }
+
+    /// Returns true if this database is backed by a file (persistent).
+    ///
+    /// In-memory databases return false.
+    #[must_use]
+    pub fn is_persistent(&self) -> bool {
+        // From the configuration it was opened with: it answers after `close()` too.
+        self.config.path().is_some()
+    }
+
+    /// Returns the database file path, if persistent.
+    ///
+    /// In-memory databases return None.
+    #[must_use]
+    pub fn path(&self) -> Option<&Path> {
+        self.config.path()
+    }
+
+    /// Returns high-level database information.
+    ///
+    /// Includes node/edge counts, persistence status, and mode (LPG/RDF).
+    ///
+    /// # Errors
+    ///
+    /// As [`node_count`](Self::node_count).
+    pub fn info(&self) -> Result<crate::admin::DatabaseInfo> {
+        self.live()?.info()
+    }
+
+    /// Returns a hierarchical memory usage breakdown. After `close()` it returns a report of zero
+    /// bytes; it returns a `Result` from 0.7.0.
+    ///
+    /// The store, its indexes, its versions and its dictionaries come from
+    /// the store's account (counted as they grow, so the report takes time
+    /// independent of the store's size), the rest from the caches, string
+    /// pools and buffer manager, each as estimated heap bytes. Safe to call
+    /// concurrently with queries. On a database on a backend of its own the
+    /// store, its indexes and its versions are the backend's, which the
+    /// engine does not measure: they count as zero, and the rest (caches,
+    /// buffers, the catalog) is the engine's own.
+    #[must_use]
+    pub fn memory_usage(&self) -> crate::memory_usage::MemoryUsage {
+        self.live_if()
+            .map_or_else(Default::default, |open| open.memory_usage())
+    }
+
+    /// Returns detailed database statistics.
+    ///
+    /// Includes counts, memory usage, and index information.
+    ///
+    /// # Errors
+    ///
+    /// As [`node_count`](Self::node_count).
+    pub fn detailed_stats(&self) -> Result<crate::admin::DatabaseStats> {
+        self.live()?.detailed_stats()
+    }
+
+    /// Returns schema information: the labels, edge types and property keys
+    /// in use, each label and edge type with its count and its properties'
+    /// value types, and the labels each edge type connects.
+    ///
+    /// It reads the whole graph, as a committed reader at the current epoch
+    /// sees it, all of the report in one pinned state.
+    ///
+    /// # Errors
+    ///
+    /// As [`node_count`](Self::node_count).
+    pub fn schema(&self) -> Result<crate::admin::SchemaInfo> {
+        self.live()?.schema()
+    }
+
+    /// Returns detailed information about the current graph's indexes: the
+    /// ones `CREATE INDEX` made, by the name it gave them, as `SHOW INDEXES`
+    /// lists them, and the ones made through the API, whose `name` is empty.
+    /// A name whose index only another graph has is not listed. The target
+    /// of a property index made through the API, which covers every label,
+    /// has an empty label (`:age`). After `close()` it returns an empty list; it returns a `Result`
+    /// from 0.7.0.
+    #[must_use]
+    pub fn list_indexes(&self) -> Vec<crate::admin::IndexInfo> {
+        self.live_if()
+            .map_or_else(Default::default, |open| open.list_indexes())
+    }
+
+    /// The types whose rules an older release applied in graphs not bound to their graph
+    /// type: since 0.6.2 a type a graph type lists applies only in its graphs, so a database
+    /// written before may hold elements those rules no longer check. One warning per type,
+    /// from the counts the store keeps, so no scan. For [`validate`](Self::validate), and
+    /// for a binding to tell at open. After `close()` it returns an empty list; it returns a
+    /// `Result` from 0.7.0.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn graph_type_scope_warnings(&self) -> Vec<crate::admin::ValidationWarning> {
+        self.live_if()
+            .map_or_else(Default::default, |open| open.graph_type_scope_warnings())
+    }
+
+    /// Validates database integrity.
+    ///
+    /// Checks for:
+    /// - Dangling edge references (edges pointing to non-existent nodes)
+    /// - Internal index consistency
+    ///
+    /// Returns a list of errors and warnings. Empty errors = valid. Reads
+    /// the database as of the current epoch.
+    ///
+    /// # Errors
+    ///
+    /// As [`node_count`](Self::node_count): a read that fails is an error,
+    /// not a finding.
+    pub fn validate(&self) -> Result<crate::admin::ValidationResult> {
+        self.live()?.validate()
+    }
+
+    /// Changes when this database checkpoints by itself (#426): when the
+    /// interval has passed since its last automatic checkpoint, or once the
+    /// WAL holds the given bytes since the last checkpoint. The new triggers
+    /// replace the ones in force (from
+    /// [`Config::with_checkpoint_interval`](crate::Config::with_checkpoint_interval)
+    /// and [`Config::with_checkpoint_wal_size`](crate::Config::with_checkpoint_wal_size),
+    /// or an earlier call), until the database closes; the file does not
+    /// store them. [`CheckpointTriggers::none`](crate::admin::CheckpointTriggers::none)
+    /// turns automatic checkpoints off.
+    ///
+    /// # Errors
+    ///
+    /// A zero interval, a size below 1 MiB (the error an open gives for
+    /// such a `Config::with_checkpoint_wal_size`), a database without a file
+    /// (in memory) or opened read-only, which never checkpoints, and the
+    /// database-closed error after `close()`.
+    pub fn set_checkpoint_triggers(
+        &self,
+        triggers: crate::admin::CheckpointTriggers,
+    ) -> Result<()> {
+        self.live()?.set_checkpoint_triggers(triggers)
+    }
+
+    /// How the automatic checkpoints fare: the triggers in force, the last
+    /// checkpoint of any kind, and the automatic ones that failed since the
+    /// last that succeeded, with the last error. A failed automatic
+    /// checkpoint is also logged as a warning, and retried after a pause. After `close()` it
+    /// returns the default status (no checkpoint, no failure, not stopped); it returns a `Result`
+    /// from 0.7.0.
+    #[must_use]
+    pub fn checkpoint_status(&self) -> crate::admin::CheckpointStatus {
+        self.live_if()
+            .map_or_else(Default::default, |open| open.checkpoint_status())
+    }
+
+    /// Returns WAL (Write-Ahead Log) status. After `close()` it returns a status of a disabled WAL
+    /// (no path, size and records 0); it returns a `Result` from 0.7.0.
+    ///
+    /// Returns None if WAL is not enabled.
+    #[must_use]
+    pub fn wal_status(&self) -> crate::admin::WalStatus {
+        self.live_if()
+            .map_or_else(Default::default, |open| open.wal_status())
+    }
+
+    /// Forces a WAL checkpoint.
+    ///
+    /// Flushes all pending WAL records to the database file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the checkpoint fails, after a commit that did not
+    /// complete (see [`TransactionManager`](crate::transaction::TransactionManager)),
+    /// and the database-closed error after `close()`
+    /// (its file is released: another handle may have written it since).
+    pub fn wal_checkpoint(&self) -> Result<()> {
+        self.live()?.wal_checkpoint()
+    }
+
+    /// The database's change log, for tests and explicit checks of its
+    /// memory account (`CdcLog::account_mismatches`).
+    ///
+    /// Since 0.6.4 it returns an owned handle, and after `close()` an empty one: holding it keeps
+    /// that part of the database alive past `close()`.
+    #[doc(hidden)]
+    #[cfg(feature = "cdc")]
+    #[must_use]
+    pub fn cdc_log(&self) -> std::sync::Arc<crate::cdc::CdcLog> {
+        self.live_if().map_or_else(
+            || std::sync::Arc::new(crate::cdc::CdcLog::new()),
+            |open| std::sync::Arc::clone(open.cdc_log()),
+        )
+    }
+
+    /// Returns whether CDC is enabled by default for new sessions. After `close()` it returns
+    /// `false`; it returns a `Result` from 0.7.0.
+    #[cfg(feature = "cdc")]
+    #[must_use]
+    pub fn is_cdc_enabled(&self) -> bool {
+        self.live_if()
+            .map_or_else(Default::default, |open| open.is_cdc_enabled())
+    }
+
+    /// Sets whether CDC is enabled by default for new sessions. After `close()` it does nothing; it
+    /// returns a `Result` from 0.7.0.
     ///
     /// Does not affect sessions that were already created.
     #[cfg(feature = "cdc")]
     pub fn set_cdc_enabled(&self, enabled: bool) {
-        self.cdc_enabled
-            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        if let Some(open) = self.live_if() {
+            open.set_cdc_enabled(enabled);
+        }
     }
 
     /// Returns the full change history for an entity (node or edge) of the
@@ -920,10 +1075,7 @@ impl super::GrafeoDB {
         &self,
         entity_id: impl Into<crate::cdc::EntityId>,
     ) -> Result<Vec<crate::cdc::ChangeEvent>> {
-        let epoch = self.read_epoch();
-        let mut events = self.cdc_log.history(entity_id.into());
-        events.retain(|event| event.epoch <= epoch);
-        Ok(events)
+        self.live()?.history(entity_id)
     }
 
     /// Returns change events for an entity of the default graph since the
@@ -938,10 +1090,7 @@ impl super::GrafeoDB {
         entity_id: impl Into<crate::cdc::EntityId>,
         since_epoch: grafeo_common::types::EpochId,
     ) -> Result<Vec<crate::cdc::ChangeEvent>> {
-        let epoch = self.read_epoch();
-        let mut events = self.cdc_log.history_since(entity_id.into(), since_epoch);
-        events.retain(|event| event.epoch <= epoch);
-        Ok(events)
+        self.live()?.history_since(entity_id, since_epoch)
     }
 
     /// Returns all change events across all entities and graphs in an epoch
@@ -956,7 +1105,6 @@ impl super::GrafeoDB {
         start_epoch: grafeo_common::types::EpochId,
         end_epoch: grafeo_common::types::EpochId,
     ) -> Result<Vec<crate::cdc::ChangeEvent>> {
-        let end_epoch = end_epoch.min(self.read_epoch());
-        Ok(self.cdc_log.changes_between(start_epoch, end_epoch))
+        self.live()?.changes_between(start_epoch, end_epoch)
     }
 }

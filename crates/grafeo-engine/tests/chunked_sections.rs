@@ -151,7 +151,7 @@ fn encoded(value: &Value) -> String {
 #[cfg(feature = "triple-store")]
 fn dump_triples(lines: &mut Vec<String>, db: &GrafeoDB) {
     let rdf = db.rdf_store();
-    push_triples(lines, "rdf default graph", rdf);
+    push_triples(lines, "rdf default graph", &rdf);
     let mut names = rdf.graph_names(&grafeo_core::graph::rdf::RdfView::latest(
         grafeo_core::graph::rdf::LatestUse::Test,
     ));
@@ -362,7 +362,7 @@ fn repeated_checkpoints_of_a_multi_chunk_image_reuse_space() {
             )
             .unwrap();
         }
-        let fm = Arc::clone(db.file_manager().unwrap());
+        let fm = Arc::clone(&db.file_manager().unwrap());
         let sizes: Vec<u64> = (0..10)
             .map(|_| {
                 db.wal_checkpoint().unwrap();

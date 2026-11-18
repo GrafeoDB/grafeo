@@ -8,15 +8,64 @@ use parking_lot::RwLock;
 
 use crate::error::GrafeoStatus;
 use grafeo_common::types::{PropertyKey, PropertyMap, Value};
+use grafeo_common::utils::error::Error;
 use grafeo_engine::database::GrafeoDB;
 
 // ---------------------------------------------------------------------------
 // Opaque handle types
 // ---------------------------------------------------------------------------
 
+/// The database a handle shares with the graphs, sessions, streams and views it hands out.
+///
+/// The only ways to reach it check that it is open, so no call answers from a closed
+/// database: each fails with `GRAFEO-T007` after `grafeo_close`. Only
+/// [`close`](Self::close) reaches a closed one, as a no-op.
+pub(crate) struct SharedDb(Arc<RwLock<GrafeoDB>>);
+
+impl SharedDb {
+    pub(crate) fn new(db: GrafeoDB) -> Self {
+        Self(Arc::new(RwLock::new(db)))
+    }
+
+    /// The open database; `GRAFEO-T007` once closed.
+    pub(crate) fn read(&self) -> Result<parking_lot::RwLockReadGuard<'_, GrafeoDB>, Error> {
+        let db = self.0.read();
+        if db.is_closed() {
+            return Err(closed_error());
+        }
+        Ok(db)
+    }
+
+    /// The open database, alone (no statement runs beside it); `GRAFEO-T007` once closed.
+    pub(crate) fn write(&self) -> Result<parking_lot::RwLockWriteGuard<'_, GrafeoDB>, Error> {
+        let db = self.0.write();
+        if db.is_closed() {
+            return Err(closed_error());
+        }
+        Ok(db)
+    }
+
+    /// Another handle on the same database, for a handle it hands out; `GRAFEO-T007`
+    /// once closed.
+    pub(crate) fn share(&self) -> Result<Self, Error> {
+        drop(self.read()?);
+        Ok(Self(Arc::clone(&self.0)))
+    }
+
+    /// Closes the database: persists it and releases what it holds; a no-op once closed.
+    pub(crate) fn close(&self) -> Result<(), Error> {
+        self.0.read().close()
+    }
+}
+
+/// The error of a call on a closed database (`GRAFEO-T007`).
+pub(crate) fn closed_error() -> Error {
+    Error::Transaction(grafeo_common::utils::error::TransactionError::DatabaseClosed)
+}
+
 /// Opaque database handle. Created by `grafeo_open*`, freed by `grafeo_free_database`.
 pub struct GrafeoDatabase {
-    pub(crate) inner: Arc<RwLock<GrafeoDB>>,
+    pub(crate) inner: SharedDb,
 }
 
 /// Opaque handle on a named graph of a database (`grafeo_graph`, freed by
@@ -24,7 +73,7 @@ pub struct GrafeoDatabase {
 /// switching the database's current graph. Each call looks the graph up, so
 /// one dropped meanwhile fails the call.
 pub struct GrafeoGraph {
-    pub(crate) inner: Arc<RwLock<GrafeoDB>>,
+    pub(crate) inner: SharedDb,
     pub(crate) schema: Option<String>,
     pub(crate) name: String,
 }

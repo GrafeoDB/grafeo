@@ -1,7 +1,7 @@
 //! `db.graph(name)`: queries, batches and upserts in one named graph without
 //! switching the database's current graph.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -10,8 +10,8 @@ use wasm_bindgen::prelude::*;
 use crate::{database_error, js_error};
 
 use grafeo_common::types::Value;
+use grafeo_engine::GraphHandle as EngineGraphHandle;
 use grafeo_engine::session::Session;
-use grafeo_engine::{GrafeoDB, GraphHandle as EngineGraphHandle};
 
 use super::writes::{edge_options, edges, ids_to_js, labels, node_options, rows, summary_to_js};
 use super::{Database, raw_result_to_js, rows_to_js};
@@ -25,9 +25,8 @@ use super::{Database, raw_result_to_js, rows_to_js};
 /// longer exists or the database is closed.
 #[wasm_bindgen]
 pub struct GraphHandle {
-    db: Rc<RefCell<GrafeoDB>>,
+    db: crate::SharedDb,
     tx: Rc<RefCell<Option<Session>>>,
-    closed: Rc<Cell<bool>>,
     schema: Option<String>,
     name: String,
 }
@@ -50,14 +49,13 @@ impl Database {
     pub fn graph(&self, name: &str) -> Result<GraphHandle, JsValue> {
         self.check_open()?;
         let schema = {
-            let db = self.db();
+            let db = self.db()?;
             let graph = db.graph(name).map_err(database_error)?;
             graph.schema().map(ToString::to_string)
         };
         Ok(GraphHandle {
-            db: Rc::clone(&self.inner),
+            db: self.inner.share()?,
             tx: Rc::clone(&self.tx),
-            closed: Rc::clone(&self.closed),
             schema,
             name: name.to_string(),
         })
@@ -72,16 +70,14 @@ impl GraphHandle {
         call_name: &str,
         call: impl FnOnce(&EngineGraphHandle<'_>) -> grafeo_common::utils::error::Result<T>,
     ) -> Result<T, JsValue> {
-        if self.closed.get() {
-            return Err(crate::closed_error());
-        }
+        self.db.check()?;
         if self.tx.borrow().is_some() {
             return Err(js_error(&format!(
                 "{call_name} on a graph handle runs on its own: commit or roll back the \
                  database's open transaction first"
             )));
         }
-        let db = self.db.borrow();
+        let db = self.db.borrow()?;
         let graph = db
             .graph_in(self.schema.as_deref(), &self.name)
             .map_err(database_error)?;
@@ -104,9 +100,14 @@ impl GraphHandle {
 #[wasm_bindgen]
 impl GraphHandle {
     /// The graph's name.
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` (`GRAFEO-T007`) once the database is closed.
     #[wasm_bindgen(getter)]
-    pub fn name(&self) -> String {
-        self.name.clone()
+    pub fn name(&self) -> Result<String, JsValue> {
+        self.db.check()?;
+        Ok(self.name.clone())
     }
 
     /// Runs a GQL query in this graph; rows as objects, as

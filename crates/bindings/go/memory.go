@@ -124,6 +124,10 @@ type MemoryUsage struct {
 // MemoryUsage returns the database's memory report.
 func (db *Database) MemoryUsage() (*MemoryUsage, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 *MemoryUsage
+		return zero0, err
+	}
 	runtime.LockOSThread()
 	cJSON := C.grafeo_memory_usage_json(db.handle)
 	if cJSON == nil {
@@ -153,6 +157,10 @@ type OpenWarning struct {
 // OpenWarnings returns what the open had to say; empty for a clean open.
 func (db *Database) OpenWarnings() ([]OpenWarning, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 []OpenWarning
+		return zero0, err
+	}
 	runtime.LockOSThread()
 	cJSON := C.grafeo_open_warnings(db.handle)
 	if cJSON == nil {

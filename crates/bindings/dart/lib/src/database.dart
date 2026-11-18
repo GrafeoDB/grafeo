@@ -233,7 +233,8 @@ class GrafeoDB implements Finalizable {
 
   /// Close the database, flushing all writes.
   ///
-  /// Safe to call multiple times. After close, all other methods throw.
+  /// Safe to call multiple times. After close, every other method, and every
+  /// method of what the database handed out, throws GRAFEO-T007.
   void close() {
     if (_closed) return;
     _closed = true;
@@ -261,9 +262,15 @@ class GrafeoDB implements Finalizable {
     return ptr.toDartString();
   }
 
+  /// Every call after [close] throws the GRAFEO-T007 error, as the native
+  /// layer reports a closed database to what the database handed out.
   void _checkOpen() {
     if (_closed) {
-      throw DatabaseException('Database is closed', GrafeoStatus.database);
+      throw const DatabaseException(
+        'GRAFEO-T007: the database is closed: open it again',
+        GrafeoStatus.database,
+        gqlStatus: '25000',
+      );
     }
   }
 

@@ -80,7 +80,7 @@ fn a_compacted_database_keeps_its_rdf_section() {
 
     let db = GrafeoDB::with_config(config(&path)).unwrap();
     let fm = db.file_manager().unwrap();
-    assert!(holds(fm, SectionType::RdfStore));
+    assert!(holds(&fm, SectionType::RdfStore));
     // Read the store itself: SPARQL over a compacted database does not see
     // RDF data yet, a separate problem.
     assert_eq!(db.rdf_store().len(), 1, "the triple is in the section");
@@ -131,7 +131,7 @@ fn the_checkpoint_timer_writes_everything_after_compact() {
     // timer's next checkpoint may have taken its snapshot before Vincent's
     // commit and install its header after this read. The one after that
     // starts once the next is installed, after Vincent's commit: wait for it.
-    let fm = std::sync::Arc::clone(db.file_manager().unwrap());
+    let fm = std::sync::Arc::clone(&db.file_manager().unwrap());
     let compacted_at = fm.active_header().iteration;
     let deadline = Instant::now() + Duration::from_secs(10);
     while fm.active_header().iteration < compacted_at + 2 {
@@ -384,13 +384,13 @@ fn a_compacted_database_and_its_deletes_survive_a_reopen() {
         SectionType::RdfStore,
     ] {
         assert!(
-            holds(fm, section_type),
+            holds(&fm, section_type),
             "the file holds the {section_type:?} section"
         );
     }
     for section_type in [SectionType::CompactStore, SectionType::OverlayDeletions] {
         assert!(
-            !holds(fm, section_type),
+            !holds(&fm, section_type),
             "the file holds no {section_type:?} section: the database has one store"
         );
     }

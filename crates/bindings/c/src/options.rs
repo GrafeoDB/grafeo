@@ -5,9 +5,6 @@
 //! several databases.
 
 use std::os::raw::c_char;
-use std::sync::Arc;
-
-use parking_lot::RwLock;
 
 use grafeo_engine::config::Config;
 use grafeo_engine::database::GrafeoDB;
@@ -195,7 +192,7 @@ pub extern "C" fn grafeo_open_with_options(
     };
     match GrafeoDB::with_config(config) {
         Ok(db) => Box::into_raw(Box::new(GrafeoDatabase {
-            inner: Arc::new(RwLock::new(db)),
+            inner: crate::types::SharedDb::new(db),
         })),
         Err(error) => {
             set_error(&error);

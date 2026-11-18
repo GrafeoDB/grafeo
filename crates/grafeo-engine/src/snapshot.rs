@@ -36,7 +36,9 @@ use crate::transaction::ReadPin;
 /// ```
 ///
 /// Holding a snapshot holds back garbage collection at its epoch: drop it
-/// when the reads are done.
+/// when the reads are done. It also keeps the graph alive past
+/// [`close()`](crate::GrafeoDB::close), and the spill files it reads stay
+/// until it drops.
 pub struct Snapshot {
     store: Arc<dyn GraphStore>,
     view: ReadView,
@@ -88,7 +90,8 @@ impl Snapshot {
     /// The store as a shared handle, for an API that takes one (such as
     /// [`GrafeoDB::with_read_store`](crate::GrafeoDB::with_read_store) over a
     /// projection). It outlives the snapshot, and reads through it after the
-    /// snapshot is dropped are not pinned.
+    /// snapshot is dropped are not pinned. Holding it keeps the graph alive past `close()`, and the
+    /// spill files it reads stay until it drops.
     #[must_use]
     pub fn shared(&self) -> Arc<dyn GraphStore> {
         Arc::clone(&self.store)

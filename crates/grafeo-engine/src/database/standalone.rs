@@ -151,7 +151,7 @@ fn not_applied(op: &StandaloneOp, reason: &str) -> Error {
 ///
 /// # Errors
 ///
-/// The database-closed error after `close()` of a persistent database, and
+/// The database-closed error after `close()`, and
 /// the incomplete-commit error after a commit that did not complete.
 pub(crate) fn hold(manager: &TransactionManager, writes_too: bool) -> Result<CommitsHeld<'_>> {
     let held = if writes_too {

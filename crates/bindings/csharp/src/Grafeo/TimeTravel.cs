@@ -90,11 +90,23 @@ public sealed class AsOfView : IDisposable
     internal AsOfView(AsOfHandle handle)
     {
         _handle = handle;
-        Epoch = NativeMethods.grafeo_as_of_epoch(_handle);
     }
 
-    /// <summary>The epoch the view reads at.</summary>
-    public ulong Epoch { get; }
+    /// <summary>
+    /// The epoch the view reads at. Throws a <see cref="GrafeoException"/> with GRAFEO-T007 once
+    /// the database that handed the view out is closed.
+    /// </summary>
+    public ulong Epoch
+    {
+        get
+        {
+            // No error return in C: a closed database answers 0 and sets the last error, which
+            // the call clears when it starts.
+            var epoch = NativeMethods.grafeo_as_of_epoch(Handle);
+            if (NativeMethods.grafeo_last_error() != nint.Zero) throw GrafeoException.FromLastError();
+            return epoch;
+        }
+    }
 
     /// <inheritdoc/>
     public void Dispose()

@@ -42,6 +42,10 @@ func endedError(message string) error {
 // BeginTransaction starts a new transaction with default isolation (snapshot).
 func (db *Database) BeginTransaction() (*Transaction, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 *Transaction
+		return zero0, err
+	}
 	runtime.LockOSThread()
 	h := C.grafeo_begin_transaction(db.handle)
 	if h == nil {
@@ -58,6 +62,10 @@ func (db *Database) BeginTransaction() (*Transaction, error) {
 // BeginTransactionWith starts a transaction with a specific isolation level.
 func (db *Database) BeginTransactionWith(level IsolationLevel) (*Transaction, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 *Transaction
+		return zero0, err
+	}
 	runtime.LockOSThread()
 	h := C.grafeo_begin_transaction_with_isolation(db.handle, C.GrafeoIsolationLevel(level))
 	if h == nil {

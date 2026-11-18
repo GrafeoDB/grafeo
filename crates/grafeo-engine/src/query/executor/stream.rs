@@ -48,13 +48,17 @@ pub(crate) struct StreamPlan {
 /// The counter prevents `commit()` / `rollback()` from racing with in-flight
 /// streams that still hold references to the session's read snapshot.
 pub(crate) struct StreamGuard<'s> {
-    counter: &'s AtomicUsize,
+    counter: Arc<AtomicUsize>,
+    _session: std::marker::PhantomData<&'s ()>,
 }
 
-impl<'s> StreamGuard<'s> {
-    pub(crate) fn new(counter: &'s AtomicUsize) -> Self {
+impl StreamGuard<'_> {
+    pub(crate) fn new(counter: &Arc<AtomicUsize>) -> Self {
         counter.fetch_add(1, Ordering::AcqRel);
-        Self { counter }
+        Self {
+            counter: Arc::clone(counter),
+            _session: std::marker::PhantomData,
+        }
     }
 }
 
@@ -103,7 +107,7 @@ impl Drop for OwnedStreamGuard {
 ///
 /// # Stability: Experimental
 pub struct ResultStream<'session> {
-    operator: Box<dyn Operator>,
+    operator: crate::session::OperatorSlot,
     columns: Vec<String>,
     column_types: Vec<LogicalType>,
     deadline: Option<Instant>,
@@ -121,11 +125,15 @@ impl<'s> ResultStream<'s> {
     ///
     /// Returns [`QueryErrorKind::Semantic`](grafeo_common::utils::error::QueryErrorKind)
     /// if `columns` contains a repeated column name.
-    pub(crate) fn new(plan: StreamPlan, guard: StreamGuard<'s>) -> Result<Self> {
+    pub(crate) fn new(
+        plan: StreamPlan,
+        slots: &crate::session::Slots,
+        guard: StreamGuard<'s>,
+    ) -> Result<Self> {
         QueryResult::validate_unique_columns(&plan.columns)?;
         let len = plan.columns.len();
         Ok(Self {
-            operator: plan.operator,
+            operator: slots.register_stream(plan.operator),
             columns: plan.columns,
             column_types: vec![LogicalType::Any; len],
             deadline: plan.deadline,
@@ -179,7 +187,12 @@ impl<'s> ResultStream<'s> {
         check_deadline(self.deadline)?;
         // The operators check the deadline in their own loops too.
         let _deadline = deadline::enter(self.deadline);
-        match self.operator.next() {
+        let Some(next) = self.operator.next() else {
+            return Err(Error::Transaction(
+                grafeo_common::utils::error::TransactionError::DatabaseClosed,
+            ));
+        };
+        match next {
             Ok(Some(chunk)) => {
                 refine_column_types(&chunk, &mut self.column_types);
                 Ok(Some(chunk))
@@ -296,7 +309,7 @@ impl Iterator for RowIterator<'_> {
 ///
 /// # Stability: Experimental
 pub struct OwnedResultStream {
-    operator: Box<dyn Operator>,
+    operator: crate::session::OperatorSlot,
     columns: Vec<String>,
     column_types: Vec<LogicalType>,
     deadline: Option<Instant>,
@@ -330,11 +343,15 @@ impl OwnedResultStream {
     ///
     /// Returns [`QueryErrorKind::Semantic`](grafeo_common::utils::error::QueryErrorKind)
     /// if `columns` contains a repeated column name.
-    pub(crate) fn new(plan: StreamPlan, guard: Option<OwnedStreamGuard>) -> Result<Self> {
+    pub(crate) fn new(
+        plan: StreamPlan,
+        slots: &crate::session::Slots,
+        guard: Option<OwnedStreamGuard>,
+    ) -> Result<Self> {
         QueryResult::validate_unique_columns(&plan.columns)?;
         let len = plan.columns.len();
         Ok(Self {
-            operator: plan.operator,
+            operator: slots.register_stream(plan.operator),
             columns: plan.columns,
             column_types: vec![LogicalType::Any; len],
             deadline: plan.deadline,
@@ -397,7 +414,12 @@ impl OwnedResultStream {
         check_deadline(self.deadline)?;
         // The operators check the deadline in their own loops too.
         let _deadline = deadline::enter(self.deadline);
-        match self.operator.next() {
+        let Some(next) = self.operator.next() else {
+            return Err(Error::Transaction(
+                grafeo_common::utils::error::TransactionError::DatabaseClosed,
+            ));
+        };
+        match next {
             Ok(Some(chunk)) => {
                 refine_column_types(&chunk, &mut self.column_types);
                 Ok(Some(chunk))

@@ -11,6 +11,17 @@
  * Error handling:
  *   - Functions return GrafeoStatus (0 = success).
  *   - On error, call grafeo_last_error() for a human-readable message.
+ *   - After grafeo_close, every call on the database and on the graphs,
+ *     sessions, transactions, streams and views it handed out fails with
+ *     GRAFEO-T007 (the database is closed); only grafeo_close and
+ *     grafeo_session_close (no-ops) and the frees answer.
+ *   - The calls without an error return (grafeo_set_cdc_enabled,
+ *     grafeo_is_cdc_enabled, grafeo_current_epoch, grafeo_current_schema,
+ *     grafeo_as_of_epoch, grafeo_has_property_index and the
+ *     grafeo_stream_warning_* accessors) clear the
+ *     last error when they start. On a closed database they return their
+ *     neutral value (nothing changed, false, 0, NULL) with the last error set
+ *     to GRAFEO-T007, so a non-NULL grafeo_last_error() after one means closed.
  */
 
 #ifndef GRAFEO_H
@@ -148,6 +159,7 @@ GrafeoDatabase* grafeo_open_with_options(const char* path, const GrafeoOptions* 
 
 /* ---- Change Data Capture ------------------------------------------------- */
 
+/* No error return: see "Error handling" above (closed: no change, false). */
 void grafeo_set_cdc_enabled(GrafeoDatabase* db, bool enabled);
 bool grafeo_is_cdc_enabled(GrafeoDatabase* db);
 
@@ -244,7 +256,8 @@ void grafeo_stream_free(GrafeoStream* stream);
  * its translation's from the open, its run's as the rows that raise them are
  * pulled, all of them once the stream is exhausted. grafeo_stream_warning_count
  * takes them for the accessors, which read what it took; the strings are valid
- * until the next count or grafeo_stream_free. NULL past the last warning. */
+ * until the next count or grafeo_stream_free. NULL past the last warning.
+ * No error return: see "Error handling" above (closed: 0, NULL). */
 size_t      grafeo_stream_warning_count(const GrafeoStream* stream);
 const char* grafeo_stream_warning_code(const GrafeoStream* stream, size_t index);
 const char* grafeo_stream_warning_kind(const GrafeoStream* stream, size_t index);
@@ -254,6 +267,7 @@ const char* grafeo_stream_warning_message(const GrafeoStream* stream, size_t ind
 
 GrafeoStatus    grafeo_set_schema(GrafeoDatabase* db, const char* name);
 GrafeoStatus    grafeo_reset_schema(GrafeoDatabase* db);
+/* NULL when no schema is set; no error return: see "Error handling" above (closed: NULL). */
 const char*     grafeo_current_schema(const GrafeoDatabase* db);
 
 /* ---- Node CRUD ----------------------------------------------------------- */
@@ -301,6 +315,7 @@ GrafeoStatus grafeo_get_node_edges(GrafeoDatabase* db, uint64_t node_id, GrafeoD
 
 GrafeoStatus grafeo_create_property_index(GrafeoDatabase* db, const char* property);
 int32_t      grafeo_drop_property_index(GrafeoDatabase* db, const char* property);
+/* 1 if the index exists, 0 otherwise; no error return: see "Error handling" above (closed: 0). */
 int32_t      grafeo_has_property_index(GrafeoDatabase* db, const char* property);
 GrafeoStatus grafeo_find_nodes_by_property(GrafeoDatabase* db, const char* property, const char* value_json, uint64_t** out_ids, size_t* out_count);
 
@@ -392,10 +407,12 @@ GrafeoStatus  grafeo_graph_upsert_edges(GrafeoGraph* graph, const char* edge_typ
 #define GRAFEO_HISTORY_FOREVER  1
 #define GRAFEO_HISTORY_DURATION 2
 GrafeoDatabase* grafeo_open_with_history(const char* path, int32_t history_kind, uint64_t duration_ms);
+/* No error return: see "Error handling" above (closed: 0). */
 uint64_t        grafeo_current_epoch(GrafeoDatabase* db);
 GrafeoStatus    grafeo_epoch_as_of(GrafeoDatabase* db, int32_t point_kind, int64_t point_value, uint64_t* epoch_out);
 GrafeoResult*   grafeo_execute_as_of(GrafeoDatabase* db, const char* query, const char* params_json, int32_t point_kind, int64_t point_value);
 GrafeoAsOf*     grafeo_as_of(GrafeoDatabase* db, int32_t point_kind, int64_t point_value);
+/* No error return: see "Error handling" above (closed: 0). */
 uint64_t        grafeo_as_of_epoch(const GrafeoAsOf* view);
 GrafeoResult*   grafeo_as_of_execute(const GrafeoAsOf* view, const char* query, const char* params_json);
 GrafeoStatus    grafeo_as_of_get_node(const GrafeoAsOf* view, uint64_t id, GrafeoNode** out);

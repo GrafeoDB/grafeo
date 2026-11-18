@@ -16,7 +16,7 @@ pub enum ErrorCategory {
     Query,
     /// Transaction conflict, timeout, or invalid state.
     Transaction,
-    /// The database is closed and takes no more writes.
+    /// The database is closed and takes no more calls.
     DatabaseClosed,
     /// Storage-layer error (disk, memory limit).
     Storage,

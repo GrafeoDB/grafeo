@@ -9,8 +9,9 @@ use std::sync::Arc;
 use crate::database::QueryResult;
 
 use super::super::Session;
+use crate::session::SessionInner;
 
-impl Session {
+impl SessionInner {
     /// The RDF view a statement reads at: its transaction's snapshot (built
     /// at the transaction's first RDF statement and kept with its changes),
     /// or, outside a transaction, the published epoch, read inside the
@@ -76,13 +77,8 @@ impl Session {
         )
     }
 
-    /// Executes a GraphQL query against the RDF store.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "graphql")]
-    pub fn execute_graphql_rdf(&self, query: &str) -> Result<QueryResult> {
+    pub(crate) fn execute_graphql_rdf(&self, query: &str) -> Result<QueryResult> {
         self.timed(|| self.execute_graphql_rdf_untimed(query))
     }
 
@@ -100,13 +96,8 @@ impl Session {
         self.run_rdf_plan(&optimized_plan, "graphql")
     }
 
-    /// Executes a GraphQL query against the RDF store with parameters.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "graphql")]
-    pub fn execute_graphql_rdf_with_params(
+    pub(crate) fn execute_graphql_rdf_with_params(
         &self,
         query: &str,
         params: std::collections::HashMap<String, Value>,
@@ -138,17 +129,8 @@ impl Session {
         self.run_rdf_plan(&optimized_plan, "graphql")
     }
 
-    /// Executes a SPARQL query or update against this session.
-    ///
-    /// Without an open transaction each update commits on its own; to apply a
-    /// sequence of updates atomically, wrap it in `begin_transaction` and
-    /// `commit` on this session.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "sparql")]
-    pub fn execute_sparql(&self, query: &str) -> Result<QueryResult> {
+    pub(crate) fn execute_sparql(&self, query: &str) -> Result<QueryResult> {
         self.timed(|| self.execute_sparql_untimed(query))
     }
 
@@ -163,13 +145,8 @@ impl Session {
         self.run_rdf_plan(&optimized_plan, "sparql")
     }
 
-    /// Executes a SPARQL query with parameters.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "sparql")]
-    pub fn execute_sparql_with_params(
+    pub(crate) fn execute_sparql_with_params(
         &self,
         query: &str,
         params: std::collections::HashMap<String, Value>,
@@ -307,29 +284,16 @@ impl Session {
         }))
     }
 
-    /// Validates the default graph against SHACL shapes in a named graph.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if shape parsing fails or the shapes graph doesn't exist.
     #[cfg(feature = "shacl")]
-    pub fn validate_shacl(
+    pub(crate) fn validate_shacl(
         &self,
         shapes_graph: &str,
     ) -> Result<grafeo_core::graph::rdf::shacl::ValidationReport> {
         crate::validation::validate_shacl(self, &self.rdf_store, shapes_graph)
     }
 
-    /// Validates a named data graph against shapes in another named graph.
-    ///
-    /// Both SHACL Core constraints and SHACL-SPARQL constraints are scoped to
-    /// the named data graph (SPARQL queries receive `FROM <data_graph_name>`).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if shape parsing fails or either graph doesn't exist.
     #[cfg(feature = "shacl")]
-    pub fn validate_shacl_graph(
+    pub(crate) fn validate_shacl_graph(
         &self,
         data_graph_name: &str,
         shapes_graph_name: &str,
@@ -362,5 +326,91 @@ impl Session {
             )
             .map_err(|e| grafeo_common::utils::error::Error::Internal(e.to_string()))
         })
+    }
+}
+
+// The session's public methods: each reaches the session's slot for its call (#712).
+impl Session {
+    /// Executes a GraphQL query against the RDF store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails to parse or execute.
+    #[cfg(feature = "graphql")]
+    pub fn execute_graphql_rdf(&self, query: &str) -> Result<QueryResult> {
+        self.inner()?.execute_graphql_rdf(query)
+    }
+
+    /// Executes a GraphQL query against the RDF store with parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails to parse or execute.
+    #[cfg(feature = "graphql")]
+    pub fn execute_graphql_rdf_with_params(
+        &self,
+        query: &str,
+        params: std::collections::HashMap<String, Value>,
+    ) -> Result<QueryResult> {
+        self.inner()?.execute_graphql_rdf_with_params(query, params)
+    }
+
+    /// Executes a SPARQL query or update against this session.
+    ///
+    /// Without an open transaction each update commits on its own; to apply a
+    /// sequence of updates atomically, wrap it in `begin_transaction` and
+    /// `commit` on this session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails to parse or execute.
+    #[cfg(feature = "sparql")]
+    pub fn execute_sparql(&self, query: &str) -> Result<QueryResult> {
+        self.inner()?.execute_sparql(query)
+    }
+
+    /// Executes a SPARQL query with parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails to parse or execute.
+    #[cfg(feature = "sparql")]
+    pub fn execute_sparql_with_params(
+        &self,
+        query: &str,
+        params: std::collections::HashMap<String, Value>,
+    ) -> Result<QueryResult> {
+        self.inner()?.execute_sparql_with_params(query, params)
+    }
+
+    /// Validates the default graph against SHACL shapes in a named graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if shape parsing fails or the shapes graph doesn't exist.
+    #[cfg(feature = "shacl")]
+    pub fn validate_shacl(
+        &self,
+        shapes_graph: &str,
+    ) -> Result<grafeo_core::graph::rdf::shacl::ValidationReport> {
+        self.inner()?.validate_shacl(shapes_graph)
+    }
+
+    /// Validates a named data graph against shapes in another named graph.
+    ///
+    /// Both SHACL Core constraints and SHACL-SPARQL constraints are scoped to
+    /// the named data graph (SPARQL queries receive `FROM <data_graph_name>`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if shape parsing fails or either graph doesn't exist.
+    #[cfg(feature = "shacl")]
+    pub fn validate_shacl_graph(
+        &self,
+        data_graph_name: &str,
+        shapes_graph_name: &str,
+    ) -> Result<grafeo_core::graph::rdf::shacl::ValidationReport> {
+        self.inner()?
+            .validate_shacl_graph(data_graph_name, shapes_graph_name)
     }
 }

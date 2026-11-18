@@ -20,9 +20,11 @@ fn processor(
     graph: Option<&str>,
     (epoch, transaction): (EpochId, TransactionId),
 ) -> QueryProcessor {
-    let processor =
-        QueryProcessor::for_lpg_with_transaction(store, Arc::clone(&db.transaction_manager))
-            .with_transaction_context(epoch, transaction);
+    let processor = QueryProcessor::for_lpg_with_transaction(
+        store,
+        Arc::clone(&db.live().unwrap().transaction_manager),
+    )
+    .with_transaction_context(epoch, transaction);
     match graph {
         Some(graph) => processor.with_graph(graph),
         None => processor,
@@ -31,8 +33,11 @@ fn processor(
 
 /// A transaction of `db`'s manager, begun now, with the epoch it reads at.
 fn begin(db: &GrafeoDB) -> (EpochId, TransactionId) {
-    let transaction = db.transaction_manager.begin();
-    (db.transaction_manager.current_epoch(), transaction)
+    let transaction = db.live().unwrap().transaction_manager.begin();
+    (
+        db.live().unwrap().transaction_manager.current_epoch(),
+        transaction,
+    )
 }
 
 fn is_conflict(error: &grafeo_common::utils::error::Error) -> bool {
@@ -66,7 +71,13 @@ fn visits(session: &crate::Session) -> Value {
 #[test]
 fn a_processor_conflicts_with_a_session_on_a_node_of_the_graph_it_writes() {
     let db = two_graphs();
-    let trips = db.lpg_store().unwrap().graph("trips").unwrap();
+    let trips = db
+        .live()
+        .unwrap()
+        .lpg_store()
+        .unwrap()
+        .graph("trips")
+        .unwrap();
     let mut session = db.session();
     session.use_graph("trips");
     session.begin_transaction().unwrap();
@@ -80,7 +91,11 @@ fn a_processor_conflicts_with_a_session_on_a_node_of_the_graph_it_writes() {
         is_conflict(&error),
         "the session wrote Paris first: {error}"
     );
-    db.transaction_manager.abort(other.1).unwrap();
+    db.live()
+        .unwrap()
+        .transaction_manager
+        .abort(other.1)
+        .unwrap();
     session.commit().unwrap();
     assert_eq!(visits(&session), Value::Int64(88));
 }
@@ -88,7 +103,13 @@ fn a_processor_conflicts_with_a_session_on_a_node_of_the_graph_it_writes() {
 #[test]
 fn a_processor_does_not_conflict_with_the_same_id_in_another_graph() {
     let db = two_graphs();
-    let trips = db.lpg_store().unwrap().graph("trips").unwrap();
+    let trips = db
+        .live()
+        .unwrap()
+        .lpg_store()
+        .unwrap()
+        .graph("trips")
+        .unwrap();
     // The session writes Amsterdam, node 0 of the default graph.
     let mut session = db.session();
     session.begin_transaction().unwrap();
@@ -99,7 +120,11 @@ fn a_processor_does_not_conflict_with_the_same_id_in_another_graph() {
     processor(&db, trips, Some("trips"), other)
         .process("MATCH (c:City) SET c.visits = 4", QueryLanguage::Gql, None)
         .expect("Paris is another node than Amsterdam");
-    db.transaction_manager.commit(other.1).unwrap();
+    db.live()
+        .unwrap()
+        .transaction_manager
+        .commit(other.1)
+        .unwrap();
     session.commit().unwrap();
 
     let reader = db.session();
@@ -117,7 +142,7 @@ fn a_processor_does_not_conflict_with_the_same_id_in_another_graph() {
 #[test]
 fn a_processor_transaction_aborted_by_the_manager_leaves_nothing() {
     let db = two_graphs();
-    let root = db.lpg_store().unwrap();
+    let root = db.live().unwrap().lpg_store().unwrap();
     let transaction = begin(&db);
     let processor = processor(&db, root, None, transaction);
     processor
@@ -127,7 +152,11 @@ fn a_processor_transaction_aborted_by_the_manager_leaves_nothing() {
             None,
         )
         .unwrap();
-    db.transaction_manager.abort(transaction.1).unwrap();
+    db.live()
+        .unwrap()
+        .transaction_manager
+        .abort(transaction.1)
+        .unwrap();
 
     let rows = db
         .execute("MATCH (c:City) RETURN c.name, c.visits")

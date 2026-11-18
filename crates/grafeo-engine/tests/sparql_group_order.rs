@@ -304,7 +304,7 @@ fn a_sub_select_in_the_chain() {
 /// The profile text of `query` (the physical plan with each operator's
 /// rows), on the committed store.
 fn profile(db: &GrafeoDB, query: &str) -> String {
-    let processor = QueryProcessor::with_rdf(db.store().unwrap(), Arc::clone(db.rdf_store()));
+    let processor = QueryProcessor::with_rdf(db.store().unwrap(), Arc::clone(&db.rdf_store()));
     let result = processor
         .process(
             &format!("EXPLAIN ANALYZE {PREFIX} {query}"),

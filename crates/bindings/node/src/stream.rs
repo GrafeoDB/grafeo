@@ -32,11 +32,10 @@
 
 use std::sync::Arc;
 
-use grafeo_engine::database::GrafeoDB;
 use grafeo_engine::{OwnedResultStream, OwnedRowIterator};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 
 use crate::error::NodeGrafeoError;
 use crate::types::JsonWithTerms;
@@ -51,7 +50,8 @@ use crate::types::JsonWithTerms;
 pub struct JsResultStream {
     /// Keepalive: the database Arc must outlive the stream so the operator
     /// tree's shared stores do not get dropped mid-iteration.
-    _database: Arc<RwLock<GrafeoDB>>,
+    /// The database the stream reads; every call fails with `GRAFEO-T007` once it is closed.
+    database: crate::database::SharedDb,
     columns: Arc<Vec<String>>,
     /// Behind a `Mutex` because napi's async runtime can park tasks across
     /// threads, and `OwnedRowIterator` is not `Sync`.
@@ -65,11 +65,11 @@ pub struct JsResultStream {
 }
 
 impl JsResultStream {
-    pub(crate) fn new(database: Arc<RwLock<GrafeoDB>>, stream: OwnedResultStream) -> Self {
+    pub(crate) fn new(database: crate::database::SharedDb, stream: OwnedResultStream) -> Self {
         let columns = Arc::new(stream.columns().to_vec());
         let warnings = stream.warning_sink();
         Self {
-            _database: database,
+            database,
             columns,
             iter: Arc::new(Mutex::new(Some(stream.into_row_iter()))),
             warnings,
@@ -80,7 +80,7 @@ impl JsResultStream {
     /// A stream of a session, holding the session's statement slot until it
     /// is read to the end or closed.
     pub(crate) fn holding(
-        database: Arc<RwLock<GrafeoDB>>,
+        database: crate::database::SharedDb,
         stream: OwnedResultStream,
         permit: crate::session::StatementPermit,
     ) -> Self {
@@ -94,8 +94,9 @@ impl JsResultStream {
 impl JsResultStream {
     /// Column names in the order they appear in each row object.
     #[napi(getter)]
-    pub fn columns(&self) -> Vec<String> {
-        (*self.columns).clone()
+    pub fn columns(&self) -> Result<Vec<String>> {
+        self.database.check()?;
+        Ok((*self.columns).clone())
     }
 
     /// The warnings the statement raised so far, ordered by code: its
@@ -106,8 +107,11 @@ impl JsResultStream {
     ///
     /// New in 0.6.2. See <https://grafeo.dev/stability/>.
     #[napi(getter)]
-    pub fn warnings(&self) -> Vec<crate::query::QueryWarning> {
-        crate::query::js_warnings(&grafeo_bindings_common::warning::of_sink(&self.warnings))
+    pub fn warnings(&self) -> Result<Vec<crate::query::QueryWarning>> {
+        self.database.check()?;
+        Ok(crate::query::js_warnings(
+            &grafeo_bindings_common::warning::of_sink(&self.warnings),
+        ))
     }
 
     /// Pulls the next row as a plain object, or `null` when the stream is
@@ -120,6 +124,7 @@ impl JsResultStream {
     /// An RDF term is an RDF/JS term object, as `execute` gives it.
     #[napi(ts_return_type = "Promise<Record<string, GrafeoValue> | null>")]
     pub async fn next(&self) -> Result<Option<JsonWithTerms>> {
+        self.database.check()?;
         let iter = Arc::clone(&self.iter);
         let columns = Arc::clone(&self.columns);
         let permit = Arc::clone(&self.permit);

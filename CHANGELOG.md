@@ -12,6 +12,7 @@ Performance and memory release, in progress: this section lists what has landed 
 - **Results say where their nodes and edges are** (Experimental): `QueryResult::cell_type` and `QueryResult::cell_types`, the Python `cell_type`, the Node.js `cellType`, the `cellTypes` key of WASM `executeRaw*` results and the C `grafeo_result_types_json` give the type each value was built with. A map is a node or an edge exactly where its type says so.
 - **The openCypher TCK runs in every binding's spec tests**: 3,927 scenarios of openCypher 2024.3, converted by `scripts/convert_opencypher_tck.py`; the cases Grafeo does not pass yet are listed with their target release in `tests/spec/lpg/cypher/tck/known_failures.toml`.
 - **Python has types for the temporals its own cannot hold** (Experimental): `grafeo.Time`, `grafeo.Duration`, `grafeo.Date`, `grafeo.Timestamp` and `grafeo.ZonedDateTime` hold a time with nanoseconds, a duration with months or a part finer than a microsecond, and a date outside years 1 to 9999. Each compares, hashes and gives `to_native()`; all but `grafeo.Timestamp` (microseconds since 1970) take the engine's text.
+- **A database says whether it is closed**: `GrafeoDB::is_closed()` is true once `close()` has completed, and false after a `close()` that failed and put the database back.
 
 ### Changed
 
@@ -21,6 +22,16 @@ Performance and memory release, in progress: this section lists what has landed 
 - **A Python aware `datetime` parameter is a zoned datetime**: it keeps the offset its `tzinfo` gives and comes back aware; it was stored as a local datetime of its UTC instant and came back naive. `IS TYPED TIMESTAMP` and a property typed `LOCAL DATETIME` see the other type.
 - **A Python duration comes back as a `timedelta`, or as `grafeo.Duration`**: a `timedelta` when it holds the duration exactly, `grafeo.Duration` for months, a part finer than a microsecond, or a time part of a day or more or of the other sign than the days; it was a `{"months", "days", "nanos"}` dict. Dataframes keep the dict.
 - **An offset that is not whole minutes is refused with 22009**: a Python `datetime` or `time` whose `tzinfo` gives one, or a Go `time.Time` in a zone with one (Europe/Amsterdam before 1937, +00:19:32), fails the statement or the property write, as a time zone displacement is hours and minutes. Go's `TimeOf` still moves such an offset to its whole minutes.
+- **`close()` releases everything and every later call fails** ([#712](https://github.com/GrafeoDB/grafeo/issues/712)): after `close()` every call on the database and on the sessions, transactions, streams and views it handed out fails with `GRAFEO-T007` in every binding, reads included, and the memory goes once the statements in flight end; calls that cannot fail (`memory_usage()`, `list_graphs()` and the like) answer an empty value until 0.7.0. Snapshots (`snapshot()`, `projection()`, `Snapshot::shared()`) and the `iter_nodes()` and `iter_edges()` iterators taken before `close()` are the exception: they read on until they drop.
+- **An in-memory database refuses writes after `close()`**: as a persistent one does; WASM's `close()` also releases the database's memory.
+- **A failed `close()` keeps the data**: reads answer, writes fail with `GRAFEO-T007`, and a later `close()` or the drop persists; the sessions, streams and views it had handed out are revoked.
+- **Dropping a persistent database without `close()` refuses writes through what it handed out**: it persists and releases the file as before; a session, stream or view still held reads on until it drops.
+- **C# throws `ObjectDisposedException` after `Dispose()`**, with the `GRAFEO-T007` text; what the database handed out throws `GrafeoException` with `GRAFEO-T007`, and so do C#'s `AsOfView.Epoch` and Dart's `AsOfView.epoch`, which answered the epoch they had.
+- **C functions without an error return report a closed database**: `grafeo_current_epoch` and nine more (listed in `grafeo.h`) clear the last error on entry and, after `close()`, return their neutral value with `GRAFEO-T007` as the last error.
+
+### Deprecated
+
+- **`buffer_manager()`, `query_cache()`, `wal()` and `file_manager()` are deprecated**: each returns an owned handle, empty after `close()`, that keeps its part of the database alive while held; `memory_usage()`, `clear_plan_cache()`, `wal_status()`, `wal_checkpoint()` and `checkpoint_status()` reach the same data. They are removed in 0.7.0.
 
 ### Fixed
 

@@ -15,7 +15,7 @@
     feature = "triple-store",
     expect(
         deprecated,
-        reason = "tests read the RDF store directly to check what was committed; GrafeoDB::rdf_store() is deprecated for users and goes crate-private in 0.7.0"
+        reason = "tests read the RDF store, the buffer manager, the WAL, the file and the plan cache directly; their accessors are deprecated for users and go in 0.7.0"
     )
 )]
 
@@ -65,6 +65,8 @@ mod checkpoint_triggers;
 mod chunked_sections;
 mod clause_after_write;
 mod clear_and_rewrite_memory;
+mod close_keeps_acknowledged_commits;
+mod close_refuses_every_call;
 mod closed_type_after_a_read;
 mod closed_type_writers;
 mod commit_completion;

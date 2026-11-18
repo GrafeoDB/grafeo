@@ -883,7 +883,7 @@ impl SectionSource for FetchWatch<'_> {
     }
 }
 
-impl super::GrafeoDB {
+impl super::Open {
     /// Finishes a load once the database is built: builds the indexes the
     /// sections did not hold from all the data.
     pub(super) fn finish_load(&self, loaded: LoadedSections) {
@@ -976,8 +976,11 @@ mod tests {
         .unwrap();
         db.execute("CREATE CONSTRAINT city_name FOR (c:City) ON (c.name) UNIQUE")
             .unwrap();
-        let commits = db.transaction_manager.hold_commits().unwrap();
+        let open = db.live().unwrap();
+        let commits = open.transaction_manager.hold_commits().unwrap();
         let raw: Vec<(SectionType, Vec<u8>)> = db
+            .live()
+            .unwrap()
             .checkpoint_sources()
             .unwrap()
             .sections(&commits)
@@ -1032,7 +1035,7 @@ mod tests {
             )
             .unwrap();
             #[cfg(feature = "ring-index")]
-            db.rdf_store.rebuild_ring();
+            db.live().unwrap().rdf_store.rebuild_ring();
         }
         db.execute("INSERT (:Doc {emb: vector([3.0, 19.0]), body: 'Prague'})")
             .unwrap();
@@ -1064,9 +1067,16 @@ mod tests {
     /// returns bytes is written as one raw chunk of them instead of its own
     /// chunks.
     fn image_with(db: &GrafeoDB, replace: impl Fn(&dyn Section) -> Option<Vec<u8>>) -> MemoryImage {
-        let commits = db.transaction_manager.hold_commits().unwrap();
+        let open = db.live().unwrap();
+        let commits = open.transaction_manager.hold_commits().unwrap();
         let mut image = MemoryImage::new();
-        for section in db.checkpoint_sources().unwrap().sections(&commits) {
+        for section in db
+            .live()
+            .unwrap()
+            .checkpoint_sources()
+            .unwrap()
+            .sections(&commits)
+        {
             image
                 .begin_section(section.section_type(), section.version())
                 .unwrap();
@@ -1106,7 +1116,7 @@ mod tests {
              <http://example.org/lives_in> <http://example.org/berlin> }",
         )
         .unwrap();
-        db.rdf_store.rebuild_ring();
+        db.live().unwrap().rdf_store.rebuild_ring();
         let image = image_of(&db);
         assert!(
             image.section_types().contains(&SectionType::RdfRing),
@@ -1140,7 +1150,7 @@ mod tests {
              <http://example.org/lives_in> <http://example.org/berlin> }",
         )
         .unwrap();
-        db.rdf_store.rebuild_ring();
+        db.live().unwrap().rdf_store.rebuild_ring();
         db
     }
 
@@ -1152,9 +1162,16 @@ mod tests {
         section_type: SectionType,
         edit: impl Fn(&ChunkMeta, &mut Vec<u8>),
     ) -> MemoryImage {
-        let commits = db.transaction_manager.hold_commits().unwrap();
+        let open = db.live().unwrap();
+        let commits = open.transaction_manager.hold_commits().unwrap();
         let mut image = MemoryImage::new();
-        for section in db.checkpoint_sources().unwrap().sections(&commits) {
+        for section in db
+            .live()
+            .unwrap()
+            .checkpoint_sources()
+            .unwrap()
+            .sections(&commits)
+        {
             image
                 .begin_section(section.section_type(), section.version())
                 .unwrap();
@@ -1234,8 +1251,11 @@ mod tests {
         use grafeo_core::graph::rdf::{RdfStore, Term, TriplePattern};
 
         let db = ringed_database();
-        let commits = db.transaction_manager.hold_commits().unwrap();
+        let open = db.live().unwrap();
+        let commits = open.transaction_manager.hold_commits().unwrap();
         let raw: Vec<(SectionType, Vec<u8>)> = db
+            .live()
+            .unwrap()
             .checkpoint_sources()
             .unwrap()
             .sections(&commits)
@@ -1306,9 +1326,9 @@ mod tests {
                 Term::lang_literal("gezellig", "nl "),
             ),
         ] {
-            db.rdf_store.insert(triple);
+            db.live().unwrap().rdf_store.insert(triple);
         }
-        db.rdf_store.rebuild_ring();
+        db.live().unwrap().rdf_store.rebuild_ring();
         let image = image_of(&db);
 
         let rdf_store = Arc::new(RdfStore::new());
@@ -1412,7 +1432,7 @@ mod tests {
              <http://example.org/lives_in> <http://example.org/amsterdam> }",
         )
         .unwrap();
-        db.rdf_store.rebuild_ring();
+        db.live().unwrap().rdf_store.rebuild_ring();
         db.close().unwrap();
         drop(db);
 
@@ -1472,8 +1492,14 @@ mod tests {
         drop(fm);
 
         let db = GrafeoDB::open(&path).expect("the open succeeds");
-        assert_eq!(db.rdf_store.len(), 2, "the triples are loaded");
+        assert_eq!(
+            db.live().unwrap().rdf_store.len(),
+            2,
+            "the triples are loaded"
+        );
         let ring = db
+            .live()
+            .unwrap()
             .rdf_store
             .ring_latest()
             .expect("the ring is built from the triples");
@@ -1653,8 +1679,8 @@ mod tests {
     #[test]
     fn a_folded_database_checkpoints_as_a_plain_one() {
         let db = GrafeoDB::new_in_memory();
-        let loaded = load(&compacted_image(), &db.lpg_store().unwrap()).unwrap();
-        db.finish_load(loaded);
+        let loaded = load(&compacted_image(), &db.live().unwrap().lpg_store().unwrap()).unwrap();
+        db.live().unwrap().finish_load(loaded);
         let names = |db: &GrafeoDB| {
             db.execute("MATCH (n) WHERE n.name IS NOT NULL RETURN n.name ORDER BY n.name")
                 .unwrap()
@@ -1674,8 +1700,8 @@ mod tests {
             by_byte(vec![SectionType::Catalog, SectionType::LpgStore])
         );
         let reopened = GrafeoDB::new_in_memory();
-        let loaded = load(&checkpoint, &reopened.lpg_store().unwrap()).unwrap();
-        reopened.finish_load(loaded);
+        let loaded = load(&checkpoint, &reopened.live().unwrap().lpg_store().unwrap()).unwrap();
+        reopened.live().unwrap().finish_load(loaded);
         assert_eq!(names(&reopened), before);
         let edges = reopened
             .execute("MATCH ()-[r]->() RETURN count(r)")
@@ -1693,12 +1719,16 @@ mod tests {
              <http://example.org/prague> }",
         )
         .unwrap();
-        db.rdf_store.rebuild_ring();
+        db.live().unwrap().rdf_store.rebuild_ring();
 
         let copy = db.to_memory().unwrap();
-        assert_eq!(copy.rdf_store.len(), 1);
+        assert_eq!(copy.live().unwrap().rdf_store.len(), 1);
         assert_eq!(
-            copy.rdf_store.ring_latest().map(|ring| ring.len()),
+            copy.live()
+                .unwrap()
+                .rdf_store
+                .ring_latest()
+                .map(|ring| ring.len()),
             Some(1),
             "the copy has the ring"
         );
@@ -1709,9 +1739,16 @@ mod tests {
     /// would write it (its chunks as this release writes them).
     #[cfg(all(feature = "ring-index", feature = "sparql"))]
     fn image_with_version(db: &GrafeoDB, section_type: SectionType, version: u8) -> MemoryImage {
-        let commits = db.transaction_manager.hold_commits().unwrap();
+        let open = db.live().unwrap();
+        let commits = open.transaction_manager.hold_commits().unwrap();
         let mut image = MemoryImage::new();
-        for section in db.checkpoint_sources().unwrap().sections(&commits) {
+        for section in db
+            .live()
+            .unwrap()
+            .checkpoint_sources()
+            .unwrap()
+            .sections(&commits)
+        {
             let claimed = if section.section_type() == section_type {
                 version
             } else {
@@ -1858,10 +1895,21 @@ mod tests {
     fn the_copy_image_holds_every_section_of_a_checkpoint() {
         let db = every_kind_of_section();
         let target = GrafeoDB::new_in_memory();
-        let copied = db.copy_into(&target).unwrap();
+        let copied = db
+            .live()
+            .unwrap()
+            .copy_into(&target.live().unwrap())
+            .unwrap();
 
-        let commits = db.transaction_manager.hold_commits().unwrap();
-        let sections = db.checkpoint_sources().unwrap().sections(&commits);
+        let open = db.live().unwrap();
+
+        let commits = open.transaction_manager.hold_commits().unwrap();
+        let sections = db
+            .live()
+            .unwrap()
+            .checkpoint_sources()
+            .unwrap()
+            .sections(&commits);
         let refs: Vec<&dyn Section> = sections.iter().map(AsRef::as_ref).collect();
         let expected = MemoryImage::from_sections(&refs).unwrap();
         drop(commits);
@@ -1966,7 +2014,7 @@ mod tests {
             )
             .unwrap();
             #[cfg(feature = "ring-index")]
-            db.rdf_store.rebuild_ring();
+            db.live().unwrap().rdf_store.rebuild_ring();
         }
         db
     }
@@ -1988,8 +2036,14 @@ mod tests {
         .flatten()
         .collect();
         let db = database_with_every_section();
-        let commits = db.transaction_manager.hold_commits().unwrap();
-        let sections = db.checkpoint_sources().unwrap().sections(&commits);
+        let open = db.live().unwrap();
+        let commits = open.transaction_manager.hold_commits().unwrap();
+        let sections = db
+            .live()
+            .unwrap()
+            .checkpoint_sources()
+            .unwrap()
+            .sections(&commits);
         let refs: Vec<&dyn Section> = sections.iter().map(AsRef::as_ref).collect();
         let image = MemoryImage::from_sections(&refs).unwrap();
         drop(commits);

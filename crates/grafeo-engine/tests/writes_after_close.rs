@@ -1,14 +1,13 @@
-//! A closed database takes no more writes.
+//! A closed database takes no more calls.
 //!
 //! `close()` writes a final checkpoint and then removes the WAL. A commit, or
 //! a write outside a transaction, that ran after that checkpoint was written
 //! only to the WAL that `close()` removed (or, without the `wal` feature,
 //! nowhere): it returned success and was gone after a reopen. From the moment
-//! `close()` of a persistent database starts, commits and writes fail with an
-//! error saying the database is closed; a commit already in progress
-//! completes first and is in the final checkpoint. Reads still work, and an
-//! in-memory database, which has nothing to persist, still takes writes after
-//! `close()`.
+//! `close()` starts, every call fails with the database-closed error
+//! (`GRAFEO-T007`), reads included and on an in-memory database too; a commit
+//! already in progress completes first and is in the final checkpoint. What
+//! the file holds afterwards is checked by a reopen.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test writes_after_close
@@ -67,6 +66,15 @@ fn assert_closed(error: &impl std::fmt::Display) {
     assert!(message.contains("database is closed"), "{message}");
 }
 
+/// Checks that a read of the closed `db` fails with the database-closed error.
+#[track_caller]
+fn assert_reads_fail(db: &GrafeoDB) {
+    assert_closed(
+        &db.execute("MATCH (p:Person) RETURN p.name AS name")
+            .expect_err("a read after close() fails"),
+    );
+}
+
 /// The people a fresh open of `path` shows.
 fn people_after_reopen(path: &Path) -> Vec<Value> {
     let db = open(path);
@@ -96,11 +104,7 @@ fn a_transaction_committed_after_close_fails_and_is_not_in_the_file() {
     );
     assert_eq!(error.error_code().as_str(), "GRAFEO-T007");
     assert_closed(&error);
-    assert_eq!(
-        people(&db),
-        vec![Value::from("Alix")],
-        "the refused commit is rolled back, and reads still work"
-    );
+    assert_reads_fail(&db);
     drop(session);
     drop(db);
     assert_eq!(people_after_reopen(&path), vec![Value::from("Alix")]);
@@ -120,7 +124,7 @@ fn a_statement_after_close_fails_and_is_not_in_the_file() {
         .execute("INSERT (:Person {name: 'Gus'})")
         .expect_err("a write after close() fails");
     assert_closed(&error);
-    assert_eq!(people(&db), vec![Value::from("Alix")]);
+    assert_reads_fail(&db);
     drop(db);
     assert_eq!(people_after_reopen(&path), vec![Value::from("Alix")]);
 }
@@ -151,25 +155,33 @@ fn a_direct_write_after_close_fails_and_changes_nothing() {
             .expect_err("set_node_property fails"),
     );
     assert_closed(&db.delete_node(alix).expect_err("delete_node fails"));
+    assert_closed(&db.node_count().expect_err("node_count fails"));
+    assert_closed(&db.get_node(alix).expect_err("get_node fails"));
+    drop(db);
+
+    let reopened = open(&path);
     assert_eq!(
-        db.node_count().unwrap(),
-        1,
+        people(&reopened),
+        vec![Value::from("Alix")],
         "nothing was created or deleted"
     );
+    assert_eq!(reopened.node_count().unwrap(), 1);
     assert_eq!(
-        db.get_node(alix)
+        reopened
+            .get_node(alix)
             .unwrap()
-            .and_then(|node| node.get_property("city").cloned()),
+            .expect("Alix")
+            .get_property("city")
+            .cloned(),
         None,
         "the property was not set"
     );
-    drop(db);
-    assert_eq!(people_after_reopen(&path), vec![Value::from("Alix")]);
+    reopened.close().unwrap();
 }
 
 /// Schema changes and graph commands take effect at once, outside any
-/// commit: after `close()` they fail too, and read-only schema statements
-/// still work.
+/// commit: after `close()` they fail too, and so do read-only schema
+/// statements.
 #[test]
 fn schema_changes_and_graph_commands_after_close_fail() {
     let dir = tempfile::tempdir().unwrap();
@@ -187,11 +199,9 @@ fn schema_changes_and_graph_commands_after_close_fail() {
         &db.execute("CREATE GRAPH berlin")
             .expect_err("a graph command after close() fails"),
     );
-    let constraints = db.execute("SHOW CONSTRAINTS").unwrap();
-    assert!(
-        constraints.rows().is_empty(),
-        "SHOW still works and lists no constraint: {:?}",
-        constraints.rows()
+    assert_closed(
+        &db.execute("SHOW CONSTRAINTS")
+            .expect_err("a read-only schema statement after close() fails"),
     );
     drop(db);
 
@@ -243,32 +253,31 @@ fn a_statement_in_a_transaction_begun_before_close_fails() {
             .execute("INSERT (:Person {name: 'Gus'})")
             .expect_err("a write after close() fails"),
     );
-    assert_eq!(
-        session
+    assert_closed(
+        &session
             .execute("MATCH (p:Person) RETURN p.name AS name")
-            .unwrap()
-            .rows()
-            .len(),
-        1,
-        "the transaction still reads, and holds no write"
+            .expect_err("a read in the transaction after close() fails"),
     );
     drop(session);
     drop(db);
     assert_eq!(people_after_reopen(&path), vec![Value::from("Alix")]);
 }
 
-/// An in-memory database has nothing to persist: `close()` leaves it
-/// working, for writes too.
+/// An in-memory database has nothing to persist, and `close()` releases it
+/// all the same: every later call fails.
 #[test]
-fn an_in_memory_database_still_takes_writes_after_close() {
+fn an_in_memory_database_refuses_every_call_after_close() {
     let db = GrafeoDB::new_in_memory();
     db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
     db.close().unwrap();
 
-    db.execute("INSERT (:Person {name: 'Gus'})").unwrap();
-    db.create_node(&["City"]).unwrap();
-    assert_eq!(people(&db), vec![Value::from("Alix"), Value::from("Gus")]);
-    assert_eq!(db.node_count().unwrap(), 3);
+    assert_closed(
+        &db.execute("INSERT (:Person {name: 'Gus'})")
+            .expect_err("a write after close() fails"),
+    );
+    assert_closed(&db.create_node(&["City"]).expect_err("create_node fails"));
+    assert_reads_fail(&db);
+    assert_closed(&db.node_count().expect_err("node_count fails"));
 }
 
 /// How long a test waits for `close()` to reach its final checkpoint: a close with nothing new
@@ -276,14 +285,14 @@ fn an_in_memory_database_still_takes_writes_after_close() {
 #[cfg(feature = "testing-statement-injection")]
 const CHECKPOINT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// The race `close()` used to lose: work that waits for the final checkpoint
-/// (which holds commits off) and runs once it is written. A transaction that
-/// wrote before `close()` and commits meanwhile fails, instead of landing in
-/// the WAL that `close()` then removes. (A statement that starts once
-/// `close()` began fails at once, before it writes.)
+/// The race `close()` used to lose: work that runs while the final checkpoint
+/// is written. `close()` takes the database and its sessions first, so a
+/// transaction that wrote before `close()` and commits meanwhile fails at
+/// once: it was rolled back, and nothing of it lands in the WAL that `close()`
+/// then removes.
 #[cfg(feature = "testing-statement-injection")]
 #[test]
-fn a_commit_waiting_for_the_final_checkpoint_fails() {
+fn a_commit_during_the_final_checkpoint_fails_at_once() {
     use std::sync::{Arc, mpsc};
 
     use grafeo_common::testing::commit_hook::during_next_checkpoint;
@@ -293,6 +302,8 @@ fn a_commit_waiting_for_the_final_checkpoint_fails() {
     database_with_alix(&path);
 
     let db = Arc::new(open(&path));
+    // A change since the open, so close() has something new and checkpoints.
+    db.execute("INSERT (:Person {name: 'Vincent'})").unwrap();
     let mut session = db.session();
     session.begin_transaction().unwrap();
     session.execute("INSERT (:Person {name: 'Gus'})").unwrap();
@@ -307,17 +318,21 @@ fn a_commit_waiting_for_the_final_checkpoint_fails() {
     let (commit, finished) = started
         .recv_timeout(CHECKPOINT_WAIT)
         .expect("close() checkpointed");
-    assert!(!finished, "the commit waits for the final checkpoint");
+    assert!(finished, "the commit fails at once, without waiting");
     assert_closed(&commit.join().expect_err("the commit fails"));
     drop(db);
-    assert_eq!(people_after_reopen(&path), vec![Value::from("Alix")]);
+    assert_eq!(
+        people_after_reopen(&path),
+        vec![Value::from("Alix"), Value::from("Vincent")],
+        "the file holds the change before close() and nothing of the transaction"
+    );
 }
 
-/// A direct write (no session, no transaction) that waits for the final
-/// checkpoint fails once it is written, and changes nothing.
+/// A direct write (no session, no transaction) during the final checkpoint
+/// fails at once, and changes nothing.
 #[cfg(feature = "testing-statement-injection")]
 #[test]
-fn a_direct_write_waiting_for_the_final_checkpoint_fails() {
+fn a_direct_write_during_the_final_checkpoint_fails_at_once() {
     use std::sync::{Arc, mpsc};
 
     use grafeo_common::testing::commit_hook::during_next_checkpoint;
@@ -346,9 +361,9 @@ fn a_direct_write_waiting_for_the_final_checkpoint_fails() {
     let (write, finished) = started
         .recv_timeout(CHECKPOINT_WAIT)
         .expect("close() checkpointed");
-    assert!(!finished, "the write waits for the final checkpoint");
+    assert!(finished, "the write fails at once, without waiting");
     assert_closed(&write.join().expect_err("the write fails"));
-    assert_eq!(db.node_count().unwrap(), 2, "nothing was created");
+    assert_closed(&db.node_count().expect_err("node_count fails"));
     drop(db);
     assert_eq!(
         people_after_reopen(&path),
@@ -356,13 +371,12 @@ fn a_direct_write_waiting_for_the_final_checkpoint_fails() {
     );
 }
 
-/// A schema change or a graph command that waits for the final checkpoint
-/// (they hold commits off for the whole statement) fails once it is written,
-/// instead of changing the catalog after the last image and logging to the WAL
-/// `close()` removes.
+/// A schema change or a graph command during the final checkpoint fails at
+/// once, instead of changing the catalog after the last image and logging to
+/// the WAL `close()` removes.
 #[cfg(feature = "testing-statement-injection")]
 #[test]
-fn a_schema_change_waiting_for_the_final_checkpoint_fails() {
+fn a_schema_change_during_the_final_checkpoint_fails_at_once() {
     use std::sync::{Arc, mpsc};
 
     use grafeo_common::testing::commit_hook::during_next_checkpoint;
@@ -398,7 +412,7 @@ fn a_schema_change_waiting_for_the_final_checkpoint_fails() {
         let (write, finished) = started
             .recv_timeout(CHECKPOINT_WAIT)
             .expect("close() checkpointed");
-        assert!(!finished, "{statement}: waits for the final checkpoint");
+        assert!(finished, "{statement}: fails at once, without waiting");
         assert_closed(&write.join().expect_err("the statement fails"));
         drop(db);
         let reopened = open(&path);
@@ -534,7 +548,9 @@ fn persisting_after_close_fails_and_writes_nothing() {
             .map(|(file, _)| file)
             .collect::<Vec<_>>()
     );
-    assert_eq!(people(&db), vec![Value::from("Alix")], "reads still work");
+    assert_reads_fail(&db);
+    drop(db);
+    assert_eq!(people_after_reopen(&path), vec![Value::from("Alix")]);
 }
 
 /// Without a WAL (every persistent database in a build without the `wal`
@@ -581,7 +597,7 @@ fn a_closed_handle_overwrites_nothing_a_later_handle_wrote() {
 /// path (a statement outside a transaction, `GrafeoDB::execute_sparql`, and a
 /// transaction begun before `close()`), also for the embedded admin identity;
 /// they used to land in memory and in the WAL `close()` removed. Queries
-/// still run.
+/// fail too; the reopened file holds only the triple from before.
 #[cfg(all(feature = "sparql", feature = "triple-store"))]
 #[test]
 fn sparql_updates_after_close_fail_and_are_not_in_the_file() {
@@ -605,14 +621,9 @@ fn sparql_updates_after_close_fail_and_are_not_in_the_file() {
         "Session::execute_sparql in a transaction",
         session.execute_sparql(GUS),
     );
-    assert_eq!(db.rdf_store().len(), 1, "no triple was added in memory");
-    assert_eq!(
-        db.execute_sparql("SELECT ?s WHERE { ?s ?p ?o }")
-            .unwrap()
-            .rows()
-            .len(),
-        1,
-        "queries still run"
+    assert_closed_error(
+        "a SPARQL query",
+        db.execute_sparql("SELECT ?s WHERE { ?s ?p ?o }"),
     );
     drop(session);
     drop(db);
@@ -672,25 +683,24 @@ fn direct_graph_and_index_calls_after_close_fail() {
             db.rebuild_text_index("Person", "name"),
         );
     }
-    assert_eq!(
-        db.list_graphs(),
-        vec!["prague".to_string()],
-        "no graph changed"
-    );
-    assert_eq!(indexed(&db), (true, false), "no index changed");
     drop(db);
 
     let reopened = open(&path);
-    assert_eq!(reopened.list_graphs(), vec!["prague".to_string()]);
-    assert_eq!(indexed(&reopened), (true, false));
+    assert_eq!(
+        reopened.list_graphs(),
+        vec!["prague".to_string()],
+        "no graph changed"
+    );
+    assert_eq!(indexed(&reopened), (true, false), "no index changed");
     reopened.close().unwrap();
 }
 
 /// `CREATE PROJECTION` and `DROP PROJECTION` change only the session's
-/// projections (nothing is logged or persisted): they still work after
-/// `close()`, as reads do.
+/// projections (nothing is logged or persisted), yet after `close()` they
+/// fail like every statement: a session the closed database hands out is
+/// closed.
 #[test]
-fn projections_still_work_after_close() {
+fn projections_after_close_fail() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("barcelona.grafeo");
     database_with_alix(&path);
@@ -698,24 +708,25 @@ fn projections_still_work_after_close() {
     db.close().unwrap();
 
     let session = db.session();
-    session
-        .execute("CREATE PROJECTION social LABELS (Person)")
-        .unwrap_or_else(|error| panic!("CREATE PROJECTION after close(): {error}"));
-    assert_eq!(
-        session.execute("SHOW PROJECTIONS").unwrap().rows().to_vec(),
-        vec![vec![Value::from("social")]]
-    );
-    session
-        .execute("DROP PROJECTION social")
-        .unwrap_or_else(|error| panic!("DROP PROJECTION after close(): {error}"));
+    for statement in [
+        "CREATE PROJECTION social LABELS (Person)",
+        "SHOW PROJECTIONS",
+        "DROP PROJECTION social",
+    ] {
+        assert_closed(
+            &session
+                .execute(statement)
+                .expect_err("a projection statement after close() fails"),
+        );
+    }
 }
 
-/// A graph command refused for another reason says so after `close()`: the
-/// read-only and grant checks come before commits are held off (which fails
-/// once the database is closed), so a read-only transaction gets the
-/// read-only error and a session without a grant the permission error.
+/// A session the closed database hands out fails every statement with the
+/// database-closed error, whatever else would refuse it: a read-only
+/// transaction cannot start, and a session without a grant gets the
+/// database-closed error, not the permission error.
 #[test]
-fn a_graph_command_refused_for_another_reason_says_so_after_close() {
+fn a_session_after_close_fails_before_its_other_checks() {
     use grafeo_engine::auth::{Grant, Identity, Role};
 
     let dir = tempfile::tempdir().unwrap();
@@ -725,13 +736,10 @@ fn a_graph_command_refused_for_another_reason_says_so_after_close() {
     db.close().unwrap();
 
     let read_only = db.session();
-    read_only.execute("START TRANSACTION READ ONLY").unwrap();
-    let error = read_only
-        .execute("CREATE GRAPH berlin")
-        .expect_err("a graph command in a read-only transaction fails");
-    assert!(
-        matches!(error, Error::Transaction(TransactionError::ReadOnly)),
-        "the read-only error: {error:?}"
+    assert_closed(
+        &read_only
+            .execute("START TRANSACTION READ ONLY")
+            .expect_err("a transaction after close() does not start"),
     );
 
     let without_grant = db.session_with_identity(
@@ -741,8 +749,8 @@ fn a_graph_command_refused_for_another_reason_says_so_after_close() {
         .execute("CREATE GRAPH berlin")
         .expect_err("a graph command without a grant fails");
     assert!(
-        error.to_string().contains("permission denied"),
-        "the permission error: {error}"
+        matches!(error, Error::Transaction(TransactionError::DatabaseClosed)),
+        "the database-closed error: {error:?}"
     );
 }
 
@@ -955,10 +963,20 @@ fn imports_and_restores_after_close_fail() {
             "import_tsv_rdf",
             db.import_tsv_rdf(&tsv, "http://ex.org/knows", "http://ex.org/"),
         );
-        assert_eq!(db.rdf_store().len(), 0, "no triple was added");
     }
-    assert_eq!(people(&db), vec![Value::from("Alix")], "nothing changed");
-    assert_eq!(db.node_count().unwrap(), 1);
+    assert_reads_fail(&db);
+    drop(db);
+
+    let reopened = open(&path);
+    assert_eq!(
+        people(&reopened),
+        vec![Value::from("Alix")],
+        "nothing changed"
+    );
+    assert_eq!(reopened.node_count().unwrap(), 1);
+    #[cfg(feature = "triple-store")]
+    assert_eq!(reopened.rdf_store().len(), 0, "no triple was added");
+    reopened.close().unwrap();
 }
 
 /// After `close()` an RDF batch insert refuses before it pulls the caller's
@@ -1003,7 +1021,6 @@ fn imports_after_close_fail_before_reading_their_input() {
         let malformed = dir.path().join("malformed.ttl");
         std::fs::write(&malformed, "<http://ex.org/gus> is no triple\n").unwrap();
         assert_closed_error("load_rdf of malformed data", db.load_rdf(&malformed, None));
-        assert_eq!(db.rdf_store().len(), 0, "no triple was added");
     }
     assert_closed_error(
         "import_tsv of a missing file",
@@ -1017,7 +1034,18 @@ fn imports_after_close_fail_before_reading_their_input() {
         "import_tsv_str of malformed data",
         db.import_tsv_str("Alix\tGus\n", "KNOWS", true),
     );
-    assert_eq!(people(&db), vec![Value::from("Alix")], "nothing changed");
+    assert_reads_fail(&db);
+    drop(db);
+
+    let reopened = open(&path);
+    assert_eq!(
+        people(&reopened),
+        vec![Value::from("Alix")],
+        "nothing changed"
+    );
+    #[cfg(feature = "triple-store")]
+    assert_eq!(reopened.rdf_store().len(), 0, "no triple was added");
+    reopened.close().unwrap();
 }
 
 /// A bulk import or an RDF batch insert, by name, given a directory for its
@@ -1152,11 +1180,21 @@ fn a_read_only_handle_takes_no_restore_or_import_open_or_closed() {
                     failures.push(format!("{name}, closed {closed}: another error: {error:?}"));
                 }
             }
-            let seen = people(&db);
-            if seen != vec![Value::from("Alix")] || imported(&db) != 0 {
+            // A closed handle reads nothing: a fresh read-only open shows the file.
+            let shown = if closed {
+                if db.execute("MATCH (p:Person) RETURN p.name").is_ok() {
+                    failures.push(format!("{name}, closed {closed}: a read answered"));
+                }
+                drop(db);
+                GrafeoDB::open_read_only(&path).unwrap()
+            } else {
+                db
+            };
+            let seen = people(&shown);
+            if seen != vec![Value::from("Alix")] || imported(&shown) != 0 {
                 failures.push(format!(
                     "{name}, closed {closed}: the handle shows {seen:?} and {} more items",
-                    imported(&db)
+                    imported(&shown)
                 ));
             }
         }

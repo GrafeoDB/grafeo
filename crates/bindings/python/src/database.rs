@@ -315,6 +315,65 @@ impl AsyncQueryResultIter {
     }
 }
 
+/// The database every object of this binding shares: the database itself, and the
+/// sessions, transactions, streams, graph handles, views and adapters it hands out.
+///
+/// The only ways to reach it check that it is open, so no call answers from a closed
+/// database: each fails with `GRAFEO-T007` after `close()`, a getter as much as a query.
+/// Only [`close`](Self::close) reaches a closed one, as a no-op.
+pub(crate) struct SharedDb(Arc<RwLock<GrafeoDB>>);
+
+impl SharedDb {
+    pub(crate) fn new(db: GrafeoDB) -> Self {
+        Self(Arc::new(RwLock::new(db)))
+    }
+
+    /// The open database; `GRAFEO-T007` once closed.
+    pub(crate) fn read(&self) -> Result<parking_lot::RwLockReadGuard<'_, GrafeoDB>, PyGrafeoError> {
+        let db = self.0.read();
+        if db.is_closed() {
+            return Err(closed_error());
+        }
+        Ok(db)
+    }
+
+    /// The open database, alone (no statement runs beside it); `GRAFEO-T007` once closed.
+    pub(crate) fn write(
+        &self,
+    ) -> Result<parking_lot::RwLockWriteGuard<'_, GrafeoDB>, PyGrafeoError> {
+        let db = self.0.write();
+        if db.is_closed() {
+            return Err(closed_error());
+        }
+        Ok(db)
+    }
+
+    /// `GRAFEO-T007` once closed, for a call that reaches the database only later.
+    pub(crate) fn check(&self) -> Result<(), PyGrafeoError> {
+        self.read().map(drop)
+    }
+
+    /// Another handle on the same database, for an object it hands out; `GRAFEO-T007` once
+    /// closed.
+    pub(crate) fn share(&self) -> Result<Self, PyGrafeoError> {
+        self.check()?;
+        Ok(Self(Arc::clone(&self.0)))
+    }
+
+    /// Closes the database: persists it and releases what it holds; a no-op once closed.
+    pub(crate) fn close(&self) -> Result<(), PyGrafeoError> {
+        Ok(self.0.read().close()?)
+    }
+}
+
+/// The error of a call on a closed database (`GRAFEO-T007`).
+pub(crate) fn closed_error() -> PyGrafeoError {
+    grafeo_common::utils::error::Error::Transaction(
+        grafeo_common::utils::error::TransactionError::DatabaseClosed,
+    )
+    .into()
+}
+
 /// Your connection to a Grafeo database.
 ///
 /// Create one with `GrafeoDB()` for in-memory storage (fast, temporary) or
@@ -332,7 +391,7 @@ impl AsyncQueryResultIter {
 /// ```
 #[pyclass(name = "GrafeoDB")]
 pub struct PyGrafeoDB {
-    inner: Arc<RwLock<GrafeoDB>>,
+    inner: SharedDb,
 }
 
 impl PyGrafeoDB {
@@ -386,7 +445,7 @@ impl PyGrafeoDB {
     /// graph type (also for an open the engine does not list them for).
     fn warning_of_open(self, py: Python<'_>) -> PyResult<Self> {
         let warnings = {
-            let db = self.inner.read();
+            let db = self.inner.read()?;
             let mut warnings: Vec<(String, String)> = db
                 .open_warnings()
                 .iter()
@@ -411,7 +470,7 @@ impl PyGrafeoDB {
     fn open_with(py: Python<'_>, config: Config) -> PyResult<Self> {
         let db = without_gil(py, move || Ok(GrafeoDB::with_config(config)?))?;
         Ok(Self {
-            inner: Arc::new(RwLock::new(db)),
+            inner: SharedDb::new(db),
         })
     }
 
@@ -422,7 +481,7 @@ impl PyGrafeoDB {
         py: Python<'_>,
         work: impl FnOnce(&GrafeoDB) -> Result<T, PyGrafeoError> + Send,
     ) -> PyResult<T> {
-        without_gil(py, || work(&self.inner.read()))
+        without_gil(py, || work(&*self.inner.read()?))
     }
 
     /// [`grafeo_engine::import::import_nodes`] in a session of its own,
@@ -434,6 +493,7 @@ impl PyGrafeoDB {
         format: grafeo_engine::import::ImportFormat,
         py: Python<'_>,
     ) -> PyResult<u64> {
+        self.inner.check()?;
         std::fs::metadata(path)
             .map_err(|e| pyo3::exceptions::PyFileNotFoundError::new_err(format!("{path}: {e}")))?;
         let path = std::path::Path::new(path);
@@ -460,7 +520,7 @@ impl PyGrafeoDB {
         let result = without_gil(py, || {
             let result = self
                 .inner
-                .read()
+                .read()?
                 .execute_language(query, language, params)?;
             Ok(crate::direct::query_result(result))
         });
@@ -693,9 +753,10 @@ impl PyGrafeoDB {
     /// Example:
     ///     >>> db.storage_tiers()
     ///     {'LpgStore': 'in_memory', 'VectorStore': 'on_disk'}
-    fn storage_tiers(&self) -> HashMap<String, String> {
-        let db = self.inner.read();
-        db.storage_tiers()
+    fn storage_tiers(&self) -> PyResult<HashMap<String, String>> {
+        let db = self.inner.read()?;
+        Ok(db
+            .storage_tiers()
             .into_iter()
             .map(|(section_type, tier)| {
                 (
@@ -703,7 +764,7 @@ impl PyGrafeoDB {
                     tier_to_str(tier).to_string(),
                 )
             })
-            .collect()
+            .collect())
     }
 
     /// Reloads spilled section data back into RAM, up to `target_fraction`
@@ -720,9 +781,9 @@ impl PyGrafeoDB {
     ///     >>> db.reload_eligible(0.7)
     ///     2
     #[pyo3(signature = (target_fraction=0.7))]
-    fn reload_eligible(&self, target_fraction: f64) -> usize {
-        let db = self.inner.read();
-        db.reload_eligible(target_fraction)
+    fn reload_eligible(&self, target_fraction: f64) -> PyResult<usize> {
+        let db = self.inner.read()?;
+        Ok(db.reload_eligible(target_fraction))
     }
 
     /// Open an existing database.
@@ -777,7 +838,7 @@ impl PyGrafeoDB {
         let result = without_gil(py, || {
             let result = self
                 .inner
-                .read()
+                .read()?
                 .execute_language_with_timeout(query, "gql", params, timeout)?;
             Ok(crate::direct::query_result(result))
         });
@@ -808,7 +869,7 @@ impl PyGrafeoDB {
         // Sync graph/schema state is not needed: execute_streaming rejects the
         // session commands that would change them.
         let stream = self.released(py, |db| Ok(db.execute_streaming(query)?))?;
-        let mut stream = crate::stream::PyResultStream::new(Arc::clone(&self.inner), stream);
+        let mut stream = crate::stream::PyResultStream::new(self.inner.share()?, stream);
         stream.warn_new(py)?;
         Ok(stream)
     }
@@ -860,7 +921,7 @@ impl PyGrafeoDB {
         let point = crate::time_travel::time_point(point)?;
         let view = self.released(py, |db| Ok(db.as_of(point)?))?;
         Ok(crate::time_travel::PyAsOfView::new(
-            Arc::clone(&self.inner),
+            self.inner.share()?,
             view,
         ))
     }
@@ -898,8 +959,9 @@ impl PyGrafeoDB {
     }
 
     /// Execute a query and return a query builder.
-    fn query(&self, query: String) -> PyQueryBuilder {
-        PyQueryBuilder::create(query)
+    fn query(&self, query: String) -> PyResult<PyQueryBuilder> {
+        self.inner.check()?;
+        Ok(PyQueryBuilder::create(query))
     }
 
     /// Execute a Cypher query.
@@ -964,22 +1026,21 @@ impl PyGrafeoDB {
             None
         };
 
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
 
         future_into_py(py, async move {
             // Perform the query execution in the async context
             // We use spawn_blocking since the actual db.execute is synchronous
-            let mut result = tokio::task::spawn_blocking(move || {
-                let db = db.read();
-                if let Some(params) = param_map {
+            let mut result = tokio::task::spawn_blocking(move || -> Result<_, PyGrafeoError> {
+                let db = db.read()?;
+                Ok(if let Some(params) = param_map {
                     db.execute_with_params(&query, params)
                 } else {
                     db.execute(&query)
-                }
+                }?)
             })
             .await
-            .map_err(|e| PyGrafeoError::database(e.to_string()))?
-            .map_err(PyGrafeoError::from)?;
+            .map_err(|e| PyGrafeoError::database(e.to_string()))??;
 
             // Extract entities before consuming the result rows.
             // Entity extraction only inspects Value::Map markers, no Python needed.
@@ -1181,7 +1242,7 @@ impl PyGrafeoDB {
         labels: Vec<String>,
         properties: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyNode> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         crate::direct::create_node(&*db, &labels, properties)
     }
 
@@ -1197,7 +1258,7 @@ impl PyGrafeoDB {
         edge_type: String,
         properties: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyEdge> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         crate::direct::create_edge(
             &*db,
             NodeId(source_id),
@@ -1209,13 +1270,13 @@ impl PyGrafeoDB {
 
     /// Get a node by ID.
     fn get_node(&self, id: u64) -> PyResult<Option<PyNode>> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(raised(db.get_node(NodeId(id)))?.map(crate::direct::node))
     }
 
     /// Get an edge by ID.
     fn get_edge(&self, id: u64) -> PyResult<Option<PyEdge>> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(raised(db.get_edge(EdgeId(id)))?.map(crate::direct::edge))
     }
 
@@ -1245,7 +1306,7 @@ impl PyGrafeoDB {
         let direction = crate::direct::direction(direction)?;
         let edge_types = crate::direct::edge_types(edge_types)?;
         let edge_types: Vec<&str> = edge_types.iter().map(String::as_str).collect();
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(crate::direct::edge_pairs(raised(db.get_node_edges(
             NodeId(node_id),
             direction,
@@ -1261,7 +1322,7 @@ impl PyGrafeoDB {
     /// Returns None if the node didn't exist at that epoch, and raises
     /// GrafeoError for an epoch older than the history the database keeps.
     fn get_node_at_epoch(&self, id: u64, epoch: u64) -> PyResult<Option<PyNode>> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let node_id = NodeId(id);
         let epoch_id = grafeo_common::types::EpochId::new(epoch);
 
@@ -1288,7 +1349,7 @@ impl PyGrafeoDB {
     /// Returns None if the edge didn't exist at that epoch, and raises
     /// GrafeoError for an epoch older than the history the database keeps.
     fn get_edge_at_epoch(&self, id: u64, epoch: u64) -> PyResult<Option<PyEdge>> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let edge_id = EdgeId(id);
         let epoch_id = grafeo_common::types::EpochId::new(epoch);
 
@@ -1319,7 +1380,7 @@ impl PyGrafeoDB {
     /// version, as far back as the database keeps history (its history
     /// retention).
     fn get_node_history(&self, id: u64) -> PyResult<Vec<(u64, Option<u64>, PyNode)>> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let node_id = NodeId(id);
 
         let history = raised(db.get_node_history(node_id))?;
@@ -1343,7 +1404,7 @@ impl PyGrafeoDB {
     ///
     /// Returns a list of (created_epoch, deleted_epoch, edge) tuples.
     fn get_edge_history(&self, id: u64) -> PyResult<Vec<(u64, Option<u64>, PyEdge)>> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let edge_id = EdgeId(id);
 
         let history = raised(db.get_edge_history(edge_id))?;
@@ -1381,7 +1442,7 @@ impl PyGrafeoDB {
         epoch: u64,
         py: Python<'_>,
     ) -> PyResult<Option<Py<PyAny>>> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let node_id = NodeId(id);
         let epoch_id = grafeo_common::types::EpochId::new(epoch);
         db.get_node_property_at_epoch(node_id, key, epoch_id)
@@ -1400,7 +1461,7 @@ impl PyGrafeoDB {
         key: &str,
         py: Python<'_>,
     ) -> PyResult<Vec<(u64, Py<PyAny>)>> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let node_id = NodeId(id);
         let history = raised(db.get_node_property_history(node_id, key))?;
         history
@@ -1418,7 +1479,7 @@ impl PyGrafeoDB {
         id: u64,
         py: Python<'_>,
     ) -> PyResult<HashMap<String, Vec<(u64, Py<PyAny>)>>> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let node_id = NodeId(id);
         let history = raised(db.get_all_node_property_history(node_id))?;
         let mut result = HashMap::new();
@@ -1435,8 +1496,8 @@ impl PyGrafeoDB {
     /// Returns the current epoch of the database.
     ///
     /// The epoch increments with each committed transaction.
-    fn current_epoch(&self) -> u64 {
-        self.inner.read().current_epoch().as_u64()
+    fn current_epoch(&self) -> PyResult<u64> {
+        Ok(self.inner.read()?.current_epoch().as_u64())
     }
 
     /// Get all nodes with a specific label and their properties.
@@ -1595,7 +1656,7 @@ impl PyGrafeoDB {
     /// Returns False if the node does not exist. Raises if the node still
     /// has edges: delete them first, or use `DETACH DELETE` in a query.
     fn delete_node(&self, id: u64) -> PyResult<bool> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(db.delete_node(NodeId(id)).map_err(PyGrafeoError::from)?)
     }
 
@@ -1604,7 +1665,7 @@ impl PyGrafeoDB {
     /// Returns False if the node does not exist. The node and its edges are
     /// one change: they commit and roll back together.
     fn detach_delete_node(&self, id: u64) -> PyResult<bool> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(db
             .detach_delete_node(NodeId(id))
             .map_err(PyGrafeoError::from)?)
@@ -1612,7 +1673,7 @@ impl PyGrafeoDB {
 
     /// Delete an edge by ID.
     fn delete_edge(&self, id: u64) -> PyResult<bool> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(db.delete_edge(EdgeId(id)).map_err(PyGrafeoError::from)?)
     }
 
@@ -1632,7 +1693,7 @@ impl PyGrafeoDB {
         key: &str,
         value: &Bound<'_, pyo3::prelude::PyAny>,
     ) -> PyResult<()> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let val = PyValue::from_py_named(value, "property", key)?;
         db.set_node_property(NodeId(node_id), key, val)
             .map_err(PyGrafeoError::from)?;
@@ -1651,7 +1712,7 @@ impl PyGrafeoDB {
     /// db.add_node_label(alix.id, "Employee")  # Now has Person and Employee
     /// ```
     fn add_node_label(&self, node_id: u64, label: &str) -> PyResult<bool> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(db
             .add_node_label(NodeId(node_id), label)
             .map_err(PyGrafeoError::from)?)
@@ -1667,7 +1728,7 @@ impl PyGrafeoDB {
     /// db.remove_node_label(alix.id, "Contractor")  # Remove Contractor label
     /// ```
     fn remove_node_label(&self, node_id: u64, label: &str) -> PyResult<bool> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(db
             .remove_node_label(NodeId(node_id), label)
             .map_err(PyGrafeoError::from)?)
@@ -1684,7 +1745,7 @@ impl PyGrafeoDB {
     ///     print(f"Alix has labels: {labels}")
     /// ```
     fn get_node_labels(&self, node_id: u64) -> PyResult<Option<Vec<String>>> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         raised(db.get_node_labels(NodeId(node_id)))
     }
 
@@ -1703,7 +1764,7 @@ impl PyGrafeoDB {
         key: &str,
         value: &Bound<'_, pyo3::prelude::PyAny>,
     ) -> PyResult<()> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let val = PyValue::from_py_named(value, "property", key)?;
         db.set_edge_property(EdgeId(edge_id), key, val)
             .map_err(PyGrafeoError::from)?;
@@ -1720,7 +1781,7 @@ impl PyGrafeoDB {
     ///     print("Property removed")
     /// ```
     fn remove_node_property(&self, node_id: u64, key: &str) -> PyResult<bool> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(db
             .remove_node_property(NodeId(node_id), key)
             .map_err(PyGrafeoError::from)?)
@@ -1736,7 +1797,7 @@ impl PyGrafeoDB {
     ///     print("Property removed")
     /// ```
     fn remove_edge_property(&self, edge_id: u64, key: &str) -> PyResult<bool> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(db
             .remove_edge_property(EdgeId(edge_id), key)
             .map_err(PyGrafeoError::from)?)
@@ -1827,7 +1888,7 @@ impl PyGrafeoDB {
     /// Needs the `vector-index` feature (in the default and `full` builds).
     #[cfg(feature = "vector-index")]
     fn drop_vector_index(&self, label: &str, property: &str) -> PyResult<bool> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(db
             .drop_vector_index(label, property)
             .map_err(PyGrafeoError::from)?)
@@ -2178,6 +2239,7 @@ impl PyGrafeoDB {
         nulls: Option<Vec<String>>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
+        self.inner.check()?;
         let spec = grafeo_engine::loader::NodeLoad {
             labels: crate::direct::labels(labels)?,
             key,
@@ -2234,6 +2296,7 @@ impl PyGrafeoDB {
         nulls: Option<Vec<String>>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
+        self.inner.check()?;
         let end =
             |(label, property, column): (String, String, String)| grafeo_engine::loader::EndKey {
                 label,
@@ -2510,7 +2573,7 @@ impl PyGrafeoDB {
     ///     property: Property name of the index
     #[cfg(feature = "text-index")]
     fn drop_text_index(&self, label: &str, property: &str) -> PyResult<bool> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(db
             .drop_text_index(label, property)
             .map_err(PyGrafeoError::from)?)
@@ -2679,6 +2742,7 @@ impl PyGrafeoDB {
         batch_size: Option<usize>,
         py: Python<'_>,
     ) -> PyResult<()> {
+        self.inner.check()?;
         // Loading the model reads and parses its files.
         let mut model = without_gil(py, || {
             Ok(grafeo_engine::embedding::OnnxEmbeddingModel::from_files(
@@ -2691,7 +2755,7 @@ impl PyGrafeoDB {
         if let Some(bs) = batch_size {
             model = model.with_batch_size(bs);
         }
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         db.register_embedding_model(name, std::sync::Arc::new(model));
         Ok(())
     }
@@ -2774,7 +2838,7 @@ impl PyGrafeoDB {
     ///     print("Index removed")
     /// ```
     fn drop_property_index(&self, property: &str) -> PyResult<bool> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(db
             .drop_property_index(property)
             .map_err(PyGrafeoError::from)?)
@@ -2788,7 +2852,7 @@ impl PyGrafeoDB {
     ///     db.create_property_index("email")
     /// ```
     fn has_property_index(&self, property: &str) -> PyResult<bool> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(db.has_property_index(property))
     }
 
@@ -2845,8 +2909,8 @@ impl PyGrafeoDB {
         isolation_level: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyTransaction> {
         let level_str = extract_isolation_level(isolation_level)?;
-        let session = self.inner.read().session();
-        PyTransaction::begin(self.inner.clone(), session, level_str.as_deref())
+        let session = self.inner.read()?.session();
+        PyTransaction::begin(self.inner.share()?, session, level_str.as_deref())
     }
 
     /// Open a session whose limits bind every statement run through it: its
@@ -2864,8 +2928,12 @@ impl PyGrafeoDB {
     ///     with db.session(read_only=True, external_access=False) as session:
     ///         session.execute("MATCH (p:Person) RETURN p.name")
     #[pyo3(signature = (*, read_only=false, external_access=true))]
-    fn session(&self, read_only: bool, external_access: bool) -> crate::session::PySession {
-        crate::session::PySession::open(Arc::clone(&self.inner), read_only, external_access)
+    fn session(
+        &self,
+        read_only: bool,
+        external_access: bool,
+    ) -> PyResult<crate::session::PySession> {
+        crate::session::PySession::open(self.inner.share()?, read_only, external_access)
     }
 
     /// Begin a transaction with an explicit CDC override.
@@ -2888,8 +2956,8 @@ impl PyGrafeoDB {
         cdc_enabled: bool,
         isolation_level: Option<&str>,
     ) -> PyResult<PyTransaction> {
-        let session = self.inner.read().session_with_cdc(cdc_enabled);
-        PyTransaction::begin(self.inner.clone(), session, isolation_level)
+        let session = self.inner.read()?.session_with_cdc(cdc_enabled);
+        PyTransaction::begin(self.inner.share()?, session, isolation_level)
     }
 
     /// Trigger manual garbage collection of old MVCC versions.
@@ -2908,7 +2976,7 @@ impl PyGrafeoDB {
     /// property keys ever written, not the keys in use now: a key stays
     /// counted once no node or edge holds it.
     fn stats(&self) -> PyResult<PyDatabaseStats> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(PyDatabaseStats {
             node_count: raised(db.node_count())? as u64,
             edge_count: raised(db.edge_count())? as u64,
@@ -2931,7 +2999,7 @@ impl PyGrafeoDB {
     ///     info = db.info()
     ///     print(f"Nodes: {info['node_count']}, Edges: {info['edge_count']}")
     fn info(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let info = raised(db.info())?;
 
         let dict = pyo3::types::PyDict::new(py);
@@ -2959,7 +3027,7 @@ impl PyGrafeoDB {
     ///     stats = db.detailed_stats()
     ///     print(f"Memory: {stats['memory_bytes']} bytes")
     fn detailed_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let stats = raised(db.detailed_stats())?;
 
         let dict = pyo3::types::PyDict::new(py);
@@ -2996,7 +3064,7 @@ impl PyGrafeoDB {
     /// The call is stable; the keys and what each one counts follow the
     /// storage engine and may change in any release. See <https://grafeo.dev/stability/>.
     fn memory_usage(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let usage = db.memory_usage();
 
         let store = pyo3::types::PyDict::new(py);
@@ -3155,7 +3223,7 @@ impl PyGrafeoDB {
     ///     print(f"Queries: {m['query_count']}, Cache hits: {m['cache_hits']}")
     #[cfg(feature = "metrics")]
     fn metrics(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let snap = db.metrics();
 
         let dict = pyo3::types::PyDict::new(py);
@@ -3187,9 +3255,9 @@ impl PyGrafeoDB {
     /// Example:
     ///     print(db.metrics_prometheus())
     #[cfg(feature = "metrics")]
-    fn metrics_prometheus(&self) -> String {
-        let db = self.inner.read();
-        db.metrics_prometheus()
+    fn metrics_prometheus(&self) -> PyResult<String> {
+        let db = self.inner.read()?;
+        Ok(db.metrics_prometheus())
     }
 
     /// Resets all metrics counters and histograms to zero.
@@ -3197,9 +3265,10 @@ impl PyGrafeoDB {
     /// Example:
     ///     db.reset_metrics()
     #[cfg(feature = "metrics")]
-    fn reset_metrics(&self) {
-        let db = self.inner.read();
+    fn reset_metrics(&self) -> PyResult<()> {
+        let db = self.inner.read()?;
         db.reset_metrics();
+        Ok(())
     }
 
     /// Returns schema information: the labels, edge types and property keys
@@ -3218,7 +3287,7 @@ impl PyGrafeoDB {
     ///     for label in schema['labels']:
     ///         print(f"{label['name']}: {label['count']} nodes")
     fn schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let schema = raised(db.schema())?;
 
         let dict = pyo3::types::PyDict::new(py);
@@ -3339,7 +3408,7 @@ impl PyGrafeoDB {
     ///     wal = db.wal_status()
     ///     print(f"WAL size: {wal['size_bytes']} bytes")
     fn wal_status(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let status = db.wal_status();
 
         let dict = pyo3::types::PyDict::new(py);
@@ -3380,7 +3449,7 @@ impl PyGrafeoDB {
         if let Some(bytes) = wal_bytes {
             triggers = triggers.with_wal_bytes(bytes);
         }
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         db.set_checkpoint_triggers(triggers)
             .map_err(PyGrafeoError::from)?;
         Ok(())
@@ -3400,7 +3469,7 @@ impl PyGrafeoDB {
     ///     if status["failures"]:
     ///         print(status["last_error"])
     fn checkpoint_status(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let status = db.checkpoint_status();
 
         let dict = pyo3::types::PyDict::new(py);
@@ -3540,7 +3609,7 @@ impl PyGrafeoDB {
         let new_db = self.released(py, |db| Ok(db.to_memory()?))?;
 
         Ok(Self {
-            inner: Arc::new(RwLock::new(new_db)),
+            inner: SharedDb::new(new_db),
         })
     }
 
@@ -3562,7 +3631,7 @@ impl PyGrafeoDB {
         })?;
 
         Self {
-            inner: Arc::new(RwLock::new(db)),
+            inner: SharedDb::new(db),
         }
         .warning_of_open(py)
     }
@@ -3571,18 +3640,18 @@ impl PyGrafeoDB {
     ///
     /// In-memory databases return False.
     #[getter]
-    fn is_persistent(&self) -> bool {
-        let db = self.inner.read();
-        db.is_persistent()
+    fn is_persistent(&self) -> PyResult<bool> {
+        let db = self.inner.read()?;
+        Ok(db.is_persistent())
     }
 
     /// Returns the database file path, if persistent.
     ///
     /// In-memory databases return None.
     #[getter]
-    fn path(&self) -> Option<String> {
-        let db = self.inner.read();
-        db.path().map(|p| p.to_string_lossy().to_string())
+    fn path(&self) -> PyResult<Option<String>> {
+        let db = self.inner.read()?;
+        Ok(db.path().map(|p| p.to_string_lossy().to_string()))
     }
 
     /// Clear all cached query plans.
@@ -3593,8 +3662,9 @@ impl PyGrafeoDB {
     ///
     /// Example:
     ///     db.clear_plan_cache()
-    fn clear_plan_cache(&self) {
-        self.inner.read().clear_plan_cache();
+    fn clear_plan_cache(&self) -> PyResult<()> {
+        self.inner.read()?.clear_plan_cache();
+        Ok(())
     }
 
     /// Compacts the database: writes a checkpoint of a persistent database
@@ -3619,7 +3689,7 @@ impl PyGrafeoDB {
     fn compact(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         // Writes a checkpoint; the write lock is taken once the GIL is gone
         // (see `crate::gil`).
-        let report = without_gil(py, || Ok(self.inner.write().compact()?))?;
+        let report = without_gil(py, || Ok(self.inner.write()?.compact()?))?;
         let dict = pyo3::types::PyDict::new(py);
         dict.set_item("checkpointed", report.checkpointed)?;
         dict.set_item("versions_collected", report.versions_collected)?;
@@ -3630,7 +3700,8 @@ impl PyGrafeoDB {
 
     /// Close the database.
     fn close(&self, py: Python<'_>) -> PyResult<()> {
-        self.released(py, |db| Ok(db.close()?))
+        let inner = &self.inner;
+        without_gil(py, || inner.close())
     }
 
     /// Get the algorithms interface.
@@ -3647,8 +3718,8 @@ impl PyGrafeoDB {
     ///     scores = db.algorithms.pagerank(projection="extraction", directed=False)
     #[cfg(feature = "algos")]
     #[getter]
-    fn algorithms(&self) -> PyAlgorithms {
-        PyAlgorithms::new(self.inner.clone())
+    fn algorithms(&self) -> PyResult<PyAlgorithms> {
+        Ok(PyAlgorithms::new(self.inner.share()?))
     }
 
     /// Get a NetworkX-compatible view of the graph.
@@ -3666,8 +3737,8 @@ impl PyGrafeoDB {
     ///     pr = nx_adapter.pagerank()    # Use native Grafeo algorithms
     #[cfg(feature = "algos")]
     #[pyo3(signature = (directed=true))]
-    fn as_networkx(&self, directed: bool) -> PyNetworkXAdapter {
-        PyNetworkXAdapter::new(self.inner.clone(), directed)
+    fn as_networkx(&self, directed: bool) -> PyResult<PyNetworkXAdapter> {
+        Ok(PyNetworkXAdapter::new(self.inner.share()?, directed))
     }
 
     /// Get a solvOR-compatible adapter for OR-style algorithms.
@@ -3680,21 +3751,21 @@ impl PyGrafeoDB {
     ///     distance, path = solvor.shortest_path(1, 5)
     ///     result = solvor.max_flow(source=1, sink=10)
     #[cfg(feature = "algos")]
-    fn as_solvor(&self) -> PySolvORAdapter {
-        PySolvORAdapter::new(self.inner.clone())
+    fn as_solvor(&self) -> PyResult<PySolvORAdapter> {
+        Ok(PySolvORAdapter::new(self.inner.share()?))
     }
 
     /// Get number of nodes.
     #[getter]
     fn node_count(&self) -> PyResult<usize> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         raised(db.node_count())
     }
 
     /// Get number of edges.
     #[getter]
     fn edge_count(&self) -> PyResult<usize> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         raised(db.edge_count())
     }
 
@@ -3718,6 +3789,7 @@ impl PyGrafeoDB {
     #[cfg(feature = "arrow-export")]
     #[pyo3(signature = ())]
     fn nodes_to_arrow(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.check()?;
         let pa = py.import("pyarrow").map_err(|_| {
             pyo3::exceptions::PyModuleNotFoundError::new_err(
                 "pyarrow is required for nodes_to_arrow(). Install it with: uv add \"grafeo[arrow]\"",
@@ -3743,6 +3815,7 @@ impl PyGrafeoDB {
     #[cfg(feature = "arrow-export")]
     #[pyo3(signature = ())]
     fn nodes_to_polars(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.check()?;
         let pl = py.import("polars").map_err(|_| {
             pyo3::exceptions::PyModuleNotFoundError::new_err(
                 "polars is required for nodes_to_polars(). Install it with: uv add polars",
@@ -3793,6 +3866,7 @@ impl PyGrafeoDB {
     /// ```
     #[pyo3(signature = ())]
     fn nodes_df(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.check()?;
         let pd = py.import("pandas").map_err(|_| {
             pyo3::exceptions::PyModuleNotFoundError::new_err(
                 "pandas is required for nodes_df(). Install it with: uv add pandas",
@@ -3808,7 +3882,7 @@ impl PyGrafeoDB {
 
         // Slow fallback: element-by-element via PyO3
 
-        let db = self.inner.read();
+        let db = self.inner.read()?;
 
         // Collect all nodes and discover property keys.
         // Skip properties whose names collide with structural columns
@@ -3883,6 +3957,7 @@ impl PyGrafeoDB {
     #[cfg(feature = "arrow-export")]
     #[pyo3(signature = ())]
     fn edges_to_arrow(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.check()?;
         let pa = py.import("pyarrow").map_err(|_| {
             pyo3::exceptions::PyModuleNotFoundError::new_err(
                 "pyarrow is required for edges_to_arrow(). Install it with: uv add \"grafeo[arrow]\"",
@@ -3908,6 +3983,7 @@ impl PyGrafeoDB {
     #[cfg(feature = "arrow-export")]
     #[pyo3(signature = ())]
     fn edges_to_polars(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.check()?;
         let pl = py.import("polars").map_err(|_| {
             pyo3::exceptions::PyModuleNotFoundError::new_err(
                 "polars is required for edges_to_polars(). Install it with: uv add polars",
@@ -3949,6 +4025,7 @@ impl PyGrafeoDB {
     /// ```
     #[pyo3(signature = ())]
     fn edges_df(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.check()?;
         let pd = py.import("pandas").map_err(|_| {
             pyo3::exceptions::PyModuleNotFoundError::new_err(
                 "pandas is required for edges_df(). Install it with: uv add pandas",
@@ -3964,7 +4041,7 @@ impl PyGrafeoDB {
 
         // Slow fallback: element-by-element via PyO3
 
-        let db = self.inner.read();
+        let db = self.inner.read()?;
 
         // Collect all edges and discover property keys.
         // Skip properties whose names collide with structural columns
@@ -4061,6 +4138,7 @@ impl PyGrafeoDB {
         source: &str,
         target: &str,
     ) -> PyResult<u64> {
+        self.inner.check()?;
         // Extract columns and rows from pandas or polars DataFrame
         let (columns, rows) = extract_dataframe(py, df)?;
 
@@ -4233,23 +4311,25 @@ impl PyGrafeoDB {
     ///
     /// Existing sessions are not affected.
     #[cfg(feature = "cdc")]
-    fn enable_cdc(&self) {
-        self.inner.read().set_cdc_enabled(true);
+    fn enable_cdc(&self) -> PyResult<()> {
+        self.inner.read()?.set_cdc_enabled(true);
+        Ok(())
     }
 
     /// Disable CDC for all future sessions.
     ///
     /// Existing sessions are not affected.
     #[cfg(feature = "cdc")]
-    fn disable_cdc(&self) {
-        self.inner.read().set_cdc_enabled(false);
+    fn disable_cdc(&self) -> PyResult<()> {
+        self.inner.read()?.set_cdc_enabled(false);
+        Ok(())
     }
 
     /// Returns whether CDC is currently enabled for new sessions.
     #[cfg(feature = "cdc")]
     #[getter]
-    fn cdc_enabled(&self) -> bool {
-        self.inner.read().is_cdc_enabled()
+    fn cdc_enabled(&self) -> PyResult<bool> {
+        Ok(self.inner.read()?.is_cdc_enabled())
     }
 
     /// Returns the full change history for a node.
@@ -4261,7 +4341,7 @@ impl PyGrafeoDB {
         &self,
         node_id: u64,
     ) -> PyResult<Vec<std::collections::HashMap<String, pyo3::Py<pyo3::PyAny>>>> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let id = grafeo_common::types::NodeId::new(node_id);
         let events = db
             .history(id)
@@ -4280,7 +4360,7 @@ impl PyGrafeoDB {
         &self,
         edge_id: u64,
     ) -> PyResult<Vec<std::collections::HashMap<String, pyo3::Py<pyo3::PyAny>>>> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let id = grafeo_common::types::EdgeId::new(edge_id);
         let events = db
             .history(id)
@@ -4300,7 +4380,7 @@ impl PyGrafeoDB {
         node_id: u64,
         since_epoch: u64,
     ) -> PyResult<Vec<std::collections::HashMap<String, pyo3::Py<pyo3::PyAny>>>> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let id = grafeo_common::types::NodeId::new(node_id);
         let events = db
             .history_since(id, grafeo_common::types::EpochId(since_epoch))
@@ -4320,7 +4400,7 @@ impl PyGrafeoDB {
         start_epoch: u64,
         end_epoch: u64,
     ) -> PyResult<Vec<std::collections::HashMap<String, pyo3::Py<pyo3::PyAny>>>> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let events = db
             .changes_between(
                 grafeo_common::types::EpochId(start_epoch),
@@ -4349,7 +4429,7 @@ impl PyGrafeoDB {
     ///     result = db.execute("SHOW GRAPH TYPES")  # only sees types in 'reporting'
     fn set_schema(&self, name: String) -> PyResult<()> {
         self.inner
-            .read()
+            .read()?
             .set_current_schema(Some(&name))
             .map_err(PyGrafeoError::from)?;
         Ok(())
@@ -4358,8 +4438,9 @@ impl PyGrafeoDB {
     /// Clears the current schema context.
     ///
     /// Subsequent `execute()` calls will use the default (no-schema) namespace.
-    fn reset_schema(&self) {
-        let _ = self.inner.read().set_current_schema(None);
+    fn reset_schema(&self) -> PyResult<()> {
+        let _ = self.inner.read()?.set_current_schema(None);
+        Ok(())
     }
 
     /// Returns the current schema name, or `None` if no schema is set.
@@ -4367,8 +4448,8 @@ impl PyGrafeoDB {
     /// Example:
     ///     db.set_schema("reporting")
     ///     assert db.current_schema() == "reporting"
-    fn current_schema(&self) -> Option<String> {
-        self.inner.read().current_schema()
+    fn current_schema(&self) -> PyResult<Option<String>> {
+        Ok(self.inner.read()?.current_schema())
     }
 
     // -----------------------------------------------------------------
@@ -4385,7 +4466,7 @@ impl PyGrafeoDB {
     fn create_graph(&self, name: &str) -> PyResult<bool> {
         Ok(self
             .inner
-            .read()
+            .read()?
             .create_graph(name)
             .map_err(PyGrafeoError::from)?)
     }
@@ -4395,14 +4476,14 @@ impl PyGrafeoDB {
     fn drop_graph(&self, name: &str) -> PyResult<bool> {
         Ok(self
             .inner
-            .read()
+            .read()?
             .drop_graph(name)
             .map_err(PyGrafeoError::from)?)
     }
 
     /// Returns a list of all named graph names.
-    fn list_graphs(&self) -> Vec<String> {
-        self.inner.read().list_graphs()
+    fn list_graphs(&self) -> PyResult<Vec<String>> {
+        Ok(self.inner.read()?.list_graphs())
     }
 
     // -----------------------------------------------------------------
@@ -4446,20 +4527,20 @@ impl PyGrafeoDB {
         }
         Ok(self
             .inner
-            .read()
+            .read()?
             .create_projection(name, spec)
             .map_err(PyGrafeoError::from)?)
     }
 
     /// Drops a named graph projection. Returns ``True`` if it existed, ``False``
     /// otherwise.
-    fn drop_projection(&self, name: &str) -> bool {
-        self.inner.read().drop_projection(name)
+    fn drop_projection(&self, name: &str) -> PyResult<bool> {
+        Ok(self.inner.read()?.drop_projection(name))
     }
 
     /// Returns a list of all projection names.
-    fn list_projections(&self) -> Vec<String> {
-        self.inner.read().list_projections()
+    fn list_projections(&self) -> PyResult<Vec<String>> {
+        Ok(self.inner.read()?.list_projections())
     }
 
     /// Returns a handle on a named graph.
@@ -4476,7 +4557,7 @@ impl PyGrafeoDB {
     ///     model.execute("MATCH (n) RETURN count(n)")  # 1
     ///     db.execute("MATCH (n) RETURN count(n)")     # 0: the default graph
     fn graph(&self, name: &str) -> PyResult<crate::graph_handle::PyGraphHandle> {
-        crate::graph_handle::PyGraphHandle::open(Arc::clone(&self.inner), name)
+        crate::graph_handle::PyGraphHandle::open(self.inner.share()?, name)
     }
 
     /// Sets the current graph for subsequent ``execute()`` calls.
@@ -4490,7 +4571,7 @@ impl PyGrafeoDB {
     ///     result = db.execute("MATCH (n) RETURN n")  # queries 'social' graph
     fn set_graph(&self, name: &str) -> PyResult<()> {
         self.inner
-            .read()
+            .read()?
             .set_current_graph(Some(name))
             .map_err(PyGrafeoError::from)?;
         Ok(())
@@ -4499,8 +4580,9 @@ impl PyGrafeoDB {
     /// Clears the current graph context.
     ///
     /// Subsequent ``execute()`` calls will use the default graph.
-    fn reset_graph(&self) {
-        let _ = self.inner.read().set_current_graph(None);
+    fn reset_graph(&self) -> PyResult<()> {
+        let _ = self.inner.read()?.set_current_graph(None);
+        Ok(())
     }
 
     /// Returns the current graph name, or ``None`` if no graph is set.
@@ -4508,8 +4590,8 @@ impl PyGrafeoDB {
     /// Example:
     ///     db.set_graph("social")
     ///     assert db.current_graph() == "social"
-    fn current_graph(&self) -> Option<String> {
-        self.inner.read().current_graph()
+    fn current_graph(&self) -> PyResult<Option<String>> {
+        Ok(self.inner.read()?.current_graph())
     }
 }
 
@@ -4608,8 +4690,9 @@ impl PyIsolationLevel {
 /// runs one of its queries raises `RuntimeError` at once.
 #[pyclass(name = "Transaction")]
 pub struct PyTransaction {
-    /// Keeps the database open while the transaction lives.
-    _db: Arc<RwLock<GrafeoDB>>,
+    /// The database the transaction runs on; every call fails with `GRAFEO-T007` once it is
+    /// closed.
+    db: SharedDb,
     session: parking_lot::Mutex<Option<grafeo_engine::session::Session>>,
     committed: bool,
     rolled_back: bool,
@@ -4634,6 +4717,7 @@ impl PyTransaction {
         query: &str,
         params: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyQueryResult> {
+        self.db.check()?;
         if self.ended() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Cannot execute on completed transaction",
@@ -4657,7 +4741,7 @@ impl PyTransaction {
 
     /// Begins a transaction on `session` with an optional isolation level.
     pub(crate) fn begin(
-        db: Arc<RwLock<GrafeoDB>>,
+        db: SharedDb,
         mut session: grafeo_engine::session::Session,
         isolation_level: Option<&str>,
     ) -> PyResult<Self> {
@@ -4692,7 +4776,7 @@ impl PyTransaction {
         session.refuse_transaction_statements();
 
         Ok(Self {
-            _db: db,
+            db,
             session: parking_lot::Mutex::new(Some(session)),
             committed: false,
             rolled_back: false,
@@ -4708,8 +4792,9 @@ impl PyTransaction {
     ///
     /// Returns one of: ``"read_committed"``, ``"snapshot"``, ``"serializable"``.
     #[getter]
-    fn isolation_level(&self) -> &str {
-        &self.isolation_level_name
+    fn isolation_level(&self) -> PyResult<&str> {
+        self.db.check()?;
+        Ok(&self.isolation_level_name)
     }
 
     /// Commit the transaction.
@@ -4721,6 +4806,7 @@ impl PyTransaction {
     /// gone, `is_active` is False, and a `rollback()` after it does nothing,
     /// so the caller's except block sees the commit's error.
     fn commit(&mut self, py: Python<'_>) -> PyResult<()> {
+        self.db.check()?;
         if self.ended() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Transaction already completed",
@@ -4758,6 +4844,7 @@ impl PyTransaction {
     /// Discards all changes made within this transaction. After a commit
     /// that failed it does nothing: that commit ended the transaction.
     fn rollback(&mut self, py: Python<'_>) -> PyResult<()> {
+        self.db.check()?;
         if self.commit_failed {
             return Ok(());
         }
@@ -4793,6 +4880,7 @@ impl PyTransaction {
     /// tx.commit()  # commits without the Temp node
     /// ```
     fn savepoint(&self, name: &str) -> PyResult<()> {
+        self.db.check()?;
         if self.ended() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Transaction already completed",
@@ -4811,6 +4899,7 @@ impl PyTransaction {
     /// Undoes all writes made after the savepoint was created.
     /// The savepoint remains active and can be rolled back to again.
     fn rollback_to_savepoint(&self, name: &str) -> PyResult<()> {
+        self.db.check()?;
         if self.ended() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Transaction already completed",
@@ -4831,6 +4920,7 @@ impl PyTransaction {
     /// Frees resources associated with the savepoint. Changes made after the
     /// savepoint become permanent within the transaction scope.
     fn release_savepoint(&self, name: &str) -> PyResult<()> {
+        self.db.check()?;
         if self.ended() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Transaction already completed",
@@ -4950,8 +5040,9 @@ impl PyTransaction {
 
     /// Check if transaction is active.
     #[getter]
-    fn is_active(&self) -> bool {
-        !self.ended()
+    fn is_active(&self) -> PyResult<bool> {
+        self.db.check()?;
+        Ok(!self.ended())
     }
 
     fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
@@ -4967,7 +5058,11 @@ impl PyTransaction {
     ) -> PyResult<bool> {
         if !self.ended() {
             if exc_type.is_some() {
-                self.rollback(py)?;
+                // A closed database rolled the transaction back already; the block's own
+                // exception goes on rather than a `GRAFEO-T007` in its place.
+                if self.db.check().is_ok() {
+                    self.rollback(py)?;
+                }
             } else {
                 // Auto-commit on successful exit (no exception)
                 self.commit(py)?;

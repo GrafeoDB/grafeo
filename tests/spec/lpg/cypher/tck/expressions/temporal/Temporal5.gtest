@@ -47,9 +47,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal5: [1] Should provide accessors for date"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:Val {date: date({year: 1984, month: 10, day: 11})})
@@ -69,9 +69,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal5: [2] Should provide accessors for date in last weekYear"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:Val {date: date({year: 1984, month: 1, day: 1})})
@@ -88,9 +88,9 @@ tests:
   # [3] Should provide accessors for local time
   - name: s3_should_provide_accessors_for_local_time
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:Val {date: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123})})
@@ -107,9 +107,9 @@ tests:
   # [4] Should provide accessors for time
   - name: s4_should_provide_accessors_for_time
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:Val {date: time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'})})
@@ -129,9 +129,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal5: [5] Should provide accessors for local date time"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:Val {date: localdatetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123})})
@@ -152,9 +152,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal5: [6] Should provide accessors for date time"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:Val {date: datetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: 'Europe/Stockholm'})})
@@ -173,9 +173,9 @@ tests:
   # [7] Should provide accessors for duration
   - name: s7_should_provide_accessors_for_duration
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:Val {date: duration({years: 1, months: 4, days: 10, hours: 1, minutes: 1, seconds: 1, nanoseconds: 111111111})})

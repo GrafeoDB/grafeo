@@ -129,7 +129,7 @@ func (db *Database) Execute(query string) (*QueryResult, error) {
 func (db *Database) ExecuteParams(query string, params map[string]any) (*QueryResult, error) {
 	data, err := marshalJSON(params)
 	if err != nil {
-		return nil, fmt.Errorf("%w: failed to marshal params: %v", ErrDatabase, err)
+		return nil, fmt.Errorf("%w: failed to marshal params: %w", ErrDatabase, err)
 	}
 	return db.ExecuteWithParams(query, string(data))
 }

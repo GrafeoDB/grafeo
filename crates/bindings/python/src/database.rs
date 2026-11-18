@@ -233,7 +233,7 @@ impl AsyncQueryResult {
             let values = pyo3::types::PyList::empty(py);
             for row in &self.rows {
                 let val = match row.get(col_idx) {
-                    Some(v) => PyValue::to_py(v, py)?,
+                    Some(v) => crate::types::dataframe_value(v, py)?,
                     None => py.None(),
                 };
                 values.append(val)?;
@@ -261,7 +261,7 @@ impl AsyncQueryResult {
             let values = pyo3::types::PyList::empty(py);
             for row in &self.rows {
                 let val = match row.get(col_idx) {
-                    Some(v) => PyValue::to_py(v, py)?,
+                    Some(v) => crate::types::dataframe_value(v, py)?,
                     None => py.None(),
                 };
                 values.append(val)?;
@@ -3847,7 +3847,7 @@ impl PyGrafeoDB {
             for (i, key) in prop_keys.iter().enumerate() {
                 let prop_key = grafeo_common::types::PropertyKey::new(key.clone());
                 match node.properties.get(&prop_key) {
-                    Some(v) => prop_columns[i].append(PyValue::to_py(v, py)?)?,
+                    Some(v) => prop_columns[i].append(crate::types::dataframe_value(v, py)?)?,
                     None => prop_columns[i].append(py.None())?,
                 }
             }
@@ -4004,7 +4004,7 @@ impl PyGrafeoDB {
             for (i, key) in prop_keys.iter().enumerate() {
                 let prop_key = grafeo_common::types::PropertyKey::new(key.clone());
                 match edge.properties.get(&prop_key) {
-                    Some(v) => prop_columns[i].append(PyValue::to_py(v, py)?)?,
+                    Some(v) => prop_columns[i].append(crate::types::dataframe_value(v, py)?)?,
                     None => prop_columns[i].append(py.None())?,
                 }
             }

@@ -264,10 +264,7 @@ def temporal_feature(query: str) -> str:
 )
 def test_a_case_that_builds_a_temporal_carries_the_runner_gap(tmp_path, query, marked):
     text = convert(tmp_path, {}, temporal_feature(query))
-    assert (
-        "    runner_gap:\n      runners: [python, node, wasm, go, csharp, dart]\n"
-        in text
-    ) is marked
+    assert ("    runner_gap:\n      runners: [wasm]\n" in text) is marked
 
 
 ERROR_FEATURE = (
@@ -316,9 +313,7 @@ def test_a_table_without_rows_carries_no_gap(tmp_path):
     assert "      values: |\n        | n |\n" in text
     # A temporal case keeps the temporal gap
     temporal = temporal_feature("RETURN date('1984-10-11') AS n").replace(row, "")
-    assert "runners: [python, node, wasm, go, csharp, dart]" in convert(
-        tmp_path, {}, temporal
-    )
+    assert "runners: [wasm]" in convert(tmp_path, {}, temporal)
 
 
 def test_a_listed_value_is_replaced_in_the_query_and_the_rows(monkeypatch):

@@ -655,10 +655,7 @@
         "cypher": "localtime('12:31:14.645876123')"
       },
       "dialect": "tck",
-      "match": true,
-      "runner_gaps": {
-        "python": "fix in 0.6.4"
-      }
+      "match": true
     },
     {
       "cell": "'12:31:14.645876+01:00'",
@@ -686,10 +683,7 @@
         "cypher": "datetime('1984-10-11T12:31:14.645876+01:00')"
       },
       "dialect": "tck",
-      "match": true,
-      "runner_gaps": {
-        "python": "fix in 0.6.4"
-      }
+      "match": true
     },
     {
       "cell": "'P1Y2M10DT12H45M30.25S'",
@@ -697,10 +691,7 @@
         "cypher": "duration('P1Y2M10DT12H45M30.25S')"
       },
       "dialect": "tck",
-      "match": true,
-      "runner_gaps": {
-        "python": "fix in 0.6.4"
-      }
+      "match": true
     },
     {
       "cell": "'1984-10-11'",
@@ -744,16 +735,12 @@
     {
       "cypher": "localtime('12:31:14.645876123')",
       "text": "12:31:14.645876123",
-      "runner_gaps": {
-        "python": "fix in 0.6.4"
-      }
+      "runner_gaps": {}
     },
     {
       "cypher": "datetime('1984-10-11T12:31:14.645876+01:00')",
       "text": "1984-10-11T12:31:14.645876+01:00",
-      "runner_gaps": {
-        "python": "fix in 0.6.4"
-      }
+      "runner_gaps": {}
     },
     {
       "cypher": "datetime('1984-10-11T12:31:14.645876+01:00[Europe/Stockholm]')",
@@ -771,9 +758,7 @@
     {
       "cypher": "duration('P1Y2M10D')",
       "text": "P1Y2M10D",
-      "runner_gaps": {
-        "python": "fix in 0.6.4"
-      }
+      "runner_gaps": {}
     }
   ],
   "about_round_trips": "Each binding's own temporal fidelity: `RETURN <cypher> AS v`, then `RETURN toString($v)` with that value passed back as a parameter, must give `text`. `runner_gaps` names, per runner, the issue under which the case is a strict expected failure (it must fail there, so the fix flips it); the zone id is an engine gap, so every runner fails it. The same `runner_gaps` key on a case above works the same way."

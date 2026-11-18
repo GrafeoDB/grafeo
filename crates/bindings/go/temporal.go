@@ -24,25 +24,36 @@ const (
 )
 
 // timestampTag is t as the {"$timestamp_us": n} tag, its microseconds since
-// the Unix epoch (a finer part dropped), when t is in UTC or the local zone;
-// otherwise the {"$zoned_datetime": "..."} tag with t's offset at that
-// instant.
+// the Unix epoch (a finer part dropped), when t is in UTC or the local zone:
+// the machine's implicit zone gives the exact instant. A zone the caller
+// chose (time.LoadLocation, time.FixedZone) gives the {"$zoned_datetime":
+// "..."} tag with t's offset at that instant, and an offset that is not
+// whole minutes (Europe/Amsterdam before 1937, +00:19:32) fails the
+// statement with GQLSTATUS 22009: a time zone displacement is hours and
+// minutes.
 func timestampTag(t time.Time) any {
 	if loc := t.Location(); loc == time.UTC || loc == time.Local {
 		return map[string]int64{"$timestamp_us": t.UnixMicro()}
 	}
-	return map[string]string{"$zoned_datetime": zonedText(t)}
+	if _, offset := t.Zone(); offset%60 != 0 {
+		return badOffset{t}
+	}
+	return map[string]string{
+		"$zoned_datetime": t.Truncate(time.Microsecond).Format("2006-01-02T15:04:05.999999Z07:00"),
+	}
 }
 
-// zonedText is t as a ZONED DATETIME writes it, to the microsecond. GQL
-// offsets are whole minutes: an offset with seconds (a historic local mean
-// time) is written as its whole minutes, with the same instant.
-func zonedText(t time.Time) string {
-	_, offset := t.Zone()
-	if rest := offset % 60; rest != 0 {
-		t = t.In(time.FixedZone("", offset-rest))
+// badOffset stands in for a time whose offset is not whole minutes:
+// json.Marshal fails on it with an *Error of GQLSTATUS 22009.
+type badOffset struct{ t time.Time }
+
+func (b badOffset) MarshalJSON() ([]byte, error) {
+	_, offset := b.t.Zone()
+	return nil, &Error{
+		Message: fmt.Sprintf("the time %s has a UTC offset of %d seconds, which is not whole "+
+			"minutes: a time zone displacement is hours and minutes", b.t, offset),
+		GQLStatus: "22009",
 	}
-	return t.Truncate(time.Microsecond).Format("2006-01-02T15:04:05.999999Z07:00")
 }
 
 // zonedTime is the time.Time of a ZONED DATETIME's text, in a fixed zone of

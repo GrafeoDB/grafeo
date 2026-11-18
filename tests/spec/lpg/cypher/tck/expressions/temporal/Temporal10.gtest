@@ -47,9 +47,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [1] Should split between boundaries correctly #1"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration.between(localdatetime('2018-01-01T12:00'), localdatetime('2018-01-02T10:00')) AS dur
       RETURN dur, dur.days, dur.seconds, dur.nanosecondsOfSecond
@@ -65,9 +65,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [1] Should split between boundaries correctly #2"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration.between(localdatetime('2018-01-02T10:00'), localdatetime('2018-01-01T12:00')) AS dur
       RETURN dur, dur.days, dur.seconds, dur.nanosecondsOfSecond
@@ -83,9 +83,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [1] Should split between boundaries correctly #3"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration.between(localdatetime('2018-01-01T10:00:00.2'), localdatetime('2018-01-02T10:00:00.1')) AS dur
       RETURN dur, dur.days, dur.seconds, dur.nanosecondsOfSecond
@@ -101,9 +101,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [1] Should split between boundaries correctly #4"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration.between(localdatetime('2018-01-02T10:00:00.1'), localdatetime('2018-01-01T10:00:00.2')) AS dur
       RETURN dur, dur.days, dur.seconds, dur.nanosecondsOfSecond
@@ -119,9 +119,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [1] Should split between boundaries correctly #5"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration.between(datetime('2017-10-28T23:00+02:00[Europe/Stockholm]'), datetime('2017-10-29T04:00+01:00[Europe/Stockholm]')) AS dur
       RETURN dur, dur.days, dur.seconds, dur.nanosecondsOfSecond
@@ -137,9 +137,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [1] Should split between boundaries correctly #6"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration.between(datetime('2017-10-29T04:00+01:00[Europe/Stockholm]'), datetime('2017-10-28T23:00+02:00[Europe/Stockholm]')) AS dur
       RETURN dur, dur.days, dur.seconds, dur.nanosecondsOfSecond
@@ -155,9 +155,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #1"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(date('1984-10-11'), date('2015-06-24')) AS duration
     expect:
@@ -172,9 +172,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #2"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(date('1984-10-11'), localdatetime('2016-07-21T21:45:22.142')) AS duration
     expect:
@@ -189,9 +189,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #3"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(date('1984-10-11'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
     expect:
@@ -206,9 +206,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #4"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(date('1984-10-11'), localtime('16:30')) AS duration
     expect:
@@ -223,9 +223,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #5"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(date('1984-10-11'), time('16:30+0100')) AS duration
     expect:
@@ -240,9 +240,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #6"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(localtime('14:30'), date('2015-06-24')) AS duration
     expect:
@@ -257,9 +257,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #7"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(localtime('14:30'), localdatetime('2016-07-21T21:45:22.142')) AS duration
     expect:
@@ -274,9 +274,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #8"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(localtime('14:30'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
     expect:
@@ -291,9 +291,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #9"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(localtime('14:30'), localtime('16:30')) AS duration
     expect:
@@ -308,9 +308,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #10"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(localtime('14:30'), time('16:30+0100')) AS duration
     expect:
@@ -325,9 +325,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #11"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(time('14:30'), date('2015-06-24')) AS duration
     expect:
@@ -342,9 +342,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #12"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(time('14:30'), localdatetime('2016-07-21T21:45:22.142')) AS duration
     expect:
@@ -359,9 +359,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #13"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(time('14:30'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
     expect:
@@ -376,9 +376,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #14"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(time('14:30'), localtime('16:30')) AS duration
     expect:
@@ -393,9 +393,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #15"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(time('14:30'), time('16:30+0100')) AS duration
     expect:
@@ -410,9 +410,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #16"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(localdatetime('2015-07-21T21:40:32.142'), date('2015-06-24')) AS duration
     expect:
@@ -427,9 +427,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #17"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(localdatetime('2015-07-21T21:40:32.142'), localdatetime('2016-07-21T21:45:22.142')) AS duration
     expect:
@@ -444,9 +444,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #18"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(localdatetime('2015-07-21T21:40:32.142'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
     expect:
@@ -461,9 +461,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #19"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(localdatetime('2015-07-21T21:40:32.142'), localtime('16:30')) AS duration
     expect:
@@ -478,9 +478,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #20"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(localdatetime('2015-07-21T21:40:32.142'), time('16:30+0100')) AS duration
     expect:
@@ -495,9 +495,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #21"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(datetime('2014-07-21T21:40:36.143+0200'), date('2015-06-24')) AS duration
     expect:
@@ -512,9 +512,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #22"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(datetime('2014-07-21T21:40:36.143+0200'), localdatetime('2016-07-21T21:45:22.142')) AS duration
     expect:
@@ -529,9 +529,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #23"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(datetime('2014-07-21T21:40:36.143+0200'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
     expect:
@@ -546,9 +546,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #24"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(datetime('2014-07-21T21:40:36.143+0200'), localtime('16:30')) AS duration
     expect:
@@ -563,9 +563,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [2] Should compute duration between two temporals #25"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(datetime('2014-07-21T21:40:36.143+0200'), time('16:30+0100')) AS duration
     expect:
@@ -580,9 +580,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #1"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(date('1984-10-11'), date('2015-06-24')) AS duration
     expect:
@@ -597,9 +597,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #2"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(date('1984-10-11'), localdatetime('2016-07-21T21:45:22.142')) AS duration
     expect:
@@ -614,9 +614,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #3"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(date('1984-10-11'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
     expect:
@@ -631,9 +631,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #4"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(date('1984-10-11'), localtime('16:30')) AS duration
     expect:
@@ -648,9 +648,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #5"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(date('1984-10-11'), time('16:30+0100')) AS duration
     expect:
@@ -665,9 +665,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #6"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(localtime('14:30'), date('2015-06-24')) AS duration
     expect:
@@ -682,9 +682,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #7"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(localtime('14:30'), localdatetime('2016-07-21T21:45:22.142')) AS duration
     expect:
@@ -699,9 +699,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #8"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(localtime('14:30'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
     expect:
@@ -716,9 +716,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #9"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(time('14:30'), date('2015-06-24')) AS duration
     expect:
@@ -733,9 +733,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #10"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(time('14:30'), localdatetime('2016-07-21T21:45:22.142')) AS duration
     expect:
@@ -750,9 +750,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #11"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(time('14:30'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
     expect:
@@ -767,9 +767,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #12"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(localdatetime('2015-07-21T21:40:32.142'), date('2015-06-24')) AS duration
     expect:
@@ -784,9 +784,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #13"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(localdatetime('2015-07-21T21:40:32.142'), localdatetime('2016-07-21T21:45:22.142')) AS duration
     expect:
@@ -801,9 +801,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #14"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(localdatetime('2015-07-21T21:40:32.142'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
     expect:
@@ -818,9 +818,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #15"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(localdatetime('2015-07-21T21:40:32.142'), localtime('16:30')) AS duration
     expect:
@@ -835,9 +835,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #16"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(localdatetime('2015-07-21T21:40:32.142'), time('16:30+0100')) AS duration
     expect:
@@ -852,9 +852,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #17"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(datetime('2014-07-21T21:40:36.143+0200'), date('2015-06-24')) AS duration
     expect:
@@ -869,9 +869,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #18"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(datetime('2014-07-21T21:40:36.143+0200'), localdatetime('2016-07-21T21:45:22.142')) AS duration
     expect:
@@ -886,9 +886,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #19"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(datetime('2014-07-21T21:40:36.143+0200'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
     expect:
@@ -903,9 +903,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #20"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(datetime('2014-07-21T21:40:36.143+0200'), localtime('16:30')) AS duration
     expect:
@@ -920,9 +920,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [3] Should compute duration between two temporals in months #21"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(datetime('2014-07-21T21:40:36.143+0200'), time('16:30+0100')) AS duration
     expect:
@@ -937,9 +937,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #1"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(date('1984-10-11'), date('2015-06-24')) AS duration
     expect:
@@ -954,9 +954,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #2"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(date('1984-10-11'), localdatetime('2016-07-21T21:45:22.142')) AS duration
     expect:
@@ -971,9 +971,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #3"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(date('1984-10-11'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
     expect:
@@ -988,9 +988,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #4"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(date('1984-10-11'), localtime('16:30')) AS duration
     expect:
@@ -1005,9 +1005,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #5"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(date('1984-10-11'), time('16:30+0100')) AS duration
     expect:
@@ -1022,9 +1022,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #6"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(localtime('14:30'), date('2015-06-24')) AS duration
     expect:
@@ -1039,9 +1039,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #7"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(localtime('14:30'), localdatetime('2016-07-21T21:45:22.142')) AS duration
     expect:
@@ -1056,9 +1056,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #8"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(localtime('14:30'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
     expect:
@@ -1073,9 +1073,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #9"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(time('14:30'), date('2015-06-24')) AS duration
     expect:
@@ -1090,9 +1090,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #10"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(time('14:30'), localdatetime('2016-07-21T21:45:22.142')) AS duration
     expect:
@@ -1107,9 +1107,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #11"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(time('14:30'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
     expect:
@@ -1124,9 +1124,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #12"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(localdatetime('2015-07-21T21:40:32.142'), date('2015-06-24')) AS duration
     expect:
@@ -1141,9 +1141,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #13"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(localdatetime('2015-07-21T21:40:32.142'), localdatetime('2016-07-21T21:45:22.142')) AS duration
     expect:
@@ -1158,9 +1158,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #14"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(localdatetime('2015-07-21T21:40:32.142'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
     expect:
@@ -1175,9 +1175,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #15"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(localdatetime('2015-07-21T21:40:32.142'), localtime('16:30')) AS duration
     expect:
@@ -1192,9 +1192,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #16"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(localdatetime('2015-07-21T21:40:32.142'), time('16:30+0100')) AS duration
     expect:
@@ -1209,9 +1209,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #17"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(datetime('2014-07-21T21:40:36.143+0200'), date('2015-06-24')) AS duration
     expect:
@@ -1226,9 +1226,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #18"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(datetime('2014-07-21T21:40:36.143+0200'), localdatetime('2016-07-21T21:45:22.142')) AS duration
     expect:
@@ -1243,9 +1243,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #19"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(datetime('2014-07-21T21:40:36.143+0200'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
     expect:
@@ -1260,9 +1260,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #20"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(datetime('2014-07-21T21:40:36.143+0200'), localtime('16:30')) AS duration
     expect:
@@ -1277,9 +1277,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [4] Should compute duration between two temporals in days #21"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(datetime('2014-07-21T21:40:36.143+0200'), time('16:30+0100')) AS duration
     expect:
@@ -1294,9 +1294,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #1"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(date('1984-10-11'), date('2015-06-24')) AS duration
     expect:
@@ -1311,9 +1311,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #2"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(date('1984-10-11'), localdatetime('2016-07-21T21:45:22.142')) AS duration
     expect:
@@ -1328,9 +1328,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #3"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(date('1984-10-11'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
     expect:
@@ -1345,9 +1345,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #4"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(date('1984-10-11'), localtime('16:30')) AS duration
     expect:
@@ -1362,9 +1362,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #5"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(date('1984-10-11'), time('16:30+0100')) AS duration
     expect:
@@ -1379,9 +1379,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #6"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localtime('14:30'), date('2015-06-24')) AS duration
     expect:
@@ -1396,9 +1396,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #7"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localtime('14:30'), localdatetime('2016-07-21T21:45:22.142')) AS duration
     expect:
@@ -1413,9 +1413,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #8"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localtime('14:30'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
     expect:
@@ -1430,9 +1430,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #9"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localtime('14:30'), localtime('16:30')) AS duration
     expect:
@@ -1447,9 +1447,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #10"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localtime('14:30'), time('16:30+0100')) AS duration
     expect:
@@ -1464,9 +1464,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #11"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(time('14:30'), date('2015-06-24')) AS duration
     expect:
@@ -1481,9 +1481,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #12"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(time('14:30'), localdatetime('2016-07-21T21:45:22.142')) AS duration
     expect:
@@ -1498,9 +1498,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #13"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(time('14:30'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
     expect:
@@ -1515,9 +1515,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #14"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(time('14:30'), localtime('16:30')) AS duration
     expect:
@@ -1532,9 +1532,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #15"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(time('14:30'), time('16:30+0100')) AS duration
     expect:
@@ -1549,9 +1549,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #16"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localdatetime('2015-07-21T21:40:32.142'), date('2015-06-24')) AS duration
     expect:
@@ -1566,9 +1566,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #17"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localdatetime('2015-07-21T21:40:32.142'), localdatetime('2016-07-21T21:45:22.142')) AS duration
     expect:
@@ -1583,9 +1583,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #18"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localdatetime('2015-07-21T21:40:32.142'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
     expect:
@@ -1600,9 +1600,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #19"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localdatetime('2015-07-21T21:40:32.142'), localtime('16:30')) AS duration
     expect:
@@ -1617,9 +1617,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #20"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localdatetime('2015-07-21T21:40:32.142'), time('16:30+0100')) AS duration
     expect:
@@ -1634,9 +1634,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #21"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(datetime('2014-07-21T21:40:36.143+0200'), date('2015-06-24')) AS duration
     expect:
@@ -1651,9 +1651,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #22"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(datetime('2014-07-21T21:40:36.143+0200'), localdatetime('2016-07-21T21:45:22.142')) AS duration
     expect:
@@ -1668,9 +1668,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #23"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(datetime('2014-07-21T21:40:36.143+0200'), datetime('2015-07-21T21:40:32.142+0100')) AS duration
     expect:
@@ -1685,9 +1685,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #24"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(datetime('2014-07-21T21:40:36.143+0200'), localtime('16:30')) AS duration
     expect:
@@ -1702,9 +1702,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [5] Should compute duration between two temporals in seconds #25"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(datetime('2014-07-21T21:40:36.143+0200'), time('16:30+0100')) AS duration
     expect:
@@ -1719,9 +1719,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [6] Should compute duration between if they differ only by a fraction of a second and the first comes after the second."
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localdatetime('2014-07-21T21:40:36.143'), localdatetime('2014-07-21T21:40:36.142')) AS d
     expect:
@@ -1736,9 +1736,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [7] Should compute negative duration between in big units #1"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(date('2018-03-11'), date('2016-06-24')) AS duration
     expect:
@@ -1753,9 +1753,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [7] Should compute negative duration between in big units #2"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(date('2018-07-21'), datetime('2016-07-21T21:40:32.142+0100')) AS duration
     expect:
@@ -1770,9 +1770,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [7] Should compute negative duration between in big units #3"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(localdatetime('2018-07-21T21:40:32.142'), date('2016-07-21')) AS duration
     expect:
@@ -1787,9 +1787,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [7] Should compute negative duration between in big units #4"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(datetime('2018-07-21T21:40:36.143+0200'), localdatetime('2016-07-21T21:40:36.143')) AS duration
     expect:
@@ -1804,9 +1804,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [7] Should compute negative duration between in big units #5"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(datetime('2018-07-21T21:40:36.143+0500'), datetime('1984-07-21T22:40:36.143+0200')) AS duration
     expect:
@@ -1821,9 +1821,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [8] Should handle durations at daylight saving time day #1"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(datetime({year: 2017, month: 10, day: 29, hour: 0, timezone: 'Europe/Stockholm'}), localdatetime({year: 2017, month: 10, day: 29, hour: 4})) AS duration
     expect:
@@ -1838,9 +1838,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [8] Should handle durations at daylight saving time day #2"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(datetime({year: 2017, month: 10, day: 29, hour: 0, timezone: 'Europe/Stockholm'}), localtime({hour: 4})) AS duration
     expect:
@@ -1855,9 +1855,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [8] Should handle durations at daylight saving time day #3"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localdatetime({year: 2017, month: 10, day: 29, hour: 0 }), datetime({year: 2017, month: 10, day: 29, hour: 4, timezone: 'Europe/Stockholm'})) AS duration
     expect:
@@ -1872,9 +1872,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [8] Should handle durations at daylight saving time day #4"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localtime({hour: 0 }), datetime({year: 2017, month: 10, day: 29, hour: 4, timezone: 'Europe/Stockholm'})) AS duration
     expect:
@@ -1889,9 +1889,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [8] Should handle durations at daylight saving time day #5"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(date({year: 2017, month: 10, day: 29}), datetime({year: 2017, month: 10, day: 29, hour: 4, timezone: 'Europe/Stockholm'})) AS duration
     expect:
@@ -1906,9 +1906,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [8] Should handle durations at daylight saving time day #6"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(datetime({year: 2017, month: 10, day: 29, hour: 0, timezone: 'Europe/Stockholm'}), date({year: 2017, month: 10, day: 30})) AS duration
     expect:
@@ -1923,9 +1923,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [9] Should handle large durations"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(date('-999999999-01-01'), date('+999999999-12-31')) AS duration
     expect:
@@ -1940,9 +1940,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [10] Should handle large durations in seconds"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localdatetime('-999999999-01-01'), localdatetime('+999999999-12-31T23:59:59')) AS duration
     expect:
@@ -1957,9 +1957,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [11] Should handle when seconds and subseconds have different signs #1"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localtime('12:34:54.7'), localtime('12:34:54.3')) AS duration
     expect:
@@ -1974,9 +1974,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [11] Should handle when seconds and subseconds have different signs #2"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localtime('12:34:54.3'), localtime('12:34:54.7')) AS duration
     expect:
@@ -1991,9 +1991,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [11] Should handle when seconds and subseconds have different signs #3"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localtime('12:34:54.7'), localtime('12:34:55.3')) AS duration
     expect:
@@ -2008,9 +2008,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [11] Should handle when seconds and subseconds have different signs #4"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localtime('12:34:54.7'), localtime('12:44:55.3')) AS duration
     expect:
@@ -2025,9 +2025,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [11] Should handle when seconds and subseconds have different signs #5"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localtime('12:44:54.7'), localtime('12:34:55.3')) AS duration
     expect:
@@ -2042,9 +2042,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [11] Should handle when seconds and subseconds have different signs #6"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localtime('12:34:56'), localtime('12:34:55.7')) AS duration
     expect:
@@ -2059,9 +2059,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [11] Should handle when seconds and subseconds have different signs #7"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localtime('12:34:56'), localtime('12:44:55.7')) AS duration
     expect:
@@ -2076,9 +2076,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [11] Should handle when seconds and subseconds have different signs #8"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localtime('12:44:56'), localtime('12:34:55.7')) AS duration
     expect:
@@ -2093,9 +2093,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [11] Should handle when seconds and subseconds have different signs #9"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localtime('12:34:56.3'), localtime('12:34:54.7')) AS duration
     expect:
@@ -2110,9 +2110,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [11] Should handle when seconds and subseconds have different signs #10"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localtime('12:34:54.7'), localtime('12:34:56.3')) AS duration
     expect:
@@ -2127,9 +2127,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [12] Should compute durations with no difference #1"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localtime(), localtime()) AS duration
     expect:
@@ -2144,9 +2144,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [12] Should compute durations with no difference #2"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(time(), time()) AS duration
     expect:
@@ -2161,9 +2161,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [12] Should compute durations with no difference #3"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(date(), date()) AS duration
     expect:
@@ -2178,9 +2178,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [12] Should compute durations with no difference #4"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(localdatetime(), localdatetime()) AS duration
     expect:
@@ -2195,9 +2195,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [12] Should compute durations with no difference #5"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(datetime(), datetime()) AS duration
     expect:
@@ -2212,9 +2212,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [13] Should propagate null #1"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.between(null, null) AS t
     expect:
@@ -2229,9 +2229,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [13] Should propagate null #2"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inMonths(null, null) AS t
     expect:
@@ -2246,9 +2246,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [13] Should propagate null #3"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inDays(null, null) AS t
     expect:
@@ -2263,9 +2263,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal10: [13] Should propagate null #4"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration.inSeconds(null, null) AS t
     expect:

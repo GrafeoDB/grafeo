@@ -71,10 +71,18 @@ describe('temporal values', () => {
     expect(again).toEqual({ typed: true, equal: true })
   })
 
-  it('a timestamp before 1970 is the millisecond at or before it', async () => {
+  it('a timestamp before 1970 keeps its microseconds', async () => {
     const db = GrafeoDB.create()
+    // 500 microseconds before 1970: a Date would floor it to the millisecond,
+    // so it comes back as the tag, and passed back it is the same instant.
     const [row] = (await db.execute("RETURN local_datetime('1969-12-31T23:59:59.9995') AS t")).toArray()
-    expect(row.t.getTime()).toBe(Date.UTC(1969, 11, 31, 23, 59, 59, 999))
+    expect(row.t).toEqual({ $timestamp_us: -500 })
+    const [again] = (
+      await db.execute("RETURN $t = local_datetime('1969-12-31T23:59:59.9995') AS same", { t: row.t })
+    ).toArray()
+    expect(again.same).toBe(true)
+    const [whole] = (await db.execute("RETURN local_datetime('1969-12-31T23:59:59.999') AS t")).toArray()
+    expect(whole.t.getTime()).toBe(Date.UTC(1969, 11, 31, 23, 59, 59, 999))
   })
 
   it('stored values come back typed from a node, a stream and an AsOf read', async () => {

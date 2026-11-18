@@ -92,12 +92,14 @@ export type RdfTerm = NamedNode | BlankNode | Literal
 
 /**
  * A value in a result row: `null`, a boolean, a number (a `bigint` past
- * 2^53), a string, a `Date` (a timestamp), a `Buffer` (bytes), a
- * `Float32Array` (a vector), an RDF term, a list or an object (a map, or a
- * tagged value: `{ $decimal: '1.50' }`, `{ $date: '2024-01-15' }`,
- * `{ $time: '12:30:00+02:00' }`, `{ $duration: 'P1DT2H' }` or
- * `{ $zoned_datetime: '2024-01-15T12:30:00+02:00' }`, which a parameter takes
- * back as the same type).
+ * 2^53), a string, a `Date` (a timestamp in whole milliseconds), a `Buffer`
+ * (bytes), a `Float32Array` (a vector), an RDF term, a list or an object (a
+ * map, or a tagged value: `{ $decimal: '1.50' }`, `{ $date: '2024-01-15' }`,
+ * `{ $time: '12:30:00+02:00' }`, `{ $duration: 'P1DT2H' }`,
+ * `{ $zoned_datetime: '2024-01-15T12:30:00+02:00' }` or
+ * `{ $timestamp_us: 1705321800000001 }` (a timestamp with microseconds, which
+ * a `Date` cannot hold; a `bigint` before 1685 and after 2255), which a
+ * parameter takes back as the same type).
  */
 export type GrafeoValue =
   | null

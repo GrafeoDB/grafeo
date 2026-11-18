@@ -51,6 +51,12 @@ def value_to_string(val: Any) -> str:
     if isinstance(val, list):
         inner = ", ".join(value_to_string(v) for v in val)
         return f"[{inner}]"
+    if isinstance(val, datetime.timedelta):
+        # A duration without months: days and a time part with one sign, as
+        # the binding reads a timedelta parameter, in the Rust runner's text.
+        micros = val // datetime.timedelta(microseconds=1)
+        days = abs(micros) // 86_400_000_000 * (1 if micros >= 0 else -1)
+        return _duration_to_iso(0, days, (micros - days * 86_400_000_000) * 1000)
     if isinstance(val, dict):
         # Duration is returned as {months, days, nanos} from the C FFI.
         # Convert to ISO 8601 duration format to match the Rust runner.
@@ -426,12 +432,15 @@ def temporals_as_text(db, value: Any) -> Any:
     """``value`` with each temporal in it written as its Cypher ``toString()``, the
     engine's own text: how a ``values_dialect: tck`` file compares temporals, which
     the TCK writes as strings."""
-    # A duration comes back as a timedelta when exact both ways, else as grafeo.Duration
+    # Python's own type where it holds the value exactly, else a Grafeo type
+    # (grafeo.Time, grafeo.Duration and the others)
+    grafeo_types = tuple(
+        getattr(grafeo, name)
+        for name in ("Time", "Date", "Timestamp", "ZonedDateTime", "Duration")
+        if hasattr(grafeo, name)
+    )
     temporal_types = (datetime.date, datetime.time, datetime.timedelta)
-    duration_type = getattr(grafeo, "Duration", None)
-    if isinstance(value, temporal_types) or (
-        duration_type and isinstance(value, duration_type)
-    ):
+    if isinstance(value, temporal_types + grafeo_types):
         rows = list(db.execute_cypher("RETURN toString($v) AS s", {"v": value}))
         return rows[0]["s"]
     if isinstance(value, list):

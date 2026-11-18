@@ -561,7 +561,7 @@ impl PyQueryResult {
                 let val = match row.get(col_idx) {
                     None => py.None(),
                     Some(Value::RdfTerm(term)) => PyValue::to_py(&term.export_value(), py)?,
-                    Some(value) => PyValue::to_py(value, py)?,
+                    Some(value) => crate::types::dataframe_value(value, py)?,
                 };
                 values.append(val)?;
             }

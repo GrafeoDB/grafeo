@@ -53,11 +53,12 @@ TAG = "2024.3"
 OUTPUT = Path("tests/spec/lpg/cypher/tck")
 
 # The runners whose bindings do not hand temporals back without loss: they skip a
-# case that builds or returns one, until their binding does
+# case that builds or returns one. WASM returns a temporal as its text, which passed
+# back is a string; typed temporals there come in 0.7.0
 TEMPORAL_GAP = {
-    "runners": ["python", "node", "wasm", "go", "csharp", "dart"],
-    "issue": "fix in 0.6.4",
-    "reason": "temporals do not come back from this binding without loss",
+    "runners": ["wasm"],
+    "issue": "fix in 0.7.0",
+    "reason": "temporals come back from this binding as text, which passed back is a string",
 }
 TEMPORAL = re.compile(
     r"\b(?:date|datetime|localtime|localdatetime|time|duration)\s*(?:\(|\.\w)"

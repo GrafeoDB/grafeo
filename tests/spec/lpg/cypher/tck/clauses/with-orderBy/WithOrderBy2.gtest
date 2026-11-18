@@ -616,9 +616,9 @@ tests:
   # [11] Sort by a date expression in ascending order #1
   - name: s11_sort_by_a_date_expression_in_ascending_order_1
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {date: date({year: 1910, month: 5, day: 6})}),
@@ -643,9 +643,9 @@ tests:
   # [11] Sort by a date expression in ascending order #2
   - name: s11_sort_by_a_date_expression_in_ascending_order_2
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {date: date({year: 1910, month: 5, day: 6})}),
@@ -670,9 +670,9 @@ tests:
   # [11] Sort by a date expression in ascending order #3
   - name: s11_sort_by_a_date_expression_in_ascending_order_3
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {date: date({year: 1910, month: 5, day: 6})}),
@@ -697,9 +697,9 @@ tests:
   # [12] Sort by a date expression in descending order #1
   - name: s12_sort_by_a_date_expression_in_descending_order_1
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {date: date({year: 1910, month: 5, day: 6})}),
@@ -724,9 +724,9 @@ tests:
   # [12] Sort by a date expression in descending order #2
   - name: s12_sort_by_a_date_expression_in_descending_order_2
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {date: date({year: 1910, month: 5, day: 6})}),
@@ -754,9 +754,9 @@ tests:
       spec: "openCypher TCK 2024.3 WithOrderBy2: [13] Sort by a local time expression in ascending order #1"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {time: localtime({hour: 10, minute: 35})}),
@@ -784,9 +784,9 @@ tests:
       spec: "openCypher TCK 2024.3 WithOrderBy2: [13] Sort by a local time expression in ascending order #2"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {time: localtime({hour: 10, minute: 35})}),
@@ -814,9 +814,9 @@ tests:
       spec: "openCypher TCK 2024.3 WithOrderBy2: [13] Sort by a local time expression in ascending order #3"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {time: localtime({hour: 10, minute: 35})}),
@@ -841,9 +841,9 @@ tests:
   # [14] Sort by a local time expression in descending order #1
   - name: s14_sort_by_a_local_time_expression_in_descending_order_1
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {time: localtime({hour: 10, minute: 35})}),
@@ -868,9 +868,9 @@ tests:
   # [14] Sort by a local time expression in descending order #2
   - name: s14_sort_by_a_local_time_expression_in_descending_order_2
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {time: localtime({hour: 10, minute: 35})}),
@@ -895,9 +895,9 @@ tests:
   # [15] Sort by a time expression in ascending order #1
   - name: s15_sort_by_a_time_expression_in_ascending_order_1
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {time: time({hour: 10, minute: 35, timezone: '-08:00'})}),
@@ -922,9 +922,9 @@ tests:
   # [15] Sort by a time expression in ascending order #2
   - name: s15_sort_by_a_time_expression_in_ascending_order_2
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {time: time({hour: 10, minute: 35, timezone: '-08:00'})}),
@@ -949,9 +949,9 @@ tests:
   # [15] Sort by a time expression in ascending order #3
   - name: s15_sort_by_a_time_expression_in_ascending_order_3
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {time: time({hour: 10, minute: 35, timezone: '-08:00'})}),
@@ -979,9 +979,9 @@ tests:
       spec: "openCypher TCK 2024.3 WithOrderBy2: [16] Sort by a time expression in descending order #1"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {time: time({hour: 10, minute: 35, timezone: '-08:00'})}),
@@ -1009,9 +1009,9 @@ tests:
       spec: "openCypher TCK 2024.3 WithOrderBy2: [16] Sort by a time expression in descending order #2"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {time: time({hour: 10, minute: 35, timezone: '-08:00'})}),
@@ -1039,9 +1039,9 @@ tests:
       spec: "openCypher TCK 2024.3 WithOrderBy2: [17] Sort by a local date time expression in ascending order #1"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12})}),
@@ -1069,9 +1069,9 @@ tests:
       spec: "openCypher TCK 2024.3 WithOrderBy2: [17] Sort by a local date time expression in ascending order #2"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12})}),
@@ -1099,9 +1099,9 @@ tests:
       spec: "openCypher TCK 2024.3 WithOrderBy2: [17] Sort by a local date time expression in ascending order #3"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12})}),
@@ -1129,9 +1129,9 @@ tests:
       spec: "openCypher TCK 2024.3 WithOrderBy2: [18] Sort by a local date time expression in descending order #1"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12})}),
@@ -1159,9 +1159,9 @@ tests:
       spec: "openCypher TCK 2024.3 WithOrderBy2: [18] Sort by a local date time expression in descending order #2"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12})}),
@@ -1189,9 +1189,9 @@ tests:
       spec: "openCypher TCK 2024.3 WithOrderBy2: [19] Sort by a date time expression in ascending order #1"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12, timezone: '+00:15'})}),
@@ -1219,9 +1219,9 @@ tests:
       spec: "openCypher TCK 2024.3 WithOrderBy2: [19] Sort by a date time expression in ascending order #2"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12, timezone: '+00:15'})}),
@@ -1249,9 +1249,9 @@ tests:
       spec: "openCypher TCK 2024.3 WithOrderBy2: [19] Sort by a date time expression in ascending order #3"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12, timezone: '+00:15'})}),
@@ -1279,9 +1279,9 @@ tests:
       spec: "openCypher TCK 2024.3 WithOrderBy2: [20] Sort by a date time expression in descending order #1"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12, timezone: '+00:15'})}),
@@ -1309,9 +1309,9 @@ tests:
       spec: "openCypher TCK 2024.3 WithOrderBy2: [20] Sort by a date time expression in descending order #2"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE (:A {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12, timezone: '+00:15'})}),

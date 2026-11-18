@@ -593,9 +593,22 @@ pub fn value_to_napi(env: sys::napi_env, value: &Value) -> Result<sys::napi_valu
         Value::Bytes(bytes) => unsafe {
             <Buffer as ToNapiValue>::to_napi_value(env, Buffer::from(bytes.to_vec()))
         },
+        // A Date holds milliseconds: an instant with microseconds comes back
+        // as the tag it goes in as, `{ $timestamp_us: n }`, so that passed
+        // back it is the same instant. `n` is an integer as `Int64` gives
+        // one: a number inside ±2^53, a BigInt outside (before 1685, after
+        // 2255), which a number would round.
+        Value::Timestamp(ts) if ts.as_micros() % 1000 != 0 => {
+            let mut obj = std::ptr::null_mut();
+            // SAFETY: env is valid; napi_create_object writes to our out-pointer
+            check_napi(unsafe { sys::napi_create_object(env, &raw mut obj) })?;
+            let micros = value_to_napi(env, &Value::Int64(ts.as_micros()))?;
+            let key = CString::new("$timestamp_us").expect("static string has no null bytes");
+            // SAFETY: env, obj, and micros are valid
+            check_napi(unsafe { sys::napi_set_named_property(env, obj, key.as_ptr(), micros) })?;
+            Ok(obj)
+        }
         Value::Timestamp(ts) => {
-            // A Date holds milliseconds: the one at or before the instant,
-            // also before 1970 (a Date rounds a fraction toward zero)
             let ms = ts.as_micros().div_euclid(1000) as f64;
             let env_wrapper = Env::from_raw(env);
             Ok(env_wrapper.create_date(ms)?.raw())

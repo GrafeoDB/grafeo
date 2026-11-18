@@ -1,5 +1,7 @@
 """Algorithm results keyed by a node property, and run in its order (#566 `key=`)."""
 
+from datetime import timedelta
+
 import grafeo
 import pytest
 
@@ -146,7 +148,6 @@ def inserted(db, value):
         ("[3, 19]", "list"),
         ("{city: 'Amsterdam'}", "dict"),
         ("vector([3.0, 19.0])", "list"),
-        ("duration('P3D')", "dict"),
     ],
 )
 def test_a_key_python_cannot_hash_raises(value, python_type):
@@ -178,15 +179,16 @@ def test_keys_python_treats_as_equal_raise():
         db.algorithms.pagerank(key="id")
 
 
-def test_times_python_cannot_tell_apart_raise():
-    """Python times hold microseconds: two times within the same microsecond
-    are the same dict key to Python, so they raise."""
+def test_times_and_durations_are_keys():
+    """Two times within the same microsecond are two keys: each comes back as a
+    `grafeo.Time` with its nanoseconds. A duration is a `timedelta` key."""
     db = grafeo.GrafeoDB()
-    first = inserted(db, "time('12:03:19.000000001')")
-    second = inserted(db, "time('12:03:19.000000002')")
-    with pytest.raises(
-        grafeo.GrafeoError,
-        match=rf"nodes {first} and {second} have values for the key 'id' that Python treats as the "
-        r"same key",
-    ):
-        db.algorithms.degree_centrality(key="id")
+    inserted(db, "time('12:03:19.000000001')")
+    inserted(db, "time('12:03:19.000000002')")
+    inserted(db, "duration('P3D')")
+    keys = set(db.algorithms.degree_centrality(key="id"))
+    assert keys == {
+        grafeo.Time("12:03:19.000000001"),
+        grafeo.Time("12:03:19.000000002"),
+        timedelta(days=3),
+    }

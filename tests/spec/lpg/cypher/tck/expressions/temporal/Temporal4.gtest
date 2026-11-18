@@ -44,9 +44,9 @@ tests:
   # [1] Should store date #1
   - name: s1_should_store_date_1
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({created: date({year: 1984, month: 10, day: 11})})
     expect:
@@ -58,9 +58,9 @@ tests:
   # [1] Should store date #1 (control query)
   - name: s1_should_store_date_1_control
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE ({created: date({year: 1984, month: 10, day: 11})})
@@ -75,9 +75,9 @@ tests:
   # [2] Should store date array #1
   - name: s2_should_store_date_array_1
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [date({year: 1984, month: 10, day: 12})]})
     expect:
@@ -89,9 +89,9 @@ tests:
   # [2] Should store date array #1 (control query)
   - name: s2_should_store_date_array_1_control
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE ({dates: [date({year: 1984, month: 10, day: 12})]})
@@ -106,9 +106,9 @@ tests:
   # [2] Should store date array #2
   - name: s2_should_store_date_array_2
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [date({year: 1984, month: 10, day: 13}), date({year: 1984, month: 10, day: 14}), date({year: 1984, month: 10, day: 15})]})
     expect:
@@ -120,9 +120,9 @@ tests:
   # [2] Should store date array #2 (control query)
   - name: s2_should_store_date_array_2_control
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE ({dates: [date({year: 1984, month: 10, day: 13}), date({year: 1984, month: 10, day: 14}), date({year: 1984, month: 10, day: 15})]})
@@ -137,9 +137,9 @@ tests:
   # [3] Should store local time #1
   - name: s3_should_store_local_time_1
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({created: localtime({hour: 12})})
     expect:
@@ -154,9 +154,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [3] Should store local time #1 (control query)"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE ({created: localtime({hour: 12})})
@@ -171,9 +171,9 @@ tests:
   # [4] Should store local time array #1
   - name: s4_should_store_local_time_array_1
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [localtime({hour: 13})]})
     expect:
@@ -188,9 +188,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [4] Should store local time array #1 (control query)"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE ({dates: [localtime({hour: 13})]})
@@ -205,9 +205,9 @@ tests:
   # [4] Should store local time array #2
   - name: s4_should_store_local_time_array_2
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [localtime({hour: 14}), localtime({hour: 15}), localtime({hour: 16})]})
     expect:
@@ -222,9 +222,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [4] Should store local time array #2 (control query)"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE ({dates: [localtime({hour: 14}), localtime({hour: 15}), localtime({hour: 16})]})
@@ -239,9 +239,9 @@ tests:
   # [5] Should store time #1
   - name: s5_should_store_time_1
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({created: time({hour: 12})})
     expect:
@@ -256,9 +256,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [5] Should store time #1 (control query)"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE ({created: time({hour: 12})})
@@ -273,9 +273,9 @@ tests:
   # [6] Should store time array #1
   - name: s6_should_store_time_array_1
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [time({hour: 13})]})
     expect:
@@ -290,9 +290,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [6] Should store time array #1 (control query)"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE ({dates: [time({hour: 13})]})
@@ -307,9 +307,9 @@ tests:
   # [6] Should store time array #2
   - name: s6_should_store_time_array_2
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [time({hour: 14}), time({hour: 15}), time({hour: 16})]})
     expect:
@@ -324,9 +324,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [6] Should store time array #2 (control query)"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE ({dates: [time({hour: 14}), time({hour: 15}), time({hour: 16})]})
@@ -341,9 +341,9 @@ tests:
   # [7] Should store local date time #1
   - name: s7_should_store_local_date_time_1
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({created: localdatetime({year: 1912})})
     expect:
@@ -358,9 +358,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [7] Should store local date time #1 (control query)"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE ({created: localdatetime({year: 1912})})
@@ -375,9 +375,9 @@ tests:
   # [8] Should store local date time array #1
   - name: s8_should_store_local_date_time_array_1
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [localdatetime({year: 1913})]})
     expect:
@@ -392,9 +392,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [8] Should store local date time array #1 (control query)"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE ({dates: [localdatetime({year: 1913})]})
@@ -409,9 +409,9 @@ tests:
   # [8] Should store local date time array #2
   - name: s8_should_store_local_date_time_array_2
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [localdatetime({year: 1914}), localdatetime({year: 1915}), localdatetime({year: 1916})]})
     expect:
@@ -426,9 +426,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [8] Should store local date time array #2 (control query)"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE ({dates: [localdatetime({year: 1914}), localdatetime({year: 1915}), localdatetime({year: 1916})]})
@@ -443,9 +443,9 @@ tests:
   # [9] Should store date time #1
   - name: s9_should_store_date_time_1
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({created: datetime({year: 1912})})
     expect:
@@ -460,9 +460,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [9] Should store date time #1 (control query)"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE ({created: datetime({year: 1912})})
@@ -477,9 +477,9 @@ tests:
   # [10] Should store date time array #1
   - name: s10_should_store_date_time_array_1
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [datetime({year: 1913})]})
     expect:
@@ -494,9 +494,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [10] Should store date time array #1 (control query)"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE ({dates: [datetime({year: 1913})]})
@@ -511,9 +511,9 @@ tests:
   # [10] Should store date time array #2
   - name: s10_should_store_date_time_array_2
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [datetime({year: 1914}), datetime({year: 1915}), datetime({year: 1916})]})
     expect:
@@ -528,9 +528,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [10] Should store date time array #2 (control query)"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE ({dates: [datetime({year: 1914}), datetime({year: 1915}), datetime({year: 1916})]})
@@ -545,9 +545,9 @@ tests:
   # [11] Should store duration #1
   - name: s11_should_store_duration_1
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({created: duration({seconds: 12})})
     expect:
@@ -559,9 +559,9 @@ tests:
   # [11] Should store duration #1 (control query)
   - name: s11_should_store_duration_1_control
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE ({created: duration({seconds: 12})})
@@ -576,9 +576,9 @@ tests:
   # [12] Should store duration array #1
   - name: s12_should_store_duration_array_1
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [duration({seconds: 13})]})
     expect:
@@ -590,9 +590,9 @@ tests:
   # [12] Should store duration array #1 (control query)
   - name: s12_should_store_duration_array_1_control
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE ({dates: [duration({seconds: 13})]})
@@ -607,9 +607,9 @@ tests:
   # [12] Should store duration array #2
   - name: s12_should_store_duration_array_2
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [duration({seconds: 14}), duration({seconds: 15}), duration({seconds: 16})]})
     expect:
@@ -621,9 +621,9 @@ tests:
   # [12] Should store duration array #2 (control query)
   - name: s12_should_store_duration_array_2_control
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
         CREATE ({dates: [duration({seconds: 14}), duration({seconds: 15}), duration({seconds: 16})]})
@@ -638,9 +638,9 @@ tests:
   # [13] Should propagate null #1
   - name: s13_should_propagate_null_1
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date(null) AS t
     expect:
@@ -655,9 +655,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #2"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.transaction(null) AS t
     expect:
@@ -672,9 +672,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #3"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.statement(null) AS t
     expect:
@@ -689,9 +689,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #4"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.realtime(null) AS t
     expect:
@@ -703,9 +703,9 @@ tests:
   # [13] Should propagate null #5
   - name: s13_should_propagate_null_5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime(null) AS t
     expect:
@@ -720,9 +720,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #6"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.transaction(null) AS t
     expect:
@@ -737,9 +737,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #7"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.statement(null) AS t
     expect:
@@ -754,9 +754,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #8"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.realtime(null) AS t
     expect:
@@ -768,9 +768,9 @@ tests:
   # [13] Should propagate null #9
   - name: s13_should_propagate_null_9
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time(null) AS t
     expect:
@@ -785,9 +785,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #10"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.transaction(null) AS t
     expect:
@@ -802,9 +802,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #11"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.statement(null) AS t
     expect:
@@ -819,9 +819,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #12"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.realtime(null) AS t
     expect:
@@ -833,9 +833,9 @@ tests:
   # [13] Should propagate null #13
   - name: s13_should_propagate_null_13
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime(null) AS t
     expect:
@@ -850,9 +850,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #14"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.transaction(null) AS t
     expect:
@@ -867,9 +867,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #15"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.statement(null) AS t
     expect:
@@ -884,9 +884,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #16"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.realtime(null) AS t
     expect:
@@ -898,9 +898,9 @@ tests:
   # [13] Should propagate null #17
   - name: s13_should_propagate_null_17
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime(null) AS t
     expect:
@@ -915,9 +915,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #18"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.transaction(null) AS t
     expect:
@@ -932,9 +932,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #19"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.statement(null) AS t
     expect:
@@ -949,9 +949,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #20"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.realtime(null) AS t
     expect:
@@ -963,9 +963,9 @@ tests:
   # [13] Should propagate null #21
   - name: s13_should_propagate_null_21
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration(null) AS t
     expect:

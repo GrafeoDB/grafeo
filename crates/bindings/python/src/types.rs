@@ -18,10 +18,13 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 use pyo3::types::{
-    PyByteArray, PyBytes, PyDate, PyDateTime, PyDict, PyFloat, PyInt, PyList, PyTime,
+    PyByteArray, PyBytes, PyDate, PyDateTime, PyDelta, PyDict, PyFloat, PyInt, PyList, PyTime,
+    PyTzInfo,
 };
 
-use grafeo_common::types::{Date, Decimal, PropertyKey, Time, Timestamp, Value};
+use grafeo_common::types::{
+    Date, Decimal, Duration, PropertyKey, Time, Timestamp, Value, ZonedDatetime,
+};
 
 use crate::error::{PyGrafeoError, PyGrafeoResult};
 
@@ -353,13 +356,23 @@ impl PyValue {
 
         // Handle bytes
 
+        // A Grafeo temporal (`grafeo.Time` and the others) is its engine value.
+        if let Some(value) = crate::temporal::value_of(obj) {
+            return Ok(value);
+        }
+
         // Handle datetime. Naive datetimes are UTC, the same convention used
         // when timestamps are returned, so values round-trip on any machine.
+        // An aware one keeps its UTC offset, as a zoned datetime.
         if obj.is_instance_of::<PyDateTime>() {
             let micros = datetime_to_utc_micros(obj)
                 .map_err(|e| PyGrafeoError::Type(format!("Failed to convert datetime: {}", e)))?;
-            // An aware datetime can fall in year 0 or 10000 in UTC, which the
-            // naive UTC datetime it is returned as cannot hold.
+            if let Some(offset) = utc_offset_seconds(obj)? {
+                return Ok(Value::ZonedDatetime(ZonedDatetime::from_timestamp_offset(
+                    Timestamp::from_micros(micros),
+                    offset,
+                )));
+            }
             if !(MIN_PYTHON_MICROS..=MAX_PYTHON_MICROS).contains(&micros) {
                 return Err(PyGrafeoError::Type(format!(
                     "datetime {obj} is outside year 1 to 9999 in UTC, so it could not be read back"
@@ -375,8 +388,23 @@ impl PyValue {
                 .map_err(|e| PyGrafeoError::Type(format!("Failed to convert date: {}", e)));
         }
         if obj.is_instance_of::<PyTime>() {
-            return time_value(obj)
-                .map_err(|e| PyGrafeoError::Type(format!("Failed to convert time: {}", e)));
+            return time_value(obj);
+        }
+        // A `timedelta` is a duration of days and a time part, both with its
+        // sign: `timedelta(hours=-1)` is `PT-1H`, not one day back plus 23 hours.
+        if obj.is_instance_of::<PyDelta>() {
+            let micros = timedelta_micros(obj)
+                .map_err(|e| PyGrafeoError::Type(format!("Failed to convert timedelta: {}", e)))?;
+            // Days and a time part under a day, both with the sign of the
+            // whole: each fits an i64 for every `timedelta`.
+            let day = i128::from(MICROS_PER_DAY);
+            let parts = i64::try_from(micros / day)
+                .ok()
+                .zip(i64::try_from((micros % day) * 1000).ok());
+            let Some((days, nanos)) = parts else {
+                return Err(PyGrafeoError::Type(format!("{obj} is out of range")));
+            };
+            return Ok(Value::Duration(Duration::new(0, days, nanos)));
         }
 
         let type_name = obj
@@ -439,8 +467,17 @@ impl PyValue {
                 dict.unbind().into_any()
             }
             Value::Bytes(bytes) => PyBytes::new(py, bytes.as_ref()).unbind().into_any(),
-            Value::Timestamp(ts) => utc_micros_to_datetime(py, ts.as_micros())
-                .map_or_else(|_| py.None(), |dt| dt.unbind().into_any()),
+            // A temporal comes back as Python's own type where that holds it
+            // exactly, and as a Grafeo type where it does not.
+            Value::Time(t) if t.nanosecond() % 1000 != 0 => {
+                crate::temporal::PyGrafeoTime(*t).into_py_any(py)?
+            }
+            Value::Timestamp(_) | Value::Date(_) | Value::Time(_) | Value::ZonedDatetime(_) => {
+                match native_temporal(py, value) {
+                    Ok(native) => native,
+                    Err(_) => grafeo_temporal(py, value)?,
+                }
+            }
             Value::Decimal(d) => {
                 let decimal_mod = py.import("decimal").expect("decimal module should exist");
                 decimal_mod
@@ -448,88 +485,11 @@ impl PyValue {
                     .and_then(|class| class.call1((d.to_string(),)))
                     .map_or_else(|_| py.None(), |value| value.unbind().into_any())
             }
-            Value::Date(d) => {
-                let datetime_mod = py.import("datetime").expect("datetime module should exist");
-                let date_class = datetime_mod
-                    .getattr("date")
-                    .expect("datetime.date should exist");
-                date_class
-                    .call1((d.year(), d.month(), d.day()))
-                    .map_or_else(|_| py.None(), |dt| dt.unbind().into_any())
-            }
-            Value::Time(t) => {
-                let datetime_mod = py.import("datetime").expect("datetime module should exist");
-                let time_class = datetime_mod
-                    .getattr("time")
-                    .expect("datetime.time should exist");
-                let micros = t.nanosecond() / 1000;
-                // A time with a UTC offset is an aware `datetime.time`.
-                let tzinfo = match t.offset_seconds() {
-                    Some(seconds) => datetime_mod
-                        .getattr("timedelta")
-                        .and_then(|class| class.call1((0, seconds)))
-                        .and_then(|delta| {
-                            datetime_mod
-                                .getattr("timezone")
-                                .and_then(|class| class.call1((delta,)))
-                        })
-                        .map_or_else(|_| py.None(), |tz| tz.unbind()),
-                    None => py.None(),
-                };
-                time_class
-                    .call1((t.hour(), t.minute(), t.second(), micros, tzinfo))
-                    .map_or_else(|_| py.None(), |dt| dt.unbind().into_any())
-            }
-            Value::Duration(d) => {
-                use pyo3::conversion::IntoPyObjectExt;
-                let dict = PyDict::new(py);
-                dict.set_item("months", d.months())
-                    .expect("dict.set_item only fails on memory exhaustion");
-                dict.set_item("days", d.days())
-                    .expect("dict.set_item only fails on memory exhaustion");
-                dict.set_item("nanos", d.nanos())
-                    .expect("dict.set_item only fails on memory exhaustion");
-                dict.into_py_any(py)
-                    .expect("dict to Python conversion cannot fail")
-            }
-            Value::ZonedDatetime(zdt) => {
-                // Convert to Python datetime with fixed-offset timezone
-                let datetime_mod = py.import("datetime").expect("datetime module is built-in");
-                let local_date = zdt.to_local_date();
-                let local_time = zdt.to_local_time();
-                let micros = local_time.nanosecond() / 1000;
-                let offset_secs = zdt.offset_seconds();
-
-                // Build timezone using timedelta
-                let td_class = datetime_mod
-                    .getattr("timedelta")
-                    .expect("datetime.timedelta should exist");
-                let tz_class = datetime_mod
-                    .getattr("timezone")
-                    .expect("datetime.timezone should exist");
-                let dt_class = datetime_mod
-                    .getattr("datetime")
-                    .expect("datetime.datetime should exist");
-
-                let td = td_class
-                    .call1((0, offset_secs))
-                    .unwrap_or_else(|_| py.None().bind(py).clone());
-                let tz = tz_class
-                    .call1((td,))
-                    .unwrap_or_else(|_| py.None().bind(py).clone());
-                dt_class
-                    .call1((
-                        local_date.year(),
-                        local_date.month(),
-                        local_date.day(),
-                        local_time.hour(),
-                        local_time.minute(),
-                        local_time.second(),
-                        micros,
-                        tz,
-                    ))
-                    .map_or_else(|_| py.None(), |dt| dt.unbind().into_any())
-            }
+            Value::Duration(d) if timedelta_holds(d) => match native_temporal(py, value) {
+                Ok(native) => native,
+                Err(_) => grafeo_temporal(py, value)?,
+            },
+            Value::Duration(_) => grafeo_temporal(py, value)?,
             Value::Vector(v) => {
                 // Convert vector to Python list of floats
                 let py_floats: Vec<f32> = v.iter().copied().collect();
@@ -606,11 +566,14 @@ impl PyValue {
 const MICROS_PER_SECOND: i64 = 1_000_000;
 const MICROS_PER_DAY: i64 = 86_400 * MICROS_PER_SECOND;
 
-/// `datetime(1970, 1, 1)`, naive.
+/// `datetime(1970, 1, 1)`, naive, built once.
 fn unix_epoch(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
-    py.import("datetime")?
-        .getattr("datetime")?
-        .call1((1970, 1, 1))
+    static EPOCH: pyo3::sync::PyOnceLock<Py<PyAny>> = pyo3::sync::PyOnceLock::new();
+    EPOCH
+        .get_or_try_init(py, || {
+            PyDateTime::new(py, 1970, 1, 1, 0, 0, 0, 0, None).map(|epoch| epoch.into_any().unbind())
+        })
+        .map(|epoch| epoch.bind(py).clone())
 }
 
 /// Microseconds since the Unix epoch for `0001-01-01T00:00:00` and
@@ -636,15 +599,19 @@ fn datetime_to_utc_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
     } else {
         timedelta_micros(&offset)?
     };
-    Ok(timedelta_micros(&since_epoch)? - offset_micros)
+    // A datetime's wall clock and offset are within years 1 to 9999 and a
+    // day, so this fits.
+    i64::try_from(timedelta_micros(&since_epoch)? - offset_micros)
+        .map_err(|_| pyo3::exceptions::PyOverflowError::new_err(format!("{obj} is out of range")))
 }
 
-/// Total microseconds of a Python `timedelta`.
-fn timedelta_micros(delta: &Bound<'_, PyAny>) -> PyResult<i64> {
-    let days: i64 = delta.getattr("days")?.extract()?;
-    let seconds: i64 = delta.getattr("seconds")?.extract()?;
-    let micros: i64 = delta.getattr("microseconds")?.extract()?;
-    Ok(days * MICROS_PER_DAY + seconds * MICROS_PER_SECOND + micros)
+/// Total microseconds of a Python `timedelta`, as an `i128`: a `timedelta`
+/// holds up to 999,999,999 days, past what an `i64` of microseconds holds.
+fn timedelta_micros(delta: &Bound<'_, PyAny>) -> PyResult<i128> {
+    let days: i128 = delta.getattr("days")?.extract::<i64>()?.into();
+    let seconds: i128 = delta.getattr("seconds")?.extract::<i64>()?.into();
+    let micros: i128 = delta.getattr("microseconds")?.extract::<i64>()?.into();
+    Ok(days * i128::from(MICROS_PER_DAY) + seconds * i128::from(MICROS_PER_SECOND) + micros)
 }
 
 /// The `Date` of a Python `datetime.date` (not a `datetime`).
@@ -659,23 +626,204 @@ fn date_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
 
 /// The `Time` of a Python `datetime.time`: an aware one keeps its UTC
 /// offset, as `Value::Time` holds it.
-fn time_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
-    let field = |name: &str| -> PyResult<u32> { obj.getattr(name)?.extract() };
-    let out_of_range = || pyo3::exceptions::PyValueError::new_err(format!("{obj} is out of range"));
+fn time_value(obj: &Bound<'_, PyAny>) -> PyGrafeoResult<Value> {
+    let failed = |e: PyErr| PyGrafeoError::Type(format!("Failed to convert time: {e}"));
+    let field = |name: &str| -> PyGrafeoResult<u32> {
+        obj.getattr(name).and_then(|v| v.extract()).map_err(failed)
+    };
     let time = Time::from_hms_nano(
         field("hour")?,
         field("minute")?,
         field("second")?,
         field("microsecond")? * 1000,
     )
-    .ok_or_else(out_of_range)?;
-    let offset = obj.call_method0("utcoffset")?;
-    if offset.is_none() {
-        return Ok(Value::Time(time));
+    .ok_or_else(|| PyGrafeoError::Type(format!("{obj} is out of range")))?;
+    Ok(Value::Time(match utc_offset_seconds(obj)? {
+        Some(seconds) => time.with_offset(seconds),
+        None => time,
+    }))
+}
+
+/// A value as a dataframe column built without pyarrow holds it: a duration
+/// as `{"months", "days", "nanos"}` at any depth, as the Arrow export's
+/// struct reads in pyarrow and polars, and every other value as a row gives
+/// it, so a dataframe has the same values with or without pyarrow.
+pub(crate) fn dataframe_value(value: &Value, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    use pyo3::conversion::IntoPyObjectExt;
+    match value {
+        Value::Duration(d) => {
+            let dict = PyDict::new(py);
+            dict.set_item("months", d.months())?;
+            dict.set_item("days", d.days())?;
+            dict.set_item("nanos", d.nanos())?;
+            dict.into_py_any(py)
+        }
+        Value::List(items) => {
+            let items = items
+                .iter()
+                .map(|item| dataframe_value(item, py))
+                .collect::<PyResult<Vec<_>>>()?;
+            PyList::new(py, items)?.into_py_any(py)
+        }
+        Value::Map(map) => {
+            let dict = PyDict::new(py);
+            for (key, item) in map.iter() {
+                dict.set_item(key.as_str(), dataframe_value(item, py)?)?;
+            }
+            dict.into_py_any(py)
+        }
+        other => PyValue::to_py(other, py),
     }
-    let seconds = i32::try_from(timedelta_micros(&offset)? / MICROS_PER_SECOND)
-        .map_err(|_| out_of_range())?;
-    Ok(Value::Time(time.with_offset(seconds)))
+}
+
+/// The UTC offset of an aware `datetime` or `time` in seconds, `None` for a
+/// naive one.
+///
+/// # Errors
+///
+/// An offset that is not whole minutes (`+00:19:32`, Amsterdam before 1937)
+/// with GQLSTATUS 22009: GQL's time zone displacement is hours and minutes,
+/// and rounding it would shift the value silently.
+fn utc_offset_seconds(obj: &Bound<'_, PyAny>) -> PyGrafeoResult<Option<i32>> {
+    let failed = |e: PyErr| PyGrafeoError::Type(format!("Failed to read the UTC offset: {e}"));
+    let offset = obj.call_method0("utcoffset").map_err(failed)?;
+    if offset.is_none() {
+        return Ok(None);
+    }
+    let micros = timedelta_micros(&offset).map_err(failed)?;
+    if micros % i128::from(60 * MICROS_PER_SECOND) != 0 {
+        return Err(grafeo_common::utils::error::Error::from(
+            grafeo_common::utils::error::QueryError::new(
+                grafeo_common::utils::error::QueryErrorKind::InvalidTimeZoneDisplacement,
+                format!(
+                    "{obj} has a UTC offset of {offset}, which is not whole minutes: \
+                     a time zone displacement is hours and minutes"
+                ),
+            ),
+        )
+        .into());
+    }
+    i32::try_from(micros / i128::from(MICROS_PER_SECOND))
+        .map(Some)
+        .map_err(|_| PyGrafeoError::Type(format!("{obj} has no valid offset")))
+}
+
+/// Python's own type for a temporal `value`: a `date`, a `time` (cut to
+/// microseconds), a naive UTC `datetime` for a timestamp, an aware
+/// `datetime` for a zoned datetime, or a `timedelta` (cut to microseconds)
+/// for a duration without months.
+///
+/// # Errors
+///
+/// When Python's type cannot hold the value (a year outside 1 to 9999), or
+/// `value` is no temporal.
+pub(crate) fn native_temporal(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
+    // PyO3's constructors look the type up once; through `py.import` and a
+    // keyword call, a day duration read twice as slowly as the dict before it.
+    let utc_offset =
+        |seconds: i32| PyTzInfo::fixed_offset(py, PyDelta::new(py, 0, seconds, 0, true)?);
+    let native = match value {
+        Value::Date(d) => PyDate::new(py, d.year(), field(d.month())?, field(d.day())?)?.into_any(),
+        Value::Time(t) => {
+            let tzinfo = t.offset_seconds().map(utc_offset).transpose()?;
+            PyTime::new(
+                py,
+                field(t.hour())?,
+                field(t.minute())?,
+                field(t.second())?,
+                t.nanosecond() / 1000,
+                tzinfo.as_ref(),
+            )?
+            .into_any()
+        }
+        Value::Timestamp(ts) => utc_micros_to_datetime(py, ts.as_micros())?,
+        Value::Duration(d) if d.months() == 0 => {
+            timedelta(py, d.days(), d.nanos() / 1000)?.into_any()
+        }
+        Value::Duration(d) => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{d} has months, which a timedelta cannot hold"
+            )));
+        }
+        Value::ZonedDatetime(zdt) => {
+            let (date, time) = (zdt.to_local_date(), zdt.to_local_time());
+            PyDateTime::new(
+                py,
+                date.year(),
+                field(date.month())?,
+                field(date.day())?,
+                field(time.hour())?,
+                field(time.minute())?,
+                field(time.second())?,
+                time.nanosecond() / 1000,
+                Some(&utc_offset(zdt.offset_seconds())?),
+            )?
+            .into_any()
+        }
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{other} is not a date or time"
+            )));
+        }
+    };
+    Ok(native.unbind())
+}
+
+/// A month, day, hour, minute or second as the `u8` Python's constructors
+/// take; Grafeo's types keep each under 60.
+fn field(value: u32) -> PyResult<u8> {
+    u8::try_from(value)
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err(format!("{value} is out of range")))
+}
+
+/// `timedelta(days=days, microseconds=micros)`, its parts split so each fits
+/// the constructor's `i32`.
+fn timedelta(py: Python<'_>, days: i64, micros: i64) -> PyResult<Bound<'_, PyDelta>> {
+    let overflow = || {
+        pyo3::exceptions::PyOverflowError::new_err(format!(
+            "{days} days and {micros} microseconds are out of range"
+        ))
+    };
+    let days = days
+        .checked_add(micros.div_euclid(MICROS_PER_DAY))
+        .and_then(|days| i32::try_from(days).ok())
+        .ok_or_else(overflow)?;
+    let rest = micros.rem_euclid(MICROS_PER_DAY);
+    // `rest` is under a day: its seconds are under 86,400.
+    let seconds = i32::try_from(rest / MICROS_PER_SECOND).map_err(|_| overflow())?;
+    let micros = i32::try_from(rest % MICROS_PER_SECOND).map_err(|_| overflow())?;
+    PyDelta::new(py, days, seconds, micros, true)
+}
+
+/// Whether a `timedelta` holds `duration` exactly, so that passed back it is
+/// the same duration: no months, whole microseconds, and a time part under a
+/// day with the sign of the days (a `timedelta` normalises `P1DT-1H` to 23
+/// hours, which a parameter reads as `PT23H`).
+fn timedelta_holds(duration: &Duration) -> bool {
+    const NANOS_PER_DAY: i64 = MICROS_PER_DAY * 1000;
+    let (days, nanos) = (duration.days(), duration.nanos());
+    duration.months() == 0
+        && nanos % 1000 == 0
+        && nanos.abs() < NANOS_PER_DAY
+        && (days == 0 || nanos == 0 || days.signum() == nanos.signum())
+}
+
+/// The Grafeo type for a temporal `value` Python's own type cannot hold.
+fn grafeo_temporal(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
+    use crate::temporal::{
+        PyGrafeoDate, PyGrafeoDuration, PyGrafeoTime, PyGrafeoTimestamp, PyGrafeoZonedDateTime,
+    };
+    use pyo3::conversion::IntoPyObjectExt;
+    match value {
+        Value::Date(d) => PyGrafeoDate(*d).into_py_any(py),
+        Value::Time(t) => PyGrafeoTime(*t).into_py_any(py),
+        Value::Timestamp(ts) => PyGrafeoTimestamp(*ts).into_py_any(py),
+        Value::ZonedDatetime(zdt) => PyGrafeoZonedDateTime(*zdt).into_py_any(py),
+        Value::Duration(d) => PyGrafeoDuration(*d).into_py_any(py),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "{other} is not a date or time"
+        ))),
+    }
 }
 
 /// A naive UTC datetime for microseconds since the Unix epoch.
@@ -683,11 +831,7 @@ fn time_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
 /// Built as `epoch + timedelta`, which is exact and, unlike
 /// `datetime.fromtimestamp`, also works for dates before 1970 on Windows.
 fn utc_micros_to_datetime(py: Python<'_>, micros: i64) -> PyResult<Bound<'_, PyAny>> {
-    let timedelta = py.import("datetime")?.getattr("timedelta")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("microseconds", micros)?;
-    let delta = timedelta.call((), Some(&kwargs))?;
-    unix_epoch(py)?.call_method1("__add__", (delta,))
+    unix_epoch(py)?.call_method1("__add__", (timedelta(py, 0, micros)?,))
 }
 
 impl From<Value> for PyValue {

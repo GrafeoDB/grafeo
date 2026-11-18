@@ -285,4 +285,17 @@ public sealed class TemporalTests : IDisposable
         Assert.Throws<ArgumentOutOfRangeException>(() => new GrafeoTime(24, 0, 0));
         Assert.Throws<ArgumentOutOfRangeException>(() => new GrafeoTime(12, 0, 0, 0, TimeSpan.FromSeconds(90)));
     }
+
+    /// <summary>
+    /// An offset that is not whole minutes (Amsterdam before 1937, +00:19:32) cannot be built,
+    /// as a <see cref="DateTimeOffset"/> or a <see cref="GrafeoTime"/>, so none reaches the
+    /// engine: GQL's time zone displacement is hours and minutes.
+    /// </summary>
+    [Fact]
+    public void AnOffsetThatIsNotWholeMinutesCannotBeBuilt()
+    {
+        var amsterdam1936 = new TimeSpan(0, 19, 32);
+        Assert.Throws<ArgumentException>(() => new DateTimeOffset(1936, 5, 1, 12, 0, 0, amsterdam1936));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new GrafeoTime(12, 0, 0, 0, amsterdam1936));
+    }
 }

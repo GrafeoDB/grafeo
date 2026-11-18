@@ -11,12 +11,16 @@ Performance and memory release, in progress: this section lists what has landed 
 - **`CREATE OR REPLACE GRAPH` replaces a graph in one statement** (ISO/IEC 39075 12.4): an existing graph of the name is dropped and the new one created in one change, so a failure or a crash leaves the old graph or the new one; it was a syntax error. It is refused while another open transaction has changes in the graph, as `DROP GRAPH` is, and for a copy of itself (`AS COPY OF` or `LIKE` the same graph); a session using the graph keeps using it.
 - **Results say where their nodes and edges are** (Experimental): `QueryResult::cell_type` and `QueryResult::cell_types`, the Python `cell_type`, the Node.js `cellType`, the `cellTypes` key of WASM `executeRaw*` results and the C `grafeo_result_types_json` give the type each value was built with. A map is a node or an edge exactly where its type says so.
 - **The openCypher TCK runs in every binding's spec tests**: 3,927 scenarios of openCypher 2024.3, converted by `scripts/convert_opencypher_tck.py`; the cases Grafeo does not pass yet are listed with their target release in `tests/spec/lpg/cypher/tck/known_failures.toml`.
+- **Python has types for the temporals its own cannot hold** (Experimental): `grafeo.Time`, `grafeo.Duration`, `grafeo.Date`, `grafeo.Timestamp` and `grafeo.ZonedDateTime` hold a time with nanoseconds, a duration with months or a part finer than a microsecond, and a date outside years 1 to 9999. Each compares, hashes and gives `to_native()`; all but `grafeo.Timestamp` (microseconds since 1970) take the engine's text.
 
 ### Changed
 
 - **The Rust crate's default features include `storage`**: `grafeo` with its default features (`embedded`) now logs each commit beside the database file (`<path>.wal/`), so a commit survives a crash, and enforces `Config::with_query_memory_limit`, spilling to disk or failing with `GRAFEO-S001`, as the Python, Node.js and C packages do. Before, a commit reached the file only at a checkpoint and a crash lost every commit since. Each commit now pays the log's write, batched as `Config::with_wal_durability` sets; a build with `default-features = false` and without `storage` keeps the old behaviour.
 - **The demo dataset links Son of Anton to Anton and dates Hooli's CEOs**: `grafeo-datasets` and `@grafeo-db/datasets` add the edge type `TRAINED_ON` (Son of Anton to Anton), and Hooli's `CEO` periods are dated: Gavin Belson until 2017-06 and from 2018-04, Jack Barker in between.
 - **The demo dataset's RDF namespaces move to docs.grafeo.dev**: `sv:` is `https://docs.grafeo.dev/datasets/silicon-valley/vocab#` and `svr:` `https://docs.grafeo.dev/datasets/silicon-valley/id#` (a resource was `.../id/<key>`, now `.../id#<key>`), so every IRI opens a page that describes it; data that stored the 0.6.3 IRIs needs them rewritten.
+- **A Python aware `datetime` parameter is a zoned datetime**: it keeps the offset its `tzinfo` gives and comes back aware; it was stored as a local datetime of its UTC instant and came back naive. `IS TYPED TIMESTAMP` and a property typed `LOCAL DATETIME` see the other type.
+- **A Python duration comes back as a `timedelta`, or as `grafeo.Duration`**: a `timedelta` when it holds the duration exactly, `grafeo.Duration` for months, a part finer than a microsecond, or a time part of a day or more or of the other sign than the days; it was a `{"months", "days", "nanos"}` dict. Dataframes keep the dict.
+- **An offset that is not whole minutes is refused with 22009**: a Python `datetime` or `time` whose `tzinfo` gives one, or a Go `time.Time` in a zone with one (Europe/Amsterdam before 1937, +00:19:32), fails the statement or the property write, as a time zone displacement is hours and minutes. Go's `TimeOf` still moves such an offset to its whole minutes.
 
 ### Fixed
 
@@ -28,6 +32,10 @@ Performance and memory release, in progress: this section lists what has landed 
 - **An item of `nodes(p)` keeps the node's id under `_id`**: a node with a property named `_id` or `_labels` gave that property there; the structural keys now win, as for a returned node, and `n._id` still reads the property.
 - **Go, C# and Dart report the columns of a result without rows**: they took the column names from the first row, so an empty result had none; the new C function `grafeo_result_columns_json` gives them for every result.
 - **A node or edge built into a value is the node or edge**: a list comprehension's items (indexed or unwound), a `CASE`, `coalesce`, the item a list `+` adds and what `reduce` collects return the node or edge; they returned its id.
+- **A Python time keeps its nanoseconds**: it comes back as `grafeo.Time` where `datetime.time` cut them to microseconds.
+- **Python takes a `timedelta` as a duration parameter**: it was refused.
+- **A Python date or datetime outside years 1 to 9999 comes back**: as a Grafeo type; it came back as `None`.
+- **A Node.js timestamp keeps its microseconds**: it comes back as `{ $timestamp_us: n }` (a `bigint` before 1685 and after 2255) where a `Date` floored it to milliseconds.
 
 ## [0.6.3] - 2026-11-15
 

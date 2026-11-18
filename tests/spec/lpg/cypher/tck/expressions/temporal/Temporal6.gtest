@@ -44,9 +44,9 @@ tests:
   # [1] Should serialize date
   - name: s1_should_serialize_date
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH date({year: 1984, month: 10, day: 11}) AS d
       RETURN toString(d) AS ts, date(toString(d)) = d AS b
@@ -59,9 +59,9 @@ tests:
   # [2] Should serialize local time
   - name: s2_should_serialize_local_time
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS d
       RETURN toString(d) AS ts, localtime(toString(d)) = d AS b
@@ -74,9 +74,9 @@ tests:
   # [3] Should serialize time
   - name: s3_should_serialize_time
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}) AS d
       RETURN toString(d) AS ts, time(toString(d)) = d AS b
@@ -92,9 +92,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal6: [4] Should serialize local date time"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS d
       RETURN toString(d) AS ts, localdatetime(toString(d)) = d AS b
@@ -110,9 +110,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal6: [5] Should serialize date time"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}) AS d
       RETURN toString(d) AS ts, datetime(toString(d)) = d AS b
@@ -125,9 +125,9 @@ tests:
   # [6] Should serialize duration #1
   - name: s6_should_serialize_duration_1
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70, nanoseconds: 1}) AS d
       RETURN toString(d) AS ts, duration(toString(d)) = d AS b
@@ -140,9 +140,9 @@ tests:
   # [6] Should serialize duration #2
   - name: s6_should_serialize_duration_2
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration({years: 12, months: 5, days: -14, hours: 16}) AS d
       RETURN toString(d) AS ts, duration(toString(d)) = d AS b
@@ -155,9 +155,9 @@ tests:
   # [6] Should serialize duration #3
   - name: s6_should_serialize_duration_3
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration({minutes: 12, seconds: -60}) AS d
       RETURN toString(d) AS ts, duration(toString(d)) = d AS b
@@ -173,9 +173,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal6: [6] Should serialize duration #4"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration({seconds: 2, milliseconds: -1}) AS d
       RETURN toString(d) AS ts, duration(toString(d)) = d AS b
@@ -191,9 +191,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal6: [6] Should serialize duration #5"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration({seconds: -2, milliseconds: 1}) AS d
       RETURN toString(d) AS ts, duration(toString(d)) = d AS b
@@ -209,9 +209,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal6: [6] Should serialize duration #6"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration({seconds: -2, milliseconds: -1}) AS d
       RETURN toString(d) AS ts, duration(toString(d)) = d AS b
@@ -227,9 +227,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal6: [6] Should serialize duration #7"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration({days: 1, milliseconds: 1}) AS d
       RETURN toString(d) AS ts, duration(toString(d)) = d AS b
@@ -245,9 +245,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal6: [6] Should serialize duration #8"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration({days: 1, milliseconds: -1}) AS d
       RETURN toString(d) AS ts, duration(toString(d)) = d AS b
@@ -263,9 +263,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal6: [6] Should serialize duration #9"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration({seconds: 60, milliseconds: -1}) AS d
       RETURN toString(d) AS ts, duration(toString(d)) = d AS b
@@ -281,9 +281,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal6: [6] Should serialize duration #10"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration({seconds: -60, milliseconds: 1}) AS d
       RETURN toString(d) AS ts, duration(toString(d)) = d AS b
@@ -299,9 +299,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal6: [6] Should serialize duration #11"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration({seconds: -60, milliseconds: -1}) AS d
       RETURN toString(d) AS ts, duration(toString(d)) = d AS b
@@ -317,9 +317,9 @@ tests:
       spec: "openCypher TCK 2024.3 Temporal6: [7] Should serialize timezones correctly"
       issue: fix in 0.6.5
     runner_gap:
-      runners: [python, node, wasm, go, csharp, dart]
-      issue: fix in 0.6.4
-      reason: "temporals do not come back from this binding without loss"
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH datetime({year: 2017, month: 8, day: 8, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: 'Europe/Stockholm'}) AS d
       RETURN toString(d) AS ts

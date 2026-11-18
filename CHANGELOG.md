@@ -69,6 +69,7 @@ Performance and memory release, in progress: this section lists what has landed 
 - **A Cypher pattern comprehension runs in a WHERE**: `MATCH (n) WHERE size([(n)-->(m) | m]) > 0`, and the WHERE of OPTIONAL MATCH and WITH, run; they failed with an internal error. In ORDER BY, SET, UNWIND, a property map or a list comprehension's body it fails as unsupported (GRAFEO-Q004) until 0.6.5.
 - **A Cypher pattern comprehension keeps a match whose projection is null**: `[(n)-[:T]->(b) | b.name]` is `[null]` for a `b` without a name; the match was dropped.
 - **Read-only opens remove the spill directories of crashed processes**: the first read-only open of a process removes, from the system temp directory, its user's spill directories of read-only opens whose process is gone, before it measures the default spill cap. Directories left by 0.6.3 and earlier stay, with one warning giving their count and size.
+- **`SET x = null` and `SET x += null` no longer lock what they set**: a null map, written or as a parameter, changes nothing on a node or a relationship, and two open transactions running such a SET on one both commit; the second failed with a write conflict (`GRAFEO-T001`).
 
 ## [0.6.3] - 2026-11-15
 

@@ -1431,15 +1431,21 @@ impl GraphWriter {
     }
 }
 
-/// Whether a property set of `assignments` can change no property: without
-/// `replace`, every assignment merges an empty map (`SET n += {}`), which is
-/// so for none. A named property, a map with entries, a replace and a merge
-/// of a value that is not a map (which writes nothing, but is not decided
-/// here) can.
+/// Whether a property set of `assignments` can change no property: every
+/// assignment is a map assignment of null (`SET n = null`, `SET n += null`,
+/// which write nothing) or, without `replace`, merges an empty map
+/// (`SET n += {}`). A named property, a map with entries, a replace with a
+/// map and a value that is neither a map nor null can.
 fn changes_no_property(assignments: &[(String, Value)], replace: bool) -> bool {
-    !replace
+    // A replace without assignments keeps the conservative answer it had.
+    (!replace || !assignments.is_empty())
         && assignments.iter().all(|(name, value)| {
-            name == MAP_ASSIGNMENT && matches!(value, Value::Map(map) if map.is_empty())
+            name == MAP_ASSIGNMENT
+                && match value {
+                    Value::Null => true,
+                    Value::Map(map) => !replace && map.is_empty(),
+                    _ => false,
+                }
         })
 }
 

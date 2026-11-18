@@ -1516,7 +1516,8 @@ fn merges_that_only_match_in_opposite_orders_both_commit() {
 /// runs in two open transactions and both commit. A set that can change no
 /// property claims nothing, on a node or an edge.
 /// - `SET n += {}` and `SET n += $empty` (an empty map parameter) on a
-///   committed node, and `SET r += {}` on a committed edge.
+///   committed node, `SET n += $null` and `SET n = $null` (a null
+///   parameter), and `SET r += {}` on a committed edge.
 /// - A Cypher node MERGE without ON MATCH, and with `ON MATCH SET n += {}`.
 /// - A relationship MERGE between two bound nodes, and a path MERGE, that
 ///   match: their match branch never wrote, and must not start to.
@@ -1536,6 +1537,18 @@ fn statements_that_change_nothing_both_commit() {
             MEMORY,
             "MATCH (m:Memory {key: 'ssi'}) SET m += $empty",
             vec![("empty", empty)],
+        ),
+        (
+            "SET n += $null",
+            MEMORY,
+            "MATCH (m:Memory {key: 'ssi'}) SET m += $nothing",
+            vec![("nothing", Value::Null)],
+        ),
+        (
+            "SET n = $null",
+            MEMORY,
+            "MATCH (m:Memory {key: 'ssi'}) SET m = $nothing",
+            vec![("nothing", Value::Null)],
         ),
         (
             "SET r += {} on an edge",

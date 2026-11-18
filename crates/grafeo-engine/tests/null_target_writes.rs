@@ -195,3 +195,31 @@ fn a_node_deleted_twice_in_one_statement_is_deleted_once() {
         assert_eq!(result.counters.nodes_deleted, 1, "{language}: {query}");
     }
 }
+
+/// A map assignment of null (`SET a = null`, `SET a += null`, or a null
+/// parameter) changes nothing and counts nothing: `=` with null does not
+/// remove the properties. It pins that the write was already a no-op.
+#[test]
+fn a_null_map_assignment_changes_and_counts_nothing() {
+    let params = || std::collections::HashMap::from([("m".to_string(), Value::Null)]);
+    for (language, query) in [
+        ("gql", "MATCH (a:A {k: 1}) SET a = null"),
+        ("cypher", "MATCH (a:A {k: 1}) SET a = null"),
+        ("cypher", "MATCH (a:A {k: 1}) SET a += null"),
+        ("gql", "MATCH (a:A {k: 1}) SET a = $m"),
+        ("gql", "MATCH (a:A {k: 1}) SET a += $m"),
+        ("cypher", "MATCH (a:A {k: 1}) SET a = $m"),
+        ("cypher", "MATCH (a:A {k: 1}) SET a += $m"),
+        ("cypher", "MATCH ()-[r:R]->() SET r = $m"),
+    ] {
+        let db = database();
+        let before = contents(&db);
+        let result = match language {
+            "gql" => db.execute_with_params(query, params()),
+            _ => db.execute_cypher_with_params(query, params()),
+        }
+        .unwrap_or_else(|error| panic!("{language}: {query}: {error}"));
+        assert_eq!(counted(&result.counters), [0; 7], "{language}: {query}");
+        assert_eq!(contents(&db), before, "{language}: {query}");
+    }
+}

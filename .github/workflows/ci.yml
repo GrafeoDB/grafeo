@@ -1023,7 +1023,7 @@ jobs:
         shell: bash
         run: |
           uv pip install --system dist/*.whl
-          uv pip install --system pytest pytest-asyncio networkx numpy scipy solvor pandas pyarrow polars
+          uv pip install --system pytest pytest-asyncio networkx numpy scipy solvor pandas pyarrow polars tzdata
 
       - name: Run Python tests
         env:
@@ -1090,7 +1090,7 @@ jobs:
         shell: bash
         run: |
           uv pip install --system dist/*.whl
-          uv pip install --system pytest pytest-asyncio networkx numpy scipy solvor pandas pyarrow polars
+          uv pip install --system pytest pytest-asyncio networkx numpy scipy solvor pandas pyarrow polars tzdata
 
       - name: Run Python tests
         run: pytest crates/bindings/python/tests/ -v --ignore=crates/bindings/python/tests/benchmark_phases.py

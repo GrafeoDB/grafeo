@@ -83,6 +83,7 @@ impl SessionInner {
             session_params: parking_lot::Mutex::new(std::collections::HashMap::new()),
             viewing_epoch_override: parking_lot::Mutex::new(None),
             savepoints: parking_lot::Mutex::new(Vec::new()),
+            statement_marks: std::sync::atomic::AtomicUsize::new(0),
             rules_at_begin: std::sync::atomic::AtomicU64::new(0),
             pending_schema: parking_lot::Mutex::new(None),
             transaction_nesting_depth: parking_lot::Mutex::new(0),

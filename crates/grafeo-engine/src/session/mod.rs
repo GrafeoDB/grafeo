@@ -536,6 +536,10 @@ pub(crate) struct SessionInner {
     viewing_epoch_override: parking_lot::Mutex<Option<EpochId>>,
     /// Savepoints within the current transaction.
     savepoints: parking_lot::Mutex<Vec<SavepointState>>,
+    /// The statements of the open transaction that hold a claim mark now (they nest: a write
+    /// of several statements runs its statements inside its own). The claim log is kept while
+    /// one does or a savepoint is open.
+    statement_marks: std::sync::atomic::AtomicUsize,
     /// The catalog's rules as the open transaction began: a commit that finds them
     /// changed checks its writes again.
     rules_at_begin: std::sync::atomic::AtomicU64,
@@ -582,6 +586,23 @@ pub(crate) struct SessionInner {
     /// The warning probe the tests set (see [`ProbeStage`]).
     #[cfg(feature = "testing-warning-probe")]
     warning_probe: parking_lot::Mutex<Option<ProbeStage>>,
+}
+
+/// A statement of the open transaction holding a claim mark: counted in the session's
+/// `statement_marks` while it lives, unwinding included.
+struct OpenStatementMark<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl<'a> OpenStatementMark<'a> {
+    fn new(marks: &'a std::sync::atomic::AtomicUsize) -> Self {
+        marks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self(marks)
+    }
+}
+
+impl Drop for OpenStatementMark<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// A savepoint: its name, and how far the transaction's changes reached
@@ -656,6 +677,7 @@ impl SessionInner {
             session_params: parking_lot::Mutex::new(std::collections::HashMap::new()),
             viewing_epoch_override: parking_lot::Mutex::new(None),
             savepoints: parking_lot::Mutex::new(Vec::new()),
+            statement_marks: std::sync::atomic::AtomicUsize::new(0),
             rules_at_begin: std::sync::atomic::AtomicU64::new(0),
             pending_schema: parking_lot::Mutex::new(None),
             transaction_nesting_depth: parking_lot::Mutex::new(0),
@@ -849,6 +871,7 @@ impl SessionInner {
             session_params: parking_lot::Mutex::new(std::collections::HashMap::new()),
             viewing_epoch_override: parking_lot::Mutex::new(None),
             savepoints: parking_lot::Mutex::new(Vec::new()),
+            statement_marks: std::sync::atomic::AtomicUsize::new(0),
             rules_at_begin: std::sync::atomic::AtomicU64::new(0),
             pending_schema: parking_lot::Mutex::new(None),
             transaction_nesting_depth: parking_lot::Mutex::new(0),
@@ -5998,6 +6021,8 @@ impl SessionInner {
         self.restore_savepoint(transaction_id, &sp_state)?;
         // Remove this savepoint and all later ones
         savepoints.truncate(pos);
+        drop(savepoints);
+        self.trim_claims_unless_marked(transaction_id);
         Ok(())
     }
 
@@ -6031,7 +6056,7 @@ impl SessionInner {
     }
 
     pub(crate) fn release_savepoint(&self, name: &str) -> Result<()> {
-        let _tx_id = self.current_transaction.lock().ok_or_else(|| {
+        let transaction_id = self.current_transaction.lock().ok_or_else(|| {
             grafeo_common::utils::error::Error::Transaction(
                 grafeo_common::utils::error::TransactionError::InvalidState(
                     "No active transaction".to_string(),
@@ -6051,6 +6076,8 @@ impl SessionInner {
                 )
             })?;
         savepoints.remove(pos);
+        drop(savepoints);
+        self.trim_claims_unless_marked(transaction_id);
         Ok(())
     }
 
@@ -6367,6 +6394,11 @@ impl SessionInner {
             } else {
                 None
             };
+            // Counted from before the mark until the undo below is done: a statement inside this
+            // one, or one finishing meanwhile on another thread, keeps the log.
+            let open = transaction
+                .filter(|_| has_mutations)
+                .map(|_| OpenStatementMark::new(&self.statement_marks));
             let start = transaction
                 .filter(|_| has_mutations)
                 .map(|tx| {
@@ -6374,13 +6406,32 @@ impl SessionInner {
                         .map(|state| (tx, state))
                 })
                 .transpose()?;
-            match (body(), &start) {
+            let result = match (body(), &start) {
                 (Err(error), Some((tx, start))) => Err(with_failed_rollback(
                     error,
                     self.restore_savepoint(*tx, start),
                 )),
                 (result, _) => result,
+            };
+            drop(open);
+            if let Some((tx, _)) = start {
+                self.trim_claims_unless_marked(tx);
             }
+            result
+        }
+    }
+
+    /// Drops the open transaction's claim log once no mark can rewind it: no statement holds
+    /// one and no savepoint is open. The write set keeps the claims; a later mark starts a new
+    /// log, and no rewind reaches past its own mark.
+    fn trim_claims_unless_marked(&self, transaction_id: TransactionId) {
+        if self
+            .statement_marks
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == 0
+            && self.savepoints.lock().is_empty()
+        {
+            self.transaction_manager.trim_claims(transaction_id);
         }
     }
 
@@ -9527,6 +9578,156 @@ mod tests {
 
             // Second column should be the name
             assert_eq!(result.rows[0][1], Value::String("Alix".into()));
+        }
+
+        /// The open transaction's claim log length (`None`: no log) and write-set size.
+        fn claims_of(session: &crate::session::Session) -> (usize, usize) {
+            let inner = session.inner().unwrap();
+            let transaction = inner.current_transaction.lock().expect("a transaction");
+            (
+                inner
+                    .transaction_manager
+                    .claim_log_len(transaction)
+                    .unwrap_or(0),
+                inner
+                    .transaction_manager
+                    .get_write_set(transaction)
+                    .unwrap()
+                    .len(),
+            )
+        }
+
+        /// A bulk update in one explicit transaction keeps no second copy of its claims: once a
+        /// statement ends with no savepoint and no outer statement open, the log of what it
+        /// claimed goes, and the write set alone holds the claims until the commit. (A new
+        /// node claims nothing, so the items are written in an earlier transaction.)
+        #[test]
+        fn a_bulk_update_in_one_transaction_keeps_no_claim_log() {
+            let db = GrafeoDB::new_in_memory();
+            db.execute("UNWIND range(0, 199) AS i INSERT (:Item {id: i})")
+                .unwrap();
+            let mut session = db.session();
+            session.begin_transaction().unwrap();
+            for item in 0..200 {
+                session
+                    .execute(&format!("MATCH (i:Item {{id: {item}}}) SET i.seen = true"))
+                    .unwrap();
+                let (log, written) = claims_of(&session);
+                assert_eq!(log, 0, "after statement {item}: the log is gone");
+                assert!(written > item, "the write set keeps the claims");
+            }
+            session.commit().unwrap();
+            let seen = db
+                .execute("MATCH (i:Item) WHERE i.seen RETURN count(i) AS n")
+                .unwrap();
+            assert_eq!(seen.rows()[0][0], Value::Int64(200));
+        }
+
+        /// A savepoint keeps the log of what was claimed after it: rolling back to it releases
+        /// exactly those claims, and once no savepoint is left the log goes.
+        #[test]
+        fn a_savepoint_keeps_the_claims_it_can_undo() {
+            let db = GrafeoDB::new_in_memory();
+            db.execute(
+                "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'}),                  (:Person {name: 'Mia'}), (:Person {name: 'Jules'})",
+            )
+            .unwrap();
+            let set_city = |name: &str| {
+                format!("MATCH (p:Person {{name: '{name}'}}) SET p.city = 'Amsterdam'")
+            };
+            let mut session = db.session();
+            session.begin_transaction().unwrap();
+            session.execute(&set_city("Alix")).unwrap();
+            let (_, before) = claims_of(&session);
+            session.savepoint("sp").unwrap();
+            session.execute(&set_city("Gus")).unwrap();
+            let (log, written) = claims_of(&session);
+            assert!(log > 0, "the savepoint keeps the log");
+            assert!(written > before);
+            session.rollback_to_savepoint("sp").unwrap();
+            assert_eq!(
+                claims_of(&session).1,
+                before,
+                "only the claims after the savepoint are released"
+            );
+            session.execute(&set_city("Mia")).unwrap();
+            assert_eq!(claims_of(&session).0, 0, "no savepoint left: the log goes");
+
+            session.savepoint("second").unwrap();
+            session.execute(&set_city("Jules")).unwrap();
+            assert!(claims_of(&session).0 > 0);
+            session.release_savepoint("second").unwrap();
+            assert_eq!(claims_of(&session).0, 0, "released: the log goes");
+            session.commit().unwrap();
+            let names = db
+                .execute("MATCH (p:Person) WHERE p.city IS NOT NULL RETURN p.name AS n ORDER BY n")
+                .unwrap();
+            assert_eq!(
+                names
+                    .rows()
+                    .iter()
+                    .map(|row| row[0].clone())
+                    .collect::<Vec<_>>(),
+                [
+                    Value::from("Alix"),
+                    Value::from("Jules"),
+                    Value::from("Mia")
+                ]
+            );
+        }
+
+        /// A statement that fails after earlier ones went undoes only its own claims, with the
+        /// log of the earlier ones gone.
+        #[test]
+        fn a_failed_statement_after_others_undoes_only_its_own_claims() {
+            let db = GrafeoDB::new_in_memory();
+            db.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+            let mut session = db.session();
+            session.begin_transaction().unwrap();
+            session.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+            let (_, before) = claims_of(&session);
+            assert!(
+                session
+                    .execute("MATCH (p:Person {name: 'Gus'}) SET p.city = 'Paris' RETURN 1 / 0")
+                    .is_err()
+            );
+            assert_eq!(claims_of(&session), (0, before), "Gus's claim is released");
+            session.commit().unwrap();
+            let city = db
+                .execute("MATCH (p:Person {name: 'Gus'}) RETURN p.city AS c")
+                .unwrap();
+            assert_eq!(city.rows()[0][0], Value::Null);
+        }
+
+        /// Inside a transaction, a write of several statements (`as_one_write`, as an upsert
+        /// runs) that fails undoes all of them: the statements inside it keep their log for the
+        /// outer one's undo.
+        #[test]
+        fn a_write_of_several_statements_undoes_them_all_inside_a_transaction() {
+            let db = GrafeoDB::new_in_memory();
+            db.execute("INSERT (:Person {name: 'Gus'}), (:Person {name: 'Vincent'})")
+                .unwrap();
+            let mut session = db.session();
+            session.begin_transaction().unwrap();
+            session.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+            let (_, before) = claims_of(&session);
+            {
+                let inner = session.inner().unwrap();
+                let undone: grafeo_common::utils::error::Result<()> = inner.as_one_write(|| {
+                    inner.execute("MATCH (p:Person {name: 'Gus'}) SET p.city = 'Rome'")?;
+                    inner.execute("MATCH (p:Person {name: 'Vincent'}) SET p.city = 'Rome'")?;
+                    Err(grafeo_common::utils::error::Error::Internal(
+                        "undo both".into(),
+                    ))
+                });
+                assert!(undone.is_err());
+            }
+            assert_eq!(claims_of(&session), (0, before), "both claims are released");
+            session.commit().unwrap();
+            let cities = db
+                .execute("MATCH (p:Person) WHERE p.city IS NOT NULL RETURN count(p) AS n")
+                .unwrap();
+            assert_eq!(cities.rows()[0][0], Value::Int64(0));
         }
     }
 

@@ -2465,6 +2465,25 @@ impl TransactionManager {
         ))
     }
 
+    /// The length of the open transaction's claim log, `None` without one (tests).
+    #[cfg(test)]
+    pub(crate) fn claim_log_len(&self, transaction_id: TransactionId) -> Option<usize> {
+        self.transactions
+            .read()
+            .get(&transaction_id)
+            .and_then(|info| info.claim_undo.as_ref().map(Vec::len))
+    }
+
+    /// Drops the claim log of an active transaction: no mark can rewind it any more (the
+    /// session holds no statement mark and no savepoint). Its claims stay in its sets.
+    pub(crate) fn trim_claims(&self, transaction_id: TransactionId) {
+        if let Some(info) = self.transactions.write().get_mut(&transaction_id)
+            && info.state == TransactionState::Active
+        {
+            info.claim_undo = None;
+        }
+    }
+
     /// Rewinds conflict claims after the caller has successfully undone the
     /// corresponding storage changes. Never hold this lock during backend undo.
     pub(crate) fn restore_claims(

@@ -325,6 +325,7 @@ mod rdf_commit_batches;
 mod rdf_file_loader;
 mod rdf_invalid_triples;
 mod rdf_load_crash_replay;
+mod rdf_operator_grants;
 mod rdf_recycled_change_sets;
 mod rdf_statistics_collection;
 mod rdf_statistics_drift;

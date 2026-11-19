@@ -4019,6 +4019,11 @@ struct RdfLeapfrogOperator {
     /// Whether the leapfrog join has been executed.
     executed: bool,
     terms: Arc<QueryTermIds>,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](grafeo_core::execution::memory::capture)): the matches it
+    /// buffers, a slot per matched triple (their terms are the ring's). Past
+    /// the query memory limit or the memory limit it fails with `GRAFEO-S001`.
+    memory: grafeo_core::execution::OperatorMemory,
 }
 
 #[cfg(feature = "ring-index")]
@@ -4037,12 +4042,15 @@ impl RdfLeapfrogOperator {
             position: 0,
             executed: false,
             terms,
+            memory: grafeo_core::execution::memory::capture(),
         }
     }
 
-    fn execute_join(&mut self) {
+    /// Runs the join once, buffering its matches against the statement's
+    /// memory.
+    fn execute_join(&mut self) -> std::result::Result<(), OperatorError> {
         if self.executed {
-            return;
+            return Ok(());
         }
         self.executed = true;
 
@@ -4050,7 +4058,13 @@ impl RdfLeapfrogOperator {
             &self.ring,
             self.annotated_patterns.clone(),
         );
-        self.results = join.collect();
+        for matched in join {
+            self.memory.add(
+                std::mem::size_of::<Vec<Triple>>() + matched.len() * std::mem::size_of::<Triple>(),
+            )?;
+            self.results.push(matched);
+        }
+        Ok(())
     }
 
     /// The term a variable is bound to in a set of matched triples.
@@ -4083,7 +4097,7 @@ impl RdfLeapfrogOperator {
 #[cfg(feature = "ring-index")]
 impl Operator for RdfLeapfrogOperator {
     fn next(&mut self) -> grafeo_core::execution::operators::OperatorResult {
-        self.execute_join();
+        self.execute_join()?;
 
         if self.position >= self.results.len() {
             return Ok(None);

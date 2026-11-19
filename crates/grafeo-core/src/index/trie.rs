@@ -51,6 +51,10 @@ impl TrieNode {
     }
 }
 
+/// The bytes one key of a trie takes in its parent's table: the key and its
+/// node, the table's own overhead aside.
+pub(crate) const TRIE_ENTRY_BYTES: usize = std::mem::size_of::<(NodeId, TrieNode)>();
+
 /// A trie index for edge patterns in multi-way joins.
 ///
 /// Edges are indexed by path (usually [src, dst]). The trie structure

@@ -20,8 +20,9 @@
 //! | SPARQL `ORDER BY` (`order.rs`) | `sparql_order_under_limit.rs` |
 //! | SPARQL `DELETE`/`INSERT ... WHERE` and `DELETE WHERE` (`RdfModify`) | `sparql_updates_refuse_at_the_query_limit` |
 //! | the pattern insert and delete with an input (`RdfInsertPattern`, `RdfDeletePattern`) | none: no translator builds them with an input, only the planner's unit tests |
-//! | the leapfrog joins (`LeapfrogJoinOperator`, `RdfLeapfrogOperator`) | none yet: no plan reaches them; they take grants in the next patch |
-//! | a per-row SPARQL `EXISTS`'s answers (`exists_per_row.rs`) | none yet: the next patch |
+//! | the Ring's leapfrog join (`RdfLeapfrogOperator`) | `rdf_operator_grants.rs` (in `main`: it needs the Ring) |
+//! | the LPG leapfrog join (`LeapfrogJoinOperator`, no plan reaches it) | `grafeo-core`'s pull operator list |
+//! | a per-row SPARQL `EXISTS`'s answers (`exists_per_row.rs`) | `rdf_operator_grants.rs` |
 //!
 //! GQL `UNION` streams its branches (only `UNION DISTINCT` keeps rows, in its
 //! distinct), so it has no buffer of its own to count. The limits here are

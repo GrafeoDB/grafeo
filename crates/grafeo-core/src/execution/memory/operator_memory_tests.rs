@@ -19,8 +19,8 @@ use crate::execution::operators::{
     AggregateExpr, AggregatePushOperator, ApplyOperator, DelimBuffer, DelimReplayOperator,
     DistinctMaterializingOperator, DistinctOperator, DistinctPushOperator, EagerOperator,
     ExceptOperator, HashAggregateOperator, HashJoinOperator, IntersectOperator, JoinType,
-    MapCollectOperator, NestedLoopJoinOperator, Operator, OperatorError, OperatorResult,
-    ShuffleOperator, SimpleAggregateOperator, SortKey, SortOperator, TopKOperator,
+    LeapfrogJoinOperator, MapCollectOperator, NestedLoopJoinOperator, Operator, OperatorError,
+    OperatorResult, ShuffleOperator, SimpleAggregateOperator, SortKey, SortOperator, TopKOperator,
 };
 #[cfg(feature = "spill")]
 use crate::execution::operators::{SpillableAggregatePushOperator, SpillableSortPushOperator};
@@ -85,6 +85,47 @@ fn built_in<T>(ctx: &OperatorMemoryContext, build: impl FnOnce() -> T) -> T {
     build()
 }
 
+/// `chunks` chunks of 1024 rows of one Int64-typed column, counting up from 1:
+/// the leapfrog join reads its keys from typed columns only.
+struct Int64Numbers {
+    next: i64,
+    left: usize,
+}
+
+impl Int64Numbers {
+    fn boxed(chunks: usize) -> Box<dyn Operator> {
+        Box::new(Self {
+            next: 1,
+            left: chunks,
+        })
+    }
+}
+
+impl Operator for Int64Numbers {
+    fn next(&mut self) -> OperatorResult {
+        if self.left == 0 {
+            return Ok(None);
+        }
+        self.left -= 1;
+        let mut column = ValueVector::with_capacity(LogicalType::Int64, 1024);
+        for value in self.next..self.next + 1024 {
+            column.push_int64(value);
+        }
+        self.next += 1024;
+        Ok(Some(DataChunk::new(vec![column])))
+    }
+
+    fn reset(&mut self) {}
+
+    fn name(&self) -> &'static str {
+        "Int64Numbers"
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
+    }
+}
+
 /// Runs `operator` to its end.
 fn drain(operator: &mut dyn Operator) -> Result<usize, OperatorError> {
     let mut rows = 0;
@@ -120,7 +161,7 @@ fn assert_refused<T: std::fmt::Debug>(result: Result<T, OperatorError>, bound: L
 #[test]
 fn every_materializing_pull_operator_refuses_at_the_query_limit() {
     type Build = fn() -> Box<dyn Operator>;
-    let operators: [(&str, Build); 16] = [
+    let operators: [(&str, Build); 17] = [
         ("sort", || {
             Box::new(SortOperator::new(
                 Numbers::boxed(20, 1),
@@ -217,6 +258,14 @@ fn every_materializing_pull_operator_refuses_at_the_query_limit() {
                 Numbers::boxed(20, 1),
                 vec![count_distinct(0)],
                 vec![LogicalType::Int64],
+            ))
+        }),
+        ("leapfrog join", || {
+            Box::new(LeapfrogJoinOperator::new(
+                vec![Int64Numbers::boxed(20), Int64Numbers::boxed(20)],
+                vec![vec![0], vec![0]],
+                vec![LogicalType::Int64, LogicalType::Int64],
+                vec![(0, 0), (1, 0)],
             ))
         }),
         ("apply reading its outer input first", || {

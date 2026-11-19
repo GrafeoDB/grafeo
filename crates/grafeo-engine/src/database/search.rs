@@ -39,6 +39,72 @@ fn no_vector_index(label: &str, property: &str) -> Error {
     ))
 }
 
+/// The nodes of `label` in `store` that `filters` allows, as `view` sees
+/// them: `None` when there are no filters (every node), else the nodes that
+/// meet every filter (possibly none).
+///
+/// A filter is a value to equal, or a map of `$`-prefixed operators (`$gt`,
+/// `$gte`, `$lt`, `$lte`, `$ne`, `$in`, `$nin`, `$contains`). A node without
+/// the property meets a filter only when its every operator is `$ne` or
+/// `$nin`. Every filter is checked before any is applied.
+///
+/// # Errors
+///
+/// A null or malformed filter (`Error::InvalidValue`, naming the key; see
+/// [`filter_problem`](grafeo_core::graph::property_filter::filter_problem)),
+/// or a failed read.
+#[cfg(any(feature = "vector-index", feature = "text-index"))]
+pub(crate) fn filter_allowlist(
+    store: &RowGroupStore,
+    label: &str,
+    filters: Option<&std::collections::HashMap<String, Value>>,
+    view: ReadView,
+) -> Result<Option<std::collections::HashSet<NodeId>>> {
+    use grafeo_core::graph::property_filter::{
+        filter_problem, is_operator_map, keeps_missing, matches_filter,
+    };
+
+    let Some(filters) = filters.filter(|f| !f.is_empty()) else {
+        return Ok(None);
+    };
+    if let Some(problem) = filters
+        .iter()
+        .find_map(|(key, filter_value)| filter_problem(key, filter_value))
+    {
+        return Err(Error::InvalidValue(problem));
+    }
+
+    let mut allowlist: std::collections::HashSet<NodeId> =
+        store.nodes_by_label(label, view)?.into_iter().collect();
+    for (key, filter_value) in filters {
+        if is_operator_map(filter_value) {
+            // Operators: checked on the nodes still allowed.
+            let mut kept = std::collections::HashSet::with_capacity(allowlist.len());
+            for node_id in allowlist {
+                let keep = match store.node_property(node_id, key, view)? {
+                    Some(value) if !value.is_null() => matches_filter(&value, filter_value),
+                    _ => keeps_missing(filter_value),
+                };
+                if keep {
+                    kept.insert(node_id);
+                }
+            }
+            allowlist = kept;
+        } else {
+            // Equality: an indexed lookup when there is an index.
+            let matching: std::collections::HashSet<NodeId> = store
+                .find_nodes_by_property(key, filter_value, view)?
+                .into_iter()
+                .collect();
+            allowlist = allowlist.intersection(&matching).copied().collect();
+        }
+        if allowlist.is_empty() {
+            break;
+        }
+    }
+    Ok(Some(allowlist))
+}
+
 impl super::Open {
     /// The view a search reads at, and the pin that keeps it while the
     /// search runs: the published epoch, as for every read outside a
@@ -47,63 +113,6 @@ impl super::Open {
     fn search_view(&self) -> (crate::transaction::ReadPin, ReadView) {
         let pin = self.transaction_manager.pin_read();
         (pin, ReadView::committed(self.read_epoch()))
-    }
-
-    /// Computes a node allowlist from property filters, as `view` sees the
-    /// nodes of `label` in `store`.
-    ///
-    /// Supports equality filters (scalar values) and operator filters (Map values
-    /// with `$`-prefixed keys like `$gt`, `$lt`, `$in`, `$contains`).
-    ///
-    /// Returns `None` if filters is `None` or empty (meaning no filtering),
-    /// or `Some(set)` with the intersection (possibly empty).
-    #[cfg(any(feature = "vector-index", feature = "text-index"))]
-    fn compute_filter_allowlist(
-        store: &RowGroupStore,
-        label: &str,
-        filters: Option<&std::collections::HashMap<String, Value>>,
-        view: ReadView,
-    ) -> Result<Option<std::collections::HashSet<NodeId>>> {
-        let Some(filters) = filters.filter(|f| !f.is_empty()) else {
-            return Ok(None);
-        };
-
-        // Start with all nodes for this label
-        let mut allowlist: std::collections::HashSet<NodeId> =
-            store.nodes_by_label(label, view)?.into_iter().collect();
-
-        for (key, filter_value) in filters {
-            // Check if this is an operator filter (Map with $-prefixed keys)
-            let is_operator_filter = matches!(filter_value, Value::Map(ops) if ops.keys().any(|k| k.as_str().starts_with('$')));
-
-            if is_operator_filter {
-                // Operator filter: scan only the current allowlist (not all nodes).
-                // This is much faster when a prior filter has already narrowed the set.
-                let mut kept = std::collections::HashSet::with_capacity(allowlist.len());
-                for node_id in allowlist {
-                    if store.node_property(node_id, key, view)?.is_some_and(|v| {
-                        grafeo_core::graph::property_filter::matches_filter(&v, filter_value)
-                    }) {
-                        kept.insert(node_id);
-                    }
-                }
-                allowlist = kept;
-            } else {
-                // Equality filter: use indexed lookup when available
-                let matching: std::collections::HashSet<NodeId> = store
-                    .find_nodes_by_property(key, filter_value, view)?
-                    .into_iter()
-                    .collect();
-                allowlist = allowlist.intersection(&matching).copied().collect();
-            }
-
-            // Short-circuit: empty intersection means no results possible
-            if allowlist.is_empty() {
-                return Ok(Some(allowlist));
-            }
-        }
-
-        Ok(Some(allowlist))
     }
 
     #[cfg(feature = "vector-index")]
@@ -123,7 +132,7 @@ impl super::Open {
         check_query_vector(query, config.dimensions, label, property)?;
 
         let (_pin, view) = self.search_view();
-        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view)?;
+        let allowlist = filter_allowlist(&store, label, filters, view)?;
         let search = IndexSearch {
             k,
             ef,
@@ -153,7 +162,7 @@ impl super::Open {
         }
 
         let (_pin, view) = self.search_view();
-        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view)?;
+        let allowlist = filter_allowlist(&store, label, filters, view)?;
         let search = IndexSearch {
             k,
             ef,
@@ -190,7 +199,7 @@ impl super::Open {
 
         // Step 1: Fetch candidates from HNSW (with optional filter)
         let (_pin, view) = self.search_view();
-        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view)?;
+        let allowlist = filter_allowlist(&store, label, filters, view)?;
         let search = IndexSearch {
             k: fetch_k,
             ef,
@@ -237,7 +246,7 @@ impl super::Open {
     ) -> Result<Vec<(NodeId, f64)>> {
         let store = self.current_lpg_store()?;
         let (_pin, view) = self.search_view();
-        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view)?;
+        let allowlist = filter_allowlist(&store, label, filters, view)?;
         let search = IndexSearch {
             k,
             ef: None,
@@ -323,7 +332,7 @@ impl super::Open {
         // Both searches keep only the nodes that match the filters, before
         // fusion: filtering the fused results would return fewer than k.
         let (_pin, view) = self.search_view();
-        let allowlist = Self::compute_filter_allowlist(&store, label, options.filters, view)?;
+        let allowlist = filter_allowlist(&store, label, options.filters, view)?;
         if allowlist.as_ref().is_some_and(|allowed| allowed.is_empty()) {
             return Ok(Vec::new());
         }
@@ -392,8 +401,11 @@ impl super::GrafeoDB {
     /// * `query` - Query vector (slice of floats)
     /// * `k` - Number of nearest neighbors to return
     /// * `ef` - Search beam width (higher = better recall, slower). Uses index default if `None`.
-    /// * `filters` - Optional property equality filters. Only nodes matching all
-    ///   `(key, value)` pairs will appear in results.
+    /// * `filters` - Optional property filters, all of which a node must meet.
+    ///   A value is an equality; a map of `$gt`, `$gte`, `$lt`, `$lte`, `$ne`,
+    ///   `$in`, `$nin` or `$contains` compares. A node without the property
+    ///   meets a filter only when its every operator is `$ne` or `$nin`. The
+    ///   filters apply before the top `k`, so up to `k` matching nodes come back.
     ///
     /// # Returns
     ///
@@ -408,7 +420,11 @@ impl super::GrafeoDB {
     /// Returns an error if no vector index exists for the given label and
     /// property, and an invalid-value error if the query vector has another
     /// number of values than the index's dimensions, or a NaN or an infinite
-    /// value (see [`check_query_vector`]).
+    /// value (see [`check_query_vector`]). A filter that is null (no value
+    /// equals null: `$ne` keeps the nodes without the property) or malformed
+    /// (an unknown operator, `$in` or `$nin` without a list, `$contains`
+    /// without a string) is an invalid-value error naming its key, before the
+    /// search runs.
     #[cfg(feature = "vector-index")]
     pub fn vector_search(
         &self,
@@ -434,7 +450,7 @@ impl super::GrafeoDB {
     /// * `queries` - Batch of query vectors
     /// * `k` - Number of nearest neighbors per query
     /// * `ef` - Search beam width (uses index default if `None`)
-    /// * `filters` - Optional property equality filters
+    /// * `filters` - Optional property filters, as [`vector_search`](Self::vector_search) takes them
     ///
     /// # Errors
     ///
@@ -442,6 +458,9 @@ impl super::GrafeoDB {
     /// property, and an invalid-value error if any query vector is one the
     /// index cannot measure (see [`vector_search`](Self::vector_search)): no
     /// query of the batch runs then.
+    /// A filter that is null or malformed is an invalid-value error naming
+    /// its key, before the search runs (see the filter rules at
+    /// [`vector_search`](Self::vector_search)).
     #[cfg(feature = "vector-index")]
     pub fn batch_vector_search(
         &self,
@@ -472,7 +491,7 @@ impl super::GrafeoDB {
     /// * `lambda` - Relevance vs. diversity in \[0, 1\] (default: 0.5).
     ///   1.0 = pure relevance, 0.0 = pure diversity.
     /// * `ef` - HNSW search beam width (uses index default if `None`)
-    /// * `filters` - Optional property equality filters
+    /// * `filters` - Optional property filters, as [`vector_search`](Self::vector_search) takes them
     ///
     /// # Returns
     ///
@@ -484,6 +503,9 @@ impl super::GrafeoDB {
     /// Returns an error if no vector index exists for the given label and
     /// property, and an invalid-value error if the query vector is one the
     /// index cannot measure (see [`vector_search`](Self::vector_search)).
+    /// A filter that is null or malformed is an invalid-value error naming
+    /// its key, before the search runs (see the filter rules at
+    /// [`vector_search`](Self::vector_search)).
     #[cfg(feature = "vector-index")]
     #[allow(
         clippy::too_many_arguments,
@@ -522,6 +544,9 @@ impl super::GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if no text index exists for this label+property.
+    /// A filter that is null or malformed is an invalid-value error naming
+    /// its key, before the search runs (see the filter rules at
+    /// [`vector_search`](Self::vector_search)).
     #[cfg(feature = "text-index")]
     pub fn text_search(
         &self,
@@ -620,6 +645,9 @@ impl super::GrafeoDB {
     ///
     /// Returns an invalid-value error if the vector index exists and the
     /// query vector is one it cannot measure (see
+    /// [`vector_search`](Self::vector_search)).
+    /// A filter that is null or malformed is an invalid-value error naming
+    /// its key, before the search runs (see the filter rules at
     /// [`vector_search`](Self::vector_search)).
     #[cfg(feature = "hybrid-search")]
     pub fn hybrid_search_with(

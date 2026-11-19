@@ -1,0 +1,169 @@
+# Search filters on the search procedures (#742)
+#
+# CALL grafeo.search.text, .vector and .mmr take a filters map as their last argument and keep k:
+# the filter chooses which nodes may be hits before the k best are taken, so a filter that drops
+# a node never leaves fewer than k hits while k allowed nodes match. A node without the filtered
+# property is kept by $ne and $nin and dropped by an equality. A null filter value is an error
+# that points to $ne.
+#
+# Five documents: Gus is deleted (true), Alix, Jules and Mia are not (false), Vincent has no
+# deleted property. "canals" matches Alix, Gus, Vincent and Jules. The vector [1.0, 0.0] ranks
+# Gus, Vincent, Alix, Jules, Mia.
+#
+# The search API calls (text_search, vector_search with a filters map) are checked in the Rust
+# tests (search_soft_delete.rs) and the Python and Node binding tests.
+
+meta:
+  language: gql
+  model: lpg
+  section: "procedures"
+  title: Search filters on the search procedures
+  dataset: empty
+
+tests:
+
+  - name: text_search_with_ne_keeps_a_node_without_the_property
+    setup:
+      - "INSERT (:Doc {owner: 'Alix', text: 'canals of Amsterdam', deleted: false, emb: vector([0.7, 0.3])})"
+      - "INSERT (:Doc {owner: 'Gus', text: 'canals and bridges', deleted: true, emb: vector([1.0, 0.0])})"
+      - "INSERT (:Doc {owner: 'Vincent', text: 'canals at night', emb: vector([0.9, 0.1])})"
+      - "INSERT (:Doc {owner: 'Jules', text: 'Amsterdam canals in winter', deleted: false, emb: vector([0.5, 0.5])})"
+      - "INSERT (:Doc {owner: 'Mia', text: 'a quiet street', deleted: false, emb: vector([0.0, 1.0])})"
+      - "CREATE INDEX doc_text FOR (n:Doc) ON (n.text) USING TEXT"
+    query: "CALL grafeo.search.text('Doc', 'text', 'canals', 10, $filters) YIELD node_id, score MATCH (d:Doc) WHERE id(d) = node_id RETURN d.owner"
+    params:
+      filters: {"deleted": {"$ne": true}}
+    expect:
+      rows:
+        - [Alix]
+        - [Jules]
+        - [Vincent]
+
+  - name: text_search_with_nin_keeps_a_node_without_the_property
+    setup:
+      - "INSERT (:Doc {owner: 'Alix', text: 'canals of Amsterdam', deleted: false})"
+      - "INSERT (:Doc {owner: 'Gus', text: 'canals and bridges', deleted: true})"
+      - "INSERT (:Doc {owner: 'Vincent', text: 'canals at night'})"
+      - "INSERT (:Doc {owner: 'Jules', text: 'Amsterdam canals in winter', deleted: false})"
+      - "CREATE INDEX doc_text FOR (n:Doc) ON (n.text) USING TEXT"
+    query: "CALL grafeo.search.text('Doc', 'text', 'canals', 10, $filters) YIELD node_id, score MATCH (d:Doc) WHERE id(d) = node_id RETURN d.owner"
+    params:
+      filters: {"deleted": {"$nin": [true]}}
+    expect:
+      rows:
+        - [Alix]
+        - [Jules]
+        - [Vincent]
+
+  - name: text_search_with_an_equality_drops_a_node_without_the_property
+    setup:
+      - "INSERT (:Doc {owner: 'Alix', text: 'canals of Amsterdam', deleted: false})"
+      - "INSERT (:Doc {owner: 'Gus', text: 'canals and bridges', deleted: true})"
+      - "INSERT (:Doc {owner: 'Vincent', text: 'canals at night'})"
+      - "INSERT (:Doc {owner: 'Jules', text: 'Amsterdam canals in winter', deleted: false})"
+      - "CREATE INDEX doc_text FOR (n:Doc) ON (n.text) USING TEXT"
+    query: "CALL grafeo.search.text('Doc', 'text', 'canals', 10, $filters) YIELD node_id, score MATCH (d:Doc) WHERE id(d) = node_id RETURN d.owner"
+    params:
+      filters: {"deleted": false}
+    expect:
+      rows:
+        - [Alix]
+        - [Jules]
+
+  - name: text_search_with_a_filter_keeps_k
+    setup:
+      - "INSERT (:Doc {owner: 'Alix', text: 'canals of Amsterdam', deleted: false})"
+      - "INSERT (:Doc {owner: 'Gus', text: 'canals and bridges', deleted: true})"
+      - "INSERT (:Doc {owner: 'Vincent', text: 'canals at night'})"
+      - "INSERT (:Doc {owner: 'Jules', text: 'Amsterdam canals in winter', deleted: false})"
+      - "CREATE INDEX doc_text FOR (n:Doc) ON (n.text) USING TEXT"
+    query: "CALL grafeo.search.text('Doc', 'text', 'canals', 3, $filters) YIELD node_id, score RETURN count(*) AS hits"
+    params:
+      filters: {"deleted": {"$ne": true}}
+    expect:
+      rows:
+        - [3]
+
+  - name: vector_search_with_ne_keeps_k_in_distance_order
+    setup:
+      - "INSERT (:Doc {owner: 'Alix', deleted: false, emb: vector([0.7, 0.3])})"
+      - "INSERT (:Doc {owner: 'Gus', deleted: true, emb: vector([1.0, 0.0])})"
+      - "INSERT (:Doc {owner: 'Vincent', emb: vector([0.9, 0.1])})"
+      - "INSERT (:Doc {owner: 'Jules', deleted: false, emb: vector([0.5, 0.5])})"
+      - "INSERT (:Doc {owner: 'Mia', deleted: false, emb: vector([0.0, 1.0])})"
+      - "CREATE VECTOR INDEX doc_emb ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+    query: "CALL grafeo.search.vector('Doc', 'emb', [1.0, 0.0], 2, $filters) YIELD node_id, distance MATCH (d:Doc) WHERE id(d) = node_id RETURN d.owner ORDER BY distance"
+    params:
+      filters: {"deleted": {"$ne": true}}
+    expect:
+      ordered: true
+      rows:
+        - [Vincent]
+        - [Alix]
+
+  - name: mmr_search_with_a_filter_keeps_k
+    setup:
+      - "INSERT (:Doc {owner: 'Alix', deleted: false, emb: vector([0.7, 0.3])})"
+      - "INSERT (:Doc {owner: 'Gus', deleted: true, emb: vector([1.0, 0.0])})"
+      - "INSERT (:Doc {owner: 'Vincent', emb: vector([0.9, 0.1])})"
+      - "INSERT (:Doc {owner: 'Jules', deleted: false, emb: vector([0.5, 0.5])})"
+      - "INSERT (:Doc {owner: 'Mia', deleted: false, emb: vector([0.0, 1.0])})"
+      - "CREATE VECTOR INDEX doc_emb ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+    query: "CALL grafeo.search.mmr('Doc', 'emb', [1.0, 0.0], 2, 10, 0.5, $filters) YIELD node_id, distance RETURN count(*) AS hits"
+    params:
+      filters: {"deleted": {"$ne": true}}
+    expect:
+      rows:
+        - [2]
+
+  - name: mmr_search_with_a_filter_leaves_the_deleted_node_out
+    setup:
+      - "INSERT (:Doc {owner: 'Alix', deleted: false, emb: vector([0.7, 0.3])})"
+      - "INSERT (:Doc {owner: 'Gus', deleted: true, emb: vector([1.0, 0.0])})"
+      - "INSERT (:Doc {owner: 'Vincent', emb: vector([0.9, 0.1])})"
+      - "INSERT (:Doc {owner: 'Jules', deleted: false, emb: vector([0.5, 0.5])})"
+      - "INSERT (:Doc {owner: 'Mia', deleted: false, emb: vector([0.0, 1.0])})"
+      - "CREATE VECTOR INDEX doc_emb ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+    query: "CALL grafeo.search.mmr('Doc', 'emb', [1.0, 0.0], 4, 10, 0.5, $filters) YIELD node_id, distance MATCH (d:Doc) WHERE id(d) = node_id RETURN d.owner"
+    params:
+      filters: {"deleted": {"$ne": true}}
+    expect:
+      rows:
+        - [Alix]
+        - [Jules]
+        - [Mia]
+        - [Vincent]
+
+  - name: a_null_filter_value_is_an_error_that_points_to_ne
+    setup:
+      - "INSERT (:Doc {owner: 'Alix', text: 'canals of Amsterdam', deleted: false})"
+      - "CREATE INDEX doc_text FOR (n:Doc) ON (n.text) USING TEXT"
+    query: "CALL grafeo.search.text('Doc', 'text', 'canals', 10, $filters) YIELD node_id, score RETURN node_id"
+    params:
+      filters: {"deleted": null}
+    expect:
+      error: "$ne"
+
+  - name: a_null_filter_value_is_an_error_for_the_vector_search_too
+    setup:
+      - "INSERT (:Doc {owner: 'Alix', deleted: false, emb: vector([0.7, 0.3])})"
+      - "CREATE VECTOR INDEX doc_emb ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+    query: "CALL grafeo.search.vector('Doc', 'emb', [1.0, 0.0], 2, $filters) YIELD node_id, distance RETURN node_id"
+    params:
+      filters: {"deleted": null}
+    expect:
+      error: "$ne"
+
+  - name: text_search_with_a_filters_map_written_in_the_query
+    setup:
+      - "INSERT (:Doc {owner: 'Alix', text: 'canals of Amsterdam', deleted: false})"
+      - "INSERT (:Doc {owner: 'Gus', text: 'canals and bridges', deleted: true})"
+      - "INSERT (:Doc {owner: 'Vincent', text: 'canals at night'})"
+      - "INSERT (:Doc {owner: 'Jules', text: 'Amsterdam canals in winter', deleted: false})"
+      - "CREATE INDEX doc_text FOR (n:Doc) ON (n.text) USING TEXT"
+    query: "CALL grafeo.search.text('Doc', 'text', 'canals', 10, {deleted: {`$ne`: true}}) YIELD node_id, score MATCH (d:Doc) WHERE id(d) = node_id RETURN d.owner"
+    expect:
+      rows:
+        - [Alix]
+        - [Jules]
+        - [Vincent]

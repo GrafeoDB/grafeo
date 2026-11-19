@@ -16,6 +16,7 @@ Performance and memory release, in progress: this section lists what has landed 
 - **A Cypher CALL on its own takes `YIELD *`**: it yields every output of the procedure.
 - **Deleting data is documented**: a "Deleting Data" section of the security guide says what deleting removes from the database file and from memory, and when, what stays by design while a database is open (history retention, the change feed, the RDF term dictionary, the plan cache), and what is outside Grafeo.
 - **History can be bounded in bytes**: `Config::with_history_retention_limit` (Python `history_retention_limit`, Node.js and WebAssembly `historyRetentionLimit`, C `grafeo_options_set_history_retention_limit`) keeps at most that many bytes of replaced data in the history, on top of the time window, in memory and in the file; the window then starts at the later of the two. There is no limit by default, and it is not stored with the file, so it is passed at every open.
+- **The search procedures take filters**: `CALL grafeo.search.text`, `grafeo.search.vector` and `grafeo.search.mmr` take an optional `filters` map as their last argument, with the search API's rules, and return `k` matching nodes; inside a transaction they see its own writes ([#742](https://github.com/GrafeoDB/grafeo/issues/742)).
 
 ### Changed
 
@@ -83,6 +84,8 @@ Performance and memory release, in progress: this section lists what has landed 
 - **SPARQL `DELETE/INSERT ... WHERE` holds its input once, under the query memory limit**: an update kept a full copy of its input chunk for every solution of its `WHERE`, with no bound, and now keeps each chunk once and fails with `GRAFEO-S001` past `with_query_memory_limit` or the memory limit, before it writes anything.
 - **SPARQL's leapfrog join and a per-row `EXISTS` stay within the query memory limit**: a cyclic SPARQL join over the ring index and an `EXISTS` evaluated per row (one that reads the row in a `BIND` or a filter) fail with `GRAFEO-S001` past `with_query_memory_limit` or the memory limit, where their state grew without a bound.
 - **`KEEP DIFFERENT EDGES` ends on a cycle**: a pattern that keeps different edges is searched as a trail, as `MATCH DIFFERENT EDGES` is, where it walked and ran until the query timeout.
+- **`$ne` and `$nin` keep a node without the property**: in the `filters` of `text_search`, `vector_search`, `batch_vector_search`, `mmr_search` and `hybrid_search`, `{"deleted": {"$ne": true}}` now keeps nodes that have no `deleted`, where they were left out ([#742](https://github.com/GrafeoDB/grafeo/issues/742)).
+- **A null or malformed search filter is refused**: a null value, an unknown operator, `$in` or `$nin` without a list, or `$contains` without a string is an invalid-value error (`GRAFEO-V001`) naming the key, where such a filter matched no node, or every node for `$nin`.
 
 ## [0.6.3] - 2026-11-15
 

@@ -373,6 +373,7 @@ mod search_after_a_match;
 mod search_filters;
 mod search_index_names_with_colons;
 mod search_operations;
+mod search_soft_delete;
 mod search_ties;
 mod selected_graph_direct_calls;
 mod selector_paths_s_group;

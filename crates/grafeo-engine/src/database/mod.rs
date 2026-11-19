@@ -70,6 +70,8 @@ mod rdf_ops;
 #[cfg(feature = "wal")]
 mod schema_replay;
 mod search;
+#[cfg(any(feature = "vector-index", feature = "text-index"))]
+pub(crate) use search::filter_allowlist;
 // The consumers of the RDF sections, the only sections it wraps.
 #[cfg(any(feature = "triple-store", test))]
 pub(crate) mod section_consumer;

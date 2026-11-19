@@ -26,6 +26,10 @@ mod file;
 #[cfg(feature = "spill")]
 mod manager;
 #[cfg(feature = "spill")]
+mod merge;
+#[cfg(all(test, feature = "spill"))]
+mod merge_tests;
+#[cfg(feature = "spill")]
 mod partition;
 #[cfg(feature = "spill")]
 mod serializer;
@@ -39,6 +43,10 @@ pub use external_sort::{ExternalSort, NullOrder, SortDirection, SortKey};
 pub use file::{SpillFile, SpillFileReader};
 #[cfg(feature = "spill")]
 pub use manager::{SPILL_FILE_STEP, SpillManager};
+#[cfg(feature = "spill")]
+pub use merge::{
+    MERGE_FAN_IN, MERGE_MIN_READ_BUFFER, MERGE_READ_BUFFER, RowOrder, RunMerge, SortedRuns,
+};
 #[cfg(feature = "spill")]
 pub use partition::{DEFAULT_NUM_PARTITIONS, PartitionedState};
 #[cfg(feature = "spill")]

@@ -2,9 +2,11 @@
 //!
 //! `ORDER BY ... LIMIT n` (`OFFSET m`) keeps at most `m + n` rows and a chunk, so it runs under a
 //! limit smaller than its input, and answers as a full sort followed by the slice, ties in input
-//! order. A full sort past the limit (a top-k of every row too) refuses with `GRAFEO-S001` naming
-//! the query memory limit and its setting, with or without a spill path: the SPARQL sort does not
-//! spill yet. The order is SPARQL 1.1's (section 15.1) and does not change.
+//! order. A full sort past the limit spills to disk when the database has a spill path, and
+//! answers as in memory: the same rows in the same order, ties included. Without a spill path, or
+//! past the spill limit, it refuses with `GRAFEO-S001` naming the bound (and a top-k of every row
+//! refuses too). The order is SPARQL 1.1's (section 15.1) and does not change. A build without
+//! `spill` spills nothing, so there every case with a spill path refuses as without one.
 //!
 //! The oracle is the same query on the same data without a limit.
 //!
@@ -131,8 +133,32 @@ fn assert_refused(result: Result<Vec<String>, String>, what: &str) {
     );
 }
 
+/// A sort past the limit with a spill path: with spilling built in, it answers as `want`;
+/// without it, it refuses as with no spill path.
+fn assert_spilled(result: Result<Vec<String>, String>, want: &[String], what: &str) {
+    #[cfg(feature = "spill")]
+    assert_eq!(result.as_deref(), Ok(want), "{what}");
+    #[cfg(not(feature = "spill"))]
+    {
+        let _ = want;
+        assert_refused(result, what);
+    }
+}
+
+/// Whether `result` is what [`assert_spilled`] wants.
+fn spilled_as(result: &Result<Vec<String>, String>, want: &[String]) -> bool {
+    if cfg!(feature = "spill") {
+        result.as_deref() == Ok(want)
+    } else {
+        result
+            .as_ref()
+            .is_err_and(|error| error.starts_with("GRAFEO-S001"))
+    }
+}
+
 /// The sweep's three cases: the two top-k answer as the unlimited run; the full sort over the
-/// limit refuses naming it, with and without a spill path (it cannot spill).
+/// limit refuses naming it without a spill path, and with one spills and answers as the unlimited
+/// run, leaving no file behind.
 #[test]
 fn the_sweeps_cases_under_the_limit() {
     let small = numbers(3_000);
@@ -162,10 +188,29 @@ fn the_sweeps_cases_under_the_limit() {
         "a full sort of 20,000 triples under 1 MiB",
     );
     let dir = tempfile::tempdir().unwrap();
-    assert_refused(
-        ordered(&database(&large, Some(MIB), Some(dir.path())), query),
+    let spilling = database(&large, Some(MIB), Some(dir.path()));
+    assert_spilled(
+        ordered(&spilling, query),
+        &unlimited(&large, query),
         "a full sort of 20,000 triples under 1 MiB, with a spill path",
     );
+    assert_eq!(files_under(dir.path()), 0, "no spill file is left");
+}
+
+/// The files under `dir`, in its subdirectories too.
+fn files_under(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir).map_or(0, |entries| {
+        entries
+            .flatten()
+            .map(|entry| {
+                if entry.path().is_dir() {
+                    files_under(&entry.path())
+                } else {
+                    1
+                }
+            })
+            .sum()
+    })
 }
 
 /// The orders of the key-kind class test: one key of every kind both ways, an unbound key, an
@@ -194,18 +239,31 @@ const CLASS_LIMITS: [usize; 9] = [
     2 * MIB,
 ];
 
-/// The top-k orders every key kind as the full sort does. Each order runs under a limit of its
-/// own from [`CLASS_LIMITS`]: the smallest at least a quarter above the smallest its pattern fits
-/// in without `ORDER BY` (an `OPTIONAL` needs more than a single pattern), so the top-k has room
-/// for its rows and a chunk. There, with no spill path, the full sort must be past the limit
-/// (refused), so the order's top 5 after 17 rows, which must equal the unlimited sort's slice,
-/// ties included, cannot come from a full sort that happened to fit.
+/// The top-k and the spilled full sort order every key kind as the full sort in memory does.
+/// Each order runs under a limit of its own from [`CLASS_LIMITS`]: the smallest at least a
+/// quarter above the smallest its pattern fits in without `ORDER BY` (an `OPTIONAL` needs more
+/// than a single pattern), so the top-k has room for its rows and a chunk. There, with no spill
+/// path, the full sort must be past the limit (refused), so neither the order's top 5 after 17
+/// rows nor the full sort with a spill path, which must equal the unlimited sort (its slice, or
+/// all of it), ties included, can come from a full sort that happened to fit in memory.
 #[test]
-fn a_top_k_orders_every_key_kind_as_the_full_sort() {
+fn every_key_kind_orders_as_in_memory_in_a_top_k_and_spilled() {
     let triples = every_kind(12_000);
     let capped: Vec<(usize, GrafeoDB)> = CLASS_LIMITS
         .iter()
         .map(|&limit| (limit, database(&triples, Some(limit), None)))
+        .collect();
+    let dir = tempfile::tempdir().unwrap();
+    let spilling: Vec<GrafeoDB> = CLASS_LIMITS
+        .iter()
+        .enumerate()
+        .map(|(index, &limit)| {
+            database(
+                &triples,
+                Some(limit),
+                Some(&dir.path().join(index.to_string())),
+            )
+        })
         .collect();
     let mut wrong = Vec::new();
     for order in ORDERS {
@@ -221,18 +279,30 @@ fn a_top_k_orders_every_key_kind_as_the_full_sort() {
             ));
             continue;
         };
-        let Some((limit, db)) = capped.iter().find(|(limit, _)| *limit >= fits + fits / 4) else {
+        let Some(position) = capped
+            .iter()
+            .position(|(limit, _)| *limit >= fits + fits / 4)
+        else {
             wrong.push(format!(
                 "{order}: no limit of {CLASS_LIMITS:?} is a quarter above {fits}"
             ));
             continue;
         };
+        let (limit, db) = &capped[position];
         match ordered(db, order) {
             Err(error) if error.starts_with("GRAFEO-S001") => {}
             other => wrong.push(format!(
                 "{order}: the full sort is not past {limit} bytes, where the pattern fits: {:?}",
                 other.map(|rows| rows.len())
             )),
+        }
+        let spilled = ordered(&spilling[position], order);
+        if !spilled_as(&spilled, &full) {
+            wrong.push(format!(
+                "{order} spilled under {limit} bytes: {:?}, want the {} rows in memory",
+                spilled.map(|rows| rows.len()),
+                full.len()
+            ));
         }
         let query = format!("{order} LIMIT 5 OFFSET 17");
         let want: Vec<String> = full.iter().skip(17).take(5).cloned().collect();
@@ -258,9 +328,10 @@ const TOP_K_ORDERS: &[&str] = &[
 
 /// The top-k equals a full sort and the slice for `k` (offset plus limit) of 0, 1 and a few,
 /// with and without `OFFSET`, under a limit far below the input and with no spill path (a
-/// top-k needs none). A `k` of the row count or more keeps every row, a full sort: under the
-/// same limit it refuses as the full sort does, offsets at and past the row count included; with
-/// no limit it answers as the slice.
+/// top-k needs none). A `k` near the row count, at it or past it, outgrows the limit: without a
+/// spill path it refuses as the full sort does, offsets at and past the row count included; with
+/// one its kept rows and the rest of its input spill, and it answers as the slice, as it does with
+/// no limit. In the order of ties only, the switch to the spill falls inside a run of ties.
 #[test]
 fn a_top_k_equals_the_full_sort_and_the_slice() {
     let triples = every_kind(6_000);
@@ -306,16 +377,22 @@ fn a_top_k_equals_the_full_sort_and_the_slice() {
             (rows, 5),
         ] {
             let query = format!("{order} LIMIT {limit} OFFSET {offset}");
-            for db in [&capped, &capped_with_a_spill_path] {
-                match ordered(db, &query) {
-                    Err(error)
-                        if error.starts_with("GRAFEO-S001")
-                            && error.contains("query memory limit") => {}
-                    other => wrong.push(format!(
-                        "{query} under the limit: {:?}, want S001",
-                        other.map(|rows| rows.len())
-                    )),
+            match ordered(&capped, &query) {
+                Err(error)
+                    if error.starts_with("GRAFEO-S001") && error.contains("query memory limit") => {
                 }
+                other => wrong.push(format!(
+                    "{query} under the limit: {:?}, want S001",
+                    other.map(|rows| rows.len())
+                )),
+            }
+            if !spilled_as(
+                &ordered(&capped_with_a_spill_path, &query),
+                &slice(limit, offset),
+            ) {
+                wrong.push(format!(
+                    "{query} under the limit with a spill path: not the slice"
+                ));
             }
             if ordered(&free, &query).as_ref() != Ok(&slice(limit, offset)) {
                 wrong.push(format!("{query} without a limit: not the slice"));
@@ -326,10 +403,10 @@ fn a_top_k_equals_the_full_sort_and_the_slice() {
 }
 
 /// A full sort past the limit refuses with `GRAFEO-S001` naming the query memory limit and its
-/// setting, with or without a spill path: the SPARQL sort does not spill yet. GQL's sort of as
-/// many rows without a spill path is the reference refusal.
+/// setting without a spill path (GQL's sort of as many rows is the reference refusal), spills
+/// with one and room on it, and past the spill limit refuses naming that.
 #[test]
-fn a_full_sort_past_the_limit_refuses() {
+fn a_full_sort_past_the_limit_spills_or_refuses() {
     let triples = numbers(20_000);
     let query = "SELECT ?s ?o WHERE { ?s ex:v ?o } ORDER BY ?o";
     let db = database(&triples, Some(MIB), None);
@@ -352,11 +429,34 @@ fn a_full_sort_past_the_limit_refuses() {
     )
     .unwrap();
     db.batch_insert_rdf(triples.iter().cloned()).unwrap();
-    assert_refused(ordered(&db, query), "a spill path with room");
     let higher = database(&triples, Some(512 * MIB), None);
-    assert_eq!(
-        ordered(&higher, query).map(|rows| rows.len()),
-        Ok(20_000),
-        "a higher limit lets the same sort through"
-    );
+    let want = ordered(&higher, query).expect("a higher limit lets the same sort through");
+    assert_eq!(want.len(), 20_000);
+    assert_spilled(ordered(&db, query), &want, "a spill path with room");
+    a_full_sort_past_the_spill_limit_refuses(&triples, query);
 }
+
+/// Past the spill limit a spilling sort refuses naming it, and leaves no file.
+#[cfg(feature = "spill")]
+fn a_full_sort_past_the_spill_limit_refuses(triples: &[Triple], query: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = GrafeoDB::with_config(
+        Config::in_memory()
+            .with_query_memory_limit(MIB)
+            .with_spill_path(dir.path())
+            .with_spill_limit(64 * KIB as u64),
+    )
+    .unwrap();
+    db.batch_insert_rdf(triples.iter().cloned()).unwrap();
+    let error = ordered(&db, query).expect_err("past the spill limit");
+    assert!(error.starts_with("GRAFEO-S001"), "{error}");
+    assert!(
+        error.contains("spill limit"),
+        "names the spill limit: {error}"
+    );
+    assert_eq!(files_under(dir.path()), 0, "no spill file is left");
+}
+
+/// Without spilling built in there is no spill limit to pass.
+#[cfg(not(feature = "spill"))]
+fn a_full_sort_past_the_spill_limit_refuses(_triples: &[Triple], _query: &str) {}

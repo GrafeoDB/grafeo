@@ -487,6 +487,7 @@ mod typed_paths_see_open_writes;
 mod types_in_a_schema;
 mod unaliased_aggregate_return;
 mod unary_plus;
+mod unbounded_patterns_refused;
 mod unbounded_walks;
 mod undirected_trail_reach;
 mod unique_constraint_claims;

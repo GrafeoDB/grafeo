@@ -207,34 +207,41 @@ fn cycle() -> GrafeoDB {
     cycle_with_timeout(Duration::from_secs(30))
 }
 
-/// An unbounded walk around a cycle never ends by itself: each path is
-/// charged per edge, so the one open walk reaches the budget and the query
-/// fails, it does not run on.
+/// An unbounded walk around a cycle never ends by itself, so GQL refuses it
+/// before it runs (`42001`, since 0.6.4): a quantifier without an upper bound
+/// needs a path mode or a selector.
 #[test]
-fn an_unbounded_walk_around_a_cycle_fails_at_the_budget() {
+fn an_unbounded_walk_around_a_cycle_is_refused() {
     let db = cycle();
     let query = "MATCH (a:Spot {name: 'a'})-[*]->(b) RETURN count(b) AS c";
     let error = run(&db, "gql", query).expect_err(query);
-    // A 3-cycle has one walk of each length: the search holds that walk
-    // alone when its next edge goes over the budget.
-    assert_eq!(paths_held(&error), 1, "{query}: {error}");
-    assert!(error.to_string().contains("8 MiB"), "{query}: {error}");
+    assert_eq!(
+        grafeo_common::utils::gqlstatus::GqlStatus::from(&error).as_str(),
+        "42001",
+        "{query}: {error}"
+    );
 }
 
-/// The same walk keeping its path (a path or an edge list variable) builds
-/// each row's path of thousands of edges, so it reaches the query timeout
-/// before the budget; either way it ends with an error.
+/// The same walk keeping its path (a path or an edge list variable) is
+/// refused at once too: before 0.6.4 it built each row's path of thousands
+/// of edges and ran into the query timeout.
 #[test]
-fn an_unbounded_walk_keeping_its_path_ends_with_an_error() {
+fn an_unbounded_walk_keeping_its_path_is_refused_at_once() {
     let db = cycle_with_timeout(Duration::from_secs(2));
     for query in [
         "MATCH p = (a:Spot {name: 'a'})-[*]->(b) RETURN count(p) AS c",
         "MATCH (a:Spot {name: 'a'})-[e*]->(b) RETURN count(b) AS c",
     ] {
-        let message = run(&db, "gql", query).expect_err(query).to_string();
+        let start = std::time::Instant::now();
+        let error = run(&db, "gql", query).expect_err(query);
+        assert_eq!(
+            grafeo_common::utils::gqlstatus::GqlStatus::from(&error).as_str(),
+            "42001",
+            "{query}: {error}"
+        );
         assert!(
-            message.contains("GRAFEO-Q003") || message.contains("GRAFEO-Q006"),
-            "{query}: {message}"
+            start.elapsed() < Duration::from_secs(1),
+            "{query}: refused before it runs, not at the timeout"
         );
     }
 }

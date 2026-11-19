@@ -2322,7 +2322,7 @@ mod gql_conformance_edge_cases {
 
         let result = session
             .execute(
-                "MATCH (a:Node {id: 'A'})-[:NEXT]->{1,}(b:Node) \
+                "MATCH TRAIL (a:Node {id: 'A'})-[:NEXT]->{1,}(b:Node) \
                  RETURN b.id AS dst ORDER BY dst",
             )
             .unwrap();

@@ -1507,6 +1507,7 @@ impl GqlTranslator {
         match_clause: &ast::MatchClause,
         initial_input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
+        pattern::check_bounded_patterns(match_clause)?;
         // The match mode and the path mode are independent (ISO/IEC
         // 39075:2024 16.4 and 16.6): REPEATABLE ELEMENTS, the default, keeps
         // the path mode. DIFFERENT EDGES binds no edge twice in the whole
@@ -1515,7 +1516,10 @@ impl GqlTranslator {
         // can never match, so its expands and searches may stop at a
         // repeated edge.
         let different_edges = match_clause.match_mode == Some(ast::MatchMode::DifferentEdges);
-        // The path mode of a pattern: its own, else the clause's
+        // The path mode of a pattern: its own, else the clause's. Under
+        // DIFFERENT EDGES, of the clause or kept by the pattern (`KEEP
+        // DIFFERENT EDGES`), a walk is searched as a trail: a path that
+        // repeats an edge never matches, and on a cycle a walk never ends.
         let path_mode_of = |aliased: &ast::AliasedPattern| {
             let mode = match aliased.path_mode.or(match_clause.path_mode) {
                 Some(ast::PathMode::Walk) | None => PathMode::Walk,
@@ -1523,7 +1527,11 @@ impl GqlTranslator {
                 Some(ast::PathMode::Simple) => PathMode::Simple,
                 Some(ast::PathMode::Acyclic) => PathMode::Acyclic,
             };
-            if different_edges && mode == PathMode::Walk {
+            let keeps_different_edges = match aliased.keep {
+                Some(keep) => keep == ast::MatchMode::DifferentEdges,
+                None => different_edges,
+            };
+            if keeps_different_edges && mode == PathMode::Walk {
                 PathMode::Trail
             } else {
                 mode

@@ -773,8 +773,19 @@ class TestGraphGlotConformance:
 # ---------------------------------------------------------------------------
 
 
+# Queries GraphGlot accepts and Grafeo refuses by a syntax rule GraphGlot does not check:
+# ISO/IEC 39075 16.4, syntax rule 14 (an unbounded quantifier needs a path mode or a
+# selector). Grafeo's parser reads them; the refusal (42001) comes before they run.
+REFUSED_BY_A_SYNTAX_RULE = {
+    "qpath_003": "no upper bound",
+    "qpath_006": "no upper bound",
+    "qpath_007": "no upper bound",
+}
+
+
 def _assert_category(dialect: FullGQL, db, category: str) -> None:
-    """Assert all GraphGlot-accepted queries in *category* also parse in Grafeo."""
+    """Assert all GraphGlot-accepted queries in *category* also parse in Grafeo, except those
+    a syntax rule refuses (``REFUSED_BY_A_SYNTAX_RULE``), which must be refused for it."""
     queries = CORPUS.get(category, [])
 
     # Only test queries that GraphGlot accepts (valid GQL)
@@ -790,6 +801,13 @@ def _assert_category(dialect: FullGQL, db, category: str) -> None:
     failures = []
     for entry in gg_valid:
         gr_ok, gr_err = _grafeo_accepts(db, entry["query"])
+        refused_for = REFUSED_BY_A_SYNTAX_RULE.get(entry["id"])
+        if refused_for is not None:
+            if gr_ok or refused_for not in (gr_err or ""):
+                failures.append(
+                    f"[{entry['id']}] {entry['query']}\n  Expected the refusal: {gr_err}"
+                )
+            continue
         if not gr_ok:
             failures.append(f"[{entry['id']}] {entry['query']}\n  Error: {gr_err}")
 

@@ -3682,6 +3682,11 @@ for case_id, query in [
     ("EP25", "MATCH (n:A) RETURN n.k AS k, n.h AS h"),
 ]:
     case(case_id, query, GQL, "listed_type")
+# An unbounded quantifier needs a path mode or a selector in GQL (0.6.4, ISO/IEC 39075 16.4 SR 14):
+#     with TRAIL, Cypher's semantics, GQL answers as Cypher's BJ3 does (EP26); without one GQL
+#     refuses it with 42001 before it runs (EP27; 0.6.3 walked, and ran to its timeout on a cycle)
+case("EP26", "MATCH TRAIL (g:Person {name: 'Gus'})-[:KNOWS*]->(c) RETURN c.name AS c", GQL, "social")
+case("EP27", "MATCH (g:Person {name: 'Gus'})-[:KNOWS*]->(c) RETURN c.name AS c", GQL, "social")
 
 # EQ: CREATE OR REPLACE GRAPH (ISO 12.4) replaces a graph in one change (it was a syntax error):
 #     the replaced graph is empty (EQ5); EQ6 is cleanup, returning the session to the default graph

@@ -25,7 +25,7 @@ tests:
       - "INSERT (:Hub {name: 'Alix'}), (:Hub {name: 'Gus'})"
       - "MATCH (a:Hub {name: 'Alix'}), (g:Hub {name: 'Gus'}) FOR i IN range(1, 12) INSERT (a)-[:KNOWS]->(g), (g)-[:KNOWS]->(a)"
     variants:
-      gql: "MATCH (a:Hub {name: 'Alix'})-[:KNOWS]->{1,}(b) RETURN count(b) AS walks"
+      gql: "MATCH TRAIL (a:Hub {name: 'Alix'})-[:KNOWS]->{1,}(b) RETURN count(b) AS walks"
       cypher: "MATCH (a:Hub {name: 'Alix'})-[:KNOWS*]->(b) RETURN count(b) AS walks"
     expect:
       error: "bound the quantifier"
@@ -35,7 +35,7 @@ tests:
       - "INSERT (:Hub {name: 'Alix'}), (:Hub {name: 'Gus'})"
       - "MATCH (a:Hub {name: 'Alix'}), (g:Hub {name: 'Gus'}) FOR i IN range(1, 12) INSERT (a)-[:KNOWS]->(g), (g)-[:KNOWS]->(a)"
     variants:
-      gql: "MATCH (a:Hub {name: 'Alix'})-[:KNOWS]->{1,}(b) RETURN count(DISTINCT b) AS reached"
+      gql: "MATCH TRAIL (a:Hub {name: 'Alix'})-[:KNOWS]->{1,}(b) RETURN count(DISTINCT b) AS reached"
       cypher: "MATCH (a:Hub {name: 'Alix'})-[:KNOWS*]->(b) RETURN count(DISTINCT b) AS reached"
     expect:
       rows:
@@ -46,7 +46,7 @@ tests:
       - "INSERT (:Hub {name: 'Alix'}), (:Hub {name: 'Gus'})"
       - "MATCH (a:Hub {name: 'Alix'}), (g:Hub {name: 'Gus'}) FOR i IN range(1, 12) INSERT (a)-[:KNOWS]->(g), (g)-[:KNOWS]->(a)"
     variants:
-      gql: "MATCH (a:Hub {name: 'Alix'}), (b:Hub) WHERE EXISTS { MATCH (a)-[:KNOWS]->{1,}(b) } RETURN b.name"
+      gql: "MATCH (a:Hub {name: 'Alix'}), (b:Hub) WHERE EXISTS { MATCH TRAIL (a)-[:KNOWS]->{1,}(b) } RETURN b.name"
       cypher: "MATCH (a:Hub {name: 'Alix'}), (b:Hub) WHERE EXISTS { (a)-[:KNOWS*]->(b) } RETURN b.name"
     expect:
       rows:

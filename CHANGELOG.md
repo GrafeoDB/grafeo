@@ -19,6 +19,7 @@ Performance and memory release, in progress: this section lists what has landed 
 
 ### Changed
 
+- **GQL and SQL/PGQ refuse a path pattern that can match without end**: an unbounded quantifier (`*`, `+`, `{m,}`) needs a path mode (`TRAIL`, `ACYCLIC`, `SIMPLE`) or a selector such as `ANY SHORTEST`, as ISO GQL requires, and fails with `42001` without one, where it ran until the query timeout on a cycle; Cypher is unchanged. Add `TRAIL` or an upper bound, as the 0.6 upgrade guide shows.
 - **The Rust crate's default features include `storage`**: `grafeo` with its default features (`embedded`) now logs each commit beside the database file (`<path>.wal/`), so a commit survives a crash, and enforces `Config::with_query_memory_limit`, spilling to disk or failing with `GRAFEO-S001`, as the Python, Node.js and C packages do. Before, a commit reached the file only at a checkpoint and a crash lost every commit since. Each commit now pays the log's write, batched as `Config::with_wal_durability` sets; a build with `default-features = false` and without `storage` keeps the old behaviour.
 - **The query memory limit holds in every build**: in builds without disk spilling (the `edge` profile, WebAssembly, and any build without the `spill` feature), a query past `with_query_memory_limit` or the memory limit fails with `GRAFEO-S001` naming the limit, where it ran unbounded before. With spilling, a sort spills first, as before.
 - **A SPARQL `ORDER BY` spills to disk past the query memory limit**: with a spill path set, a SPARQL `ORDER BY`, with or without `LIMIT`, past `with_query_memory_limit` spills and answers as it would in memory, where it failed with `GRAFEO-S001`; without a spill path it still fails.
@@ -80,6 +81,7 @@ Performance and memory release, in progress: this section lists what has landed 
 - **The CLI writes engine warnings to standard error**: with `--format json` or `csv` a warning, such as one about old spill directories, went to standard output ahead of the rows; the output now holds only the result.
 - **A RETURN value that is a node in some rows and a plain value in others comes back as the node**: `CASE WHEN c THEN n ELSE 1 END`, `coalesce(b, 1)`, an item of `[n, r, 1]` taken by a computed index, and `[n] + [1]` gave the node's or relationship's id; each row now has the type of the part it took. Until 0.7.0 such a value still gives the id when a WITH passes it on, when it is a grouping key or sits inside another such form, and when it is a GQL `||` of lists; an ORDER BY gives it as an untyped map.
 - **SPARQL `DELETE/INSERT ... WHERE` holds its input once, under the query memory limit**: an update kept a full copy of its input chunk for every solution of its `WHERE`, with no bound, and now keeps each chunk once and fails with `GRAFEO-S001` past `with_query_memory_limit` or the memory limit, before it writes anything.
+- **`KEEP DIFFERENT EDGES` ends on a cycle**: a pattern that keeps different edges is searched as a trail, as `MATCH DIFFERENT EDGES` is, where it walked and ran until the query timeout.
 
 ## [0.6.3] - 2026-11-15
 

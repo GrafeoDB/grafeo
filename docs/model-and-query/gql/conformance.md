@@ -183,6 +183,7 @@ Per the standard, minimum conformance requires:
 | `+` (1 or more) | Supported | Normalized to `{1,}` |
 | `?` questioned | Supported | 0 or 1 hop |
 | Parenthesized quantified `((a)-[e]->(b)){2,5}` | Supported | A pattern of more than one edge needs an upper bound of at most 16 repetitions |
+| An unbounded quantifier without a mode or selector | Refused (`42001`), as section 16.4, syntax rule 14 requires | Needs `TRAIL`, `ACYCLIC`, `SIMPLE`, a selector or `DIFFERENT EDGES` (see [patterns](patterns.md#unbounded-quantifiers-need-a-mode-or-a-selector)) |
 
 ### Pattern Composition
 
@@ -190,7 +191,7 @@ Per the standard, minimum conformance requires:
 |---------|--------|-------|
 | Multiple comma-separated patterns | Supported | Implicit join on shared variables |
 | Pattern union `\|` | Supported | |
-| Path aliases `p = (a)-[*]-(b)` | Supported | |
+| Path aliases `p = TRAIL (a)-[*]-(b)` | Supported | |
 | shortestPath / allShortestPaths | Supported | Cypher-style functions |
 
 ## Expressions and Predicates

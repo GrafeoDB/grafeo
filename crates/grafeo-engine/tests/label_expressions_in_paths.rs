@@ -290,7 +290,7 @@ fn variable_length() {
         &[
             "MATCH (x@)-[:R*1..2]->(t:T) RETURN x.name",
             "MATCH (x@)-[:R]->{1,2}(t:T) RETURN x.name",
-            "MATCH (x@)-[:R]->+(t:T) RETURN x.name",
+            "MATCH TRAIL (x@)-[:R]->+(t:T) RETURN x.name",
         ],
     );
 }

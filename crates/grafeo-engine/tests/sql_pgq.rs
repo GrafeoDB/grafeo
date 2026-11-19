@@ -1011,13 +1011,13 @@ fn a_star_without_bounds_is_one_or_more_hops() {
     let reached = [Value::Int64(11), Value::Int64(12)];
     assert_eq!(
         ids(
-            "SELECT * FROM GRAPH_TABLE (MATCH (m:Message {id: 10})-[:REPLY_OF*]->(p) COLUMNS (p.id AS id))"
+            "SELECT * FROM GRAPH_TABLE (MATCH TRAIL (m:Message {id: 10})-[:REPLY_OF*]->(p) COLUMNS (p.id AS id))"
         ),
         reached
     );
     assert_eq!(
         ids(
-            "SELECT * FROM GRAPH_TABLE (MATCH (m:Message {id: 10})-[:REPLY_OF*1..]->(p) COLUMNS (p.id AS id))"
+            "SELECT * FROM GRAPH_TABLE (MATCH TRAIL (m:Message {id: 10})-[:REPLY_OF*1..]->(p) COLUMNS (p.id AS id))"
         ),
         reached
     );

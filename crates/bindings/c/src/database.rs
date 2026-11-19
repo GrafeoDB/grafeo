@@ -2153,6 +2153,13 @@ pub extern "C" fn grafeo_commit(tx: *mut GrafeoTransaction) -> GrafeoStatus {
                 tx.committed = true;
                 GrafeoStatus::Ok
             }
+            // After close() the session is revoked: keeping it makes every
+            // later call on the transaction fail with GRAFEO-T007 as well.
+            Err(
+                e @ grafeo_common::utils::error::Error::Transaction(
+                    grafeo_common::utils::error::TransactionError::DatabaseClosed,
+                ),
+            ) => set_error(&e),
             Err(e) => {
                 // A commit that fails ends the transaction all the same
                 // (one refused before it began is rolled back here), so a
@@ -2172,7 +2179,8 @@ pub extern "C" fn grafeo_commit(tx: *mut GrafeoTransaction) -> GrafeoStatus {
 }
 
 /// Rollback a transaction. After a commit that failed it does nothing and
-/// returns `GRAFEO_OK`: that commit ended the transaction.
+/// returns `GRAFEO_OK`: that commit ended the transaction. After the database
+/// closed it fails with GRAFEO-T007, as every call on the transaction does.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_rollback(tx: *mut GrafeoTransaction) -> GrafeoStatus {
     if tx.is_null() {

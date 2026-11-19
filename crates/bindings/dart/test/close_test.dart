@@ -208,6 +208,12 @@ void main() {
         'graph.execute': () => graph.execute(query),
         'transaction.execute': () => transaction.execute(query),
         'transaction.commit': () => transaction.commit(),
+        // A commit refused by the closed database leaves the transaction
+        // answering GRAFEO-T007: every call after it throws it too.
+        'transaction.execute after the commit': () =>
+            transaction.execute(query),
+        'transaction.rollback after the commit': () => transaction.rollback(),
+        'transaction.commit after the commit': () => transaction.commit(),
         'stream.next': () => stream.next(),
         'stream.columns': () => stream.columns,
         'stream.warnings': () => stream.warnings,

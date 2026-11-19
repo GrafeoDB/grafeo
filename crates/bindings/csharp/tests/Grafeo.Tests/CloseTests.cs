@@ -108,6 +108,11 @@ public sealed class CloseTests : IDisposable
             ["graph.Execute"] = () => graph.Execute(query),
             ["transaction.Execute"] = () => transaction.Execute(query),
             ["transaction.Commit"] = () => { transaction.Commit(); return null; },
+            // A commit refused by the closed database leaves the transaction answering
+            // GRAFEO-T007: every call after it throws it too.
+            ["transaction.Execute after the commit"] = () => transaction.Execute(query),
+            ["transaction.Rollback after the commit"] = () => { transaction.Rollback(); return null; },
+            ["transaction.Commit after the commit"] = () => { transaction.Commit(); return null; },
             ["stream.Next"] = () => stream.Next(),
             ["stream.Columns"] = () => stream.Columns,
             ["stream.Warnings"] = () => stream.Warnings,

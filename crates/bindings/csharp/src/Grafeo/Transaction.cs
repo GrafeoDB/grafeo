@@ -134,10 +134,10 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
     {
         ThrowIfFinished();
         var h = Handle;
-        _finished = true;
         var status = NativeMethods.grafeo_commit(h);
         if (status != (int)GrafeoStatus.Ok)
-            throw GrafeoException.FromLastError(GrafeoStatus.Transaction);
+            throw EndUnlessClosed(GrafeoException.FromLastError(GrafeoStatus.Transaction));
+        _finished = true;
         _handle.Committed = true;
     }
 
@@ -145,7 +145,8 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
     /// Roll back the transaction, discarding all changes. After a commit that
     /// succeeded it throws a <see cref="TransactionException"/>, as in every
     /// binding: there is nothing left to roll back. After a commit that failed
-    /// it does nothing, as that commit ended the transaction.
+    /// it does nothing, as that commit ended the transaction. After the
+    /// database closed it throws with GRAFEO-T007, as every call does.
     /// </summary>
     public void Rollback()
     {
@@ -155,10 +156,23 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
             throw new TransactionException("Transaction already committed");
         if (_finished) return;
         var h = Handle;
-        _finished = true;
         var status = NativeMethods.grafeo_rollback(h);
         if (status != (int)GrafeoStatus.Ok)
-            throw GrafeoException.FromLastError(GrafeoStatus.Transaction);
+            throw EndUnlessClosed(GrafeoException.FromLastError(GrafeoStatus.Transaction));
+        _finished = true;
+    }
+
+    /// <summary>
+    /// Ends the transaction after a failed commit or rollback, unless the
+    /// database was closed: the native layer then answers every later call
+    /// with GRAFEO-T007, so the transaction stays for it. Returns
+    /// <paramref name="error"/>.
+    /// </summary>
+    private GrafeoException EndUnlessClosed(GrafeoException error)
+    {
+        if (!error.Message.StartsWith("GRAFEO-T007", StringComparison.Ordinal))
+            _finished = true;
+        return error;
     }
 
     // =========================================================================

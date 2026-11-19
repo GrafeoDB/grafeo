@@ -914,12 +914,21 @@ fn what_the_database_handed_out_fails_after_close() {
             )
             .is_null()
         }),
-        // The rollback first: after a commit that failed, a rollback has nothing to do and
-        // answers, as it does on an open database.
         row("grafeo_rollback", || {
             status(crate::database::grafeo_rollback(transaction))
         }),
         row("grafeo_commit", || status(grafeo_commit(transaction))),
+        // A commit refused by the closed database does not end the transaction as a failed
+        // commit does: every call after it fails with GRAFEO-T007 too.
+        row("grafeo_transaction_execute after the commit", || {
+            grafeo_transaction_execute(transaction, query.as_ptr()).is_null()
+        }),
+        row("grafeo_rollback after the commit", || {
+            status(crate::database::grafeo_rollback(transaction))
+        }),
+        row("grafeo_commit after the commit", || {
+            status(grafeo_commit(transaction))
+        }),
         // The stream (the warning accessors have no error return: neutral values).
         row("grafeo_stream_next_row_json", || {
             status(grafeo_stream_next_row_json(stream, &raw mut json))

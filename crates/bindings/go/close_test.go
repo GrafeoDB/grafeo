@@ -2,8 +2,10 @@ package grafeo
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -217,18 +219,32 @@ func TestWhatAClosedDatabaseHandedOutFailsWithT007(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rows := map[string]func() error{
-		"graph.Execute": func() error { _, err := graph.Execute(query); return err },
-		"tx.Execute":    func() error { _, err := tx.Execute(query); return err },
-		"tx.Commit":     func() error { return tx.Commit() },
-		"stream.Next":   func() error { _, err := stream.Next(); return err },
-		"view.Execute":  func() error { _, err := view.Execute(query); return err },
-		"view.GetNode":  func() error { _, err := view.GetNode(0); return err },
+	type row struct {
+		name string
+		call func() error
 	}
+	rows := []row{
+		{"graph.Execute", func() error { _, err := graph.Execute(query); return err }},
+		{"tx.Execute", func() error { _, err := tx.Execute(query); return err }},
+		{"tx.Commit", func() error { return tx.Commit() }},
+		{"tx.Rollback", func() error { return tx.Rollback() }},
+		{"stream.Next", func() error { _, err := stream.Next(); return err }},
+		{"view.Execute", func() error { _, err := view.Execute(query); return err }},
+		{"view.GetNode", func() error { _, err := view.GetNode(0); return err }},
+	}
+	// Each call twice, in order and then in reverse, so a call after any
+	// other fails with GRAFEO-T007 as well: a commit refused by the closed
+	// database leaves the transaction answering GRAFEO-T007.
 	var missed []string
-	for name, call := range rows {
-		if err := call(); !isClosedError(err) {
-			missed = append(missed, name+": "+errorText(err))
+	for pass := range 2 {
+		for i := range rows {
+			r := rows[i]
+			if pass == 1 {
+				r = rows[len(rows)-1-i]
+			}
+			if err := r.call(); !isClosedError(err) {
+				missed = append(missed, fmt.Sprintf("%s (pass %d): %s", r.name, pass+1, errorText(err)))
+			}
 		}
 	}
 	sort.Strings(missed)
@@ -237,6 +253,17 @@ func TestWhatAClosedDatabaseHandedOutFailsWithT007(t *testing.T) {
 	}
 	stream.Close()
 	view.Close()
+
+	// The refused commit kept the C transaction; the finalizer frees it once.
+	if tx.handle == nil {
+		t.Fatal("the commit refused by the closed database freed the transaction")
+	}
+	tx.free()
+	if tx.handle != nil {
+		t.Fatal("the transaction still holds its C handle")
+	}
+	tx.free()
+	runtime.GC()
 
 	reopened, err := Open(path)
 	if err != nil {

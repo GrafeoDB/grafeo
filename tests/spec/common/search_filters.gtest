@@ -23,6 +23,7 @@ meta:
 tests:
 
   - name: text_search_with_ne_keeps_a_node_without_the_property
+    requires: [text-index]
     setup:
       - "INSERT (:Doc {owner: 'Alix', text: 'canals of Amsterdam', deleted: false, emb: vector([0.7, 0.3])})"
       - "INSERT (:Doc {owner: 'Gus', text: 'canals and bridges', deleted: true, emb: vector([1.0, 0.0])})"
@@ -40,6 +41,7 @@ tests:
         - [Vincent]
 
   - name: text_search_with_nin_keeps_a_node_without_the_property
+    requires: [text-index]
     setup:
       - "INSERT (:Doc {owner: 'Alix', text: 'canals of Amsterdam', deleted: false})"
       - "INSERT (:Doc {owner: 'Gus', text: 'canals and bridges', deleted: true})"
@@ -56,6 +58,7 @@ tests:
         - [Vincent]
 
   - name: text_search_with_an_equality_drops_a_node_without_the_property
+    requires: [text-index]
     setup:
       - "INSERT (:Doc {owner: 'Alix', text: 'canals of Amsterdam', deleted: false})"
       - "INSERT (:Doc {owner: 'Gus', text: 'canals and bridges', deleted: true})"
@@ -71,6 +74,7 @@ tests:
         - [Jules]
 
   - name: text_search_with_a_filter_keeps_k
+    requires: [text-index]
     setup:
       - "INSERT (:Doc {owner: 'Alix', text: 'canals of Amsterdam', deleted: false})"
       - "INSERT (:Doc {owner: 'Gus', text: 'canals and bridges', deleted: true})"
@@ -85,6 +89,7 @@ tests:
         - [3]
 
   - name: vector_search_with_ne_keeps_k_in_distance_order
+    requires: [vector-index]
     setup:
       - "INSERT (:Doc {owner: 'Alix', deleted: false, emb: vector([0.7, 0.3])})"
       - "INSERT (:Doc {owner: 'Gus', deleted: true, emb: vector([1.0, 0.0])})"
@@ -102,6 +107,7 @@ tests:
         - [Alix]
 
   - name: mmr_search_with_a_filter_keeps_k
+    requires: [vector-index]
     setup:
       - "INSERT (:Doc {owner: 'Alix', deleted: false, emb: vector([0.7, 0.3])})"
       - "INSERT (:Doc {owner: 'Gus', deleted: true, emb: vector([1.0, 0.0])})"
@@ -117,6 +123,7 @@ tests:
         - [2]
 
   - name: mmr_search_with_a_filter_leaves_the_deleted_node_out
+    requires: [vector-index]
     setup:
       - "INSERT (:Doc {owner: 'Alix', deleted: false, emb: vector([0.7, 0.3])})"
       - "INSERT (:Doc {owner: 'Gus', deleted: true, emb: vector([1.0, 0.0])})"
@@ -135,6 +142,7 @@ tests:
         - [Vincent]
 
   - name: a_null_filter_value_is_an_error_that_points_to_ne
+    requires: [text-index]
     setup:
       - "INSERT (:Doc {owner: 'Alix', text: 'canals of Amsterdam', deleted: false})"
       - "CREATE INDEX doc_text FOR (n:Doc) ON (n.text) USING TEXT"
@@ -145,6 +153,7 @@ tests:
       error: "$ne"
 
   - name: a_null_filter_value_is_an_error_for_the_vector_search_too
+    requires: [vector-index]
     setup:
       - "INSERT (:Doc {owner: 'Alix', deleted: false, emb: vector([0.7, 0.3])})"
       - "CREATE VECTOR INDEX doc_emb ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
@@ -155,6 +164,7 @@ tests:
       error: "$ne"
 
   - name: text_search_with_a_filters_map_written_in_the_query
+    requires: [text-index]
     setup:
       - "INSERT (:Doc {owner: 'Alix', text: 'canals of Amsterdam', deleted: false})"
       - "INSERT (:Doc {owner: 'Gus', text: 'canals and bridges', deleted: true})"

@@ -408,6 +408,33 @@ fn joined(first: &[Value], second: &[Value]) -> Value {
     Value::List(items.into())
 }
 
+/// Which part of an expression a row's value came from (see
+/// [`ExpressionPredicate::eval_choosing`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChosenPart {
+    /// Part `.0`: a CASE result (the ELSE after the WHEN clauses), a
+    /// `coalesce` argument, or an item of a list taken by its index.
+    Part(usize),
+    /// A list `+`: its first `.0` items come from the left side, the rest
+    /// from the right.
+    Joined(usize),
+    /// No part: a null, or an expression of another form.
+    None,
+}
+
+/// The position `index` names in a list of `len` items (a negative index
+/// counts from the end), `None` outside the list.
+fn list_position(len: usize, index: i64) -> Option<usize> {
+    let position = if index < 0 {
+        i64::try_from(len).ok()?.checked_add(index)?
+    } else {
+        index
+    };
+    usize::try_from(position)
+        .ok()
+        .filter(|&position| position < len)
+}
+
 /// The error of a unary `sign` on a value that is neither a number nor a
 /// duration: invalid value type (22G12, see [`wrong_kinds`]).
 fn sign_of_a_non_number(sign: char, value: &Value) -> OperatorError {
@@ -1492,6 +1519,104 @@ impl ExpressionPredicate {
         self.errors.take().map_or(Ok(value), Err)
     }
 
+    /// [`eval_at`](Self::eval_at), and which part of the expression the
+    /// value came from when it is a CASE, a `coalesce`, an index or a `+`
+    /// (see [`ChosenPart`]); each part is evaluated once, as `eval_at` does.
+    ///
+    /// # Errors
+    ///
+    /// As [`eval_at`](Self::eval_at).
+    pub fn eval_choosing(
+        &self,
+        chunk: &DataChunk,
+        row: usize,
+    ) -> Result<(Option<Value>, ChosenPart), OperatorError> {
+        let chosen = self.eval_choosing_expr(&self.expression, chunk, row);
+        self.errors.take().map_or(Ok(chosen), Err)
+    }
+
+    fn eval_choosing_expr(
+        &self,
+        expr: &FilterExpression,
+        chunk: &DataChunk,
+        row: usize,
+    ) -> (Option<Value>, ChosenPart) {
+        match expr {
+            FilterExpression::Case {
+                operand,
+                when_clauses,
+                else_clause,
+            } => match self.case_part(operand.as_deref(), when_clauses, chunk, row) {
+                Some(index) => (
+                    self.eval_expr(&when_clauses[index].1, chunk, row),
+                    ChosenPart::Part(index),
+                ),
+                None => match else_clause {
+                    Some(else_expr) => (
+                        self.eval_expr(else_expr, chunk, row),
+                        ChosenPart::Part(when_clauses.len()),
+                    ),
+                    None => (Some(Value::Null), ChosenPart::None),
+                },
+            },
+            FilterExpression::FunctionCall {
+                function: BuiltinFunction::Coalesce,
+                args,
+            } => match self.coalesce_part(args, chunk, row) {
+                Some((value, index)) => (Some(value), ChosenPart::Part(index)),
+                None => (Some(Value::Null), ChosenPart::None),
+            },
+            FilterExpression::IndexAccess { base, index } => {
+                // As the ordinary arm: no index is read without a base.
+                let Some(base_val) = self.eval_expr(base, chunk, row) else {
+                    return (None, ChosenPart::None);
+                };
+                let Some(index_val) = self.eval_expr(index, chunk, row) else {
+                    return (None, ChosenPart::None);
+                };
+                let part = match (&base_val, &index_val) {
+                    (Value::List(items), Value::Int64(i)) => {
+                        list_position(items.len(), *i).map_or(ChosenPart::None, ChosenPart::Part)
+                    }
+                    _ => ChosenPart::None,
+                };
+                (
+                    self.index_access(base, &base_val, &index_val, chunk, row),
+                    part,
+                )
+            }
+            FilterExpression::Binary {
+                left,
+                op: BinaryFilterOp::Add,
+                right,
+            } => {
+                // As the binary arm reads a `+`: a missing value is a null.
+                let left_val = self.eval_expr(left, chunk, row).unwrap_or(Value::Null);
+                let right_val = self.eval_expr(right, chunk, row).unwrap_or(Value::Null);
+                let left_items = match &left_val {
+                    Value::List(items) => items.len(),
+                    _ => 1,
+                };
+                let value = self.binary_values(
+                    left,
+                    &left_val,
+                    BinaryFilterOp::Add,
+                    right,
+                    &right_val,
+                    chunk,
+                    row,
+                );
+                let part = if matches!(value, Some(Value::List(_))) {
+                    ChosenPart::Joined(left_items)
+                } else {
+                    ChosenPart::None
+                };
+                (value, part)
+            }
+            other => (self.eval_expr(other, chunk, row), ChosenPart::None),
+        }
+    }
+
     /// Records `error`, which fails the query (see [`ErrorSlot`]), and gives
     /// the `None` evaluation goes on with.
     fn fail(&self, error: OperatorError) -> Option<Value> {
@@ -1583,23 +1708,7 @@ impl ExpressionPredicate {
                         self.eval_expr(right, chunk, row)?,
                     )
                 };
-                if *op == BinaryFilterOp::Add
-                    && let Some(entity) =
-                        self.entity_beside_a_string(left, &left_val, right, &right_val, chunk, row)
-                {
-                    return self.fail(OperatorError::wrong_kind(format!(
-                        "no sum of {} and a string: {}",
-                        entity.name(),
-                        binary_text(&left_val, *op, &right_val)
-                    )));
-                }
-                if let Some((left_kind, right_kind)) =
-                    self.kinds_apart(left, &left_val, *op, right, &right_val, chunk, row)
-                {
-                    return self
-                        .compare_across_kinds(&left_val, left_kind, *op, &right_val, right_kind);
-                }
-                self.eval_binary_op(&left_val, *op, &right_val)
+                self.binary_values(left, &left_val, *op, right, &right_val, chunk, row)
             }
             FilterExpression::Unary { op, operand } => {
                 let val = self.eval_expr(operand, chunk, row);
@@ -1637,99 +1746,7 @@ impl ExpressionPredicate {
             FilterExpression::IndexAccess { base, index } => {
                 let base_val = self.eval_expr(base, chunk, row)?;
                 let index_val = self.eval_expr(index, chunk, row)?;
-                match (&base_val, &index_val) {
-                    (Value::List(items), Value::Int64(i)) => {
-                        // reason: list/string lengths fit i64; index values are user-provided
-                        #[allow(
-                            clippy::cast_possible_truncation,
-                            clippy::cast_possible_wrap,
-                            clippy::cast_sign_loss
-                        )]
-                        let idx = if *i < 0 {
-                            // Negative indexing from end
-                            let len = items.len() as i64;
-                            (len + i) as usize
-                        } else {
-                            *i as usize
-                        };
-                        items.get(idx).cloned()
-                    }
-                    (Value::String(s), Value::Int64(i)) => {
-                        // reason: list/string lengths fit i64; index values are user-provided
-                        #[allow(
-                            clippy::cast_possible_truncation,
-                            clippy::cast_possible_wrap,
-                            clippy::cast_sign_loss
-                        )]
-                        let idx = if *i < 0 {
-                            // From the end, in characters as the index counts
-                            let len = s.chars().count() as i64;
-                            (len + i) as usize
-                        } else {
-                            *i as usize
-                        };
-                        s.chars()
-                            .nth(idx)
-                            .map(|c| Value::String(c.to_string().into()))
-                    }
-                    (Value::Map(m), Value::String(key)) => {
-                        let prop_key = PropertyKey::new(key.as_str());
-                        m.get(&prop_key).cloned()
-                    }
-                    // A component of a temporal property (`n.born.month`).
-                    (
-                        Value::Date(_)
-                        | Value::Time(_)
-                        | Value::Timestamp(_)
-                        | Value::ZonedDatetime(_)
-                        | Value::Duration(_),
-                        Value::String(key),
-                    ) => base_val.temporal_component(key),
-                    (_, Value::String(key)) => {
-                        // Node/edge bracket access: n['name'] looks up a property
-                        // via the store when the base variable refers to a node or edge.
-                        if let FilterExpression::Variable(var) = base.as_ref()
-                            && let Some(&col_idx) = self.variable_columns.get(var)
-                            && let Some(col) = chunk.column(col_idx)
-                        {
-                            if let Some(node_id) = col.get_node_id(row)
-                                && let Some(node) = self.resolve_node(node_id)
-                            {
-                                return node.get_property(key.as_str()).cloned();
-                            }
-                            if let Some(edge_id) = col.get_edge_id(row)
-                                && let Some(edge) = self.resolve_edge(edge_id)
-                            {
-                                return edge.get_property(key.as_str()).cloned();
-                            }
-                        }
-                        // A node or edge taken from a list, a map or a
-                        // function (`rs[0].w`, `head(rs).w`, `x.msg.id`,
-                        // `startNode(r).name`) is its ID.
-                        if let Value::Int64(id) = &base_val
-                            && let Ok(id) = u64::try_from(*id)
-                        {
-                            return match self.shape(base, chunk, row) {
-                                LogicalType::Node => self
-                                    .resolve_node(NodeId::new(id))
-                                    .and_then(|node| node.get_property(key.as_str()).cloned()),
-                                LogicalType::Edge => self
-                                    .resolve_edge(EdgeId::new(id))
-                                    .and_then(|edge| edge.get_property(key.as_str()).cloned()),
-                                _ => None,
-                            };
-                        }
-                        // A list is indexed by a position, not a name.
-                        if matches!(base_val, Value::List(_)) {
-                            return self.fail(wrong_index(&base_val, &index_val));
-                        }
-                        None
-                    }
-                    (Value::List(_) | Value::String(_), index) if !index.is_null() => {
-                        self.fail(wrong_index(&base_val, &index_val))
-                    }
-                    _ => None,
-                }
+                self.index_access(base, &base_val, &index_val, chunk, row)
             }
             FilterExpression::SliceAccess { base, start, end } => {
                 let base_val = self.eval_expr(base, chunk, row)?;
@@ -3217,16 +3234,10 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            BuiltinFunction::Coalesce => {
-                for arg in args {
-                    if let Some(val) = self.eval_expr(arg, chunk, row)
-                        && !matches!(val, Value::Null)
-                    {
-                        return Some(val);
-                    }
-                }
-                Some(Value::Null)
-            }
+            BuiltinFunction::Coalesce => Some(
+                self.coalesce_part(args, chunk, row)
+                    .map_or(Value::Null, |(value, _)| value),
+            ),
             BuiltinFunction::Exists => {
                 if args.len() != 1 {
                     return None;
@@ -4742,38 +4753,184 @@ impl ExpressionPredicate {
         chunk: &DataChunk,
         row: usize,
     ) -> Option<Value> {
+        match self.case_part(operand, when_clauses, chunk, row) {
+            Some(index) => self.eval_expr(&when_clauses[index].1, chunk, row),
+            // No match - return ELSE or NULL
+            None => match else_clause {
+                Some(else_expr) => self.eval_expr(else_expr, chunk, row),
+                None => Some(Value::Null),
+            },
+        }
+    }
+
+    /// `left op right` of the evaluated operands, for an operator other than
+    /// `IN`, AND, OR and XOR: a node or edge beside a string under `+`, and
+    /// operands of kinds kept apart, are not compared as their ids.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "both operands as expressions (for their kind) and as values, as the binary arm has them"
+    )]
+    fn binary_values(
+        &self,
+        left: &FilterExpression,
+        left_val: &Value,
+        op: BinaryFilterOp,
+        right: &FilterExpression,
+        right_val: &Value,
+        chunk: &DataChunk,
+        row: usize,
+    ) -> Option<Value> {
+        if op == BinaryFilterOp::Add
+            && let Some(entity) =
+                self.entity_beside_a_string(left, left_val, right, right_val, chunk, row)
+        {
+            return self.fail(OperatorError::wrong_kind(format!(
+                "no sum of {} and a string: {}",
+                entity.name(),
+                binary_text(left_val, op, right_val)
+            )));
+        }
+        if let Some((left_kind, right_kind)) =
+            self.kinds_apart(left, left_val, op, right, right_val, chunk, row)
+        {
+            return self.compare_across_kinds(left_val, left_kind, op, right_val, right_kind);
+        }
+        self.eval_binary_op(left_val, op, right_val)
+    }
+
+    /// `base[index]` of the evaluated `base_val` and `index_val`; `base` is
+    /// the expression, for a node or edge read through its id.
+    fn index_access(
+        &self,
+        base: &FilterExpression,
+        base_val: &Value,
+        index_val: &Value,
+        chunk: &DataChunk,
+        row: usize,
+    ) -> Option<Value> {
+        match (base_val, index_val) {
+            (Value::List(items), Value::Int64(i)) => {
+                list_position(items.len(), *i).and_then(|idx| items.get(idx).cloned())
+            }
+            (Value::String(s), Value::Int64(i)) => {
+                // From the end, in characters as the index counts: only then
+                // are they counted.
+                let position = if *i < 0 {
+                    list_position(s.chars().count(), *i)
+                } else {
+                    usize::try_from(*i).ok()
+                };
+                position
+                    .and_then(|idx| s.chars().nth(idx))
+                    .map(|c| Value::String(c.to_string().into()))
+            }
+            (Value::Map(m), Value::String(key)) => {
+                let prop_key = PropertyKey::new(key.as_str());
+                m.get(&prop_key).cloned()
+            }
+            // A component of a temporal property (`n.born.month`).
+            (
+                Value::Date(_)
+                | Value::Time(_)
+                | Value::Timestamp(_)
+                | Value::ZonedDatetime(_)
+                | Value::Duration(_),
+                Value::String(key),
+            ) => base_val.temporal_component(key),
+            (_, Value::String(key)) => {
+                // Node/edge bracket access: n['name'] looks up a property
+                // via the store when the base variable refers to a node or edge.
+                if let FilterExpression::Variable(var) = base
+                    && let Some(&col_idx) = self.variable_columns.get(var)
+                    && let Some(col) = chunk.column(col_idx)
+                {
+                    if let Some(node_id) = col.get_node_id(row)
+                        && let Some(node) = self.resolve_node(node_id)
+                    {
+                        return node.get_property(key.as_str()).cloned();
+                    }
+                    if let Some(edge_id) = col.get_edge_id(row)
+                        && let Some(edge) = self.resolve_edge(edge_id)
+                    {
+                        return edge.get_property(key.as_str()).cloned();
+                    }
+                }
+                // A node or edge taken from a list, a map or a
+                // function (`rs[0].w`, `head(rs).w`, `x.msg.id`,
+                // `startNode(r).name`) is its ID.
+                if let Value::Int64(id) = base_val
+                    && let Ok(id) = u64::try_from(*id)
+                {
+                    return match self.shape(base, chunk, row) {
+                        LogicalType::Node => self
+                            .resolve_node(NodeId::new(id))
+                            .and_then(|node| node.get_property(key.as_str()).cloned()),
+                        LogicalType::Edge => self
+                            .resolve_edge(EdgeId::new(id))
+                            .and_then(|edge| edge.get_property(key.as_str()).cloned()),
+                        _ => None,
+                    };
+                }
+                // A list is indexed by a position, not a name.
+                if matches!(base_val, Value::List(_)) {
+                    return self.fail(wrong_index(base_val, index_val));
+                }
+                None
+            }
+            (Value::List(_) | Value::String(_), index) if !index.is_null() => {
+                self.fail(wrong_index(base_val, index_val))
+            }
+            _ => None,
+        }
+    }
+
+    /// The WHEN clause whose result a CASE gives for `row`, `None` for the
+    /// ELSE (or null without one).
+    fn case_part(
+        &self,
+        operand: Option<&FilterExpression>,
+        when_clauses: &[(FilterExpression, FilterExpression)],
+        chunk: &DataChunk,
+        row: usize,
+    ) -> Option<usize> {
         if let Some(test_expr) = operand {
             // Simple CASE: CASE expr WHEN val1 THEN res1 ...
             // Use unwrap_or(Null) so a NULL test expression falls through to ELSE
             // rather than short-circuiting the entire CASE (NULL != anything).
             let test_val = self.eval_expr(test_expr, chunk, row).unwrap_or(Value::Null);
-            for (when_expr, then_expr) in when_clauses {
+            when_clauses.iter().position(|(when_expr, _)| {
                 let when_val = self.eval_expr(when_expr, chunk, row).unwrap_or(Value::Null);
                 // Three-valued logic: NULL never matches anything in simple CASE
-                if !test_val.is_null()
+                !test_val.is_null()
                     && !when_val.is_null()
                     && self.equals(&test_val, &when_val) == Some(true)
-                {
-                    return self.eval_expr(then_expr, chunk, row);
-                }
-            }
+            })
         } else {
             // Searched CASE: CASE WHEN cond1 THEN res1 ...
             // Use unwrap_or(Null) so a NULL/UNKNOWN condition falls through
             // to the next WHEN or ELSE (three-valued logic: only TRUE matches).
-            for (when_expr, then_expr) in when_clauses {
-                let when_val = self.eval_expr(when_expr, chunk, row).unwrap_or(Value::Null);
-                if when_val.as_bool() == Some(true) {
-                    return self.eval_expr(then_expr, chunk, row);
-                }
-            }
+            when_clauses.iter().position(|(when_expr, _)| {
+                self.eval_expr(when_expr, chunk, row)
+                    .unwrap_or(Value::Null)
+                    .as_bool()
+                    == Some(true)
+            })
         }
-        // No match - return ELSE or NULL
-        if let Some(else_expr) = else_clause {
-            self.eval_expr(else_expr, chunk, row)
-        } else {
-            Some(Value::Null)
-        }
+    }
+
+    /// The first argument of a `coalesce` that is not null, and its
+    /// position; `None` when every argument is null.
+    fn coalesce_part(
+        &self,
+        args: &[FilterExpression],
+        chunk: &DataChunk,
+        row: usize,
+    ) -> Option<(Value, usize)> {
+        args.iter().enumerate().find_map(|(index, arg)| {
+            self.eval_expr(arg, chunk, row)
+                .filter(|value| !value.is_null())
+                .map(|value| (value, index))
+        })
     }
 
     fn eval_unary_op(&self, op: UnaryFilterOp, val: Option<Value>) -> Option<Value> {

@@ -143,10 +143,10 @@ s2_standalone_call_to_procedure_that_takes_no_arguments_and_yields_no_results_ca
 s3_standalone_call_to_procedure_with_implicit_arguments = { reason = "out-of-scope", note = "standalone CALL with implicit arguments" }
 
 [Comparison2]
-s3_comparing_across_types_yields_null_except_numbers_1 = { issue = "fix in 0.6.4", note = "a node or relationship taken from a list of mixed kinds by a computed index comes back as its id" }
-s3_comparing_across_types_yields_null_except_numbers_2 = { issue = "fix in 0.6.4", note = "a node or relationship taken from a list of mixed kinds by a computed index comes back as its id" }
-s3_comparing_across_types_yields_null_except_numbers_3 = { issue = "fix in 0.6.4", note = "a node or relationship taken from a list of mixed kinds by a computed index comes back as its id" }
-s3_comparing_across_types_yields_null_except_numbers_4 = { issue = "fix in 0.6.4", note = "a node or relationship taken from a list of mixed kinds by a computed index comes back as its id" }
+s3_comparing_across_types_yields_null_except_numbers_1 = { issue = "fix in 0.7.0", note = "a node or relationship taken from a list of mixed kinds by a computed index and passed on by a WITH comes back as its id; entity values carry its kind" }
+s3_comparing_across_types_yields_null_except_numbers_2 = { issue = "fix in 0.7.0", note = "a node or relationship taken from a list of mixed kinds by a computed index and passed on by a WITH comes back as its id; entity values carry its kind" }
+s3_comparing_across_types_yields_null_except_numbers_3 = { issue = "fix in 0.7.0", note = "a node or relationship taken from a list of mixed kinds by a computed index and passed on by a WITH comes back as its id; entity values carry its kind" }
+s3_comparing_across_types_yields_null_except_numbers_4 = { issue = "fix in 0.7.0", note = "a node or relationship taken from a list of mixed kinds by a computed index and passed on by a WITH comes back as its id; entity values carry its kind" }
 
 [Create1]
 s13_fail_when_creating_a_node_that_is_already_bound = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }

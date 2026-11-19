@@ -567,7 +567,10 @@ impl super::Planner {
     ) -> Result<ProjectExpr> {
         let expr = self.convert_expression(expression)?;
         let variable_columns = variable_columns.clone();
-        Ok(match self.entity_value(expression) {
+        let kind = self
+            .entity_value(expression)
+            .or_else(|| self.per_row_entity(expression));
+        Ok(match kind {
             Some(kind) => ProjectExpr::Entities {
                 expr,
                 variable_columns,
@@ -578,6 +581,65 @@ impl super::Planner {
                 variable_columns,
             },
         })
+    }
+
+    /// What a RETURN expression holds whose parts are of different kinds, one
+    /// kind per row ([`EntityValue::PerRow`]): a CASE (its WHEN results, then
+    /// its ELSE), a `coalesce` (its arguments), a list of mixed items taken
+    /// from by a computed index (its items), and a list `+` (the item type of
+    /// each side, a side that is no list being one item). `None` when no part
+    /// holds a node or an edge, or a side of a `+` is a list of mixed items.
+    fn per_row_entity(&self, expression: &LogicalExpression) -> Option<EntityValue> {
+        let part = |expression: &LogicalExpression| {
+            self.held_entity(expression)
+                .map_or(LogicalType::Any, |kind| kind.logical_type())
+        };
+        let parts: Vec<LogicalType> = match expression {
+            LogicalExpression::Case {
+                when_clauses,
+                else_clause,
+                ..
+            } => when_clauses
+                .iter()
+                .map(|(_, result)| result)
+                .chain(else_clause.as_deref())
+                .map(part)
+                .collect(),
+            LogicalExpression::FunctionCall {
+                callee: Callee::Builtin(BuiltinFunction::Coalesce),
+                args,
+                ..
+            } => args.iter().map(part).collect(),
+            LogicalExpression::IndexAccess { base, index }
+                if !matches!(index.as_ref(), LogicalExpression::Literal(_)) =>
+            {
+                match self.entity_value(base)?.logical_type() {
+                    LogicalType::Tuple(items) => items,
+                    _ => return None,
+                }
+            }
+            LogicalExpression::Binary {
+                left,
+                op: BinaryOp::Add,
+                right,
+            } => {
+                let side = |side: &LogicalExpression| match self.held_entity(side) {
+                    None => Some(LogicalType::Any),
+                    Some(kind) => match kind.logical_type() {
+                        LogicalType::List(_) | LogicalType::Tuple(_) => {
+                            Some(kind.item()?.logical_type())
+                        }
+                        single => Some(single),
+                    },
+                };
+                vec![side(left)?, side(right)?]
+            }
+            _ => return None,
+        };
+        parts
+            .iter()
+            .any(|part| EntityValue::of_type(part).is_some())
+            .then_some(EntityValue::PerRow(parts))
     }
 
     /// What `expression` yields when that is a node, an edge, a list of them

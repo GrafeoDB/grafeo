@@ -80,7 +80,7 @@ tests:
   - name: s3_comparing_across_types_yields_null_except_numbers_1
     xfail:
       spec: "openCypher TCK 2024.3 Comparison2: [3] Comparing across types yields null, except numbers #1"
-      issue: fix in 0.6.4
+      issue: fix in 0.7.0
     setup:
       - |
         CREATE ()-[:T]->()
@@ -104,7 +104,7 @@ tests:
   - name: s3_comparing_across_types_yields_null_except_numbers_2
     xfail:
       spec: "openCypher TCK 2024.3 Comparison2: [3] Comparing across types yields null, except numbers #2"
-      issue: fix in 0.6.4
+      issue: fix in 0.7.0
     setup:
       - |
         CREATE ()-[:T]->()
@@ -128,7 +128,7 @@ tests:
   - name: s3_comparing_across_types_yields_null_except_numbers_3
     xfail:
       spec: "openCypher TCK 2024.3 Comparison2: [3] Comparing across types yields null, except numbers #3"
-      issue: fix in 0.6.4
+      issue: fix in 0.7.0
     setup:
       - |
         CREATE ()-[:T]->()
@@ -152,7 +152,7 @@ tests:
   - name: s3_comparing_across_types_yields_null_except_numbers_4
     xfail:
       spec: "openCypher TCK 2024.3 Comparison2: [3] Comparing across types yields null, except numbers #4"
-      issue: fix in 0.6.4
+      issue: fix in 0.7.0
     setup:
       - |
         CREATE ()-[:T]->()

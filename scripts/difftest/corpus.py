@@ -3793,4 +3793,10 @@ case("EZ2", "RETURN (2 ^ 3) ^ 2 AS r, POWER(2, POWER(3, 2)) AS s", GQL)
 case("FA1", "MATCH (r:Robot {name: 'R1'}) SET r += 5 RETURN r.name AS n", CYPHER, "writes")
 case("FA2", "MATCH (r:Robot {name: 'R1'}) SET r = 'x' RETURN r.name AS n", GQL, "writes")
 
+# FB: a RETURN column whose parts are of different kinds gives each row the part it took: a node
+#     where it took the node (0.6.4; it gave the node's id), a plain value where it took that
+case("FB1", "MATCH (p:Person) RETURN p.name AS k, CASE WHEN p.age > 30 THEN p ELSE p.age END AS v", BOTH)
+case("FB2", "MATCH (p:Person) OPTIONAL MATCH (p)-[:LIVES_IN]->(c) RETURN p.name AS k, coalesce(c, p.age) AS v", BOTH)
+case("FB3", "MATCH (p:Person) RETURN p.name AS k, [p, p.age][p.age % 2] AS v", BOTH)
+
 # fmt: on

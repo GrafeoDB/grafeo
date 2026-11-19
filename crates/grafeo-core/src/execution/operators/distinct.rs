@@ -105,7 +105,10 @@ impl Operator for DistinctOperator {
                 return Ok(None);
             };
 
-            let mut builder = DataChunkBuilder::with_capacity(&chunk.column_types(), 2048);
+            // Sized by the chunk: at most its rows are new, and a chunk of a few
+            // rows (a projection split by row type) allocates for a few.
+            let mut builder =
+                DataChunkBuilder::with_capacity(&chunk.column_types(), chunk.row_count());
             // The key columns that hold heap memory, picked once per chunk
             // (none when the operator counts nothing, or every key is flat).
             let heap = crate::execution::memory::HeapColumns::counted(

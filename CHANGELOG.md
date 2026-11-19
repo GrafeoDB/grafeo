@@ -76,6 +76,7 @@ Performance and memory release, in progress: this section lists what has landed 
 - **`SET x = null` and `SET x += null` no longer lock what they set**: a null map, written or as a parameter, changes nothing on a node or a relationship, and two open transactions running such a SET on one both commit; the second failed with a write conflict (`GRAFEO-T001`).
 - **A long explicit transaction keeps one copy of its write claims**: the log that undoes a failed statement's claims is dropped after each statement once no savepoint is open, so a bulk update in one transaction no longer holds a second copy of every claim until the commit.
 - **The CLI writes engine warnings to standard error**: with `--format json` or `csv` a warning, such as one about old spill directories, went to standard output ahead of the rows; the output now holds only the result.
+- **A RETURN value that is a node in some rows and a plain value in others comes back as the node**: `CASE WHEN c THEN n ELSE 1 END`, `coalesce(b, 1)`, an item of `[n, r, 1]` taken by a computed index, and `[n] + [1]` gave the node's or relationship's id; each row now has the type of the part it took. Until 0.7.0 such a value still gives the id when a WITH passes it on, when it is a grouping key or sits inside another such form, and when it is a GQL `||` of lists; an ORDER BY gives it as an untyped map.
 
 ## [0.6.3] - 2026-11-15
 

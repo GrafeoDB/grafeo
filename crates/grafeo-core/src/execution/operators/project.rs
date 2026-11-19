@@ -1,12 +1,12 @@
 //! Project operator for selecting and transforming columns.
 
-use super::filter::{ExpressionPredicate, FilterExpression, SessionContext};
+use super::filter::{ChosenPart, ExpressionPredicate, FilterExpression, SessionContext};
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::{DataChunk, ValueVector};
 use crate::graph::GraphStore;
 use crate::graph::lpg::{Edge, Node};
 use grafeo_common::types::{EdgeId, LogicalType, NodeId, PropertyKey, ReadView, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
 /// A projection expression.
@@ -93,6 +93,13 @@ pub enum EntityValue {
     /// (`LogicalType::Tuple`, a list literal such as `[n, 1]`) or a list of
     /// such values (`LogicalType::List`). Made by [`EntityValue::of_type`].
     Nested(LogicalType),
+    /// A value whose kind depends on the row, of a RETURN column only: the
+    /// static type of each part of a CASE (its WHEN results, then its ELSE),
+    /// of a `coalesce` (its arguments), of a list taken from by a computed
+    /// index (its items), or the item types of the two sides of a list `+`.
+    /// Each row has the type of the part it came from (see [`ChosenPart`]),
+    /// and the projection starts a chunk where that type changes.
+    PerRow(Vec<LogicalType>),
 }
 
 impl EntityValue {
@@ -119,6 +126,8 @@ impl EntityValue {
             Self::Nodes => LogicalType::List(Box::new(LogicalType::Node)),
             Self::Edges => LogicalType::List(Box::new(LogicalType::Edge)),
             Self::Nested(value_type) => value_type.clone(),
+            // One type per row: none for the column.
+            Self::PerRow(_) => LogicalType::Any,
         }
     }
 
@@ -360,6 +369,9 @@ pub struct ProjectOperator {
     store: Option<(Arc<dyn GraphStore>, ReadView)>,
     /// Session context for introspection functions in expression evaluation.
     session_context: SessionContext,
+    /// Output chunks still to give: the runs after the first of an input
+    /// chunk whose per-row column changes type (see [`EntityValue::PerRow`]).
+    pending: VecDeque<DataChunk>,
 }
 
 impl ProjectOperator {
@@ -381,6 +393,7 @@ impl ProjectOperator {
             output_types,
             store: None,
             session_context: SessionContext::default(),
+            pending: VecDeque::new(),
         }
     }
 
@@ -405,6 +418,7 @@ impl ProjectOperator {
             output_types,
             store: Some((store, view)),
             session_context: SessionContext::default(),
+            pending: VecDeque::new(),
         }
     }
 
@@ -440,6 +454,9 @@ impl ProjectOperator {
 
 impl Operator for ProjectOperator {
     fn next(&mut self) -> OperatorResult {
+        if let Some(chunk) = self.pending.pop_front() {
+            return Ok(Some(chunk));
+        }
         // Get next chunk from child
         let Some(input) = self.child.next()? else {
             return Ok(None);
@@ -447,6 +464,8 @@ impl Operator for ProjectOperator {
 
         // Create output chunk
         let mut output = DataChunk::with_capacity(&self.output_types, input.row_count());
+        // The per-row columns: their index, values and each row's type.
+        let mut per_row: Vec<(usize, Vec<Value>, Vec<LogicalType>)> = Vec::new();
 
         // Evaluate each projection
         for (i, proj) in self.projections.iter().enumerate() {
@@ -687,6 +706,19 @@ impl Operator for ProjectOperator {
                     )
                     .with_session_context(self.session_context.clone());
 
+                    if let EntityValue::PerRow(parts) = kind {
+                        let mut values = Vec::with_capacity(input.row_count());
+                        let mut types = Vec::with_capacity(input.row_count());
+                        for row in input.selected_indices() {
+                            let (value, part) = evaluator.eval_choosing(&input, row)?;
+                            let value = value.unwrap_or(Value::Null);
+                            let row_type = part_type(parts, part, &value);
+                            values.push(resolve_entities(store.as_ref(), view, &value, &row_type)?);
+                            types.push(row_type);
+                        }
+                        per_row.push((i, values, types));
+                        continue;
+                    }
                     let shape = kind.logical_type();
                     for row in input.selected_indices() {
                         let value = evaluator.eval_at(&input, row)?.unwrap_or(Value::Null);
@@ -724,10 +756,18 @@ impl Operator for ProjectOperator {
         }
 
         output.set_count(input.row_count());
-        Ok(Some(output))
+        // An empty chunk stays one chunk: no chunk would end the stream.
+        if per_row.is_empty() || input.row_count() == 0 {
+            return Ok(Some(output));
+        }
+        let mut runs = split_per_row(output, per_row, input.row_count()).into_iter();
+        let first = runs.next();
+        self.pending.extend(runs);
+        Ok(first)
     }
 
     fn reset(&mut self) {
+        self.pending.clear();
         self.child.reset();
     }
 
@@ -738,6 +778,130 @@ impl Operator for ProjectOperator {
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
         self
     }
+}
+
+/// The type of a row's value in a [`EntityValue::PerRow`] column: the type of
+/// the part it came from, for a list `+` a tuple of each side's item type,
+/// and `Any` when no part gave it (a null).
+fn part_type(parts: &[LogicalType], part: ChosenPart, value: &Value) -> LogicalType {
+    match (part, value) {
+        (ChosenPart::Part(index), _) => parts.get(index).cloned().unwrap_or(LogicalType::Any),
+        (ChosenPart::Joined(left), Value::List(items)) => {
+            let side = |index: usize| parts.get(index).cloned().unwrap_or(LogicalType::Any);
+            LogicalType::Tuple(
+                (0..items.len())
+                    .map(|item| side(usize::from(item >= left)))
+                    .collect(),
+            )
+        }
+        _ => LogicalType::Any,
+    }
+}
+
+/// The vector type of a run of rows of type `row_type`: records of it when
+/// it holds a node or an edge, plain values otherwise.
+fn run_vector_type(row_type: &LogicalType) -> LogicalType {
+    if holds_entities(row_type) {
+        LogicalType::Records(Box::new(row_type.clone()))
+    } else {
+        LogicalType::Any
+    }
+}
+
+/// `output`'s `rows` with the `per_row` columns filled in, as chunks of
+/// consecutive rows whose per-row columns share a vector type (a null fits
+/// any): `output` itself when one run holds every row, otherwise one chunk
+/// per run, each row copied once.
+fn split_per_row(
+    mut output: DataChunk,
+    per_row: Vec<(usize, Vec<Value>, Vec<LogicalType>)>,
+    rows: usize,
+) -> Vec<DataChunk> {
+    let width = per_row.len();
+    // Whether the rows `left` and `right` of a per-row column go into one
+    // vector: both hold no node or edge (plain values), or both have one type.
+    // Compared in place: no vector type is built per row.
+    let same_vector = |column: usize, left: usize, right: usize| {
+        let types = &per_row[column].2;
+        let (left, right) = (&types[left], &types[right]);
+        match (holds_entities(left), holds_entities(right)) {
+            (false, false) => true,
+            (true, true) => left == right,
+            _ => false,
+        }
+    };
+    // The runs, flat: each one's end row, and per per-row column a row that
+    // gives the run its type (`None` while every row of it is null, which
+    // fits any). Nothing is allocated per run but its vector.
+    let mut ends: Vec<usize> = Vec::new();
+    let mut typed_by: Vec<Option<usize>> = Vec::new();
+    let mut current: Vec<Option<usize>> = vec![None; width];
+    for row in 0..rows {
+        let fits = (0..width).all(|column| match current[column] {
+            Some(known) if !per_row[column].1[row].is_null() => same_vector(column, known, row),
+            _ => true,
+        });
+        if !fits {
+            ends.push(row);
+            typed_by.extend_from_slice(&current);
+            current.fill(None);
+        }
+        for (column, known) in current.iter_mut().enumerate() {
+            if known.is_none() && !per_row[column].1[row].is_null() {
+                *known = Some(row);
+            }
+        }
+    }
+    ends.push(rows);
+    typed_by.extend_from_slice(&current);
+    let mut columns: Vec<(usize, std::vec::IntoIter<Value>, Vec<LogicalType>)> = per_row
+        .into_iter()
+        .map(|(index, values, types)| (index, values.into_iter(), types))
+        .collect();
+    let indexes: Vec<usize> = columns.iter().map(|(index, _, _)| *index).collect();
+    // The vector of `len` rows of per-row column `column` in run `run`.
+    let mut vector = |column: usize, run: usize, len: usize| {
+        let (_, values, types) = &mut columns[column];
+        let vector_type = typed_by[run * width + column]
+            .map_or(LogicalType::Any, |row| run_vector_type(&types[row]));
+        let mut vector = ValueVector::with_capacity(vector_type, len);
+        for value in values.take(len) {
+            vector.push_value(value);
+        }
+        vector
+    };
+    if ends.len() == 1 {
+        for (column, index) in indexes.iter().enumerate() {
+            *output
+                .column_mut(*index)
+                .expect("column exists: index matches projection schema") = vector(column, 0, rows);
+        }
+        return vec![output];
+    }
+    let mut chunks = Vec::with_capacity(ends.len());
+    let mut start = 0;
+    for (run, &end) in ends.iter().enumerate() {
+        let len = end - start;
+        let run_columns = (0..output.column_count())
+            .map(|column| {
+                if let Some(position) = indexes.iter().position(|index| *index == column) {
+                    vector(position, run, len)
+                } else {
+                    let source = output
+                        .column(column)
+                        .expect("column exists: index matches projection schema");
+                    let mut vector = ValueVector::with_capacity(source.data_type().clone(), len);
+                    for row in start..end {
+                        vector.push_value(source.get_value(row).unwrap_or(Value::Null));
+                    }
+                    vector
+                }
+            })
+            .collect();
+        chunks.push(DataChunk::new(run_columns));
+        start = end;
+    }
+    chunks
 }
 
 /// Replaces the entity ids in `value` with node or edge maps, where its

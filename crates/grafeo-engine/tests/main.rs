@@ -240,6 +240,7 @@ mod merge_set_labels;
 mod merge_without_index;
 mod metrics_integration;
 mod migration_image_check;
+mod mixed_kind_columns;
 mod mmr_search;
 mod multi_label_scan_order;
 mod mutation_planning;

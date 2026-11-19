@@ -2,7 +2,9 @@
 
 Values holding a marker are written, deleted, compacted and the database closed; the
 process's own memory then holds no copy of the marker. The check runs in a child process
-where glibc overwrites every block it frees (``MALLOC_PERTURB_``) and Python allocates its
+where glibc overwrites every block it frees (``MALLOC_PERTURB_``), with its per-thread cache
+of freed blocks off (``glibc.malloc.tcache_count=0``: a block that cache takes keeps all but
+its first 16 bytes, as the cache returns before the overwrite), and Python allocates its
 small objects with malloc too (``PYTHONMALLOC=malloc``), so freed memory holds no marker.
 
 The marker exists whole only inside Grafeo: the query joins its two halves with ``||``, and
@@ -118,7 +120,12 @@ def child(directory):
 
 
 def test_deleted_values_leave_the_memory_grafeo_allocated(tmp_path):
-    environment = dict(os.environ, MALLOC_PERTURB_="165", PYTHONMALLOC="malloc")
+    tunables = ":".join(
+        part for part in (os.environ.get("GLIBC_TUNABLES"), "glibc.malloc.tcache_count=0") if part
+    )
+    environment = dict(
+        os.environ, MALLOC_PERTURB_="165", PYTHONMALLOC="malloc", GLIBC_TUNABLES=tunables
+    )
     run = subprocess.run(
         [sys.executable, __file__, str(tmp_path)],
         capture_output=True,

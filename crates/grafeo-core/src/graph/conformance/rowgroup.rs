@@ -1283,3 +1283,132 @@ fn fast_reads_agree_with_the_row_by_row_reads_at_every_view() {
     }
     open.roll_back().unwrap();
 }
+
+/// An edge type filter holds while the store's types do, and resolves again when they
+/// change: a type created after the filter was made is found on the next read with it,
+/// an unknown name reads no edges until it is created, the same filter read against
+/// another store (whose ids for the names differ) reads that store's own edges, filters
+/// read in turn each read their own, and once the filters go the store holds none of
+/// the query's strings.
+#[test]
+fn an_edge_type_filter_resolves_again_when_the_types_change() {
+    use grafeo_common::types::EdgeId;
+
+    use crate::graph::traits::{EdgeTypeFilter, FilteredHop};
+
+    fn is_send_and_sync<T: Send + Sync>() {}
+    is_send_and_sync::<EdgeTypeFilter>();
+
+    let edges = |store: &RowGroupStore, node, filter: &mut EdgeTypeFilter, view| {
+        store
+            .edges_with_filter(node, Direction::Outgoing, filter, view)
+            .unwrap()
+            .into_iter()
+            .map(|(_, edge)| edge)
+            .collect::<Vec<EdgeId>>()
+    };
+    let store = RowGroupStore::new();
+    let people = people(&store).unwrap();
+    let fresh = vec![ArcStr::from(String::from("FRESH"))];
+    let mut filter = store.edge_type_filter(&fresh);
+    let mut tx = Tx::begin(&store, 10);
+    assert!(
+        edges(&store, people.alix, &mut filter, tx.handle.view()).is_empty(),
+        "no type FRESH yet"
+    );
+    let made = tx
+        .create_edge(people.alix, people.gus, "FRESH", &[])
+        .unwrap();
+    assert_eq!(
+        edges(&store, people.alix, &mut filter, tx.handle.view()),
+        [made],
+        "the same filter finds it"
+    );
+
+    // Another store, whose ids for the names differ: the one filter reads each its own.
+    let other = RowGroupStore::new();
+    let other_people = super::people(&other).unwrap();
+    let mut other_tx = Tx::begin(&other, 10);
+    other_tx
+        .create_edge(other_people.gus, other_people.mia, "SPARE", &[])
+        .unwrap();
+    let other_made = other_tx
+        .create_edge(other_people.alix, other_people.mia, "FRESH", &[])
+        .unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            edges(&store, people.alix, &mut filter, tx.handle.view()),
+            [made]
+        );
+        assert_eq!(
+            edges(
+                &other,
+                other_people.alix,
+                &mut filter,
+                other_tx.handle.view()
+            ),
+            [other_made]
+        );
+    }
+
+    // Filters read in turn, as a join reads three, through the intersection too.
+    let names = ["T0", "T1", "T2", "T3", "T4", "T5"];
+    let lists: Vec<Vec<ArcStr>> = names
+        .iter()
+        .map(|name| vec![ArcStr::from(String::from(*name))])
+        .collect();
+    let mut filters: Vec<EdgeTypeFilter> = lists
+        .iter()
+        .map(|list| store.edge_type_filter(list))
+        .collect();
+    let made: Vec<EdgeId> = names
+        .iter()
+        .map(|name| tx.create_edge(people.alix, people.mia, name, &[]).unwrap())
+        .collect();
+    let back = tx.create_edge(people.gus, people.mia, "T1", &[]).unwrap();
+    for _ in 0..3 {
+        for (filter, edge) in filters.iter_mut().zip(&made) {
+            assert_eq!(
+                edges(&store, people.alix, filter, tx.handle.view()),
+                [*edge]
+            );
+        }
+        let (near, far) = filters.split_at_mut(1);
+        let (common, _) = store
+            .common_edges_with_filter(
+                FilteredHop {
+                    node: people.alix,
+                    direction: Direction::Outgoing,
+                    filter: &mut near[0],
+                },
+                FilteredHop {
+                    node: people.gus,
+                    direction: Direction::Outgoing,
+                    filter: &mut far[0],
+                },
+                tx.handle.view(),
+            )
+            .unwrap();
+        assert_eq!(
+            common
+                .iter()
+                .map(|found| (found.node, found.near_edge, found.far_edge))
+                .collect::<Vec<_>>(),
+            [(people.mia, made[0], back)],
+            "T0 from Alix meets T1 from Gus at Mia"
+        );
+    }
+    other_tx.roll_back().unwrap();
+    tx.roll_back().unwrap();
+    drop((filter, filters));
+    assert_eq!(
+        ArcStr::strong_count(&fresh[0]),
+        Some(1),
+        "the store holds none of the query's strings"
+    );
+    assert!(
+        lists
+            .iter()
+            .all(|list| ArcStr::strong_count(&list[0]) == Some(1))
+    );
+}

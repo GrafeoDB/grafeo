@@ -6,6 +6,7 @@ use super::{Operator, OperatorError, OperatorResult, ReadCounter, SeekKey};
 use crate::execution::DataChunk;
 use crate::graph::Direction;
 use crate::graph::GraphStore;
+use crate::graph::traits::EdgeTypeFilter;
 use grafeo_common::types::{ArcStr, EdgeId, LogicalType, NodeId, ReadView, Value};
 use std::sync::Arc;
 
@@ -56,8 +57,9 @@ pub struct ExpandOperator {
     source_column: usize,
     /// Direction of edge traversal.
     direction: Direction,
-    /// The edge types to follow, as stored (every type when empty).
-    edge_types: Vec<ArcStr>,
+    /// The edge types to follow, as stored (every type when empty), prepared by the
+    /// store once for every row's read.
+    edge_types: EdgeTypeFilter,
     /// What is known of the node each row's edges end at.
     target: HopTarget,
     /// Chunk capacity.
@@ -116,12 +118,13 @@ impl ExpandOperator {
         edge_types: Vec<String>,
         view: ReadView,
     ) -> Self {
+        let edge_types = store.edge_type_filter(&stored_types(edge_types));
         Self {
             store,
             input,
             source_column,
             direction,
-            edge_types: stored_types(edge_types),
+            edge_types,
             target: HopTarget::Unknown,
             chunk_capacity: 2048,
             current_input: None,
@@ -281,12 +284,12 @@ impl ExpandOperator {
         let HopTarget::Nodes(nodes) = &self.target else {
             return Ok(None);
         };
-        if self.direction == Direction::Both || self.edge_types.len() != 1 {
+        if self.direction == Direction::Both || self.edge_types.names().len() != 1 {
             return Ok(None);
         }
         let long = self
             .store
-            .edge_entries_at_most(source, self.direction, &self.edge_types, self.view)
+            .edge_entries_at_most(source, self.direction, self.edge_types.names(), self.view)
             .is_some_and(|entries| entries > nodes.len().saturating_mul(ENTRIES_PER_TARGET));
         if !long {
             return Ok(None);
@@ -297,7 +300,7 @@ impl ExpandOperator {
                 source,
                 *target,
                 self.direction,
-                &self.edge_types,
+                self.edge_types.names(),
                 self.view,
             )?;
             super::read_counter::count(self.reads.as_deref(), found.len());
@@ -345,22 +348,20 @@ impl ExpandOperator {
                 source_id,
                 target,
                 self.direction,
-                &self.edge_types,
+                self.edge_types.names(),
                 self.view,
             )?;
             super::read_counter::count(self.reads.as_deref(), edges.len());
             edges.into_iter().map(|edge| (target, edge)).collect()
         } else {
-            visible_edges_from(
-                self.store.as_ref(),
+            let edges = self.store.edges_with_filter(
                 source_id,
                 self.direction,
-                &EdgeWalk {
-                    edge_types: &self.edge_types,
-                    view: self.view,
-                    reads: self.reads.as_deref(),
-                },
-            )?
+                &mut self.edge_types,
+                self.view,
+            )?;
+            super::read_counter::count(self.reads.as_deref(), edges.len());
+            edges
         };
         // Edges found target by target have the right ends already; this costs them a search.
         if let HopTarget::Nodes(nodes) = &self.target {

@@ -2,7 +2,7 @@
 //! through `GraphBackend` and the read traits only.
 
 use grafeo_common::change::{Before, DataOp, Table};
-use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, Value};
+use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, ReadView, Value};
 
 use super::{
     Image, LABELS, Outcome, Reader, Rng, Store, Tx, apply_all, committed, committed_view, counts,
@@ -11,6 +11,7 @@ use super::{
 };
 use crate::graph::Direction;
 use crate::graph::apply::{Applied, ApplyError, Writer};
+use crate::graph::traits::{EdgeTypeFilter, FilteredHop, HopFrom};
 
 /// The nodes and edges two images hold, without their problems.
 fn data(
@@ -1191,6 +1192,127 @@ fn ends_seen<S: Store>(store: &S, reader: Reader, what: &str) -> Outcome {
                 &edges.len(),
                 &format!("{what}: node {raw}'s degree ({direction:?})"),
             )?;
+        }
+    }
+    Ok(())
+}
+
+/// The reads that take an edge type filter answer as the reads by name: the same edges in
+/// the same order, and the same nodes in common with the same entries read, for every type
+/// list, way and pair of nodes, at a transaction's view and at a committed reader's. The
+/// filters are made before any edge type exists and kept through a seeded workload, so a
+/// read after a new type resolves again.
+pub(crate) fn the_edge_type_filter_reads_as_the_names<S: Store>(make: &dyn Fn() -> S) -> Outcome {
+    let lists: Vec<Vec<ArcStr>> = std::iter::once(&[][..])
+        .chain(super::TYPES)
+        .map(|types| types.iter().map(|name| ArcStr::from(*name)).collect())
+        .collect();
+    for seed in 1..=6 {
+        let store = make();
+        let mut rng = Rng::new(seed);
+        let filters = || -> Vec<EdgeTypeFilter> {
+            lists
+                .iter()
+                .map(|names| store.edge_type_filter(names))
+                .collect()
+        };
+        let (mut near, mut far) = (filters(), filters());
+        for transaction in 0..8_u64 {
+            let mut tx = Tx::begin(&store, 300 + transaction);
+            for _ in 0..12 {
+                random_write(&mut tx, &mut rng)?;
+            }
+            let what = format!("seed {seed}, transaction {transaction}");
+            let own = super::read_view(Reader::Transaction(tx.id, tx.snapshot));
+            filters_read_as_names(&store, own, &lists, (&mut near, &mut far), &what)?;
+            if rng.below(3) == 0 {
+                tx.roll_back()?;
+            } else {
+                tx.commit()?;
+            }
+            let committed = committed_view(&store);
+            let what = format!("{what}, committed");
+            filters_read_as_names(&store, committed, &lists, (&mut near, &mut far), &what)?;
+        }
+    }
+    Ok(())
+}
+
+/// [`the_edge_type_filter_reads_as_the_names`] at `view`: `near` and `far` hold a filter of
+/// each of `lists`, in its order.
+fn filters_read_as_names<S: Store>(
+    store: &S,
+    view: ReadView,
+    lists: &[Vec<ArcStr>],
+    (near, far): (&mut [EdgeTypeFilter], &mut [EdgeTypeFilter]),
+    what: &str,
+) -> Outcome {
+    const WAYS: [Direction; 3] = [Direction::Outgoing, Direction::Incoming, Direction::Both];
+    let mut nodes = ok(store.node_ids(view), "node_ids");
+    // A node no reader sees has no edges either way.
+    nodes.push(NodeId::new(1 << 40));
+    for (index, names) in lists.iter().enumerate() {
+        for &node in &nodes {
+            for direction in WAYS {
+                same(
+                    &ok(
+                        store.edges_with_filter(node, direction, &mut near[index], view),
+                        "edges_with_filter",
+                    ),
+                    &ok(store.edges(node, direction, names, view), "edges"),
+                    &format!("{what}: edges of {node:?} {direction:?} {names:?}"),
+                )?;
+            }
+        }
+        for far_index in [index, (index + 1) % lists.len()] {
+            let far_names = &lists[far_index];
+            for &a in nodes.iter().take(6) {
+                for &b in nodes.iter().rev().take(6) {
+                    for (near_way, far_way) in WAYS.into_iter().flat_map(|near_way| {
+                        WAYS.into_iter().map(move |far_way| (near_way, far_way))
+                    }) {
+                        let by_filter = ok(
+                            store.common_edges_with_filter(
+                                FilteredHop {
+                                    node: a,
+                                    direction: near_way,
+                                    filter: &mut near[index],
+                                },
+                                FilteredHop {
+                                    node: b,
+                                    direction: far_way,
+                                    filter: &mut far[far_index],
+                                },
+                                view,
+                            ),
+                            "common_edges_with_filter",
+                        );
+                        let by_names = ok(
+                            store.common_edges(
+                                &HopFrom {
+                                    node: a,
+                                    direction: near_way,
+                                    edge_types: names,
+                                },
+                                &HopFrom {
+                                    node: b,
+                                    direction: far_way,
+                                    edge_types: far_names,
+                                },
+                                view,
+                            ),
+                            "common_edges",
+                        );
+                        same(
+                            &by_filter,
+                            &by_names,
+                            &format!(
+                                "{what}: common edges of {a:?} {near_way:?} {names:?} and {b:?} {far_way:?} {far_names:?}"
+                            ),
+                        )?;
+                    }
+                }
+            }
         }
     }
     Ok(())

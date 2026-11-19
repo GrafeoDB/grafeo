@@ -87,6 +87,73 @@ pub struct HopFrom<'a> {
     pub edge_types: &'a [ArcStr],
 }
 
+/// The edge types a traversal follows, prepared by the store it reads
+/// ([`GraphStore::edge_type_filter`]). An operator builds one when it opens and
+/// passes it on every read, so a store turns the names into its own ids once
+/// rather than on every row. It holds the names and, from a store that
+/// prepares them, that store's resolved form, which the store checks on each
+/// read: a type created since, or another store, resolves again.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct EdgeTypeFilter {
+    names: Vec<ArcStr>,
+    /// The row-group store's ids of the names, `None` until a read resolves them.
+    pub(crate) resolved: Option<ResolvedEdgeTypes>,
+}
+
+impl EdgeTypeFilter {
+    /// A filter of `names` that no store has resolved: what the default
+    /// [`GraphStore::edge_type_filter`] gives.
+    pub(crate) fn of_names(names: &[ArcStr]) -> Self {
+        Self {
+            names: names.to_vec(),
+            resolved: None,
+        }
+    }
+
+    /// The edge types it follows, as stored (every type when empty).
+    #[must_use]
+    pub fn names(&self) -> &[ArcStr] {
+        &self.names
+    }
+}
+
+/// The ids a row-group store resolved a filter's names to, valid for that store
+/// while its edge type dictionary keeps the stamp they were read at.
+#[derive(Debug)]
+pub(crate) struct ResolvedEdgeTypes {
+    /// The store that resolved them.
+    pub(crate) store: u64,
+    /// The stamp of its edge type dictionary when it did.
+    pub(crate) stamp: u64,
+    /// The ids of the names it has; empty when it has none of them.
+    pub(crate) ids: SmallVec<[u32; 4]>,
+}
+
+/// One side of [`GraphStore::common_edges_with_filter`]: [`HopFrom`] with its
+/// edge types prepared.
+#[derive(Debug)]
+pub struct FilteredHop<'a> {
+    /// The node.
+    pub node: NodeId,
+    /// The way the list goes.
+    pub direction: Direction,
+    /// The edge types it holds.
+    pub filter: &'a mut EdgeTypeFilter,
+}
+
+impl FilteredHop<'_> {
+    /// The same hop by its names.
+    #[must_use]
+    pub fn as_hop(&self) -> HopFrom<'_> {
+        HopFrom {
+            node: self.node,
+            direction: self.direction,
+            edge_types: self.filter.names(),
+        }
+    }
+}
+
 /// A node two lists reach, by one edge of each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CommonEdge {
@@ -145,6 +212,13 @@ pub struct KeyColumnGroup {
 /// - The defaults are exact by construction: each answers what the required
 ///   reads answer, only slower. A store overrides them to answer faster,
 ///   never differently. A default that cannot answer returns an error.
+/// - The reads that take an [`EdgeTypeFilter`] are the built-in store's fast
+///   path of a traversal: the engine's operators prepare their edge types once
+///   ([`edge_type_filter`](Self::edge_type_filter)) and read through them on
+///   every row. Only the built-in store resolves a filter; on any other store
+///   the filter forms default to the reads by name and give their results, so
+///   a store need not override either (it may, reading the filter's
+///   [`names`](EdgeTypeFilter::names)).
 ///
 /// # Object safety
 ///
@@ -441,6 +515,51 @@ pub trait GraphStore: Send + Sync {
             self.edges(near.node, near.direction, near.edge_types, view)?,
             self.edges(far.node, far.direction, far.edge_types, view)?,
         )
+    }
+
+    /// `names` prepared for the reads that take a filter
+    /// ([`edges_with_filter`](Self::edges_with_filter),
+    /// [`common_edges_with_filter`](Self::common_edges_with_filter)): an operator
+    /// builds it once and passes it on every read. The default keeps the names
+    /// only; the built-in store resolves them once, and checks on each read that
+    /// they still hold.
+    fn edge_type_filter(&self, names: &[ArcStr]) -> EdgeTypeFilter {
+        EdgeTypeFilter::of_names(names)
+    }
+
+    /// [`edges`](Self::edges) of the types of `filter`: the same edges in the
+    /// same order. The built-in store's fast path of a traversal, which reads
+    /// with the same types on every row; the name form answers alike. The
+    /// default reads [`edges`](Self::edges) with the filter's names.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn edges_with_filter(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        filter: &mut EdgeTypeFilter,
+        view: ReadView,
+    ) -> Result<Vec<(NodeId, EdgeId)>> {
+        self.edges(node, direction, filter.names(), view)
+    }
+
+    /// [`common_edges`](Self::common_edges) of the hops' filters: the same
+    /// answer, entries read included. The built-in store's fast path of an
+    /// intersection; the default reads [`common_edges`](Self::common_edges)
+    /// with the names.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn common_edges_with_filter(
+        &self,
+        near: FilteredHop<'_>,
+        far: FilteredHop<'_>,
+        view: ReadView,
+    ) -> Result<(Vec<CommonEdge>, usize)> {
+        self.common_edges(&near.as_hop(), &far.as_hop(), view)
     }
 
     /// The edges [`edges`](Self::edges) lists for `node` whose other end is

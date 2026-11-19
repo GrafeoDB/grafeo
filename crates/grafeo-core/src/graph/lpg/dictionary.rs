@@ -12,11 +12,21 @@
 //! load restores them id for id, so the ids a file's chunks hold are the ids
 //! the store uses, checkpoint after checkpoint.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use arcstr::ArcStr;
 use grafeo_common::utils::hash::FxHashMap;
 
+/// The stamps dictionaries take, each new one past every other given out.
+static STAMPS: AtomicU64 = AtomicU64::new(1);
+
+/// A stamp no dictionary has had.
+fn fresh_stamp() -> u64 {
+    STAMPS.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Names and their ids, both ways; see the module docs.
-#[derive(Debug, Default, Clone)]
+#[derive(Clone)]
 pub(crate) struct NameDictionary {
     /// Name to id.
     by_name: FxHashMap<ArcStr, u32>,
@@ -24,6 +34,32 @@ pub(crate) struct NameDictionary {
     by_id: Vec<Option<ArcStr>>,
     /// The heap bytes of the names it holds ([`name_heap`]), kept as names come and go.
     name_bytes: usize,
+    /// Which names and ids it holds: a stamp no other dictionary had, taken anew at every
+    /// change, so ids resolved from it hold while the stamp does (a clone keeps it, as it
+    /// holds the same).
+    stamp: u64,
+}
+
+impl Default for NameDictionary {
+    fn default() -> Self {
+        Self {
+            by_name: FxHashMap::default(),
+            by_id: Vec::new(),
+            name_bytes: 0,
+            stamp: fresh_stamp(),
+        }
+    }
+}
+
+/// Its names and ids, without the stamp: two dictionaries of the same names show alike.
+impl std::fmt::Debug for NameDictionary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NameDictionary")
+            .field("by_name", &self.by_name)
+            .field("by_id", &self.by_id)
+            .field("name_bytes", &self.name_bytes)
+            .finish()
+    }
 }
 
 /// The heap bytes of one name: an `ArcStr` holds its bytes after a header of two words (its
@@ -40,6 +76,11 @@ impl NameDictionary {
     /// The id of `name`, `None` when it has none.
     pub(crate) fn get_id(&self, name: &str) -> Option<u32> {
         self.by_name.get(name).copied()
+    }
+
+    /// Which names and ids the dictionary holds: equal stamps, equal lookups.
+    pub(crate) fn stamp(&self) -> u64 {
+        self.stamp
     }
 
     /// The name of `id`, `None` when it names nothing.
@@ -63,6 +104,7 @@ impl NameDictionary {
         self.name_bytes += name_heap(&name);
         self.by_name.insert(name.clone(), id);
         self.by_id.push(Some(name));
+        self.stamp = fresh_stamp();
         id
     }
 
@@ -99,6 +141,7 @@ impl NameDictionary {
         self.name_bytes += name_heap(&name);
         self.by_name.insert(name.clone(), id);
         self.by_id[at] = Some(name);
+        self.stamp = fresh_stamp();
         Ok(())
     }
 
@@ -113,6 +156,7 @@ impl NameDictionary {
         if let Some(slot) = self.by_id.get_mut(id as usize) {
             *slot = None;
         }
+        self.stamp = fresh_stamp();
         Some(id)
     }
 

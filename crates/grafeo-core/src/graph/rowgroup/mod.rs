@@ -1496,6 +1496,21 @@ pub struct RowGroupStore {
     /// The database's planning generation, which a large move of a count
     /// moves, once a database attaches it.
     planning: std::sync::OnceLock<Arc<AtomicU64>>,
+    /// Which store this is, for the edge type filters it resolves (`read`).
+    identity: StoreIdentity,
+}
+
+/// A number no other row-group store of the process has: a filter one store
+/// resolved is never read with another's ids. Not an address, which a store
+/// made after a dropped one may reuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StoreIdentity(pub(crate) u64);
+
+impl Default for StoreIdentity {
+    fn default() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
 }
 
 /// What a collect took out: rows, and the values and label sets kept for

@@ -128,6 +128,7 @@ mod direct_write_atomicity;
 mod downgrade_fixtures;
 mod duplicate_column_disambiguation;
 mod edge_endpoint_conflicts;
+mod edge_type_filter;
 mod edge_type_lists;
 mod edge_type_names;
 mod element_and_temporal_functions;

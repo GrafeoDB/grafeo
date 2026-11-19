@@ -168,6 +168,15 @@ pub trait ConstraintValidator: Send + Sync {
         true
     }
 
+    /// Whether checking a new node of `labels` reads the nodes written
+    /// before it (a UNIQUE or NODE KEY constraint of one of the labels): a
+    /// bulk create then writes each row before it checks the next, so a value
+    /// repeated within the rows is refused.
+    fn checks_unique_nodes(&self, labels: &[String]) -> bool {
+        let _ = labels;
+        true
+    }
+
     /// Whether checking `value` for property `key` of an existing node needs
     /// the node's labels or its other properties. When no value a SET writes
     /// does, a writer checks each value on its own (with no labels) and does

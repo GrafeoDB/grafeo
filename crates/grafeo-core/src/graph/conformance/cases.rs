@@ -985,6 +985,189 @@ pub(crate) fn a_bulk_range_across_row_groups_commits_each_row<S: Store>(
     same_data(&committed(&store), &before, "after the bulk rollback")
 }
 
+/// A chunk of a bulk write applies its creates in order and commits with its
+/// range; a chunk refused at its last row (an end no one sees) fails, and the
+/// transaction's rollback of its range leaves the store as it was. A chunk
+/// that mixes nodes and edges, or holds an op that is no create, is refused.
+pub(crate) fn a_chunk_applies_in_order_and_a_refused_one_is_taken_back<S: Store>(
+    make: &dyn Fn() -> S,
+) -> Outcome {
+    let store = make();
+    let people = people(&store)?;
+    let (nodes_before, edges_before, _) = counts(&store, &LABELS);
+    let mut tx = Tx::begin(&store, 10);
+    let ids = store
+        .reserve_node_ids(3)
+        .map_err(|error| format!("{error:?}"))?;
+    let cities: Vec<DataOp> = ids
+        .clone()
+        .zip(["Amsterdam", "Utrecht", "Leiden"])
+        .map(|(raw, name)| DataOp::CreateNode {
+            id: NodeId::new(raw),
+            labels: labels(&["City"]),
+            properties: properties(&[("name", Value::from(name))]),
+        })
+        .collect();
+    store
+        .apply_chunk(&cities, tx.writer())
+        .map_err(|error| format!("a chunk of nodes: {error:?}"))?;
+    let edge_ids = store
+        .reserve_edge_ids(3)
+        .map_err(|error| format!("{error:?}"))?;
+    let city = |index: usize| NodeId::new(ids.start + index as u64);
+    let routes: Vec<DataOp> = edge_ids
+        .clone()
+        .zip([
+            (city(0), city(1)),
+            (city(1), city(2)),
+            (people.alix, city(0)),
+        ])
+        .map(|(raw, (src, dst))| DataOp::CreateEdge {
+            id: EdgeId::new(raw),
+            src,
+            dst,
+            edge_type: ArcStr::from("ROUTE"),
+            properties: properties(&[]),
+        })
+        .collect();
+    store
+        .apply_chunk(&routes, tx.writer())
+        .map_err(|error| format!("a chunk of edges: {error:?}"))?;
+    let mixed = [cities[0].clone(), routes[0].clone()];
+    ensure(
+        matches!(
+            store.apply_chunk(&mixed, tx.writer()),
+            Err(ApplyError::Refused(_))
+        ),
+        || "a chunk of nodes and edges is refused".to_string(),
+    )?;
+    tx.push_bulk(Table::Nodes, ids.clone())?;
+    tx.push_bulk(Table::Edges, edge_ids.clone())?;
+    let epoch = tx.commit()?;
+    let after = image(&store, Reader::At(epoch));
+    after.consistent("after the chunks commit")?;
+    after.has_node(city(2), &["City"], "name", Some(&Value::from("Leiden")))?;
+    same(
+        &(after.nodes.len(), after.edges.len()),
+        &(nodes_before + 3, edges_before + 3),
+        "the chunks' rows are seen",
+    )?;
+    let route = |raw: u64| after.edges.get(&raw).map(|edge| (edge.0, edge.1));
+    same(
+        &edge_ids.clone().map(route).collect::<Vec<_>>(),
+        &vec![
+            Some((city(0).as_u64(), city(1).as_u64())),
+            Some((city(1).as_u64(), city(2).as_u64())),
+            Some((people.alix.as_u64(), city(0).as_u64())),
+        ],
+        "each edge has its ends, in the chunk's order",
+    )?;
+
+    let before = committed(&store);
+    let mut tx = Tx::begin(&store, 11);
+    let edge_ids = store
+        .reserve_edge_ids(3)
+        .map_err(|error| format!("{error:?}"))?;
+    let nowhere = NodeId::new(
+        store
+            .reserve_node_ids(1)
+            .map_err(|error| format!("{error:?}"))?
+            .start,
+    );
+    let refused: Vec<DataOp> = edge_ids
+        .clone()
+        .zip([
+            (city(0), people.gus),
+            (people.gus, city(2)),
+            (city(1), nowhere),
+        ])
+        .map(|(raw, (src, dst))| DataOp::CreateEdge {
+            id: EdgeId::new(raw),
+            src,
+            dst,
+            edge_type: ArcStr::from("ROUTE"),
+            properties: properties(&[]),
+        })
+        .collect();
+    let failed = store.apply_chunk(&refused, tx.writer());
+    ensure(matches!(failed, Err(ApplyError::Missing(_))), || {
+        format!("a chunk whose last edge ends nowhere fails: {failed:?}")
+    })?;
+    tx.push_bulk(Table::Edges, edge_ids)?;
+    tx.roll_back()?;
+    same_data(
+        &committed(&store),
+        &before,
+        "after the refused chunk's rollback",
+    )
+}
+
+/// Replay of a logged group's creates as chunks builds what replay of the
+/// same creates one at a time builds: the same nodes, edges, counts, epoch
+/// and next ids. Self-loops and parallel edges included.
+pub(crate) fn a_replayed_chunk_builds_what_its_rows_build<S: Store>(
+    make: &dyn Fn() -> S,
+) -> Outcome {
+    let (one_at_a_time, chunked) = (make(), make());
+    let first = reserve_node(&one_at_a_time)?;
+    let epoch = next_epoch(&one_at_a_time);
+    let names = ["Vincent", "Jules", "Mia", "Butch", "Django"];
+    let node = |index: usize| NodeId::new(first + index as u64);
+    let nodes: Vec<DataOp> = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| DataOp::CreateNode {
+            id: node(index),
+            labels: labels(&["Person"]),
+            properties: properties(&[("name", Value::from(*name))]),
+        })
+        .collect();
+    let first_edge = reserve_edge(&one_at_a_time)?;
+    let ends = [(0, 1), (1, 2), (2, 0), (3, 3), (3, 4), (3, 4), (4, 0)];
+    let edges: Vec<DataOp> = ends
+        .iter()
+        .enumerate()
+        .map(|(index, &(src, dst))| DataOp::CreateEdge {
+            id: EdgeId::new(first_edge + index as u64),
+            src: node(src),
+            dst: node(dst),
+            edge_type: ArcStr::from(if index % 2 == 0 { "KNOWS" } else { "LIKES" }),
+            properties: properties(&[(
+                "since",
+                Value::Int64(2_000 + i64::try_from(index).expect("a few edges")),
+            )]),
+        })
+        .collect();
+    let writer = Writer::Replay { epoch };
+    apply_all(&one_at_a_time, &nodes, writer)?;
+    apply_all(&one_at_a_time, &edges, writer)?;
+    for chunk in [&nodes, &edges] {
+        chunked
+            .apply_chunk(chunk, writer)
+            .map_err(|error| format!("a replayed chunk: {error:?}"))?;
+    }
+    same_data(
+        &committed(&chunked),
+        &committed(&one_at_a_time),
+        "the replayed chunks",
+    )?;
+    same(
+        &counts(&chunked, &LABELS),
+        &counts(&one_at_a_time, &LABELS),
+        "the counts",
+    )?;
+    same(
+        &chunked.committed_epoch(),
+        &one_at_a_time.committed_epoch(),
+        "the epoch",
+    )?;
+    same(
+        &(reserve_node(&chunked)?, reserve_edge(&chunked)?),
+        &(reserve_node(&one_at_a_time)?, reserve_edge(&one_at_a_time)?),
+        "the next ids",
+    )
+}
+
 /// The counts move when a transaction commits, by what it wrote, and not
 /// while it is open or when it rolls back.
 pub(crate) fn counts_move_at_commit_only<S: Store>(make: &dyn Fn() -> S) -> Outcome {

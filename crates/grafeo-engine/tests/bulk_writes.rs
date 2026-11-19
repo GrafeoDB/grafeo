@@ -108,6 +108,44 @@ fn a_failing_row_undoes_the_whole_batch() {
     );
 }
 
+/// A value repeated within one batch under a uniqueness constraint fails the
+/// batch and leaves nothing of it, on one key and on a node key of two: each
+/// row is checked against the rows before it, also the ones of its chunk.
+#[cfg(feature = "cypher")]
+#[test]
+fn a_unique_value_repeated_within_a_batch_fails_it() {
+    let pair = |first: &str, last: &str| {
+        HashMap::from([
+            (PropertyKey::new("first"), Value::from(first)),
+            (PropertyKey::new("last"), Value::from(last)),
+        ])
+    };
+    let db = GrafeoDB::new_in_memory();
+    db.execute_cypher("CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS UNIQUE")
+        .unwrap();
+    db.execute_cypher("CREATE CONSTRAINT FOR (c:Character) REQUIRE (c.first, c.last) IS NODE KEY")
+        .unwrap();
+    db.batch_create_nodes_with_props(
+        "Person",
+        vec![person("Mia"), person("Jules"), person("Mia")],
+    )
+    .unwrap_err();
+    db.batch_create_nodes_with_props(
+        "Character",
+        vec![
+            pair("Mia", "Wallace"),
+            pair("Butch", "Coolidge"),
+            pair("Mia", "Wallace"),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(column(&db, "MATCH (n) RETURN count(n)"), ["0"]);
+    let created = db
+        .batch_create_nodes_with_props("Person", vec![person("Mia"), person("Jules")])
+        .unwrap();
+    assert_eq!(created.len(), 2);
+}
+
 /// The ids a batch reserved are never handed out again once it is rolled
 /// back: not by the next batch, not by a single create.
 #[test]
@@ -320,6 +358,82 @@ mod crash {
             ["3"],
             "a batch's values replay too"
         );
+        db.close().unwrap();
+    }
+
+    /// The people and edges of [`replayed_lists`]: 300 people, then 7,000
+    /// edges in a seeded order (several chunks), a tenth of them self-loops
+    /// and a tenth repeats of the edge before, of two types.
+    fn many_edges(db: &GrafeoDB) {
+        let people = db
+            .batch_create_nodes_with_props(
+                "Person",
+                (0..300).map(|i| person(&format!("p{i:03}"))).collect(),
+            )
+            .unwrap();
+        let mut state = 0x5EED_0E3E_u64;
+        let mut below = |bound: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            usize::try_from(state % bound as u64).unwrap()
+        };
+        let mut edges: Vec<(usize, usize, &str)> = Vec::new();
+        for at in 0..7_000 {
+            let edge = if at > 0 && below(10) == 0 {
+                edges[at - 1]
+            } else {
+                let src = below(people.len());
+                let dst = if below(10) == 0 {
+                    src
+                } else {
+                    below(people.len())
+                };
+                (src, dst, if below(2) == 0 { "KNOWS" } else { "LIKES" })
+            };
+            edges.push(edge);
+        }
+        db.batch_create_edges(
+            edges
+                .iter()
+                .map(|&(src, dst, edge_type)| BatchEdge::new(people[src], people[dst], edge_type))
+                .collect(),
+        )
+        .unwrap();
+    }
+
+    /// Every person's outgoing and incoming edges, by type and the other
+    /// end's name, sorted.
+    fn lists(db: &GrafeoDB) -> Vec<String> {
+        let mut lists = column(
+            db,
+            "MATCH (a:Person)-[r]->(b:Person) RETURN a.name + ' ' + type(r) + ' ' + b.name",
+        );
+        lists.extend(column(
+            db,
+            "MATCH (a:Person)<-[r]-(b:Person) RETURN a.name + ' <' + type(r) + ' ' + b.name",
+        ));
+        lists
+    }
+
+    /// Replay builds the lists the live bulk write built: every person's
+    /// edges both ways, self-loops and parallel edges included, after a crash
+    /// that leaves a load of several chunks in the WAL alone.
+    #[test]
+    fn replayed_lists() {
+        if let Some(db) = child_database() {
+            many_edges(&db);
+            // Crash: no close(), no checkpoint, no destructors.
+            std::process::exit(0);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = crashed_by(&grafeo_common::test_path!("replayed_lists"), dir.path());
+        let live = GrafeoDB::new_in_memory();
+        many_edges(&live);
+        let db = GrafeoDB::open(&path).unwrap();
+        let replayed = lists(&db);
+        assert_eq!(replayed.len(), 14_000);
+        assert_eq!(replayed, lists(&live));
         db.close().unwrap();
     }
 

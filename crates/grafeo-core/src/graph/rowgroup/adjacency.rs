@@ -243,7 +243,7 @@ impl Adjacency {
         self.offsets.capacity() * std::mem::size_of::<usize>()
     }
 
-    pub(super) fn push_sorted(&mut self, row: usize, list: &[Adjacent]) {
+    pub(super) fn push_sorted(&mut self, row: usize, list: impl IntoIterator<Item = Adjacent>) {
         if self.offsets.is_empty() {
             self.first_row = vector_start(row);
             self.offsets.push(0);
@@ -252,14 +252,14 @@ impl Adjacency {
         while self.first_row + self.offsets.len() <= row {
             self.offsets.push(self.sorted.len());
         }
-        self.sorted.extend_from_slice(list);
+        self.sorted.extend(list);
         self.offsets.push(self.sorted.len());
     }
 
     /// Adds `list` at the end of the last row's sorted list: the next piece
     /// of a list a load reads over several chunks.
-    pub(super) fn extend_last_sorted(&mut self, list: &[Adjacent]) {
-        self.sorted.extend_from_slice(list);
+    pub(super) fn extend_last_sorted(&mut self, list: impl IntoIterator<Item = Adjacent>) {
+        self.sorted.extend(list);
         if let Some(end) = self.offsets.last_mut() {
             *end = self.sorted.len();
         }
@@ -299,6 +299,61 @@ impl Adjacency {
         self.delta_bytes += list_bytes(list) - before;
         self.delta_rows.set(row);
         self.delta_len += 1;
+        if self.delta_len > MERGE_MIN.max(self.sorted.len() / 2) {
+            self.merge();
+        }
+    }
+
+    /// Adds `run`, the entries of a chunk of creates sorted by row and then
+    /// by entry. Straight to the sorted lists, one copy each, when the
+    /// adjacency is merged (no delta, nothing removed) and the run starts
+    /// past the last row with a sorted list, or at it without going below
+    /// its last entry; otherwise into the delta, a row's entries at once,
+    /// under the merge rule of [`push`](Self::push).
+    pub(super) fn push_run(&mut self, run: &[(usize, Adjacent)]) {
+        let Some(&(start, first)) = run.first() else {
+            return;
+        };
+        let last_row = self
+            .offsets
+            .len()
+            .checked_sub(2)
+            .map(|at| self.first_row + at);
+        let past_the_end = match last_row {
+            // No row has a sorted list, but a trim may have moved the rows' start up:
+            // a row below it has no offset to take.
+            None => self.offsets.is_empty() || start >= self.first_row,
+            Some(last) => {
+                start > last
+                    || (start == last
+                        && self
+                            .sorted_of(last)
+                            .last()
+                            .is_none_or(|entry| first >= *entry))
+            }
+        };
+        let rows = run.chunk_by(|a, b| a.0 == b.0);
+        fn entries(row: &[(usize, Adjacent)]) -> impl Iterator<Item = Adjacent> + '_ {
+            row.iter().map(|(_, entry)| *entry)
+        }
+        if self.is_merged() && past_the_end {
+            for row in rows {
+                if Some(row[0].0) == last_row {
+                    self.extend_last_sorted(entries(row));
+                } else {
+                    self.push_sorted(row[0].0, entries(row));
+                }
+            }
+            return;
+        }
+        for row in rows {
+            let list = self.delta.entry(row[0].0).or_default();
+            let before = list_bytes(list);
+            list.extend(entries(row));
+            self.delta_bytes += list_bytes(list) - before;
+            self.delta_rows.set(row[0].0);
+            self.delta_len += row.len();
+        }
         if self.delta_len > MERGE_MIN.max(self.sorted.len() / 2) {
             self.merge();
         }
@@ -581,6 +636,178 @@ mod tests {
         assert!(adjacency.removed.is_empty());
         adjacency.clear(1);
         assert_eq!(edges(&adjacency, 1), Vec::<u64>::new());
+    }
+
+    /// The rows and entries of `run`, sorted as a chunk hands them over.
+    fn run(entries: &[(usize, Adjacent)]) -> Vec<(usize, Adjacent)> {
+        let mut run = entries.to_vec();
+        run.sort_unstable();
+        run
+    }
+
+    /// Every row's list as `of` reads it, for `rows`.
+    fn lists(adjacency: &Adjacency, rows: std::ops::Range<usize>) -> Vec<Vec<u64>> {
+        rows.map(|row| edges(adjacency, row)).collect()
+    }
+
+    /// A run goes straight to the sorted lists only when the adjacency is
+    /// merged and the run starts past the last sorted row, or at it without
+    /// going below its last entry; any other run goes to the delta. Either way
+    /// the lists read as a push of each entry reads them.
+    #[test]
+    fn a_run_goes_to_the_sorted_lists_only_past_their_end() {
+        let base = [(1, edge(1, 5, 1)), (1, edge(2, 3, 2)), (4, edge(1, 9, 3))];
+        let cases: [(&str, Vec<(usize, Adjacent)>, bool, bool); 6] = [
+            (
+                "past the last row",
+                vec![(6, edge(1, 1, 10)), (9, edge(0, 2, 11))],
+                true,
+                true,
+            ),
+            (
+                "at the last row, above its last entry",
+                vec![
+                    (4, edge(1, 9, 10)),
+                    (4, edge(2, 0, 11)),
+                    (7, edge(0, 0, 12)),
+                ],
+                true,
+                true,
+            ),
+            (
+                "at the last row, below its last entry",
+                vec![(4, edge(1, 2, 10)), (8, edge(0, 0, 11))],
+                true,
+                false,
+            ),
+            (
+                "below the last row",
+                vec![(2, edge(0, 0, 10)), (5, edge(0, 0, 11))],
+                true,
+                false,
+            ),
+            (
+                "past the end, but a delta waits",
+                vec![(6, edge(1, 1, 10))],
+                false,
+                false,
+            ),
+            (
+                "into an empty adjacency",
+                vec![(3, edge(1, 1, 10)), (3, edge(1, 1, 11))],
+                true,
+                true,
+            ),
+        ];
+        for (what, entries, merged, straight) in cases {
+            let empty = what == "into an empty adjacency";
+            let mut pushed = Adjacency::default();
+            let mut chunked = Adjacency::default();
+            if !empty {
+                for (row, entry) in base {
+                    pushed.push(row, entry);
+                    chunked.push(row, entry);
+                }
+                pushed.merge();
+                chunked.merge();
+                if !merged {
+                    pushed.push(0, edge(0, 0, 9));
+                    chunked.push(0, edge(0, 0, 9));
+                }
+            }
+            let sorted_before = chunked.sorted.len();
+            for (row, entry) in &entries {
+                pushed.push(*row, *entry);
+            }
+            chunked.push_run(&run(&entries));
+            assert_eq!(lists(&chunked, 0..12), lists(&pushed, 0..12), "{what}");
+            if straight {
+                assert_eq!(chunked.delta_len, 0, "{what}: no delta");
+                assert_eq!(
+                    chunked.sorted.len(),
+                    sorted_before + entries.len(),
+                    "{what}"
+                );
+            } else {
+                assert_eq!(
+                    chunked.sorted.len(),
+                    sorted_before,
+                    "{what}: sorted untouched"
+                );
+            }
+            chunked.merge();
+            pushed.merge();
+            assert_eq!(
+                lists(&chunked, 0..12),
+                lists(&pushed, 0..12),
+                "{what}: merged"
+            );
+        }
+    }
+
+    /// After a trim past every list, the rows start at the trimmed row: a run below it
+    /// goes to the delta and reads back on its own rows, as pushes of its entries do.
+    #[test]
+    fn a_run_below_a_trimmed_start_goes_to_the_delta() {
+        use super::super::versions::VECTOR_ROWS;
+
+        let mut pushed = Adjacency::default();
+        let mut chunked = Adjacency::default();
+        for adjacency in [&mut pushed, &mut chunked] {
+            // Rows a load set with empty lists, then trimmed as a dead head.
+            adjacency.push_sorted(3, std::iter::empty());
+            adjacency.trim_front(2 * VECTOR_ROWS);
+            assert!(adjacency.is_merged());
+            assert_eq!(adjacency.offsets.len(), 1, "only the end is left");
+            assert_eq!(adjacency.first_row, 2 * VECTOR_ROWS);
+        }
+        let entries = [
+            (5, edge(0, 1, 10)),
+            (5, edge(1, 2, 11)),
+            (9, edge(0, 3, 12)),
+        ];
+        for (row, entry) in entries {
+            pushed.push(row, entry);
+        }
+        chunked.push_run(&run(&entries));
+        assert_eq!(
+            chunked.delta_len,
+            entries.len(),
+            "below the start: to the delta"
+        );
+        assert_eq!(lists(&chunked, 0..12), lists(&pushed, 0..12));
+        assert_eq!(edges(&chunked, 5), [10, 11]);
+        assert_eq!(edges(&chunked, 9), [12]);
+        chunked.merge();
+        pushed.merge();
+        assert_eq!(lists(&chunked, 0..12), lists(&pushed, 0..12), "merged");
+    }
+
+    /// A run with removed edges waiting goes to the delta, and a run large
+    /// enough merges as pushes of its entries would.
+    #[test]
+    fn a_run_waits_for_removed_edges_and_merges_when_large() {
+        let mut adjacency = Adjacency::default();
+        adjacency.push(0, edge(0, 1, 1));
+        adjacency.push(0, edge(0, 2, 2));
+        adjacency.merge();
+        adjacency.remove(0, 1);
+        adjacency.push_run(&run(&[(3, edge(0, 0, 5))]));
+        assert_eq!(edges(&adjacency, 0), [2]);
+        assert_eq!(edges(&adjacency, 3), [5]);
+        assert_eq!(adjacency.delta_len, 1, "removed edges wait: to the delta");
+
+        let mut large = Adjacency::default();
+        large.push(0, edge(0, 0, 0));
+        large.push(0, edge(0, 9, 1));
+        large.merge();
+        // Below the sorted lists' end, so to the delta, past its merge size.
+        let entries: Vec<(usize, Adjacent)> = (0..=MERGE_MIN as u64)
+            .map(|id| (0, edge(0, 1, 100 + id)))
+            .collect();
+        large.push_run(&run(&entries));
+        assert_eq!(large.delta_len, 0, "the run past the minimum merged");
+        assert_eq!(large.sorted.len(), MERGE_MIN + 3);
     }
 
     #[test]

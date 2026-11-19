@@ -145,6 +145,8 @@ macro_rules! __conformance_cases {
             reserved_ids_are_never_given_out_again,
             bulk_ranges_are_stamped_and_undone_by_range,
             a_bulk_range_across_row_groups_commits_each_row,
+            a_chunk_applies_in_order_and_a_refused_one_is_taken_back,
+            a_replayed_chunk_builds_what_its_rows_build,
             counts_move_at_commit_only,
             every_access_path_agrees,
             a_node_with_edges_cannot_be_deleted,

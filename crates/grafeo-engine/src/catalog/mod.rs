@@ -3617,6 +3617,19 @@ impl ConstraintValidator for CatalogConstraintValidator {
         })
     }
 
+    fn checks_unique_nodes(&self, labels: &[String]) -> bool {
+        labels.iter().any(|label| {
+            self.node_type(label).is_some_and(|def| {
+                def.constraints.iter().any(|constraint| {
+                    matches!(
+                        constraint,
+                        TypeConstraint::Unique(_) | TypeConstraint::PrimaryKey(_)
+                    )
+                })
+            })
+        })
+    }
+
     fn constrains_node_property(&self, key: &str, value: &Value) -> bool {
         // A vector index on (label, key) fixes a vector's size and takes a
         // list as a vector; the node types and a closed graph type hold every

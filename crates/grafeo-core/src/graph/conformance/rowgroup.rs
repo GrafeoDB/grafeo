@@ -1412,3 +1412,277 @@ fn an_edge_type_filter_resolves_again_when_the_types_change() {
             .all(|list| ArcStr::strong_count(&list[0]) == Some(1))
     );
 }
+
+/// Creates `edges` (source, target, type) in one bulk transaction of `store`,
+/// at ids it reserves: row by row through `apply`, or in chunks of `chunk`
+/// rows through `apply_chunk`.
+fn bulk_edges(
+    store: &RowGroupStore,
+    id: u64,
+    edges: &[(NodeId, NodeId, &str)],
+    chunk: Option<usize>,
+) {
+    use grafeo_common::change::{DataOp, Table};
+    use grafeo_common::types::EdgeId;
+
+    use crate::graph::apply::GraphBackend;
+
+    let mut tx = Tx::begin(store, id);
+    let ids = store.reserve_edge_ids(edges.len() as u64).unwrap();
+    let ops: Vec<DataOp> = ids
+        .clone()
+        .zip(edges)
+        .map(|(raw, (src, dst, edge_type))| DataOp::CreateEdge {
+            id: EdgeId::new(raw),
+            src: *src,
+            dst: *dst,
+            edge_type: ArcStr::from(*edge_type),
+            properties: super::properties(&[]),
+        })
+        .collect();
+    match chunk {
+        None => {
+            for op in &ops {
+                store.apply(op, tx.writer()).unwrap();
+            }
+        }
+        Some(rows) => {
+            for part in ops.chunks(rows) {
+                store.apply_chunk(part, tx.writer()).unwrap();
+            }
+        }
+    }
+    tx.push_bulk(Table::Edges, ids).unwrap();
+    tx.commit().unwrap();
+}
+
+/// What a reader at `view` sees of each node's edges in `store`: per node
+/// and direction, the degree and the edges as a sorted list, of all types
+/// and of each type.
+fn edge_lists(
+    store: &RowGroupStore,
+    nodes: &[NodeId],
+    types: &[&str],
+    view: ReadView,
+) -> Vec<String> {
+    let mut lists = Vec::new();
+    for &node in nodes {
+        for direction in [Direction::Outgoing, Direction::Incoming, Direction::Both] {
+            let mut all = store.edges(node, direction, &[], view).unwrap();
+            all.sort_unstable();
+            let degree = store.degree(node, direction, view).unwrap();
+            lists.push(format!("{node:?} {direction:?} {degree} {all:?}"));
+            for edge_type in types {
+                let mut typed = store
+                    .edges(node, direction, &[ArcStr::from(*edge_type)], view)
+                    .unwrap();
+                typed.sort_unstable();
+                lists.push(format!("{node:?} {direction:?} {edge_type} {typed:?}"));
+            }
+        }
+    }
+    lists
+}
+
+/// A bulk write in chunks builds the store a row at a time builds: the same
+/// nodes and edges, the same lists of every node in both directions, per
+/// type, the same degrees and counts. Edges arrive in random order and in
+/// order of their source (a chunk's lists then go straight to the sorted
+/// lists), over a store with and without lists and a delta of its own, in
+/// chunks of 1, 2,047, 2,048 and 2,049 rows, with self-loops and parallel
+/// edges, and across a row-group boundary. A load in order of source but for
+/// its last edge, whose source is below every sorted list, agrees too.
+#[test]
+fn chunks_build_the_lists_a_row_at_a_time_builds() {
+    use grafeo_common::change::{DataOp, Table};
+
+    use crate::graph::apply::GraphBackend;
+
+    const TYPES: [&str; 3] = ["KNOWS", "LIKES", "VISITED"];
+    const GROUP: u64 = 65_536;
+
+    /// Nodes at ids on both sides of a row-group boundary, and `before`'s
+    /// edges among them committed first (the last 200 of them in a second
+    /// transaction, so a delta of their own may stay).
+    fn store(before: &[(usize, usize, usize)]) -> (RowGroupStore, Vec<NodeId>) {
+        let store = RowGroupStore::new();
+        let mut tx = Tx::begin(&store, 10);
+        let ids = store.reserve_node_ids(GROUP + 40).unwrap();
+        let nodes: Vec<NodeId> = ids
+            .clone()
+            .filter(|raw| raw - ids.start < 120 || ids.end - raw <= 80)
+            .map(NodeId::new)
+            .collect();
+        for node in &nodes {
+            let op = DataOp::CreateNode {
+                id: *node,
+                labels: super::labels(&["Person"]),
+                properties: super::properties(&[]),
+            };
+            store.apply(&op, tx.writer()).unwrap();
+        }
+        tx.push_bulk(Table::Nodes, ids).unwrap();
+        tx.commit().unwrap();
+        let edges: Vec<(NodeId, NodeId, &str)> = before
+            .iter()
+            .map(|&(src, dst, kind)| (nodes[src], nodes[dst], TYPES[kind]))
+            .collect();
+        let (merged, delta) = edges.split_at(edges.len().saturating_sub(200));
+        for (id, part) in [(11, merged), (12, delta)] {
+            if !part.is_empty() {
+                bulk_edges(&store, id, part, None);
+            }
+        }
+        (store, nodes)
+    }
+
+    let node_count = store(&[]).1.len();
+    let mut rng = Rng::new(714);
+    let mut random = |count: usize| -> Vec<(usize, usize, usize)> {
+        let mut edges: Vec<(usize, usize, usize)> = (0..count)
+            .map(|_| {
+                let src = rng.below(node_count);
+                // Every tenth a self-loop.
+                let dst = if rng.below(10) == 0 {
+                    src
+                } else {
+                    rng.below(node_count)
+                };
+                (src, dst, rng.below(TYPES.len()))
+            })
+            .collect();
+        // Every tenth repeats the edge before it: parallel edges.
+        for at in (1..edges.len()).step_by(10) {
+            edges[at] = edges[at - 1];
+        }
+        edges
+    };
+    let earlier = random(3_000);
+    let mut loads = Vec::new();
+    for base in [Vec::new(), earlier] {
+        let shuffled = random(5_000);
+        let mut by_source = shuffled.clone();
+        by_source.sort_by_key(|&(src, dst, _)| (src, dst));
+        let mut last_below: Vec<_> = by_source
+            .iter()
+            .copied()
+            .filter(|&(src, _, _)| src > 0)
+            .collect();
+        last_below.push((0, 1, 0));
+        loads.push((base.clone(), shuffled));
+        loads.push((base.clone(), by_source));
+        loads.push((base, last_below));
+    }
+    for (base, load) in &loads {
+        let (expected, nodes) = store(base);
+        let edges: Vec<(NodeId, NodeId, &str)> = load
+            .iter()
+            .map(|&(src, dst, kind)| (nodes[src], nodes[dst], TYPES[kind]))
+            .collect();
+        bulk_edges(&expected, 20, &edges, None);
+        let want = edge_lists(&expected, &nodes, &TYPES, ReadView::latest());
+        let image = committed(&expected);
+        image.consistent("a row at a time").unwrap();
+        for rows in [1, 2_047, 2_048, 2_049] {
+            let (chunked, _) = store(base);
+            bulk_edges(&chunked, 20, &edges, Some(rows));
+            let what = format!(
+                "{} edges over {} in chunks of {rows}",
+                edges.len(),
+                base.len()
+            );
+            let found = committed(&chunked);
+            found.consistent(&what).unwrap();
+            assert_eq!(found, image, "{what}: the image");
+            assert_eq!(
+                edge_lists(&chunked, &nodes, &TYPES, ReadView::latest()),
+                want,
+                "{what}: the lists"
+            );
+            assert_eq!(
+                counts(&chunked, &LABELS),
+                counts(&expected, &LABELS),
+                "{what}: the counts"
+            );
+        }
+    }
+}
+
+/// A chunk that fails at its last row changes nothing, not even for the
+/// transaction that applied it: an end no one sees, an id that exists, an id
+/// twice in the chunk. The rows before it are checked, and none is written.
+#[test]
+fn a_chunk_that_fails_at_its_last_row_changes_nothing() {
+    use grafeo_common::change::DataOp;
+    use grafeo_common::types::EdgeId;
+
+    use crate::graph::apply::{ApplyError, GraphBackend};
+
+    const TYPES: [&str; 1] = ["KNOWS"];
+    let store = RowGroupStore::new();
+    let people = people(&store).unwrap();
+    let mut tx = Tx::begin(&store, 10);
+    let existing = tx
+        .create_edge(people.alix, people.gus, "KNOWS", &[])
+        .unwrap();
+    let nowhere = NodeId::new(store.reserve_node_ids(1).unwrap().start);
+    let fresh = store.reserve_edge_ids(3).unwrap().start;
+    // The chunk's edge rows as the transaction reads them by id: a row
+    // written without its adjacency shows here, where no list shows it.
+    let rows = |tx: &Tx<'_, RowGroupStore>| -> Vec<bool> {
+        (fresh..fresh + 3)
+            .map(|raw| {
+                store
+                    .edge(EdgeId::new(raw), tx.handle.view())
+                    .unwrap()
+                    .is_some()
+            })
+            .collect()
+    };
+    let nodes = [people.alix, people.gus, people.mia];
+    let view = ReadView::latest();
+    let before = (
+        tx.view(),
+        committed(&store),
+        edge_lists(&store, &nodes, &TYPES, view),
+        store.version_bytes(),
+        rows(&tx),
+    );
+    let edge = |raw: u64, src: NodeId, dst: NodeId| DataOp::CreateEdge {
+        id: EdgeId::new(raw),
+        src,
+        dst,
+        edge_type: ArcStr::from("KNOWS"),
+        properties: super::properties(&[("since", Value::Int64(2020))]),
+    };
+    let first_two = [
+        edge(fresh, people.alix, people.mia),
+        edge(fresh + 1, people.mia, people.gus),
+    ];
+    let lasts = [
+        ("an end no one sees", edge(fresh + 2, people.gus, nowhere)),
+        (
+            "an id that exists",
+            edge(existing.as_u64(), people.gus, people.alix),
+        ),
+        ("an id twice", edge(fresh, people.gus, people.alix)),
+    ];
+    for (what, last) in lasts {
+        let mut chunk = first_two.to_vec();
+        chunk.push(last);
+        let failed = store.apply_chunk(&chunk, tx.writer());
+        assert!(
+            matches!(failed, Err(ApplyError::Missing(_) | ApplyError::Exists(_))),
+            "{what}: {failed:?}"
+        );
+        let after = (
+            tx.view(),
+            committed(&store),
+            edge_lists(&store, &nodes, &TYPES, view),
+            store.version_bytes(),
+            rows(&tx),
+        );
+        assert_eq!(after, before, "{what}: nothing changed");
+    }
+    tx.roll_back().unwrap();
+}

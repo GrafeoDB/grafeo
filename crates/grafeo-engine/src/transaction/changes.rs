@@ -1254,9 +1254,9 @@ impl StreamingChanges<'_> {
     }
 
     /// Applies `op`, a create at an id of a range it reserved, as a pending
-    /// version of its transaction (see
-    /// [`GraphBackend::apply_bulk_row`]: an edge's endpoints are the
-    /// caller's to have created), and logs it.
+    /// version of its transaction (a chunk of one row, see
+    /// [`GraphBackend::apply_chunk`]: an edge's endpoints are the caller's to
+    /// have created), and logs it.
     ///
     /// # Errors
     ///
@@ -1270,7 +1270,7 @@ impl StreamingChanges<'_> {
         };
         bound
             .backend
-            .apply_bulk_row(&op, bound.transaction.writer())
+            .apply_chunk(std::slice::from_ref(&op), bound.transaction.writer())
             .map_err(|error| error.into_error(Error::Internal))?;
         #[cfg(feature = "wal")]
         if let Some(log) = &mut self.log {

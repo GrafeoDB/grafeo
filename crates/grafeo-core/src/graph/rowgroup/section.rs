@@ -2835,7 +2835,7 @@ pub(super) fn read_lpg_section_into(
                     }
                     *next_piece += 1;
                     *entries += list.len();
-                    whole.extend_last_sorted(list);
+                    whole.extend_last_sorted(list.iter().copied());
                 } else {
                     if decoded.first_entry != 0 {
                         return Err(refuse(format!(
@@ -2867,7 +2867,7 @@ pub(super) fn read_lpg_section_into(
                         graph.adjacency[direction]
                             .entry(group)
                             .or_default()
-                            .push_sorted(row, &list);
+                            .push_sorted(row, list.iter().copied());
                     }
                 }
             }

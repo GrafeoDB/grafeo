@@ -23,6 +23,11 @@ Performance and memory release, in progress: this section lists what has landed 
 - **A label the scan already read is not checked again**: a pattern step whose start or end node was scanned by a label skips its own check of that label. With the line above, graph-bench's `pattern_join` runs in 3.92 ms instead of 5.28 (`pattern_join_sql` 4.64 instead of 5.72) and `pattern_square` in 215 ms instead of 264 (SQL/PGQ 200 instead of 231), medium scale, one thread.
 - **SPARQL `REGEX` and `REPLACE` compile their pattern once per query**: a pattern repeated across rows is compiled once and reused, as `=~` and `LIKE` already do; a `REGEX` filter over 6,000 literals takes 7 ms where compiling the pattern per row took 1.7 s (release build).
 - **Pattern steps resolve their edge types once**: an expand or an intersection looks up its edge type names when it opens instead of on every row, so a multi-pattern join such as graph-bench's `pattern_join` runs 12.7% fewer instructions (Callgrind); hops and other rows are unchanged within 1%.
+- **A bulk load builds its edges into sorted adjacency at load**: CSV and other bulk loads apply their rows in chunks, and edges that arrive in source order go straight into the sorted lists, so later intersections read sorted runs; graph-bench's `pattern_triangle_hub` runs in 80.6 ms instead of 136.2, `pattern_triangle_all` in 621 ms instead of 864 and a Graphalytics load in 184 ms instead of 212 (medium scale, one thread). Memory held after the load is lower (SNB 37.0 MiB instead of 40.5), while the peak during the load rises by 2 to 4 MiB (SNB 96.8 MiB instead of 94.6, Graphalytics 68.7 instead of 65.1).
+
+### Deprecated
+
+- **`GraphBackend::apply_bulk_row` is deprecated**: a bulk write now passes its rows to the store in chunks through the new `GraphBackend::apply_chunk`, whose default still calls an `apply_bulk_row` a store of one's own overrides. Removed in 0.7.0.
 
 ### Fixed
 

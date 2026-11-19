@@ -168,7 +168,7 @@ impl RowGroupStore {
     /// What this store and its named graphs keep of committed state that commits replaced, as
     /// `(epoch, bytes)` per replacing commit, unordered: the values and labels its update chains
     /// keep and the rows deletes took out, each measured as a transaction's before-image is
-    /// ([`superseded_bytes`](grafeo_common::change::superseded_bytes)). What a load restored and
+    /// ([`superseded_bytes`]). What a load restored and
     /// what replay kept alike: the history retention limit counts it once an open is done.
     #[must_use]
     pub fn kept_superseded(&self) -> Vec<(u64, usize)> {

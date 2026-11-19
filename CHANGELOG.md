@@ -86,6 +86,7 @@ Performance and memory release, in progress: this section lists what has landed 
 - **`KEEP DIFFERENT EDGES` ends on a cycle**: a pattern that keeps different edges is searched as a trail, as `MATCH DIFFERENT EDGES` is, where it walked and ran until the query timeout.
 - **`$ne` and `$nin` keep a node without the property**: in the `filters` of `text_search`, `vector_search`, `batch_vector_search`, `mmr_search` and `hybrid_search`, `{"deleted": {"$ne": true}}` now keeps nodes that have no `deleted`, where they were left out ([#742](https://github.com/GrafeoDB/grafeo/issues/742)).
 - **A null or malformed search filter is refused**: a null value, an unknown operator, `$in` or `$nin` without a list, or `$contains` without a string is an invalid-value error (`GRAFEO-V001`) naming the key, where such a filter matched no node, or every node for `$nin`.
+- **EXPLAIN and PROFILE of a SPARQL query on the Ring's leapfrog join answer**: they failed with an internal error, while the query itself ran; the plan now shows the leapfrog join with the triple scans it absorbed.
 
 ## [0.6.3] - 2026-11-15
 

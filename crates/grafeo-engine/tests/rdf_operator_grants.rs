@@ -28,9 +28,16 @@ fn assert_refused<T: std::fmt::Debug>(result: Result<T, Error>) {
     );
 }
 
-/// A database under a query memory limit of `limit`, holding `data` (a SPARQL update).
+/// A database under a query memory limit of `limit`, holding `data` (a SPARQL update). No
+/// query timeout: these tests are about memory, and a coverage build runs the leapfrog join past
+/// the default 30 seconds.
 fn holding(limit: usize, data: &str) -> GrafeoDB {
-    let db = GrafeoDB::with_config(Config::in_memory().with_query_memory_limit(limit)).unwrap();
+    let db = GrafeoDB::with_config(
+        Config::in_memory()
+            .with_query_memory_limit(limit)
+            .without_query_timeout(),
+    )
+    .unwrap();
     db.execute_sparql(data).unwrap();
     db
 }
@@ -45,11 +52,12 @@ fn assert_route(db: &GrafeoDB, explain: &str, query: &str, route: &str) {
     );
 }
 
-/// 2,000 triangles of `:knows`: a cyclic join of three patterns, three matches per triangle.
+/// 500 triangles of `:knows`: a cyclic join of three patterns, three matches per triangle, past
+/// a 16 KiB query memory limit and small enough to run in seconds under coverage.
 #[cfg(feature = "ring-index")]
 fn triangles() -> String {
     let mut data = String::from("PREFIX : <urn:> INSERT DATA {");
-    for i in 0..2_000 {
+    for i in 0..500 {
         write!(
             data,
             " :a{i} :knows :b{i} . :b{i} :knows :c{i} . :c{i} :knows :a{i} ."
@@ -66,15 +74,13 @@ fn the_rdf_leapfrog_join_refuses_at_the_query_limit() {
     let query =
         "PREFIX : <urn:> SELECT ?x ?y ?z WHERE { ?x :knows ?y . ?y :knows ?z . ?z :knows ?x }";
     let data = triangles();
-    let small = holding(128 * KIB, &data);
+    let small = holding(16 * KIB, &data);
     small.rdf_store().rebuild_ring();
     let large = holding(512 * MIB, &data);
     large.rdf_store().rebuild_ring();
-    // The route is the Ring's leapfrog join (a cyclic join of three triple patterns with a ring);
-    // EXPLAIN and PROFILE of it fail today with an internal error, and the grant's mutation check
-    // shows this test refuses there.
+    assert_route(&large, "EXPLAIN", query, "RdfLeapfrog");
     assert_refused(small.execute_sparql(query));
-    assert_eq!(large.execute_sparql(query).unwrap().rows().len(), 6_000);
+    assert_eq!(large.execute_sparql(query).unwrap().rows().len(), 1_500);
 }
 
 #[test]

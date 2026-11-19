@@ -461,6 +461,7 @@ mod stored_procedure_arguments;
 mod stored_procedure_bodies;
 mod stored_procedure_calls;
 mod stored_procedure_result_width;
+mod streamed_finalize;
 mod streaming_results;
 mod structure_procedures;
 mod subquery_after_write;

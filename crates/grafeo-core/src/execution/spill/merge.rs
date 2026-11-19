@@ -13,11 +13,15 @@
 //! Each open run holds a read buffer of [`MERGE_READ_BUFFER`] bytes and its
 //! next row, and a pass writes through a buffer of as many. The merge counts
 //! these, and the batch it builds, against the operator's grant, planning
-//! room for a row of up to [`MERGE_MIN_READ_BUFFER`] bytes per open run.
+//! room for a row of up to [`MERGE_MIN_READ_BUFFER`] bytes per open run, and
+//! one more for a batch's first row.
 //! When the grant cannot hold a full fan-in's buffers, the merge reads fewer
 //! runs at once and takes more passes; at two runs, smaller read buffers, down
 //! to [`MERGE_MIN_READ_BUFFER`]; short of that it refuses with the bound that
-//! refused (`GRAFEO-S001`). A batch ends early where the grant does. The
+//! refused (`GRAFEO-S001`). A batch ends early where the grant does, and
+//! between batches the merge gives back the room a batch took, for the
+//! operators after it; when not even a batch's first row fits again, the
+//! merge refuses, naming itself. The
 //! plan is made once: a run's row past [`MERGE_MIN_READ_BUFFER`] bytes (a
 //! long literal, which a SPARQL run holds as a value and as its key) counts
 //! as it is, and under a tight grant can refuse where a smaller plan would
@@ -322,7 +326,7 @@ impl<O: RowOrder> RunMerge<O> {
         loop {
             let writer = usize::from(runs > fan_in) * MERGE_READ_BUFFER;
             // Only the runs it opens at once: none or one when that is all.
-            let readers = runs.min(fan_in) * (self.read_buffer + MERGE_MIN_READ_BUFFER);
+            let readers = planned_room(runs.min(fan_in), self.read_buffer);
             match self.memory.set(readers + writer) {
                 Ok(()) => return Ok(fan_in),
                 Err(_) if fan_in > 2 => fan_in = (fan_in / 2).max(2),
@@ -355,7 +359,15 @@ impl<O: RowOrder> RunMerge<O> {
             excess -= group.len() - 1;
             let mut open = group
                 .iter()
-                .map(|run| open_run(&mut self.order, self.columns, self.read_buffer, run))
+                .map(|run| {
+                    open_run(
+                        &self.manager,
+                        &mut self.order,
+                        self.columns,
+                        self.read_buffer,
+                        run,
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             let mut out = new_run(&self.manager, group.iter().map(|run| run.rows).sum())?;
             let file = out.file_mut();
@@ -365,7 +377,12 @@ impl<O: RowOrder> RunMerge<O> {
                     break;
                 };
                 serialize_row(&row, &mut RunWriter(file)).map_err(spill_error)?;
-                advance(&mut self.order, self.columns, &mut open[index])?;
+                advance(
+                    &self.manager,
+                    &mut self.order,
+                    self.columns,
+                    &mut open[index],
+                )?;
             }
             file.finish_write().map_err(spill_error)?;
             drop(open);
@@ -380,7 +397,13 @@ impl<O: RowOrder> RunMerge<O> {
     /// Opens the runs of the last pass.
     fn open_last_pass(&mut self) -> Result<(), OperatorError> {
         for run in &self.runs {
-            let open = open_run(&mut self.order, self.columns, self.read_buffer, run)?;
+            let open = open_run(
+                &self.manager,
+                &mut self.order,
+                self.columns,
+                self.read_buffer,
+                run,
+            )?;
             self.open.push(open);
         }
         self.passes += 1;
@@ -408,17 +431,25 @@ impl<O: RowOrder> RunMerge<O> {
             };
             batch_bytes += row_bytes(&row);
             batch.push(row);
-            advance(&mut self.order, self.columns, &mut self.open[index])?;
-            // Where the grant ends, so does the batch.
-            if count(
+            advance(
+                &self.manager,
+                &mut self.order,
+                self.columns,
+                &mut self.open[index],
+            )?;
+            // Where the grant ends, so does the batch. When not even its
+            // first row fits, the merge refuses: a one-row batch is never
+            // handed on past its grant.
+            if let Err(refusal) = count(
                 &mut self.memory,
                 &self.open,
                 self.read_buffer,
                 0,
                 batch_bytes,
-            )
-            .is_err()
-            {
+            ) {
+                if batch.len() == 1 {
+                    return Err(merge_refused(refusal));
+                }
                 break;
             }
         }
@@ -428,12 +459,57 @@ impl<O: RowOrder> RunMerge<O> {
             self.memory.release();
             return Ok(None);
         }
+        // The rows go on to the operators after it, which count what they
+        // keep: it counts its open runs again and gives the batch's room back,
+        // keeping its plan's (a read buffer and a next row per open run, and
+        // the next batch's first row), so a row the plan allows always fits.
+        count(&mut self.memory, &self.open, self.read_buffer, 0, 0)?;
+        self.memory
+            .trim_to(planned_room(self.open.len(), self.read_buffer));
         Ok(Some(batch))
     }
 }
 
+/// The room a merge plans for, and keeps between batches, with `open` runs
+/// open through read buffers of `read_buffer` bytes: each run's buffer and
+/// next row, and the next batch's first row (rows of up to
+/// [`MERGE_MIN_READ_BUFFER`] bytes); nothing for no runs.
+fn planned_room(open: usize, read_buffer: usize) -> usize {
+    if open == 0 {
+        return 0;
+    }
+    open * (read_buffer + MERGE_MIN_READ_BUFFER) + MERGE_MIN_READ_BUFFER
+}
+
+/// `error` naming the merge as what asked, when it is a memory refusal.
+fn merge_refused(error: OperatorError) -> OperatorError {
+    use grafeo_common::utils::error::{Error, LimitRefusal};
+
+    let OperatorError::Wrapped(inner) = &error else {
+        return error;
+    };
+    let Some(&LimitRefusal::Memory {
+        bound,
+        requested,
+        used,
+        limit,
+        ..
+    }) = inner.limit_refusal()
+    else {
+        return error;
+    };
+    OperatorError::from(Error::from(LimitRefusal::Memory {
+        bound,
+        requested,
+        used,
+        limit,
+        detail: Some("the merge of a spilled sort has no room for its next row".into()),
+    }))
+}
+
 /// Opens `run` and reads its first row.
 fn open_run<O: RowOrder>(
+    manager: &SpillManager,
     order: &mut O,
     columns: usize,
     read_buffer: usize,
@@ -452,12 +528,14 @@ fn open_run<O: RowOrder>(
         head: None,
         head_bytes: 0,
     };
-    advance(order, columns, &mut open)?;
+    advance(manager, order, columns, &mut open)?;
     Ok(open)
 }
 
-/// Reads `open`'s next row into its head, or empties the head at its end.
+/// Reads `open`'s next row into its head, or empties the head at its end,
+/// counting the row on `manager` (see [`SpillManager::rows_read_back`]).
 fn advance<O: RowOrder>(
+    manager: &SpillManager,
     order: &mut O,
     columns: usize,
     open: &mut OpenRun<O::Key>,
@@ -469,6 +547,7 @@ fn advance<O: RowOrder>(
     }
     open.left -= 1;
     let row = deserialize_row(&mut open.reader, columns).map_err(spill_error)?;
+    manager.note_row_read_back();
     let key = order.key(&row)?;
     open.head_bytes = row_bytes(&row) + order.key_bytes(&key);
     open.head = Some((key, row));

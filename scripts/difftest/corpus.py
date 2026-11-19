@@ -3804,4 +3804,13 @@ case("FB1", "MATCH (p:Person) RETURN p.name AS k, CASE WHEN p.age > 30 THEN p EL
 case("FB2", "MATCH (p:Person) OPTIONAL MATCH (p)-[:LIVES_IN]->(c) RETURN p.name AS k, coalesce(c, p.age) AS v", BOTH)
 case("FB3", "MATCH (p:Person) RETURN p.name AS k, [p, p.age][p.age % 2] AS v", BOTH)
 
+# FC: a LIMIT before another stage keeps the rows it stopped with (0.6.4; in GQL a LIMIT that
+#     reached its count in the same chunk handed on nothing, so a DISTINCT (FC1, FC2), a grouping
+#     with a key (FC3), a WHERE (FC4) or an ORDER BY (FC5) after it saw no rows)
+case("FC1", "MATCH (n:Person) WITH n.age > 0 AS adult LIMIT 3 RETURN DISTINCT adult", BOTH)
+case("FC2", "MATCH (n:Person) WITH n.age AS a LIMIT 3 RETURN DISTINCT a", BOTH)
+case("FC3", "MATCH (n:Person) WITH n.age AS a LIMIT 3 RETURN a, count(*) AS c", BOTH)
+case("FC4", "MATCH (n:Person) WITH n.age AS a LIMIT 3 WHERE a >= 0 RETURN a", BOTH)
+ordered("FC5", "MATCH (n:Person) WITH n.age AS a LIMIT 3 RETURN a ORDER BY a", BOTH)
+
 # fmt: on

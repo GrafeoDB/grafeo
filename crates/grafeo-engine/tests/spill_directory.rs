@@ -126,8 +126,10 @@ fn a_spilling_query_of_a_read_only_open_leaves_nothing() {
         db.close().unwrap();
     }
 
-    // A memory limit of one byte: every query is under pressure, and spills.
-    let db = GrafeoDB::with_config(Config::read_only(&path).with_memory_limit(1)).unwrap();
+    // A query memory limit of 64 KiB: the sort's 3,000 rows pass it and spill,
+    // and the merge of its runs fits in it.
+    let db =
+        GrafeoDB::with_config(Config::read_only(&path).with_query_memory_limit(64 << 10)).unwrap();
     let spill = db
         .buffer_manager()
         .config()

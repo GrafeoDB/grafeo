@@ -270,6 +270,17 @@ impl OperatorMemory {
         }
     }
 
+    /// Gives back the grant above what it counts or `at_least`, whichever is
+    /// more (kept to a whole step), so the operators after it can take that
+    /// room: a merge between batches, whose rows went on to them, keeping the
+    /// room its plan promised. It never grows the grant.
+    pub fn trim_to(&mut self, at_least: usize) {
+        if let Some(counted) = &mut self.counted {
+            let keep = counted.bytes.max(at_least);
+            counted.ctx.shrink(&mut counted.grant, keep);
+        }
+    }
+
     /// The bytes its grant holds (0 when it counts nothing).
     #[must_use]
     pub fn granted(&self) -> usize {
@@ -414,6 +425,25 @@ impl OperatorMemoryContext {
         grant.held += granted;
         grant.query.get_or_insert_with(|| Arc::clone(&self.query));
         Ok(())
+    }
+
+    /// Gives back what `grant` holds above `keep` bytes, rounded up to the
+    /// step its grants grow by, to the statement's cap and the buffer manager.
+    pub fn shrink(&self, grant: &mut OperatorGrant, keep: usize) {
+        let keep = keep
+            .checked_next_multiple_of(self.query.step)
+            .unwrap_or(keep);
+        let extra = grant.held.saturating_sub(keep);
+        if extra == 0 {
+            return;
+        }
+        if let Some(held) = &mut grant.grant {
+            held.shrink(extra);
+        }
+        if let Some(query) = &grant.query {
+            query.give_back(extra);
+        }
+        grant.held -= extra;
     }
 
     /// Gives back what `grant` holds, to the statement's cap and the buffer

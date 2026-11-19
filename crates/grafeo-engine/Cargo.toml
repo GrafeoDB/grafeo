@@ -292,3 +292,8 @@ path = "tests/spilled_embeddings.rs"
 [[test]]
 name = "writes_after_close"
 path = "tests/writes_after_close.rs"
+
+# A counting global allocator, which needs a process of its own.
+[[test]]
+name = "streamed_finalize_peak"
+path = "tests/streamed_finalize_peak.rs"

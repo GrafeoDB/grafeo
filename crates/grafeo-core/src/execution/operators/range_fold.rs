@@ -24,7 +24,7 @@ use crate::graph::{GraphStore, ValueRange};
 
 /// One row: the aggregates of the nodes of `label` whose `property` lies in
 /// `range`, each aggregate's column an index into `read` (`None` for
-/// `count(*)`). See the [module](self) documentation.
+/// `count(*)`).
 pub struct RangeFoldOperator {
     store: Arc<dyn GraphStore>,
     label: String,

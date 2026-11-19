@@ -58,7 +58,7 @@ fn marked(mut filter: FilterOp) -> LogicalOperator {
 }
 
 /// `predicate` without the conjuncts that say `fresh` and `target` are one.
-pub(super) fn without_check(
+pub(crate) fn without_check(
     predicate: LogicalExpression,
     fresh: &str,
     target: &str,

@@ -743,6 +743,14 @@ fn far_label(hop: &Hop, backward: bool) -> bool {
     }
 }
 
+/// Whether `input` scans `variable` by `label`.
+fn scans(input: &LogicalOperator, variable: &str, label: &str) -> bool {
+    any_operator(input, &|op| {
+        matches!(op, LogicalOperator::NodeScan(scan)
+            if scan.variable == variable && scan.label.as_deref() == Some(label))
+    })
+}
+
 /// The check that `variable` has `label`.
 fn has_label(variable: &str, label: &str) -> LogicalExpression {
     LogicalExpression::FunctionCall {
@@ -781,7 +789,7 @@ impl Hop {
             let far_end = if backward { &self.source } else { &self.target };
             let expanded = self.expand(start, backward, far_end.clone());
             let read = rows_of(&expanded);
-            let kept = rows_of(&self.after_the_hop(expanded, backward, Vec::new()));
+            let kept = rows_of(&self.after_the_hop(expanded, backward, Vec::new(), true));
             (scanned, calls, read, kept)
         };
         let forward = read_from(false);
@@ -880,16 +888,19 @@ impl Hop {
         checked(input, self.checks_of_end(backward, with_label), raising)
     }
 
-    /// The `expanded` hop under `first`, its other checks and last what may raise.
+    /// The `expanded` hop under `first`, its other checks and last what may raise;
+    /// the far end's own label too, unless `far_label` is false (a scan of the rows it
+    /// runs over read it).
     fn after_the_hop(
         &self,
         expanded: LogicalOperator,
         backward: bool,
         first: Vec<LogicalExpression>,
+        far_label: bool,
     ) -> LogicalOperator {
         let mut after = first;
-        // A far end has no scan to read its label, bound or not.
-        after.extend(self.checks_of_end(!backward, true));
+        // A far end has no scan of its own to read its label, bound or not.
+        after.extend(self.checks_of_end(!backward, far_label));
         after.extend(self.hop_checks.iter().cloned());
         let source_raising: &[LogicalExpression] =
             if backward { &self.source_raising } else { &[] };
@@ -905,7 +916,7 @@ impl Hop {
         let start = self.at_the_start(self.scan_of(backward), backward, false);
         let far_end = if backward { &self.source } else { &self.target };
         let expanded = self.expand(start, backward, far_end.clone());
-        self.after_the_hop(expanded, backward, Vec::new())
+        self.after_the_hop(expanded, backward, Vec::new(), true)
     }
 
     /// The hop over the rows of `input`, which bind the end it runs from, and
@@ -918,7 +929,21 @@ impl Hop {
         fresh: &mut FreshNames,
     ) -> LogicalOperator {
         let far_end = if backward { &self.source } else { &self.target };
-        let start = self.at_the_start(input, backward, true);
+        // A label a scan of the input read is not checked again: the scan read it at the
+        // same view, and nothing in between writes (the search takes no relation that
+        // writes, see `best_order`).
+        let unread = |target: bool| {
+            let (variable, label) = if target {
+                (&self.target, &self.target_label)
+            } else {
+                (&self.source, &self.source_label)
+            };
+            label
+                .as_deref()
+                .is_none_or(|label| !scans(&input, variable, label))
+        };
+        let (start_label, far_label) = (unread(backward), unread(!backward));
+        let start = self.at_the_start(input, backward, start_label);
         let mut first = Vec::new();
         let to = if closes {
             let name = fresh.next("_cycle_end");
@@ -928,7 +953,7 @@ impl Hop {
             far_end.clone()
         };
         let expanded = self.expand(start, backward, to);
-        self.after_the_hop(expanded, backward, first)
+        self.after_the_hop(expanded, backward, first, far_label)
     }
 }
 

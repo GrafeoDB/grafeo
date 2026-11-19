@@ -112,6 +112,22 @@ impl super::Planner {
         // A hop that knows its target: this filter stays over it and decides
         self.note_hop_target(filter);
 
+        // An intersection makes only rows that meet at its target (see
+        // `plan_intersection`): its closing equality, the whole predicate of the
+        // filter the optimizer marks (`intersect_hops`), is not checked again.
+        if let Some(PushdownHint::IntersectExpand { target }) = &filter.pushdown_hint
+            && let LogicalOperator::Expand(closing) = filter.input.as_ref()
+            && matches!(closing.input.as_ref(), LogicalOperator::Expand(_))
+            && crate::query::optimizer::without_check(
+                filter.predicate.clone(),
+                &closing.to_variable,
+                target,
+            )
+            .is_none()
+        {
+            return self.plan_input(&filter.input);
+        }
+
         // Check zone maps for simple property predicates before scanning
         // If zone map says "definitely no matches", we can short-circuit.
         // Not below a mutation, nor after one (see `after_write`): zone maps

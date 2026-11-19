@@ -30,6 +30,7 @@ mod same_term;
 mod scanned_labels;
 mod top_k_projection;
 mod turn_cost;
+pub(crate) use closing_hops::without_check;
 pub(crate) use cycles::{close_cycles, plan_names};
 pub mod join_order;
 

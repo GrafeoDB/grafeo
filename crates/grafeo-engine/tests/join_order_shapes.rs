@@ -741,3 +741,78 @@ fn a_variable_named_like_a_closing_check_keeps_its_rows() {
         }
     }
 }
+
+/// The pairs (variable, label) the plan scans, and those it checks with `hasLabel`.
+fn scanned_and_checked(plan: &str) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    let pairs = |prefix: &str, close: char| -> Vec<(String, String)> {
+        let mut found = Vec::new();
+        for line in plan.lines() {
+            let mut rest = line;
+            while let Some(at) = rest.find(prefix) {
+                rest = &rest[at + prefix.len()..];
+                if let Some(end) = rest.find(close) {
+                    let inside = &rest[..end];
+                    if let Some((variable, label)) = inside.split_once([':', ',']) {
+                        found.push((
+                            variable.trim().to_string(),
+                            label.trim().trim_matches('"').to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+        found
+    };
+    (pairs("NodeScan (", ')'), pairs("hasLabel(", ')'))
+}
+
+/// A variable a scan of a label binds is not checked for that label again: the scan read it,
+/// at the same view, and nothing between them writes. The join's posts and the triangle's
+/// people keep only the checks of the variables the scans did not bind, with the same rows.
+#[test]
+fn a_label_the_scan_read_is_not_checked_again() {
+    let db = social();
+    for i in 0..300_usize {
+        db.execute(&format!(
+            "MATCH (a:Person {{k: {i}}}), (b:Person {{k: {}}}) INSERT (a)-[:KNOWS]->(b)",
+            (i * 7 + 3) % 300
+        ))
+        .unwrap();
+    }
+    let usual = db.session();
+    let off = written(&db);
+    let triangle = "MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person)-[:KNOWS]->(a) RETURN a.k, b.k, c.k";
+    for query in [PATTERN_JOIN, triangle] {
+        let plan = explain(&usual, query);
+        let (scanned, checked) = scanned_and_checked(&plan);
+        assert!(!scanned.is_empty(), "{plan}");
+        for pair in &scanned {
+            assert!(!checked.contains(pair), "{pair:?} checked again:\n{plan}");
+        }
+        assert_eq!(
+            sorted_rows(&usual.execute(query).unwrap()),
+            sorted_rows(&off.execute(query).unwrap()),
+            "{query}"
+        );
+    }
+}
+
+/// A write between the scan and the check changes the labels the scan read: the check stays
+/// (the join search takes no relation that writes, so no scan of its rows is below a write).
+/// Every person loses the label, so the second match finds no one.
+#[test]
+fn a_label_check_after_a_write_stays() {
+    let query = "MATCH (p:Person) REMOVE p:Person WITH p \
+                 MATCH (p:Person)-[:HAS_INTEREST]->(t:Tag), (m:Post)-[:HAS_TAG]->(t), \
+                 (m)-[:HAS_CREATOR]->(p) RETURN count(*)";
+    for join_order_off in [false, true] {
+        let db = social();
+        let session = if join_order_off {
+            written(&db)
+        } else {
+            db.session()
+        };
+        let rows = session.execute(query).unwrap();
+        assert_eq!(rows.rows()[0][0], Value::Int64(0), "{query}");
+    }
+}

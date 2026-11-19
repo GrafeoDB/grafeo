@@ -15,6 +15,8 @@ Performance and memory release, in progress: this section lists what has landed 
 - **A range filter on a label reads only that label's nodes**: `MATCH (n:L) WHERE n.p > $v` no longer visits every node in the database to find the label's; graph-bench's filtered comment scan takes 23 ms instead of 38 (medium), and its order plus limit 14 ms instead of 18.
 - **An aggregate over a label's range reads each value once**: `MATCH (n:L) WHERE n.p > $v RETURN count(*), avg(n.p)` and its SQL/PGQ twin fold the values in range in one pass, with the same answers; graph-bench's filter plus average takes 7.3 ms instead of 18.5 (medium).
 - **An `ORDER BY ... LIMIT` reads the returned properties for the rows it keeps**: a node's or an edge's property that no sort key reads is read after the top-k instead of for every row, in GQL and Cypher (SQL/PGQ already did); graph-bench's order plus limit takes 12.6 ms instead of 14.4 (medium). A function call, a property of a value `WITH` binds and anything under `DISTINCT` are still computed for every row, so no error moves.
+- **A cycle closed by an intersection checks its closing node once**: a triangle, a square or a join whose closing hop runs as an intersection of two edge lists no longer filters the closing node again, since the intersection already guarantees it.
+- **A label the scan already read is not checked again**: a pattern step whose start or end node was scanned by a label skips its own check of that label. With the line above, graph-bench's `pattern_join` runs in 3.92 ms instead of 5.28 (`pattern_join_sql` 4.64 instead of 5.72) and `pattern_square` in 215 ms instead of 264 (SQL/PGQ 200 instead of 231), medium scale, one thread.
 
 ### Fixed
 

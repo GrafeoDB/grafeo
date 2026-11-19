@@ -81,6 +81,11 @@ pub struct SortPushOperator {
     /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
     /// as itself.
     temporal: TemporalComparison,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](crate::execution::memory::capture)); it counts nothing
+    /// outside a budgeted statement. It does not spill: past the query memory
+    /// limit or the memory limit it fails with `GRAFEO-S001`.
+    memory: crate::execution::memory::OperatorMemory,
 }
 
 impl SortPushOperator {
@@ -93,6 +98,7 @@ impl SortPushOperator {
             output_width: None,
             column_types: ColumnTypes::default(),
             temporal: TemporalComparison::TypesApart,
+            memory: crate::execution::memory::capture(),
         }
     }
 
@@ -153,10 +159,10 @@ fn output_width(num_cols: usize, width: Option<usize>) -> usize {
     width.map_or(num_cols, |width| width.min(num_cols))
 }
 
-/// One chunk with the first `width` values of each sorted row, in columns of
-/// the input's types (a node or edge column stays one, see `ColumnTypes`).
-fn output_chunk(rows: &[Vec<Value>], column_types: &ColumnTypes, width: usize) -> DataChunk {
-    let types: Vec<LogicalType> = (0..width)
+/// The types of the first `width` output columns: the input's (a node or edge
+/// column stays one, see `ColumnTypes`).
+fn output_types(column_types: &ColumnTypes, width: usize) -> Vec<LogicalType> {
+    (0..width)
         .map(|column| {
             column_types
                 .types()
@@ -164,7 +170,38 @@ fn output_chunk(rows: &[Vec<Value>], column_types: &ColumnTypes, width: usize) -
                 .cloned()
                 .unwrap_or(LogicalType::Any)
         })
-        .collect();
+        .collect()
+}
+
+/// One chunk with the first `width` values of each sorted row, moved out of
+/// `rows`: each row is freed once its values are in the chunk, so the sort
+/// holds about one copy of its rows while it builds the output, not two.
+fn output_chunk_taking(
+    rows: Vec<Vec<Value>>,
+    column_types: &ColumnTypes,
+    width: usize,
+) -> DataChunk {
+    let types = output_types(column_types, width);
+    let mut builder = DataChunkBuilder::with_capacity(&types, rows.len());
+    for row in rows {
+        let mut values = row.into_iter();
+        for column in 0..width {
+            let value = values.next().unwrap_or(Value::Null);
+            if let Some(out) = builder.column_mut(column) {
+                out.push_value(value);
+            }
+        }
+        builder.advance_row();
+    }
+    builder.finish()
+}
+
+/// One chunk with the first `width` values of each sorted row, in columns of
+/// the input's types (a node or edge column stays one, see `ColumnTypes`): the
+/// spillable sort's, which reads its rows from a buffer or a merge.
+#[cfg(feature = "spill")]
+fn output_chunk(rows: &[Vec<Value>], column_types: &ColumnTypes, width: usize) -> DataChunk {
+    let types = output_types(column_types, width);
     let mut builder = DataChunkBuilder::with_capacity(&types, rows.len());
     for row in rows {
         for column in 0..width {
@@ -191,7 +228,10 @@ impl PushOperator for SortPushOperator {
 
         let num_cols = chunk.column_count();
 
-        // Buffer all rows
+        // Buffer the selected rows, and count what they hold as the spillable
+        // sort does: a row's values with their heap, and the row's own list.
+        let counts = self.memory.counts();
+        let mut bytes = 0usize;
         for i in chunk.selected_indices() {
             let mut row = Vec::with_capacity(num_cols);
             for col_idx in 0..num_cols {
@@ -199,9 +239,21 @@ impl PushOperator for SortPushOperator {
                     .column(col_idx)
                     .and_then(|c| c.get_value(i))
                     .unwrap_or(Value::Null);
+                if counts {
+                    bytes = bytes.saturating_add(val.estimated_size_bytes());
+                }
                 row.push(val);
             }
             self.buffer.push(row);
+        }
+        // Against the statement's memory: a chunk at a time, a compare within
+        // the grant.
+        if counts {
+            let rows = chunk.selected_indices().count();
+            let per_row =
+                num_cols * std::mem::size_of::<Value>() + std::mem::size_of::<Vec<Value>>();
+            self.memory
+                .add(bytes.saturating_add(rows.saturating_mul(per_row)))?;
         }
 
         Ok(true)
@@ -222,11 +274,13 @@ impl PushOperator for SortPushOperator {
         if num_cols == 0 {
             return Ok(());
         }
-        let chunk = output_chunk(
-            &self.buffer,
+        let chunk = output_chunk_taking(
+            std::mem::take(&mut self.buffer),
             &self.column_types,
             output_width(num_cols, self.output_width),
         );
+        // Its rows are in the output chunk now, which is downstream's to count.
+        self.memory.release();
         sink.consume(chunk)?;
 
         Ok(())

@@ -1,6 +1,7 @@
-//! The operator memory of builds with spilling: one statement's cap
+//! The operator memory, in every build: one statement's cap
 //! ([`QueryMemory`]), the grants its operators take under it and the buffer
-//! manager's limit, and the memory consumers of the operators that spill.
+//! manager's limit, and (with spilling) the memory consumers of the operators
+//! that spill.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -304,6 +305,7 @@ pub struct OperatorMemoryContext {
     buffer_manager: Arc<BufferManager>,
     /// Per-query spill manager for creating spill files (`None`: this open
     /// has no spill path, so its operators cannot spill).
+    #[cfg(feature = "spill")]
     spill_manager: Option<Arc<crate::execution::spill::SpillManager>>,
     /// The statement's memory, shared by its operators.
     query: Arc<QueryMemory>,
@@ -312,18 +314,30 @@ pub struct OperatorMemoryContext {
 impl OperatorMemoryContext {
     /// Creates the context of one statement, capped by the buffer manager's
     /// budget until [`with_query_limit`](Self::with_query_limit) sets a lower
-    /// cap.
+    /// cap. Its operators cannot spill until
+    /// [`with_spill_manager`](Self::with_spill_manager) gives it a spill
+    /// manager.
     #[must_use]
-    pub fn new(
-        buffer_manager: Arc<BufferManager>,
-        spill_manager: Option<Arc<crate::execution::spill::SpillManager>>,
-    ) -> Self {
+    pub fn new(buffer_manager: Arc<BufferManager>) -> Self {
         let query = QueryMemory::new(buffer_manager.budget(), buffer_manager.grant_step());
         Self {
             buffer_manager,
-            spill_manager,
+            #[cfg(feature = "spill")]
+            spill_manager: None,
             query,
         }
+    }
+
+    /// Sets the per-query spill manager the statement's operators spill
+    /// through (`None`: the open has no spill path, so they cannot spill).
+    #[cfg(feature = "spill")]
+    #[must_use]
+    pub fn with_spill_manager(
+        mut self,
+        spill_manager: Option<Arc<crate::execution::spill::SpillManager>>,
+    ) -> Self {
+        self.spill_manager = spill_manager;
+        self
     }
 
     /// Sets the query memory limit this statement's operators are bounded by
@@ -456,6 +470,7 @@ impl OperatorMemoryContext {
     }
 
     /// Returns the spill manager, when this open has a spill path.
+    #[cfg(feature = "spill")]
     #[must_use]
     pub fn spill_manager(&self) -> Option<&Arc<crate::execution::spill::SpillManager>> {
         self.spill_manager.as_ref()

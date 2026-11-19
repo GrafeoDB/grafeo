@@ -1,7 +1,9 @@
 //! One statement's operators share one memory cap (#674): every operator that
 //! materializes its input takes grants against it, a chunk or a table resize
 //! at a time, and one that cannot spill fails with `GRAFEO-S001` naming the
-//! bound that refused. Consumers of concurrent operators stay their own (C18).
+//! bound that refused, in every build (a build without spilling has no
+//! operator that spills). Consumers of concurrent operators stay their own
+//! (C18).
 
 use std::sync::Arc;
 
@@ -11,17 +13,20 @@ use grafeo_common::utils::error::LimitBound;
 
 use crate::execution::chunk::DataChunk;
 use crate::execution::memory::{self, OperatorMemory, OperatorMemoryContext, StatementMemory};
+#[cfg(feature = "spill")]
 use crate::execution::operators::push::SortKey as PushSortKey;
 use crate::execution::operators::{
     AggregateExpr, AggregatePushOperator, ApplyOperator, DelimBuffer, DelimReplayOperator,
     DistinctMaterializingOperator, DistinctOperator, DistinctPushOperator, EagerOperator,
     ExceptOperator, HashAggregateOperator, HashJoinOperator, IntersectOperator, JoinType,
     MapCollectOperator, NestedLoopJoinOperator, Operator, OperatorError, OperatorResult,
-    ShuffleOperator, SimpleAggregateOperator, SortKey, SortOperator,
-    SpillableAggregatePushOperator, SpillableSortPushOperator, TopKOperator,
+    ShuffleOperator, SimpleAggregateOperator, SortKey, SortOperator, TopKOperator,
 };
-use crate::execution::pipeline::PushOperator;
+#[cfg(feature = "spill")]
+use crate::execution::operators::{SpillableAggregatePushOperator, SpillableSortPushOperator};
+use crate::execution::pipeline::{Pipeline, PushOperator};
 use crate::execution::sink::CollectorSink;
+use crate::execution::source::OperatorSource;
 use crate::execution::vector::ValueVector;
 
 const KIB: usize = 1 << 10;
@@ -71,7 +76,7 @@ impl Operator for Numbers {
 
 /// A statement's context with a large budget and a `limit` byte cap.
 fn statement(limit: usize) -> OperatorMemoryContext {
-    OperatorMemoryContext::new(BufferManager::with_budget(256 * MIB), None).with_query_limit(limit)
+    OperatorMemoryContext::new(BufferManager::with_budget(256 * MIB)).with_query_limit(limit)
 }
 
 /// `operator`, built inside the statement scope of `ctx`.
@@ -239,6 +244,87 @@ fn every_materializing_pull_operator_refuses_at_the_query_limit() {
     }
 }
 
+/// Every push operator that materializes its input, as the pipeline
+/// conversion builds it from the pull plan (a sort, a grouping, a distinct;
+/// with a statement's context and spilling, their spillable forms, which have
+/// no spill path here): in a statement capped at 64 KiB the pipeline fails
+/// naming the query memory limit; at a large cap it runs; either way the
+/// statement holds nothing once the pipeline drops. Without spilling this is
+/// the whole of a sort's and a grouping's accounting.
+#[test]
+fn every_materializing_push_operator_refuses_at_the_query_limit() {
+    type Build = fn() -> Box<dyn Operator>;
+    let plans: [(&str, Build); 4] = [
+        ("sort", || {
+            Box::new(SortOperator::new(
+                Numbers::boxed(20, 1),
+                vec![SortKey::ascending(0)],
+            ))
+        }),
+        ("grouping", || {
+            Box::new(HashAggregateOperator::new(
+                Numbers::boxed(20, 1),
+                vec![0],
+                vec![AggregateExpr::count_star()],
+                vec![LogicalType::Int64, LogicalType::Int64],
+            ))
+        }),
+        ("global count distinct", || {
+            Box::new(HashAggregateOperator::new(
+                Numbers::boxed(20, 1),
+                Vec::new(),
+                vec![count_distinct(0)],
+                vec![LogicalType::Int64],
+            ))
+        }),
+        ("distinct", || {
+            Box::new(DistinctOperator::new(Numbers::boxed(20, 1)))
+        }),
+    ];
+    let converted = |ctx: &OperatorMemoryContext, build: Build, with_context: bool| {
+        built_in(ctx, || {
+            let plan = build();
+            #[cfg(feature = "spill")]
+            if with_context {
+                return crate::execution::pipeline_convert::convert_to_pipeline_with_memory(
+                    plan,
+                    Some(ctx.clone()),
+                );
+            }
+            let _ = with_context;
+            crate::execution::pipeline_convert::convert_to_pipeline(plan)
+        })
+    };
+    for &with_context in SPILLABLE {
+        for (name, build) in plans {
+            let name = format!("{name}, with the context {with_context}");
+            let small = statement(64 * KIB);
+            let (source, push_ops) = converted(&small, build, with_context);
+            assert!(!push_ops.is_empty(), "{name}: converted to push operators");
+            let mut pipeline = Pipeline::new(
+                Box::new(OperatorSource::new(source)),
+                push_ops,
+                Box::new(CollectorSink::new()),
+            );
+            assert_refused(pipeline.execute(), LimitBound::QueryMemoryLimit);
+            drop(pipeline);
+            assert_eq!(small.query().used(), 0, "{name}: gave back what it held");
+
+            let large = statement(64 * MIB);
+            let (source, push_ops) = converted(&large, build, with_context);
+            let mut pipeline = Pipeline::new(
+                Box::new(OperatorSource::new(source)),
+                push_ops,
+                Box::new(CollectorSink::new()),
+            );
+            pipeline.execute().unwrap();
+            drop(pipeline);
+            assert_eq!(large.query().used(), 0, "{name}: gave back what it held");
+            assert_eq!(large.buffer_manager().stats().total_allocated, 0, "{name}");
+        }
+    }
+}
+
 /// `COUNT(DISTINCT column)`.
 fn count_distinct(column: usize) -> AggregateExpr {
     let mut expr = AggregateExpr::count(column);
@@ -250,25 +336,37 @@ fn count_distinct(column: usize) -> AggregateExpr {
 /// without spilling, or the spillable one (without a spill path here, so it
 /// has nowhere to spill).
 fn push_count_distinct(ctx: &OperatorMemoryContext, spillable: bool) -> Box<dyn PushOperator> {
+    #[cfg(feature = "spill")]
     if spillable {
-        Box::new(SpillableAggregatePushOperator::with_memory_context(
+        return Box::new(SpillableAggregatePushOperator::with_memory_context(
             Vec::new(),
             vec![count_distinct(0)],
             ctx.clone(),
-        ))
-    } else {
-        Box::new(built_in(ctx, || {
-            AggregatePushOperator::global(vec![count_distinct(0)])
-        }))
+        ));
     }
+    assert!(
+        !spillable,
+        "a build without spilling has no spillable aggregate"
+    );
+    Box::new(built_in(ctx, || {
+        AggregatePushOperator::global(vec![count_distinct(0)])
+    }))
 }
+
+/// Whether this build has the spillable operators: the push aggregate test
+/// runs both forms with them, the one without spilling otherwise.
+const SPILLABLE: &[bool] = if cfg!(feature = "spill") {
+    &[false, true]
+} else {
+    &[false]
+};
 
 /// The push aggregates count their groups' DISTINCT sets: past a small cap
 /// they fail naming the query memory limit, under a large one they run, and
 /// they give back what they held when they drop.
 #[test]
 fn the_push_aggregates_count_their_distinct_sets() {
-    for spillable in [false, true] {
+    for &spillable in SPILLABLE {
         let small = statement(64 * KIB);
         let mut aggregate = push_count_distinct(&small, spillable);
         let mut sink = CollectorSink::new();
@@ -382,7 +480,7 @@ fn a_grant_past_the_memory_limit_names_the_memory_limit() {
     let _held = manager
         .try_allocate(900 * KIB, MemoryRegion::ExecutionBuffers)
         .unwrap();
-    let ctx = OperatorMemoryContext::new(Arc::clone(&manager), None);
+    let ctx = OperatorMemoryContext::new(Arc::clone(&manager));
     assert_eq!(ctx.query_limit(), MIB);
     let mut memory = OperatorMemory::new(ctx.clone());
     assert_refused(memory.add(200 * KIB), LimitBound::MemoryLimit);
@@ -397,7 +495,7 @@ fn a_grant_past_the_memory_limit_names_the_memory_limit() {
 #[test]
 fn the_query_limit_never_exceeds_the_budget() {
     let manager = BufferManager::with_budget(MIB);
-    let ctx = OperatorMemoryContext::new(manager, None).with_query_limit(8 * MIB);
+    let ctx = OperatorMemoryContext::new(manager).with_query_limit(8 * MIB);
     assert_eq!(ctx.query_limit(), MIB);
 }
 
@@ -415,13 +513,14 @@ fn a_nested_scope_restores_the_outer_one() {
     assert!(Arc::ptr_eq(current.query(), outer.query()));
 }
 
+#[cfg(feature = "spill")]
 /// Two sorts of one database each register a consumer of their own name:
 /// one sort's end unregisters only its own, and a sort dropped without
 /// finishing (a failed statement) unregisters its own too (C18).
 #[test]
 fn concurrent_sorts_keep_their_own_consumers() {
     let manager = BufferManager::with_budget(64 * MIB);
-    let ctx = OperatorMemoryContext::new(Arc::clone(&manager), None);
+    let ctx = OperatorMemoryContext::new(Arc::clone(&manager));
     let mut first = SpillableSortPushOperator::with_memory_context(
         vec![PushSortKey::ascending(0)],
         ctx.clone(),
@@ -456,12 +555,13 @@ fn concurrent_sorts_keep_their_own_consumers() {
     assert_eq!(ctx.query().used(), 0);
 }
 
+#[cfg(feature = "spill")]
 /// A sort past the statement's cap without a spill path fails naming the
 /// query memory limit, and its consumer goes when it drops.
 #[test]
 fn a_push_sort_without_a_spill_path_refuses_at_the_query_limit() {
     let manager = BufferManager::with_budget(64 * MIB);
-    let ctx = OperatorMemoryContext::new(Arc::clone(&manager), None).with_query_limit(64 * KIB);
+    let ctx = OperatorMemoryContext::new(Arc::clone(&manager)).with_query_limit(64 * KIB);
     let mut sort = SpillableSortPushOperator::with_memory_context(
         vec![PushSortKey::ascending(0)],
         ctx.clone(),
@@ -665,6 +765,7 @@ fn a_distinct_counts_the_strings_its_keys_keep() {
     assert_eq!(drain(&mut integers).unwrap(), 2048);
 }
 
+#[cfg(feature = "spill")]
 /// A grouping past the query limit with a spill path refuses at once: its
 /// estimate counts spilled groups too, so it never spills to get under the
 /// cap (a spilled partition is loaded again by its next key).
@@ -672,11 +773,9 @@ fn a_distinct_counts_the_strings_its_keys_keep() {
 fn a_spillable_grouping_past_the_query_limit_refuses_without_spilling() {
     let dir = tempfile::tempdir().unwrap();
     let spill = Arc::new(crate::execution::spill::SpillManager::new(dir.path()).unwrap());
-    let ctx = OperatorMemoryContext::new(
-        BufferManager::with_budget(256 * MIB),
-        Some(Arc::clone(&spill)),
-    )
-    .with_query_limit(64 * KIB);
+    let ctx = OperatorMemoryContext::new(BufferManager::with_budget(256 * MIB))
+        .with_spill_manager(Some(Arc::clone(&spill)))
+        .with_query_limit(64 * KIB);
     let mut aggregate = SpillableAggregatePushOperator::with_memory_context(
         vec![0],
         vec![AggregateExpr::count_star()],

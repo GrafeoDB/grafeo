@@ -412,13 +412,13 @@ pub(crate) struct SessionConfig {
     #[cfg(query_language)]
     pub path_search_budget: usize,
     /// Buffer manager for memory-aware query execution.
-    #[cfg(feature = "spill")]
+    #[cfg(any(lpg_language, rdf_language))]
     pub buffer_manager: Option<Arc<grafeo_common::memory::buffer::BufferManager>>,
     /// The open's spill account, which bounds the queries' spill files.
     #[cfg(feature = "spill")]
     pub spill_account: Option<Arc<grafeo_core::execution::spill::SpillAccount>>,
     /// What one statement's operators may hold (`Config::with_query_memory_limit`).
-    #[cfg(feature = "spill")]
+    #[cfg(any(lpg_language, rdf_language))]
     pub query_memory_limit: Option<usize>,
     pub commit_counter: Arc<AtomicUsize>,
     pub gc_interval: usize,
@@ -490,14 +490,14 @@ pub(crate) struct SessionInner {
     query_timeout: Option<Duration>,
     /// Maximum size in bytes for a single property value.
     max_property_size: Option<usize>,
-    /// Buffer manager for memory-aware execution (spill decisions).
-    #[cfg(feature = "spill")]
+    /// Buffer manager for memory-aware execution: the operators' grants.
+    #[cfg(any(lpg_language, rdf_language))]
     buffer_manager: Option<Arc<grafeo_common::memory::buffer::BufferManager>>,
     /// The open's spill account, which bounds the queries' spill files.
     #[cfg(feature = "spill")]
     spill_account: Option<Arc<grafeo_core::execution::spill::SpillAccount>>,
     /// What one statement's operators may hold, per open (None: the global limit).
-    #[cfg(feature = "spill")]
+    #[cfg(any(lpg_language, rdf_language))]
     query_memory_limit: Option<usize>,
     /// Shared commit counter for triggering auto-GC.
     commit_counter: Arc<AtomicUsize>,
@@ -671,11 +671,11 @@ impl SessionInner {
             #[cfg(query_language)]
             query_timeout: cfg.query_timeout,
             max_property_size: cfg.max_property_size,
-            #[cfg(feature = "spill")]
+            #[cfg(any(lpg_language, rdf_language))]
             buffer_manager: cfg.buffer_manager,
             #[cfg(feature = "spill")]
             spill_account: cfg.spill_account,
-            #[cfg(feature = "spill")]
+            #[cfg(any(lpg_language, rdf_language))]
             query_memory_limit: cfg.query_memory_limit,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
@@ -869,11 +869,11 @@ impl SessionInner {
             #[cfg(query_language)]
             query_timeout: cfg.query_timeout,
             max_property_size: cfg.max_property_size,
-            #[cfg(feature = "spill")]
+            #[cfg(any(lpg_language, rdf_language))]
             buffer_manager: cfg.buffer_manager,
             #[cfg(feature = "spill")]
             spill_account: cfg.spill_account,
-            #[cfg(feature = "spill")]
+            #[cfg(any(lpg_language, rdf_language))]
             query_memory_limit: cfg.query_memory_limit,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
@@ -6744,29 +6744,43 @@ impl SessionInner {
     }
 
     /// Creates a per-query `OperatorMemoryContext`: the buffer manager, the
-    /// open's spill account when the open has a spill path (a per-query
-    /// subdirectory), and the query memory limit the statement's operators
-    /// are bounded by together (the configured one, never above the global
-    /// limit).
+    /// query memory limit the statement's operators are bounded by together
+    /// (the configured one, never above the global limit), and with spilling
+    /// the open's spill account when the open has a spill path (a per-query
+    /// subdirectory). In every build its operators take grants; without
+    /// spilling they refuse at the limit.
     ///
     /// Returns `None` only when the database has no buffer manager, in which
     /// case its operators run without a budget.
-    #[cfg(all(feature = "spill", any(lpg_language, rdf_language)))]
+    #[cfg(any(lpg_language, rdf_language))]
     pub(crate) fn make_operator_memory_context(
         &self,
     ) -> Option<grafeo_core::execution::OperatorMemoryContext> {
-        // Numbers the per-query spill directories. Not the commit counter: that
-        // one paces garbage collection, and a query is not a commit (#565).
-        static NEXT_QUERY_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
         let bm = self.buffer_manager.as_ref()?;
         let query_limit = self
             .query_memory_limit
             .map_or_else(|| bm.budget(), |query| query.min(bm.budget()));
-        // Per-query isolation: a unique subdirectory, created only if the
-        // query spills (see `SpillManager::create_file`). No spill path: no
-        // manager, and the operators cannot spill.
-        let spill_manager = bm.config().spill_path.as_ref().and_then(|spill_path| {
+        let context = grafeo_core::execution::OperatorMemoryContext::new(std::sync::Arc::clone(bm))
+            .with_query_limit(query_limit);
+        #[cfg(feature = "spill")]
+        let context = context.with_spill_manager(self.make_spill_manager(bm));
+        Some(context)
+    }
+
+    /// The per-query spill manager: a unique subdirectory of the open's spill
+    /// path, created only if the query spills (see `SpillManager::create_file`),
+    /// bounded by the open's spill account. No spill path: no manager, and the
+    /// operators cannot spill.
+    #[cfg(all(feature = "spill", any(lpg_language, rdf_language)))]
+    fn make_spill_manager(
+        &self,
+        bm: &grafeo_common::memory::buffer::BufferManager,
+    ) -> Option<std::sync::Arc<grafeo_core::execution::SpillManager>> {
+        // Numbers the per-query spill directories. Not the commit counter: that
+        // one paces garbage collection, and a query is not a commit (#565).
+        static NEXT_QUERY_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+        bm.config().spill_path.as_ref().and_then(|spill_path| {
             let query_id = NEXT_QUERY_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let query_dir = spill_path.join(format!("query_{query_id}"));
             let mut manager = grafeo_core::execution::SpillManager::new(&query_dir)
@@ -6777,14 +6791,7 @@ impl SessionInner {
                 manager = manager.with_account(std::sync::Arc::clone(account));
             }
             Some(std::sync::Arc::new(manager))
-        });
-        Some(
-            grafeo_core::execution::OperatorMemoryContext::new(
-                std::sync::Arc::clone(bm),
-                spill_manager,
-            )
-            .with_query_limit(query_limit),
-        )
+        })
     }
 
     /// Records query metrics for any language.
@@ -7714,16 +7721,10 @@ impl Drop for SessionInner {
 
 /// The memory of one statement of `session`: its cap and the buffer manager
 /// its operators take their grants from (see
-/// [`Session::make_operator_memory_context`]).
-#[cfg(all(feature = "spill", any(lpg_language, rdf_language)))]
+/// [`Session::make_operator_memory_context`]), in every build.
+#[cfg(any(lpg_language, rdf_language))]
 fn statement_memory(session: &SessionInner) -> grafeo_core::execution::StatementMemory {
     grafeo_core::execution::StatementMemory::of(session.make_operator_memory_context())
-}
-
-/// The memory of one statement: without spilling, operators take no grants.
-#[cfg(all(not(feature = "spill"), any(lpg_language, rdf_language)))]
-fn statement_memory(_session: &SessionInner) -> grafeo_core::execution::StatementMemory {
-    grafeo_core::execution::StatementMemory::Unbudgeted
 }
 
 /// The parameter values to fill into `plan`: `None` for an empty map when the

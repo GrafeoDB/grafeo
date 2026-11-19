@@ -343,7 +343,7 @@ impl Operator for RdfSortOperator {
     }
 }
 
-#[cfg(all(test, feature = "spill"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -397,7 +397,7 @@ mod tests {
     /// A sort of `chunks` chunks by the key column descending, keeping the
     /// first `top_k`, built in a statement capped at `limit`.
     fn sort_of(chunks: usize, top_k: Option<usize>, limit: usize) -> RdfSortOperator {
-        let ctx = OperatorMemoryContext::new(BufferManager::with_budget(256 << 20), None)
+        let ctx = OperatorMemoryContext::new(BufferManager::with_budget(256 << 20))
             .with_query_limit(limit);
         let _scope = memory::enter(StatementMemory::Budgeted(ctx));
         RdfSortOperator::new(

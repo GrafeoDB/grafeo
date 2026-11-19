@@ -3142,6 +3142,7 @@ impl RdfPlanner {
             column_map,
             terms: Arc::clone(&self.terms),
             done: false,
+            memory: grafeo_core::execution::memory::capture(),
         });
 
         Ok((operator, Vec::new(), Vec::new()))
@@ -3553,6 +3554,11 @@ struct RdfModifyOperator {
     column_map: HashMap<String, usize>,
     terms: Arc<QueryTermIds>,
     done: bool,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](grafeo_core::execution::memory::capture)): the chunks of the WHERE clause's solutions, kept until the templates run.
+    /// Past the query memory limit or the memory limit it fails with
+    /// `GRAFEO-S001`, before it writes anything.
+    memory: grafeo_core::execution::OperatorMemory,
 }
 
 impl Operator for RdfModifyOperator {
@@ -3562,26 +3568,31 @@ impl Operator for RdfModifyOperator {
         }
         let writer = update_writer(&self.writer)?;
 
-        // Step 1: every solution of the WHERE clause, before any change.
-        let mut bindings: Vec<(DataChunk, usize)> = Vec::new();
+        // Step 1: every solution of the WHERE clause, before any change: each
+        // chunk kept once, its selected rows the solutions.
+        let mut chunks: Vec<DataChunk> = Vec::new();
         while let Some(chunk) = self.input.next()? {
-            for row in chunk.selected_indices() {
-                bindings.push((chunk.clone(), row));
-            }
+            self.memory
+                .add_with(|| grafeo_core::execution::memory::chunk_bytes(&chunk))?;
+            chunks.push(chunk);
         }
+        let bindings: Vec<(&DataChunk, usize)> = chunks
+            .iter()
+            .flat_map(|chunk| chunk.selected_indices().map(move |row| (chunk, row)))
+            .collect();
 
         // Step 2: the DELETE templates, each variable its exact bound term.
         for template in &self.delete_templates {
             let graph = template.graph.as_deref();
             check_mutation_graph(graph)?;
-            for (chunk, row) in &bindings {
+            for &(chunk, row) in &bindings {
                 let mut blanks = FreshBlankNodes::default();
                 let mut term = |component| {
                     template_term(
                         component,
                         &self.column_map,
                         chunk,
-                        *row,
+                        row,
                         &self.terms,
                         &mut blanks,
                     )
@@ -3598,7 +3609,7 @@ impl Operator for RdfModifyOperator {
 
         // Step 3: the INSERT templates over the same solutions, a template
         // blank node fresh for each solution.
-        for (chunk, row) in &bindings {
+        for &(chunk, row) in &bindings {
             let mut blanks = FreshBlankNodes::default();
             for template in &self.insert_templates {
                 let graph = template.graph.as_deref();
@@ -3608,7 +3619,7 @@ impl Operator for RdfModifyOperator {
                         component,
                         &self.column_map,
                         chunk,
-                        *row,
+                        row,
                         &self.terms,
                         &mut blanks,
                     )
@@ -3623,6 +3634,9 @@ impl Operator for RdfModifyOperator {
                 }
             }
         }
+        drop(bindings);
+        drop(chunks);
+        self.memory.release();
 
         self.done = true;
         Ok(None)
@@ -7156,6 +7170,7 @@ mod tests {
             column_map: HashMap::new(),
             terms: Arc::default(),
             done: false,
+            memory: grafeo_core::execution::OperatorMemory::unbudgeted(),
         });
         let any = op.into_any();
         assert!(any.downcast::<RdfModifyOperator>().is_ok());

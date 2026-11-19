@@ -1405,8 +1405,9 @@ impl Config {
     /// limit, and the statement changes nothing. The memory
     /// limit binds besides it: a query limit above the memory limit is the
     /// memory limit. Per open, never stored; 0 fails
-    /// [`validate`](Self::validate). It applies in builds with spilling (the
-    /// `spill` feature); path searches keep their own budget
+    /// [`validate`](Self::validate). It applies in every build; without
+    /// spilling (the `spill` feature) nothing spills, so a sort refuses at the
+    /// cap too. Path searches keep their own budget
     /// ([`with_path_search_budget`](Self::with_path_search_budget)).
     #[must_use]
     pub fn with_query_memory_limit(mut self, bytes: usize) -> Self {

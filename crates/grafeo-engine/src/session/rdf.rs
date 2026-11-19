@@ -58,11 +58,11 @@ impl SessionInner {
             #[cfg(query_language)]
             query_timeout: cfg.query_timeout,
             max_property_size: cfg.max_property_size,
-            #[cfg(feature = "spill")]
+            #[cfg(any(lpg_language, rdf_language))]
             buffer_manager: cfg.buffer_manager,
             #[cfg(feature = "spill")]
             spill_account: cfg.spill_account,
-            #[cfg(feature = "spill")]
+            #[cfg(any(lpg_language, rdf_language))]
             query_memory_limit: cfg.query_memory_limit,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,

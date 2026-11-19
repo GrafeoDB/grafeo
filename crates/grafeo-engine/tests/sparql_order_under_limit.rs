@@ -9,10 +9,10 @@
 //! The oracle is the same query on the same data without a limit.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test main sparql_order_under_limit::
+//! cargo test -p grafeo-engine --all-features --test sparql_order_under_limit
 //! ```
 
-#![cfg(all(feature = "sparql", feature = "triple-store", feature = "spill"))]
+#![cfg(all(feature = "sparql", feature = "triple-store"))]
 
 use grafeo_core::graph::rdf::{Term, Triple};
 use grafeo_engine::{Config, GrafeoDB};

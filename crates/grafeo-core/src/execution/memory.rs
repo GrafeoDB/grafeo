@@ -4,24 +4,18 @@ use grafeo_common::memory::buffer::{BufferManager, MemoryGrant, MemoryRegion, Pr
 use std::sync::Arc;
 
 // The statement memory of the operators: one statement's cap and the grants
-// under it with spilling, nothing to count without it (the operators hold the
-// same type in either build).
-#[cfg(feature = "spill")]
+// under it, in every build. Only spilling is behind `spill`: without it an
+// operator that would spill refuses at the cap.
 mod budget;
-#[cfg(not(feature = "spill"))]
-mod no_budget;
 mod scope;
 
-#[cfg(feature = "spill")]
 pub use budget::{
     ConsumerRegistration, OperatorGrant, OperatorMemory, OperatorMemoryContext, QueryMemory,
     StatementMemory, capture, current,
 };
-#[cfg(not(feature = "spill"))]
-pub use no_budget::{OperatorMemory, StatementMemory, capture};
 pub use scope::{MemoryScope, enter, in_scope, statement};
 
-#[cfg(all(test, feature = "spill"))]
+#[cfg(test)]
 mod operator_memory_tests;
 
 /// Default chunk size for execution buffers.

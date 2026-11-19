@@ -5,13 +5,34 @@
 //! that run pull plans, and what their values hold on the heap. Past the
 //! limit an operator that cannot spill fails with `GRAFEO-S001` naming the
 //! query memory limit, a writing statement changes nothing (in an explicit
-//! transaction too), and a higher limit lets the same statement through.
+//! transaction too), and a higher limit lets the same statement through. In
+//! every build: without spilling the sorts and groupings refuse too.
+//!
+//! The engine's operators that keep their input, each with its test here (the
+//! core's are in `grafeo-core`'s `operator_memory_tests.rs`, one list each for
+//! the pull and the push operators):
+//!
+//! | Operator | Test |
+//! | --- | --- |
+//! | a built-in procedure's result (`procedure_call.rs`) | `a_procedure_result_refuses_at_the_query_limit` |
+//! | a stored procedure's result (`user_procedure.rs`) | `a_stored_procedure_result_refuses_at_the_query_limit` |
+//! | SPARQL `EXISTS` (a mark, a row check: `exists_pair.rs`) and CONSTRUCT's seen triples | `sparql_exists_and_construct_refuse_at_the_query_limit` |
+//! | SPARQL `ORDER BY` (`order.rs`) | `sparql_order_under_limit.rs` |
+//! | SPARQL `DELETE`/`INSERT ... WHERE` and `DELETE WHERE` (`RdfModify`) | `sparql_updates_refuse_at_the_query_limit` |
+//! | the pattern insert and delete with an input (`RdfInsertPattern`, `RdfDeletePattern`) | none: no translator builds them with an input, only the planner's unit tests |
+//! | the leapfrog joins (`LeapfrogJoinOperator`, `RdfLeapfrogOperator`) | none yet: no plan reaches them; they take grants in the next patch |
+//! | a per-row SPARQL `EXISTS`'s answers (`exists_per_row.rs`) | none yet: the next patch |
+//!
+//! GQL `UNION` streams its branches (only `UNION DISTINCT` keeps rows, in its
+//! distinct), so it has no buffer of its own to count. The limits here are
+//! 1 MiB and 128 KiB: well under what each statement holds.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test main memory_query_limit_operators::
+//! cargo test -p grafeo-engine --all-features --test memory_query_limit_operators
+//! cargo test -p grafeo-engine --no-default-features --features gql,regex-lite --test memory_query_limit_operators
 //! ```
 
-#![cfg(all(feature = "gql", feature = "spill"))]
+#![cfg(feature = "gql")]
 
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::Error;
@@ -103,14 +124,8 @@ fn cypher_pull_operators_refuse_at_the_query_limit() {
 /// memory limit: nothing stays granted to execution buffers.
 #[test]
 fn a_refused_statement_gives_its_memory_back() {
-    use grafeo_common::memory::buffer::MemoryRegion;
-
     let db = capped(MIB);
-    let execution = |db: &GrafeoDB| {
-        db.buffer_manager()
-            .stats()
-            .region_usage(MemoryRegion::ExecutionBuffers)
-    };
+    let execution = |db: &GrafeoDB| db.memory_usage().buffer_manager.execution_buffers_bytes;
     let before = execution(&db);
     for query in GQL {
         assert_refused(db.execute(query));
@@ -213,6 +228,51 @@ fn sparql_exists_and_construct_refuse_at_the_query_limit() {
             large.execute_sparql(query).unwrap().rows().len(),
             10_000,
             "{query}"
+        );
+    }
+}
+
+/// SPARQL updates keep what they write until their input ends: `DELETE WHERE`
+/// and `INSERT WHERE` (RdfModify) each WHERE chunk, the pattern forms the
+/// triples. Past the limit they refuse and change nothing; under it they
+/// write every triple.
+#[cfg(all(feature = "sparql", feature = "triple-store"))]
+#[test]
+fn sparql_updates_refuse_at_the_query_limit() {
+    // How many triples have `predicate`: a SPARQL count, an RDF literal.
+    let count = |db: &GrafeoDB, predicate: &str| {
+        let rows = db
+            .execute_sparql(&format!(
+                "PREFIX : <urn:> SELECT (COUNT(*) AS ?n) WHERE {{ ?s :{predicate} ?o }}"
+            ))
+            .unwrap();
+        rows.rows()[0][0].clone()
+    };
+    for update in [
+        "PREFIX : <urn:> DELETE { ?s :knows ?o } INSERT { ?o :known ?s } WHERE { ?s :knows ?o }",
+        "PREFIX : <urn:> DELETE WHERE { ?s :knows ?o }",
+        "PREFIX : <urn:> INSERT { ?o :known ?s } WHERE { ?s :knows ?o }",
+    ] {
+        let small = rdf_people(128 * 1024);
+        let knows = count(&small, "knows");
+        assert_refused(small.execute_sparql(update));
+        assert_eq!(count(&small, "knows"), knows, "{update}: changed nothing");
+        assert_eq!(count(&small, "known"), count(&small, "nothing"), "{update}");
+
+        let large = rdf_people(512 * MIB);
+        let (knows, none) = (count(&large, "knows"), count(&large, "nothing"));
+        large.execute_sparql(update).unwrap();
+        let inserts = update.contains("INSERT");
+        let deletes = update.contains("DELETE");
+        assert_eq!(
+            count(&large, "known"),
+            if inserts { knows.clone() } else { none.clone() },
+            "{update}: wrote every triple"
+        );
+        assert_eq!(
+            count(&large, "knows"),
+            if deletes { none } else { knows },
+            "{update}: deleted every triple"
         );
     }
 }
@@ -376,6 +436,7 @@ fn explain_of_a_refused_statement_succeeds_and_profile_is_refused() {
     assert_refused(db.execute(&format!("PROFILE {refused}")));
 }
 
+#[cfg(feature = "spill")]
 /// A strict expected failure of a grouping that should spill: `body` fails
 /// with `GRAFEO-S001` today (the behavior `spec` names is not there yet,
 /// `issue` tracks it). If it passes, the test fails so the mark is removed;
@@ -400,6 +461,7 @@ const GROUPINGS: &[&str] = &[
     "UNWIND range(1, 200000) AS i RETURN i % 100000 AS k, collect(i) AS xs",
 ];
 
+#[cfg(feature = "spill")]
 /// A grouping's answer in a form two runs compare by: its rows in order for
 /// an ORDER BY, else sorted, with each collected list sorted; for a LIMIT
 /// without an ORDER BY, which groups come is open, so only how many and
@@ -433,6 +495,7 @@ fn answer(query: &str, rows: &[Vec<Value>]) -> Vec<String> {
 /// higher limit gives the same answer. The spilling arm is a strict expected
 /// failure: a grouping counts its spilled groups and refuses at once, until
 /// spilled groups merge at the end instead of being loaded again.
+#[cfg(feature = "spill")]
 #[test]
 fn a_grouping_past_the_query_limit_spills_or_names_the_limit() {
     for query in GROUPINGS {
@@ -478,5 +541,40 @@ fn a_grouping_past_the_query_limit_spills_or_names_the_limit() {
                 Ok(())
             },
         );
+    }
+}
+
+/// A build without spilling enforces the query memory limit too: a sort and
+/// every grouping past it refuse naming it, a spill path set or not (there is
+/// nothing to spill with), and a scan and a count under it answer as before.
+#[cfg(not(feature = "spill"))]
+#[test]
+fn without_spilling_sorts_and_groupings_refuse_at_the_query_limit() {
+    let spill = tempfile::tempdir().unwrap();
+    let with_a_spill_path = GrafeoDB::with_config(
+        Config::in_memory()
+            .with_query_memory_limit(MIB)
+            .with_spill_path(spill.path()),
+    )
+    .unwrap();
+    let sort = "UNWIND range(1, 200000) AS i RETURN i ORDER BY -i";
+    for db in [&capped(MIB), &with_a_spill_path] {
+        assert_refused(db.execute(sort));
+        for query in GROUPINGS {
+            assert_refused(db.execute(query));
+        }
+        let rows = db
+            .execute("UNWIND range(1, 200000) AS i RETURN count(*) AS n")
+            .unwrap();
+        assert_eq!(rows.rows()[0][0], Value::Int64(200_000), "a count streams");
+        let rows = db
+            .execute("UNWIND range(1, 200000) AS i WITH i WHERE i % 50000 = 0 RETURN i")
+            .unwrap();
+        assert_eq!(rows.rows().len(), 4, "a scan streams");
+    }
+    let higher = capped(512 * MIB);
+    assert_eq!(higher.execute(sort).unwrap().rows().len(), 200_000);
+    for query in GROUPINGS {
+        assert!(!higher.execute(query).unwrap().rows().is_empty(), "{query}");
     }
 }

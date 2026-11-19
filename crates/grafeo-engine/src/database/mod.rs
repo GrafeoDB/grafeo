@@ -2199,11 +2199,11 @@ impl Open {
             max_property_size: self.config.max_property_size(),
             #[cfg(query_language)]
             path_search_budget: self.config.path_search_budget(),
-            #[cfg(feature = "spill")]
+            #[cfg(any(lpg_language, rdf_language))]
             buffer_manager: Some(Arc::clone(&self.buffer_manager)),
             #[cfg(feature = "spill")]
             spill_account: self.spill_account.clone(),
-            #[cfg(feature = "spill")]
+            #[cfg(any(lpg_language, rdf_language))]
             query_memory_limit: self.config.query_memory_limit(),
             commit_counter: Arc::clone(&self.commit_counter),
             gc_interval: self.config.gc_interval(),

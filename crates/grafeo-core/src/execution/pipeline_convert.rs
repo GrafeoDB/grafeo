@@ -433,10 +433,8 @@ mod tests {
         use std::sync::Arc;
 
         let temp_dir = tempfile::TempDir::new().unwrap();
-        let context = OperatorMemoryContext::new(
-            BufferManager::with_budget(1024 * 1024),
-            Some(Arc::new(SpillManager::new(temp_dir.path()).unwrap())),
-        );
+        let context = OperatorMemoryContext::new(BufferManager::with_budget(1024 * 1024))
+            .with_spill_manager(Some(Arc::new(SpillManager::new(temp_dir.path()).unwrap())));
         let (source, push_ops) =
             convert_to_pipeline_with_memory(nodes_sorted_by_a_dropped_key(), Some(context));
         assert_eq!(source.name(), "NodesWithKeys");

@@ -463,6 +463,16 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
+      - name: Test the query memory limit without spilling
+        run: |
+          cargo nextest run -p grafeo-core --no-default-features --lib -E 'test(/memory::operator_memory_tests::/)'
+          cargo nextest run -p grafeo-engine --no-default-features --features gql,cypher,sparql,triple-store,regex,algos --test memory_query_limit_operators --test sparql_order_under_limit
+          cargo nextest run -p grafeo-engine --no-default-features --features gql,regex-lite --test memory_query_limit_operators
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
       - name: Test and lint the grafeo crate with its default features
         run: |
           cargo nextest run -p grafeo --test main open_with_default_features::

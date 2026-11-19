@@ -94,7 +94,7 @@ pub use factorized_filter::{
 };
 pub use filter::{
     BinaryFilterOp, ExpressionPredicate, FilterExpression, FilterOperator, LazyValue,
-    ListPredicateKind, Predicate, SessionContext, StatementClock, UnaryFilterOp,
+    ListPredicateKind, PatternCache, Predicate, SessionContext, StatementClock, UnaryFilterOp,
 };
 pub use functions::{
     Arity, BuiltinFunction, FunctionGroup, FunctionSupport, REGEX_SUPPORT, Volatility,

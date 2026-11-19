@@ -31,10 +31,6 @@ serde.workspace = true
 bincode.workspace = true
 serde_json = { version = "1", optional = true }  # The backup manifest and cursor (feature `wal`)
 
-# Regex for SPARQL FILTER (use regex-lite for smaller WASM builds)
-regex = { workspace = true, optional = true }
-regex-lite = { workspace = true, optional = true }
-
 # Cryptographic hashes for SPARQL hash functions (optional, RDF only)
 md5 = { workspace = true, optional = true }
 sha1 = { workspace = true, optional = true }
@@ -70,8 +66,8 @@ proptest.workspace = true
 [features]
 default = ["gql", "parallel", "wal", "grafeo-file", "spill", "mmap", "regex"]
 lpg = []  # Deprecated: the LPG store is always built, so this enables nothing. Removed in 0.7.0.
-regex = ["dep:regex", "grafeo-core/regex"]
-regex-lite = ["dep:regex-lite", "grafeo-core/regex-lite"]
+regex = ["grafeo-core/regex"]  # SPARQL REGEX compiles through grafeo-core's pattern cache
+regex-lite = ["grafeo-core/regex-lite"]  # the same, regex-lite (smaller WASM builds)
 gql = ["grafeo-adapters/gql"]
 cypher = ["grafeo-adapters/cypher", "gql"]
 sparql = ["grafeo-adapters/sparql"]

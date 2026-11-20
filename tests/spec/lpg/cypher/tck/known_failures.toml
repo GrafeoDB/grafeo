@@ -160,8 +160,6 @@ s19_fail_when_adding_new_label_predicate_on_a_node_that_is_already_bound_5 = { i
 [Create2]
 s22_fail_when_creating_a_variable_length_relationship = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
 
-[Create4]
-
 [Create5]
 s5_create_a_pattern_with_multiple_hops_and_varying_directions_control = { issue = "fix in 0.6.5", note = "Cypher column names are not the source text, or RETURN * is not by name" }
 

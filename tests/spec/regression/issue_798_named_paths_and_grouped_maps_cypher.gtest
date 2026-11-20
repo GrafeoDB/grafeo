@@ -1,0 +1,77 @@
+# Zero-length named paths and grouping keys in maps (#798): cases the openCypher TCK
+# lacks; Match6 [1], Merge1 [13] and With1 [4] cover the rest. Return6 [6] returns the right
+# rows but still fails there on its column name (#800), so the map case is here. CREATE chains
+# are in crates/grafeo-engine/tests/cypher_create_chains.rs.
+meta:
+  language: cypher
+  model: lpg
+  section: regression
+  title: Zero-length named paths and grouping keys in maps
+  dataset: empty
+
+tests:
+
+  - name: zero_length_named_path_has_one_node
+    setup:
+      - "CREATE (:A {name: 'a'})"
+    query: "MATCH p = (n:A) RETURN length(p), size(nodes(p)), size(relationships(p)), nodes(p)[0].name"
+    expect:
+      rows:
+        - [0, 1, 0, a]
+
+  - name: zero_length_named_path_of_an_anonymous_node
+    setup:
+      - "CREATE (), ()"
+    query: "MATCH p = () RETURN length(p)"
+    expect:
+      rows:
+        - [0]
+        - [0]
+
+  - name: zero_length_named_path_after_a_match
+    setup:
+      - "CREATE (:A {name: 'a'})-[:R]->(:B {name: 'b'})"
+    query: "MATCH (a:A)-->(b) MATCH p = (b) RETURN length(p), nodes(p)[0].name"
+    expect:
+      rows:
+        - [0, b]
+
+  - name: optional_zero_length_named_path_without_a_match_is_null
+    query: "OPTIONAL MATCH p = (n:Missing) RETURN p IS NULL"
+    expect:
+      rows:
+        - [true]
+
+  - name: merge_binds_a_zero_length_path_when_it_matches
+    setup:
+      - "CREATE (:A {num: 1})"
+    query: "MERGE p = (a:A {num: 1}) RETURN length(p), nodes(p)[0].num"
+    expect:
+      rows:
+        - [0, 1]
+
+  - name: merge_of_a_zero_length_path_that_matches_creates_nothing
+    setup:
+      - "CREATE (:A {num: 1})"
+    statements:
+      - "MERGE p = (a:A {num: 1}) RETURN p"
+      - "MATCH (a:A) RETURN count(a)"
+    expect:
+      rows:
+        - [1]
+
+  - name: grouping_key_inside_a_map_beside_an_aggregate
+    setup:
+      - "CREATE (:P {name: 'A'})<-[:F]-(:C {name: 'c1'}), (:P {name: 'B'})"
+      - "MATCH (a:P {name: 'A'}) CREATE (a)<-[:F]-(:C {name: 'c2'})"
+    query: "MATCH (a:P)<-[:F]-(c) RETURN a.name, {foo: a.name = 'A', kids: size(collect(c.name))} AS m"
+    expect:
+      rows:
+        - [A, "{foo: true, kids: 2}"]
+
+  - name: a_map_reading_another_variable_beside_an_aggregate_is_refused
+    setup:
+      - "CREATE (:P {name: 'A'})<-[:F]-(:C {name: 'c'})"
+    query: "MATCH (a:P)<-[:F]-(c) RETURN a.name, {kid: c.name, kids: collect(c.name)} AS m"
+    expect:
+      error: "not a grouping key"

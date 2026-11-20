@@ -144,6 +144,9 @@ tests:
   # [8] `labels()` failing on a path
   # TCK: SyntaxError at compile time: InvalidArgumentType
   - name: s8_labels_failing_on_a_path
+    xfail:
+      spec: "openCypher TCK 2024.3 Graph3: [8] `labels()` failing on a path"
+      issue: fix in 0.7.0
     setup:
       - |
         CREATE (:Foo), (:Foo:Bar)

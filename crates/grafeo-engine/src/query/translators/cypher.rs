@@ -25,7 +25,7 @@ use crate::query::plan::{
 use grafeo_adapters::query::cypher::{self, ast};
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
 /// Whether aggregate substitution is reading a scalar wrapper or an argument.
@@ -104,6 +104,10 @@ struct CypherTranslator {
     /// they stay in its rows for an ORDER BY, SKIP or LIMIT after it, and
     /// the next other clause projects the rows to these columns.
     with_columns: RefCell<Option<Vec<String>>>,
+    /// Whether the clause just translated is a CREATE that reads nothing of
+    /// the graph: a CREATE right after it, reading nothing either, joins its
+    /// operator (see [`CypherTranslator::translate_create_clause`]).
+    after_create: Cell<bool>,
     /// The variables the `CALL` body being translated imports, which a
     /// `WITH` in it passes on whether it names them or not.
     call_imports: CallImports,
@@ -148,6 +152,7 @@ impl CypherTranslator {
             call_scope: RefCell::new(None),
             sort_scope: RefCell::new(None),
             with_columns: RefCell::new(None),
+            after_create: Cell::new(false),
             call_imports: CallImports::default(),
         }
     }
@@ -282,6 +287,7 @@ impl CypherTranslator {
         // ORDER BY sorts it. A WITH or RETURN sets it again; any other clause
         // (a CALL subquery whose body ends with a RETURN among them) clears it.
         let sort_scope = self.sort_scope.take();
+        let after_create = self.after_create.take();
         // After a WITH whose WHERE read variables it leaves out, a clause
         // other than ORDER BY, SKIP and LIMIT sees only the WITH's columns.
         let input = match (clause, input) {
@@ -309,7 +315,7 @@ impl CypherTranslator {
             ast::Clause::Skip(expr) => self.translate_skip(expr, input),
             ast::Clause::Limit(expr) => self.translate_limit(expr, input),
             ast::Clause::Create(create_clause) => {
-                self.translate_create_clause(create_clause, input)
+                self.translate_create_clause(create_clause, input, after_create)
             }
             ast::Clause::Merge(merge_clause) => self.translate_merge(merge_clause, input),
             ast::Clause::Delete(delete_clause) => self.translate_delete(delete_clause, input),
@@ -328,6 +334,10 @@ impl CypherTranslator {
         if !matches!(clause, ast::Clause::With(_) | ast::Clause::Return(_)) {
             self.sort_scope.replace(None);
         }
+        self.after_create.set(matches!(
+            clause,
+            ast::Clause::Create(create_clause) if !create_reads_graph(create_clause)
+        ));
         plan
     }
 
@@ -965,8 +975,9 @@ impl CypherTranslator {
 
         // A path variable on more than one relationship pattern binds the
         // path of all of them, which no single expand has: the hops are bound
-        // one by one and the path is put together after them.
-        let whole_path_alias = path_alias.clone().filter(|_| path.chain.len() > 1);
+        // one by one and the path is put together after them. On none, it
+        // binds the path of the one node, which no expand binds either.
+        let whole_path_alias = path_alias.clone().filter(|_| path.chain.len() != 1);
         let Some(alias) = whole_path_alias else {
             for rel in &path.chain {
                 plan = self
@@ -999,6 +1010,17 @@ impl CypherTranslator {
         path_alias: Option<String>,
     ) -> Result<LogicalOperator> {
         match pattern {
+            // A node alone under a path variable is a path of no relationships
+            ast::Pattern::Node(node_pattern) if path_alias.is_some() => self
+                .translate_path_pattern_with_alias(
+                    &ast::PathPattern {
+                        start: node_pattern.clone(),
+                        chain: Vec::new(),
+                        span: None,
+                    },
+                    input,
+                    path_alias,
+                ),
             ast::Pattern::Node(node_pattern) => self.translate_node_pattern(node_pattern, input),
             ast::Pattern::Path(path_pattern) => {
                 self.translate_path_pattern_with_alias(path_pattern, input, path_alias)
@@ -1743,7 +1765,10 @@ impl CypherTranslator {
                 Some(variable.as_str()) != node_variable
             }
         });
-        if path.is_some() || sets_like_a_clause {
+        // A path variable is bound by the whole-pattern plan only, also on a
+        // node alone
+        let names_a_path = matches!(pattern, ast::Pattern::NamedPath { .. });
+        if path.is_some() || names_a_path || sets_like_a_clause {
             return self.translate_merge_pattern(merge_clause, input);
         }
         let input = input.unwrap_or(LogicalOperator::Empty);
@@ -3036,10 +3061,20 @@ impl CypherTranslator {
         Ok(wrap_limit(input, count))
     }
 
+    /// A CREATE right after another (`after_create`, no clause between them),
+    /// where neither reads the graph, joins the other's operator: its
+    /// elements follow the other's, in order. For each row that creates what
+    /// the two clauses would, since a created element's properties read the
+    /// row built so far either way, and keeps a chain of CREATE clauses from
+    /// nesting a level per clause (see `limits`). A CREATE whose properties
+    /// read the graph (`EXISTS`, `COUNT`, a pattern comprehension) reads what
+    /// the clause before created, which joining would change, so neither is
+    /// joined to the other.
     fn translate_create_clause(
         &self,
         create_clause: &ast::CreateClause,
         input: Option<LogicalOperator>,
+        after_create: bool,
     ) -> Result<LogicalOperator> {
         let elements = self.create_elements(&create_clause.patterns)?;
         if elements.is_empty() {
@@ -3050,11 +3085,18 @@ impl CypherTranslator {
                 ))
             });
         }
-        Ok(LogicalOperator::Create(CreateOp {
-            elements,
-            input: input.map(Box::new),
-            claim: None,
-        }))
+        let joins = after_create && !create_reads_graph(create_clause);
+        match input {
+            Some(LogicalOperator::Create(mut previous)) if joins && previous.claim.is_none() => {
+                previous.elements.extend(elements);
+                Ok(LogicalOperator::Create(previous))
+            }
+            input => Ok(LogicalOperator::Create(CreateOp {
+                elements,
+                input: input.map(Box::new),
+                claim: None,
+            })),
+        }
     }
 
     /// The nodes and edges `patterns` create, in order: one [`CreateOp`] for
@@ -4191,6 +4233,90 @@ fn pattern_plan_names(op: &LogicalOperator, names: &mut HashSet<String>) {
     }
     for child in op.children() {
         pattern_plan_names(child, names);
+    }
+}
+
+/// Whether a property expression of the patterns of `create` reads the graph
+/// (see [`reads_graph`]).
+fn create_reads_graph(create: &ast::CreateClause) -> bool {
+    fn node_reads(node: &ast::NodePattern) -> bool {
+        node.properties.iter().any(|(_, value)| reads_graph(value))
+    }
+    fn pattern_reads(pattern: &ast::Pattern) -> bool {
+        match pattern {
+            ast::Pattern::Node(node) => node_reads(node),
+            ast::Pattern::Path(path) => {
+                node_reads(&path.start)
+                    || path.chain.iter().any(|rel| {
+                        rel.properties.iter().any(|(_, value)| reads_graph(value))
+                            || node_reads(&rel.target)
+                    })
+            }
+            ast::Pattern::NamedPath { pattern, .. } => pattern_reads(pattern),
+        }
+    }
+    create.patterns.iter().any(pattern_reads)
+}
+
+/// Checks if an AST expression reads the graph: an `EXISTS` or `COUNT`
+/// subquery or a pattern comprehension in it.
+fn reads_graph(expr: &ast::Expression) -> bool {
+    match expr {
+        ast::Expression::Exists(_)
+        | ast::Expression::CountSubquery(_)
+        | ast::Expression::PatternComprehension { .. } => true,
+        ast::Expression::FunctionCall { args, .. } | ast::Expression::List(args) => {
+            args.iter().any(reads_graph)
+        }
+        ast::Expression::Binary { left, right, .. }
+        | ast::Expression::IndexAccess {
+            base: left,
+            index: right,
+        } => reads_graph(left) || reads_graph(right),
+        ast::Expression::Unary { operand, .. } => reads_graph(operand),
+        ast::Expression::PropertyAccess { base, .. } => reads_graph(base),
+        ast::Expression::SliceAccess { base, start, end } => {
+            reads_graph(base)
+                || start.as_deref().is_some_and(reads_graph)
+                || end.as_deref().is_some_and(reads_graph)
+        }
+        ast::Expression::Case {
+            input,
+            whens,
+            else_clause,
+        } => {
+            input.as_deref().is_some_and(reads_graph)
+                || whens.iter().any(|(w, t)| reads_graph(w) || reads_graph(t))
+                || else_clause.as_deref().is_some_and(reads_graph)
+        }
+        ast::Expression::Map(entries) => entries.iter().any(|(_, value)| reads_graph(value)),
+        ast::Expression::ListComprehension {
+            list,
+            filter,
+            projection,
+            ..
+        } => {
+            reads_graph(list)
+                || filter.as_deref().is_some_and(reads_graph)
+                || projection.as_deref().is_some_and(reads_graph)
+        }
+        ast::Expression::ListPredicate {
+            list, predicate, ..
+        } => reads_graph(list) || reads_graph(predicate),
+        ast::Expression::Reduce {
+            initial,
+            list,
+            expression,
+            ..
+        } => reads_graph(initial) || reads_graph(list) || reads_graph(expression),
+        ast::Expression::MapProjection { entries, .. } => entries.iter().any(|entry| match entry {
+            ast::MapProjectionEntry::LiteralEntry(_, value) => reads_graph(value),
+            ast::MapProjectionEntry::PropertySelector(_)
+            | ast::MapProjectionEntry::AllProperties => false,
+        }),
+        ast::Expression::Literal(_)
+        | ast::Expression::Variable(_)
+        | ast::Expression::Parameter(_) => false,
     }
 }
 

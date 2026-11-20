@@ -612,13 +612,13 @@ fn test_filtered_vector_search_results_ordered_by_distance() {
 }
 
 // ============================================================================
-// NULL semantics: $ne and $nin exclude nodes missing the filtered property
+// A missing property: $ne and $nin keep the node (#742)
 // ============================================================================
 
-/// Documents that nodes without the filtered property are excluded from
-/// $ne/$nin results (SQL three-valued NULL semantics).
+/// A node without the filtered property meets `$ne` ("not red" holds for a
+/// node with no colour), as the filter map's operators decide (#742).
 #[test]
-fn test_filter_ne_excludes_nodes_missing_property() {
+fn test_filter_ne_keeps_nodes_missing_property() {
     let db = GrafeoDB::new_in_memory();
 
     // 3 nodes: two with color, one without
@@ -641,7 +641,7 @@ fn test_filter_ne_excludes_nodes_missing_property() {
         .unwrap();
     // n3 has no "color" property
 
-    // $ne: "red" should match n2 (blue) but NOT n3 (no color)
+    // $ne: "red" matches n2 (blue) and n3 (no color), not n1 (red)
     let filters: HashMap<String, Value> = [(
         "color".to_string(),
         op_filter(vec![("$ne", Value::String("red".into()))]),
@@ -653,11 +653,11 @@ fn test_filter_ne_excludes_nodes_missing_property() {
         .vector_search("Item", "emb", &[0.5, 0.5, 0.5], 10, None, Some(&filters))
         .expect("ne filter");
 
-    // Only n2 matches: n1 is red, n3 lacks the property entirely
+    let mut found: Vec<_> = results.into_iter().map(|(id, _)| id).collect();
+    found.sort_unstable();
     assert_eq!(
-        results.len(),
-        1,
-        "$ne excludes nodes missing the property (NULL != 'red' is unknown): got {}",
-        results.len()
+        found,
+        [n2, n3],
+        "$ne keeps blue and the node without a color"
     );
 }

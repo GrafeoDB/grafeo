@@ -97,7 +97,7 @@ fn test_variable_length_unbounded() {
     let s = db.session();
     let r = s
         .execute(
-            "MATCH (a:Node {name: 'A'})-[:LINK*]->(b:Node) \
+            "MATCH TRAIL (a:Node {name: 'A'})-[:LINK*]->(b:Node) \
              RETURN b.name AS name ORDER BY name",
         )
         .unwrap();

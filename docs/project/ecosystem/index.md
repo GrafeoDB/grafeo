@@ -44,11 +44,27 @@ The GrafeoDB ecosystem extends beyond the core database with AI/LLM integrations
 
     [:octicons-arrow-right-24: Learn more](grafeo-web.md)
 
+-   :material-brain:{ .lg .middle } **grafeo-memory**
+
+    ---
+
+    Memory for agents and LLM applications in one Grafeo file: facts, entities, search and change history, with any LLM.
+
+    [:octicons-arrow-right-24: Learn more](grafeo-memory.md)
+
+-   :material-chip:{ .lg .middle } **grafeo-mcp**
+
+    ---
+
+    Model Context Protocol server: expose a graph database as tools for LLM agents.
+
+    [:octicons-arrow-right-24: Learn more](grafeo-mcp.md)
+
 -   :material-link-variant:{ .lg .middle } **grafeo-langchain**
 
     ---
 
-    LangChain integration for Grafeo: graph store, vector store and Graph RAG retrieval.
+    LangChain integration for Grafeo: graph store, question answering, and a vector store with graph traversal for Graph RAG.
 
     [:octicons-arrow-right-24: Learn more](grafeo-langchain.md)
 
@@ -59,22 +75,6 @@ The GrafeoDB ecosystem extends beyond the core database with AI/LLM integrations
     LlamaIndex integration: PropertyGraphStore, vector search and knowledge graph construction.
 
     [:octicons-arrow-right-24: Learn more](grafeo-llamaindex.md)
-
--   :material-chip:{ .lg .middle } **grafeo-mcp**
-
-    ---
-
-    Model Context Protocol server: expose a graph database as tools for LLM agents.
-
-    [:octicons-arrow-right-24: Learn more](grafeo-mcp.md)
-
--   :material-brain:{ .lg .middle } **grafeo-memory**
-
-    ---
-
-    AI memory layer for LLM applications: extract facts, deduplicate, semantic search, change history.
-
-    [:octicons-arrow-right-24: Learn more](grafeo-memory.md)
 
 -   :material-table-arrow-right:{ .lg .middle } **Arrow / Polars / pandas**
 

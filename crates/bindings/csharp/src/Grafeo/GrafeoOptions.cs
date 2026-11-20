@@ -8,8 +8,9 @@ namespace Grafeo;
 /// The memory and spill settings a database opens with, for
 /// <see cref="GrafeoDB.Open(string?, GrafeoOptions?)"/>. Unset means the default: 75% of the
 /// memory the process may use for the memory limit, the memory limit for the query memory
-/// limit, a quarter of the memory limit (at most 256 MiB) for the path search budget, half the
-/// spill volume's free space for the spill limit. A write past the memory limit fails with
+/// limit, a quarter of the memory limit (at most 256 MiB) for the path search budget, a quarter
+/// of the memory limit (at least 1 MiB) for the snapshot retention limit, half the spill
+/// volume's free space for the spill limit. A write past the memory limit fails with
 /// GRAFEO-S001, and so does a path search over its budget. One object may open several
 /// databases.
 /// </summary>
@@ -22,6 +23,8 @@ public sealed class GrafeoOptions : IDisposable
     private ulong? _memoryLimit;
     private ulong? _queryMemoryLimit;
     private ulong? _pathSearchBudget;
+    private ulong? _snapshotRetentionLimit;
+    private ulong? _historyRetentionLimit;
     private ulong? _spillLimit;
     private bool _unlimitedSpill;
 
@@ -56,6 +59,29 @@ public sealed class GrafeoOptions : IDisposable
         return this;
     }
 
+    /// <summary>
+    /// How many bytes of replaced data an open transaction's snapshot may keep: what the commits
+    /// since it began replaced that it can still read. Past it the transaction's next call fails
+    /// with the retryable GRAFEO-T012 and rolls it back. Below 1 MiB fails at the open.
+    /// </summary>
+    public GrafeoOptions SetSnapshotRetentionLimit(long bytes)
+    {
+        _snapshotRetentionLimit = Bytes(bytes);
+        return this;
+    }
+
+    /// <summary>
+    /// How many bytes of replaced data the history window may keep: once the commits since its
+    /// start replaced more, the start moves forward, whichever of time or bytes comes first, and a
+    /// read before it is refused. No limit by default; zero fails at the open. Not stored with the
+    /// database: pass it at every open.
+    /// </summary>
+    public GrafeoOptions SetHistoryRetentionLimit(long bytes)
+    {
+        _historyRetentionLimit = Bytes(bytes);
+        return this;
+    }
+
     /// <summary>How many bytes may spill to disk; zero means nothing spills.</summary>
     public GrafeoOptions SetSpillLimit(long bytes)
     {
@@ -80,7 +106,7 @@ public sealed class GrafeoOptions : IDisposable
     private static ulong Bytes(long bytes) => bytes < 0 ? 0 : (ulong)bytes;
 
     /// <summary>Sets these settings on the native options object <paramref name="native"/>.</summary>
-    internal void ApplyTo(nint native)
+    internal void ApplyTo(OptionsHandle native)
     {
         if (_memoryLimit is { } memory)
             GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_memory_limit(native, memory));
@@ -88,6 +114,10 @@ public sealed class GrafeoOptions : IDisposable
             GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_query_memory_limit(native, query));
         if (_pathSearchBudget is { } paths)
             GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_path_search_budget(native, paths));
+        if (_snapshotRetentionLimit is { } snapshots)
+            GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_snapshot_retention_limit(native, snapshots));
+        if (_historyRetentionLimit is { } history)
+            GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_history_retention_limit(native, history));
         if (_unlimitedSpill)
             GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_unlimited_spill(native));
         else if (_spillLimit is { } spill)

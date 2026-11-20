@@ -4,11 +4,15 @@
 
 use std::ffi::{CStr, CString};
 
-use crate::database::{grafeo_execute, grafeo_free_database, grafeo_free_result};
+use crate::database::{
+    grafeo_begin_transaction, grafeo_execute, grafeo_free_database, grafeo_free_result,
+    grafeo_free_transaction, grafeo_rollback, grafeo_transaction_execute,
+};
 use crate::error::{GrafeoStatus, grafeo_last_error};
 use crate::options::{
     GrafeoOptions, grafeo_open_with_options, grafeo_options_free, grafeo_options_new,
-    grafeo_options_set_path_search_budget,
+    grafeo_options_set_history_retention_limit, grafeo_options_set_path_search_budget,
+    grafeo_options_set_snapshot_retention_limit,
 };
 use crate::types::GrafeoDatabase;
 
@@ -61,4 +65,86 @@ fn the_path_search_budget_binds() {
         "{error}"
     );
     grafeo_free_database(db);
+}
+
+/// The last error's text.
+fn last_error() -> String {
+    // SAFETY: the binding's last error, a C string it owns.
+    unsafe { CStr::from_ptr(grafeo_last_error()) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The snapshot retention limit reaches the open: below 1 MiB the open fails naming the minimum;
+/// at 1 MiB an open transaction that read Alix fails with GRAFEO-T012 once 20 commits replaced
+/// 64 KiB each, and rolls back.
+#[test]
+fn the_snapshot_retention_limit_binds() {
+    let options = grafeo_options_new();
+    assert_eq!(
+        grafeo_options_set_snapshot_retention_limit(options, 512 * 1024),
+        GrafeoStatus::Ok
+    );
+    let refused = grafeo_open_with_options(std::ptr::null(), options);
+    grafeo_options_free(options);
+    assert!(refused.is_null());
+    assert!(last_error().contains("at least 1 MiB"), "{}", last_error());
+
+    let options = grafeo_options_new();
+    assert_eq!(
+        grafeo_options_set_snapshot_retention_limit(options, 1 << 20),
+        GrafeoStatus::Ok
+    );
+    let db = grafeo_open_with_options(std::ptr::null(), options);
+    grafeo_options_free(options);
+    assert!(!db.is_null());
+    assert_eq!(
+        run(db, "INSERT (:Person {name: 'Alix', bio: 'Amsterdam'})"),
+        Ok(())
+    );
+    let tx = grafeo_begin_transaction(db);
+    assert!(!tx.is_null());
+    let read = CString::new("MATCH (p:Person {name: 'Alix'}) RETURN p.bio AS bio").unwrap();
+    let result = grafeo_transaction_execute(tx, read.as_ptr());
+    assert!(!result.is_null(), "{}", last_error());
+    grafeo_free_result(result);
+    for round in 0..20 {
+        let bio = format!("{round}{}", "Vincent ".repeat(8 * 1024));
+        assert_eq!(
+            run(
+                db,
+                &format!("MATCH (p:Person {{name: 'Alix'}}) SET p.bio = '{bio}'")
+            ),
+            Ok(())
+        );
+    }
+    assert!(grafeo_transaction_execute(tx, read.as_ptr()).is_null());
+    assert!(last_error().contains("GRAFEO-T012"), "{}", last_error());
+    assert_eq!(grafeo_rollback(tx), GrafeoStatus::Ok);
+    grafeo_free_transaction(tx);
+    grafeo_free_database(db);
+}
+
+/// The history retention limit reaches the open: zero fails it; a limit opens.
+#[test]
+fn the_history_retention_limit_reaches_the_open() {
+    for (bytes, opens) in [(0, false), (1 << 20, true)] {
+        let options = grafeo_options_new();
+        assert_eq!(
+            grafeo_options_set_history_retention_limit(options, bytes),
+            GrafeoStatus::Ok
+        );
+        let db = grafeo_open_with_options(std::ptr::null(), options);
+        grafeo_options_free(options);
+        assert_eq!(!db.is_null(), opens, "{bytes}: {}", last_error());
+        if opens {
+            grafeo_free_database(db);
+        } else {
+            assert!(
+                last_error().contains("history_retention_limit"),
+                "{}",
+                last_error()
+            );
+        }
+    }
 }

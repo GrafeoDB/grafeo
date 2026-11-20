@@ -1,0 +1,3321 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/temporal/Temporal3.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Temporal3"
+  title: "Temporal3 - Project Temporal Values from other Temporal Values"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Should select date #1
+  - name: s1_should_select_date_1
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 11, day: 11}) AS other
+      RETURN date(other) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-11-11' |
+      side_effects: {}
+
+  # [1] Should select date #2
+  - name: s1_should_select_date_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [1] Should select date #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 11, day: 11}) AS other
+      RETURN date({date: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-11-11' |
+      side_effects: {}
+
+  # [1] Should select date #3
+  - name: s1_should_select_date_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [1] Should select date #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 11, day: 11}) AS other
+      RETURN date({date: other, year: 28}) AS result
+    expect:
+      values: |
+        | result |
+        | '0028-11-11' |
+      side_effects: {}
+
+  # [1] Should select date #4
+  - name: s1_should_select_date_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [1] Should select date #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 11, day: 11}) AS other
+      RETURN date({date: other, day: 28}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-11-28' |
+      side_effects: {}
+
+  # [1] Should select date #5
+  - name: s1_should_select_date_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [1] Should select date #5"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 11, day: 11}) AS other
+      RETURN date({date: other, week: 1}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-01-08' |
+      side_effects: {}
+
+  # [1] Should select date #6
+  - name: s1_should_select_date_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [1] Should select date #6"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 11, day: 11}) AS other
+      RETURN date({date: other, ordinalDay: 28}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-01-28' |
+      side_effects: {}
+
+  # [1] Should select date #7
+  - name: s1_should_select_date_7
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [1] Should select date #7"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 11, day: 11}) AS other
+      RETURN date({date: other, quarter: 3}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-08-11' |
+      side_effects: {}
+
+  # [1] Should select date #8
+  - name: s1_should_select_date_8
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS other
+      RETURN date(other) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-11-11' |
+      side_effects: {}
+
+  # [1] Should select date #9
+  - name: s1_should_select_date_9
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [1] Should select date #9"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS other
+      RETURN date({date: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-11-11' |
+      side_effects: {}
+
+  # [1] Should select date #10
+  - name: s1_should_select_date_10
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [1] Should select date #10"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS other
+      RETURN date({date: other, year: 28}) AS result
+    expect:
+      values: |
+        | result |
+        | '0028-11-11' |
+      side_effects: {}
+
+  # [1] Should select date #11
+  - name: s1_should_select_date_11
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [1] Should select date #11"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS other
+      RETURN date({date: other, day: 28}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-11-28' |
+      side_effects: {}
+
+  # [1] Should select date #12
+  - name: s1_should_select_date_12
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [1] Should select date #12"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS other
+      RETURN date({date: other, week: 1}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-01-08' |
+      side_effects: {}
+
+  # [1] Should select date #13
+  - name: s1_should_select_date_13
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [1] Should select date #13"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS other
+      RETURN date({date: other, ordinalDay: 28}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-01-28' |
+      side_effects: {}
+
+  # [1] Should select date #14
+  - name: s1_should_select_date_14
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [1] Should select date #14"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS other
+      RETURN date({date: other, quarter: 3}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-08-11' |
+      side_effects: {}
+
+  # [1] Should select date #15
+  - name: s1_should_select_date_15
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 11, day: 11, hour: 12, timezone: '+01:00'}) AS other
+      RETURN date(other) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-11-11' |
+      side_effects: {}
+
+  # [1] Should select date #16
+  - name: s1_should_select_date_16
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [1] Should select date #16"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 11, day: 11, hour: 12, timezone: '+01:00'}) AS other
+      RETURN date({date: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-11-11' |
+      side_effects: {}
+
+  # [1] Should select date #17
+  - name: s1_should_select_date_17
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [1] Should select date #17"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 11, day: 11, hour: 12, timezone: '+01:00'}) AS other
+      RETURN date({date: other, year: 28}) AS result
+    expect:
+      values: |
+        | result |
+        | '0028-11-11' |
+      side_effects: {}
+
+  # [1] Should select date #18
+  - name: s1_should_select_date_18
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [1] Should select date #18"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 11, day: 11, hour: 12, timezone: '+01:00'}) AS other
+      RETURN date({date: other, day: 28}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-11-28' |
+      side_effects: {}
+
+  # [1] Should select date #19
+  - name: s1_should_select_date_19
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [1] Should select date #19"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 11, day: 11, hour: 12, timezone: '+01:00'}) AS other
+      RETURN date({date: other, week: 1}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-01-08' |
+      side_effects: {}
+
+  # [1] Should select date #20
+  - name: s1_should_select_date_20
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [1] Should select date #20"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 11, day: 11, hour: 12, timezone: '+01:00'}) AS other
+      RETURN date({date: other, ordinalDay: 28}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-01-28' |
+      side_effects: {}
+
+  # [1] Should select date #21
+  - name: s1_should_select_date_21
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [1] Should select date #21"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 11, day: 11, hour: 12, timezone: '+01:00'}) AS other
+      RETURN date({date: other, quarter: 3}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-08-11' |
+      side_effects: {}
+
+  # [2] Should select local time #1
+  - name: s2_should_select_local_time_1
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS other
+      RETURN localtime(other) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:14.645876123' |
+      side_effects: {}
+
+  # [2] Should select local time #2
+  - name: s2_should_select_local_time_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [2] Should select local time #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS other
+      RETURN localtime({time: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:14.645876123' |
+      side_effects: {}
+
+  # [2] Should select local time #3
+  - name: s2_should_select_local_time_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [2] Should select local time #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS other
+      RETURN localtime({time: other, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:42.645876123' |
+      side_effects: {}
+
+  # [2] Should select local time #4
+  - name: s2_should_select_local_time_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [2] Should select local time #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS other
+      RETURN localtime(other) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:14.645876' |
+      side_effects: {}
+
+  # [2] Should select local time #5
+  - name: s2_should_select_local_time_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [2] Should select local time #5"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS other
+      RETURN localtime({time: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:14.645876' |
+      side_effects: {}
+
+  # [2] Should select local time #6
+  - name: s2_should_select_local_time_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [2] Should select local time #6"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS other
+      RETURN localtime({time: other, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:42.645876' |
+      side_effects: {}
+
+  # [2] Should select local time #7
+  - name: s2_should_select_local_time_7
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [2] Should select local time #7"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN localtime(other) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:14.645' |
+      side_effects: {}
+
+  # [2] Should select local time #8
+  - name: s2_should_select_local_time_8
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [2] Should select local time #8"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN localtime({time: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:14.645' |
+      side_effects: {}
+
+  # [2] Should select local time #9
+  - name: s2_should_select_local_time_9
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [2] Should select local time #9"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN localtime({time: other, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:42.645' |
+      side_effects: {}
+
+  # [2] Should select local time #10
+  - name: s2_should_select_local_time_10
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [2] Should select local time #10"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS other
+      RETURN localtime(other) AS result
+    expect:
+      values: |
+        | result |
+        | '12:00' |
+      side_effects: {}
+
+  # [2] Should select local time #11
+  - name: s2_should_select_local_time_11
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [2] Should select local time #11"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS other
+      RETURN localtime({time: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '12:00' |
+      side_effects: {}
+
+  # [2] Should select local time #12
+  - name: s2_should_select_local_time_12
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [2] Should select local time #12"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS other
+      RETURN localtime({time: other, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '12:00:42' |
+      side_effects: {}
+
+  # [3] Should select time #1
+  - name: s3_should_select_time_1
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS other
+      RETURN time(other) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:14.645876123Z' |
+      side_effects: {}
+
+  # [3] Should select time #2
+  - name: s3_should_select_time_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [3] Should select time #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS other
+      RETURN time({time: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:14.645876123Z' |
+      side_effects: {}
+
+  # [3] Should select time #3
+  - name: s3_should_select_time_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [3] Should select time #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS other
+      RETURN time({time: other, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:14.645876123+05:00' |
+      side_effects: {}
+
+  # [3] Should select time #4
+  - name: s3_should_select_time_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [3] Should select time #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS other
+      RETURN time({time: other, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:42.645876123Z' |
+      side_effects: {}
+
+  # [3] Should select time #5
+  - name: s3_should_select_time_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [3] Should select time #5"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS other
+      RETURN time({time: other, second: 42, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:42.645876123+05:00' |
+      side_effects: {}
+
+  # [3] Should select time #6
+  - name: s3_should_select_time_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [3] Should select time #6"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS other
+      RETURN time(other) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:14.645876+01:00' |
+      side_effects: {}
+
+  # [3] Should select time #7
+  - name: s3_should_select_time_7
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [3] Should select time #7"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS other
+      RETURN time({time: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:14.645876+01:00' |
+      side_effects: {}
+
+  # [3] Should select time #8
+  - name: s3_should_select_time_8
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [3] Should select time #8"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS other
+      RETURN time({time: other, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '16:31:14.645876+05:00' |
+      side_effects: {}
+
+  # [3] Should select time #9
+  - name: s3_should_select_time_9
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [3] Should select time #9"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS other
+      RETURN time({time: other, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:42.645876+01:00' |
+      side_effects: {}
+
+  # [3] Should select time #10
+  - name: s3_should_select_time_10
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [3] Should select time #10"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS other
+      RETURN time({time: other, second: 42, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '16:31:42.645876+05:00' |
+      side_effects: {}
+
+  # [3] Should select time #11
+  - name: s3_should_select_time_11
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [3] Should select time #11"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN time(other) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:14.645Z' |
+      side_effects: {}
+
+  # [3] Should select time #12
+  - name: s3_should_select_time_12
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [3] Should select time #12"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN time({time: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:14.645Z' |
+      side_effects: {}
+
+  # [3] Should select time #13
+  - name: s3_should_select_time_13
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [3] Should select time #13"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN time({time: other, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:14.645+05:00' |
+      side_effects: {}
+
+  # [3] Should select time #14
+  - name: s3_should_select_time_14
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [3] Should select time #14"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN time({time: other, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:42.645Z' |
+      side_effects: {}
+
+  # [3] Should select time #15
+  - name: s3_should_select_time_15
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [3] Should select time #15"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN time({time: other, second: 42, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '12:31:42.645+05:00' |
+      side_effects: {}
+
+  # [3] Should select time #16
+  - name: s3_should_select_time_16
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [3] Should select time #16"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS other
+      RETURN time(other) AS result
+    expect:
+      values: |
+        | result |
+        | '12:00+01:00' |
+      side_effects: {}
+
+  # [3] Should select time #17
+  - name: s3_should_select_time_17
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [3] Should select time #17"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS other
+      RETURN time({time: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '12:00+01:00' |
+      side_effects: {}
+
+  # [3] Should select time #18
+  - name: s3_should_select_time_18
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [3] Should select time #18"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS other
+      RETURN time({time: other, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '16:00+05:00' |
+      side_effects: {}
+
+  # [3] Should select time #19
+  - name: s3_should_select_time_19
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [3] Should select time #19"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS other
+      RETURN time({time: other, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '12:00:42+01:00' |
+      side_effects: {}
+
+  # [3] Should select time #20
+  - name: s3_should_select_time_20
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [3] Should select time #20"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS other
+      RETURN time({time: other, second: 42, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '16:00:42+05:00' |
+      side_effects: {}
+
+  # [4] Should select date into local date time #1
+  - name: s4_should_select_date_into_local_date_time_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [4] Should select date into local date time #1"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS other
+      RETURN localdatetime({date: other, hour: 10, minute: 10, second: 10}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T10:10:10' |
+      side_effects: {}
+
+  # [4] Should select date into local date time #2
+  - name: s4_should_select_date_into_local_date_time_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [4] Should select date into local date time #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS other
+      RETURN localdatetime({date: other, day: 28, hour: 10, minute: 10, second: 10}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T10:10:10' |
+      side_effects: {}
+
+  # [4] Should select date into local date time #3
+  - name: s4_should_select_date_into_local_date_time_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [4] Should select date into local date time #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN localdatetime({date: other, hour: 10, minute: 10, second: 10}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-07T10:10:10' |
+      side_effects: {}
+
+  # [4] Should select date into local date time #4
+  - name: s4_should_select_date_into_local_date_time_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [4] Should select date into local date time #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN localdatetime({date: other, day: 28, hour: 10, minute: 10, second: 10}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-28T10:10:10' |
+      side_effects: {}
+
+  # [4] Should select date into local date time #5
+  - name: s4_should_select_date_into_local_date_time_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [4] Should select date into local date time #5"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS other
+      RETURN localdatetime({date: other, hour: 10, minute: 10, second: 10}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T10:10:10' |
+      side_effects: {}
+
+  # [4] Should select date into local date time #6
+  - name: s4_should_select_date_into_local_date_time_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [4] Should select date into local date time #6"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS other
+      RETURN localdatetime({date: other, day: 28, hour: 10, minute: 10, second: 10}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T10:10:10' |
+      side_effects: {}
+
+  # [5] Should select time into local date time #1
+  - name: s5_should_select_time_into_local_date_time_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [5] Should select time into local date time #1"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS other
+      RETURN localdatetime({year: 1984, month: 10, day: 11, time: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645876123' |
+      side_effects: {}
+
+  # [5] Should select time into local date time #2
+  - name: s5_should_select_time_into_local_date_time_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [5] Should select time into local date time #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS other
+      RETURN localdatetime({year: 1984, month: 10, day: 11, time: other, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:42.645876123' |
+      side_effects: {}
+
+  # [5] Should select time into local date time #3
+  - name: s5_should_select_time_into_local_date_time_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [5] Should select time into local date time #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS other
+      RETURN localdatetime({year: 1984, month: 10, day: 11, time: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645876' |
+      side_effects: {}
+
+  # [5] Should select time into local date time #4
+  - name: s5_should_select_time_into_local_date_time_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [5] Should select time into local date time #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS other
+      RETURN localdatetime({year: 1984, month: 10, day: 11, time: other, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:42.645876' |
+      side_effects: {}
+
+  # [5] Should select time into local date time #5
+  - name: s5_should_select_time_into_local_date_time_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [5] Should select time into local date time #5"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN localdatetime({year: 1984, month: 10, day: 11, time: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645' |
+      side_effects: {}
+
+  # [5] Should select time into local date time #6
+  - name: s5_should_select_time_into_local_date_time_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [5] Should select time into local date time #6"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN localdatetime({year: 1984, month: 10, day: 11, time: other, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:42.645' |
+      side_effects: {}
+
+  # [5] Should select time into local date time #7
+  - name: s5_should_select_time_into_local_date_time_7
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [5] Should select time into local date time #7"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS other
+      RETURN localdatetime({year: 1984, month: 10, day: 11, time: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:00' |
+      side_effects: {}
+
+  # [5] Should select time into local date time #8
+  - name: s5_should_select_time_into_local_date_time_8
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [5] Should select time into local date time #8"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS other
+      RETURN localdatetime({year: 1984, month: 10, day: 11, time: other, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:00:42' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #1
+  - name: s6_should_select_date_and_time_into_local_date_time_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #1"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645876123' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #2
+  - name: s6_should_select_date_and_time_into_local_date_time_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:31:42.645876123' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #3
+  - name: s6_should_select_date_and_time_into_local_date_time_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645876' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #4
+  - name: s6_should_select_date_and_time_into_local_date_time_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:31:42.645876' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #5
+  - name: s6_should_select_date_and_time_into_local_date_time_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #5"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #6
+  - name: s6_should_select_date_and_time_into_local_date_time_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #6"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:31:42.645' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #7
+  - name: s6_should_select_date_and_time_into_local_date_time_7
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #7"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:00' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #8
+  - name: s6_should_select_date_and_time_into_local_date_time_8
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #8"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:00:42' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #9
+  - name: s6_should_select_date_and_time_into_local_date_time_9
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #9"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-07T12:31:14.645876123' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #10
+  - name: s6_should_select_date_and_time_into_local_date_time_10
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #10"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-28T12:31:42.645876123' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #11
+  - name: s6_should_select_date_and_time_into_local_date_time_11
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #11"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-07T12:31:14.645876' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #12
+  - name: s6_should_select_date_and_time_into_local_date_time_12
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #12"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-28T12:31:42.645876' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #13
+  - name: s6_should_select_date_and_time_into_local_date_time_13
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #13"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-07T12:31:14.645' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #14
+  - name: s6_should_select_date_and_time_into_local_date_time_14
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #14"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-28T12:31:42.645' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #15
+  - name: s6_should_select_date_and_time_into_local_date_time_15
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #15"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-07T12:00' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #16
+  - name: s6_should_select_date_and_time_into_local_date_time_16
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #16"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-28T12:00:42' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #17
+  - name: s6_should_select_date_and_time_into_local_date_time_17
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #17"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645876123' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #18
+  - name: s6_should_select_date_and_time_into_local_date_time_18
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #18"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:31:42.645876123' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #19
+  - name: s6_should_select_date_and_time_into_local_date_time_19
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #19"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645876' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #20
+  - name: s6_should_select_date_and_time_into_local_date_time_20
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #20"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:31:42.645876' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #21
+  - name: s6_should_select_date_and_time_into_local_date_time_21
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #21"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #22
+  - name: s6_should_select_date_and_time_into_local_date_time_22
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #22"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:31:42.645' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #23
+  - name: s6_should_select_date_and_time_into_local_date_time_23
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #23"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:00' |
+      side_effects: {}
+
+  # [6] Should select date and time into local date time #24
+  - name: s6_should_select_date_and_time_into_local_date_time_24
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [6] Should select date and time into local date time #24"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherTime
+      RETURN localdatetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:00:42' |
+      side_effects: {}
+
+  # [7] Should select datetime into local date time #1
+  - name: s7_should_select_datetime_into_local_date_time_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [7] Should select datetime into local date time #1"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN localdatetime(other) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-07T12:31:14.645' |
+      side_effects: {}
+
+  # [7] Should select datetime into local date time #2
+  - name: s7_should_select_datetime_into_local_date_time_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [7] Should select datetime into local date time #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN localdatetime({datetime: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-07T12:31:14.645' |
+      side_effects: {}
+
+  # [7] Should select datetime into local date time #3
+  - name: s7_should_select_datetime_into_local_date_time_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [7] Should select datetime into local date time #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN localdatetime({datetime: other, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-28T12:31:42.645' |
+      side_effects: {}
+
+  # [7] Should select datetime into local date time #4
+  - name: s7_should_select_datetime_into_local_date_time_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [7] Should select datetime into local date time #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS other
+      RETURN localdatetime(other) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:00' |
+      side_effects: {}
+
+  # [7] Should select datetime into local date time #5
+  - name: s7_should_select_datetime_into_local_date_time_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [7] Should select datetime into local date time #5"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS other
+      RETURN localdatetime({datetime: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:00' |
+      side_effects: {}
+
+  # [7] Should select datetime into local date time #6
+  - name: s7_should_select_datetime_into_local_date_time_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [7] Should select datetime into local date time #6"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS other
+      RETURN localdatetime({datetime: other, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:00:42' |
+      side_effects: {}
+
+  # [8] Should select date into date time #1
+  - name: s8_should_select_date_into_date_time_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [8] Should select date into date time #1"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS other
+      RETURN datetime({date: other, hour: 10, minute: 10, second: 10}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T10:10:10Z' |
+      side_effects: {}
+
+  # [8] Should select date into date time #2
+  - name: s8_should_select_date_into_date_time_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [8] Should select date into date time #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS other
+      RETURN datetime({date: other, hour: 10, minute: 10, second: 10, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T10:10:10+05:00' |
+      side_effects: {}
+
+  # [8] Should select date into date time #3
+  - name: s8_should_select_date_into_date_time_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [8] Should select date into date time #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS other
+      RETURN datetime({date: other, day: 28, hour: 10, minute: 10, second: 10}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T10:10:10Z' |
+      side_effects: {}
+
+  # [8] Should select date into date time #4
+  - name: s8_should_select_date_into_date_time_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [8] Should select date into date time #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS other
+      RETURN datetime({date: other, day: 28, hour: 10, minute: 10, second: 10, timezone: 'Pacific/Honolulu'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T10:10:10-10:00[Pacific/Honolulu]' |
+      side_effects: {}
+
+  # [8] Should select date into date time #5
+  - name: s8_should_select_date_into_date_time_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [8] Should select date into date time #5"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN datetime({date: other, hour: 10, minute: 10, second: 10}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-07T10:10:10Z' |
+      side_effects: {}
+
+  # [8] Should select date into date time #6
+  - name: s8_should_select_date_into_date_time_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [8] Should select date into date time #6"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN datetime({date: other, hour: 10, minute: 10, second: 10, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-07T10:10:10+05:00' |
+      side_effects: {}
+
+  # [8] Should select date into date time #7
+  - name: s8_should_select_date_into_date_time_7
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [8] Should select date into date time #7"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN datetime({date: other, day: 28, hour: 10, minute: 10, second: 10}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-28T10:10:10Z' |
+      side_effects: {}
+
+  # [8] Should select date into date time #8
+  - name: s8_should_select_date_into_date_time_8
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [8] Should select date into date time #8"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN datetime({date: other, day: 28, hour: 10, minute: 10, second: 10, timezone: 'Pacific/Honolulu'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-28T10:10:10-10:00[Pacific/Honolulu]' |
+      side_effects: {}
+
+  # [8] Should select date into date time #9
+  - name: s8_should_select_date_into_date_time_9
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [8] Should select date into date time #9"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS other
+      RETURN datetime({date: other, hour: 10, minute: 10, second: 10}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T10:10:10Z' |
+      side_effects: {}
+
+  # [8] Should select date into date time #10
+  - name: s8_should_select_date_into_date_time_10
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [8] Should select date into date time #10"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS other
+      RETURN datetime({date: other, hour: 10, minute: 10, second: 10, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T10:10:10+05:00' |
+      side_effects: {}
+
+  # [8] Should select date into date time #11
+  - name: s8_should_select_date_into_date_time_11
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [8] Should select date into date time #11"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS other
+      RETURN datetime({date: other, day: 28, hour: 10, minute: 10, second: 10}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T10:10:10Z' |
+      side_effects: {}
+
+  # [8] Should select date into date time #12
+  - name: s8_should_select_date_into_date_time_12
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [8] Should select date into date time #12"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS other
+      RETURN datetime({date: other, day: 28, hour: 10, minute: 10, second: 10, timezone: 'Pacific/Honolulu'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T10:10:10-10:00[Pacific/Honolulu]' |
+      side_effects: {}
+
+  # [9] Should select time into date time #1
+  - name: s9_should_select_time_into_date_time_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [9] Should select time into date time #1"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS other
+      RETURN datetime({year: 1984, month: 10, day: 11, time: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645876123Z' |
+      side_effects: {}
+
+  # [9] Should select time into date time #2
+  - name: s9_should_select_time_into_date_time_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [9] Should select time into date time #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS other
+      RETURN datetime({year: 1984, month: 10, day: 11, time: other, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645876123+05:00' |
+      side_effects: {}
+
+  # [9] Should select time into date time #3
+  - name: s9_should_select_time_into_date_time_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [9] Should select time into date time #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS other
+      RETURN datetime({year: 1984, month: 10, day: 11, time: other, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:42.645876123Z' |
+      side_effects: {}
+
+  # [9] Should select time into date time #4
+  - name: s9_should_select_time_into_date_time_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [9] Should select time into date time #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS other
+      RETURN datetime({year: 1984, month: 10, day: 11, time: other, second: 42, timezone: 'Pacific/Honolulu'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:42.645876123-10:00[Pacific/Honolulu]' |
+      side_effects: {}
+
+  # [9] Should select time into date time #5
+  - name: s9_should_select_time_into_date_time_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [9] Should select time into date time #5"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS other
+      RETURN datetime({year: 1984, month: 10, day: 11, time: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645876+01:00' |
+      side_effects: {}
+
+  # [9] Should select time into date time #6
+  - name: s9_should_select_time_into_date_time_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [9] Should select time into date time #6"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS other
+      RETURN datetime({year: 1984, month: 10, day: 11, time: other, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T16:31:14.645876+05:00' |
+      side_effects: {}
+
+  # [9] Should select time into date time #7
+  - name: s9_should_select_time_into_date_time_7
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [9] Should select time into date time #7"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS other
+      RETURN datetime({year: 1984, month: 10, day: 11, time: other, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:42.645876+01:00' |
+      side_effects: {}
+
+  # [9] Should select time into date time #8
+  - name: s9_should_select_time_into_date_time_8
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [9] Should select time into date time #8"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS other
+      RETURN datetime({year: 1984, month: 10, day: 11, time: other, second: 42, timezone: 'Pacific/Honolulu'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T01:31:42.645876-10:00[Pacific/Honolulu]' |
+      side_effects: {}
+
+  # [9] Should select time into date time #9
+  - name: s9_should_select_time_into_date_time_9
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [9] Should select time into date time #9"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN datetime({year: 1984, month: 10, day: 11, time: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645Z' |
+      side_effects: {}
+
+  # [9] Should select time into date time #10
+  - name: s9_should_select_time_into_date_time_10
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [9] Should select time into date time #10"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN datetime({year: 1984, month: 10, day: 11, time: other, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645+05:00' |
+      side_effects: {}
+
+  # [9] Should select time into date time #11
+  - name: s9_should_select_time_into_date_time_11
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [9] Should select time into date time #11"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN datetime({year: 1984, month: 10, day: 11, time: other, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:42.645Z' |
+      side_effects: {}
+
+  # [9] Should select time into date time #12
+  - name: s9_should_select_time_into_date_time_12
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [9] Should select time into date time #12"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN datetime({year: 1984, month: 10, day: 11, time: other, second: 42, timezone: 'Pacific/Honolulu'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:42.645-10:00[Pacific/Honolulu]' |
+      side_effects: {}
+
+  # [9] Should select time into date time #13
+  - name: s9_should_select_time_into_date_time_13
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [9] Should select time into date time #13"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS other
+      RETURN datetime({year: 1984, month: 10, day: 11, time: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:00+01:00[Europe/Stockholm]' |
+      side_effects: {}
+
+  # [9] Should select time into date time #14
+  - name: s9_should_select_time_into_date_time_14
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [9] Should select time into date time #14"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS other
+      RETURN datetime({year: 1984, month: 10, day: 11, time: other, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T16:00+05:00' |
+      side_effects: {}
+
+  # [9] Should select time into date time #15
+  - name: s9_should_select_time_into_date_time_15
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [9] Should select time into date time #15"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS other
+      RETURN datetime({year: 1984, month: 10, day: 11, time: other, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:00:42+01:00[Europe/Stockholm]' |
+      side_effects: {}
+
+  # [9] Should select time into date time #16
+  - name: s9_should_select_time_into_date_time_16
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [9] Should select time into date time #16"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS other
+      RETURN datetime({year: 1984, month: 10, day: 11, time: other, second: 42, timezone: 'Pacific/Honolulu'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T01:00:42-10:00[Pacific/Honolulu]' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #1
+  - name: s10_should_select_date_and_time_into_date_time_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #1"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645876123Z' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #2
+  - name: s10_should_select_date_and_time_into_date_time_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645876123+05:00' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #3
+  - name: s10_should_select_date_and_time_into_date_time_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:31:42.645876123Z' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #4
+  - name: s10_should_select_date_and_time_into_date_time_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42, timezone: 'Pacific/Honolulu'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:31:42.645876123-10:00[Pacific/Honolulu]' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #5
+  - name: s10_should_select_date_and_time_into_date_time_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #5"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645876+01:00' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #6
+  - name: s10_should_select_date_and_time_into_date_time_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #6"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T16:31:14.645876+05:00' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #7
+  - name: s10_should_select_date_and_time_into_date_time_7
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #7"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:31:42.645876+01:00' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #8
+  - name: s10_should_select_date_and_time_into_date_time_8
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #8"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42, timezone: 'Pacific/Honolulu'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T01:31:42.645876-10:00[Pacific/Honolulu]' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #9
+  - name: s10_should_select_date_and_time_into_date_time_9
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #9"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645Z' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #10
+  - name: s10_should_select_date_and_time_into_date_time_10
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #10"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645+05:00' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #11
+  - name: s10_should_select_date_and_time_into_date_time_11
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #11"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:31:42.645Z' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #12
+  - name: s10_should_select_date_and_time_into_date_time_12
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #12"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42, timezone: 'Pacific/Honolulu'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:31:42.645-10:00[Pacific/Honolulu]' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #13
+  - name: s10_should_select_date_and_time_into_date_time_13
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #13"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:00+01:00[Europe/Stockholm]' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #14
+  - name: s10_should_select_date_and_time_into_date_time_14
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #14"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T16:00+05:00' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #15
+  - name: s10_should_select_date_and_time_into_date_time_15
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #15"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:00:42+01:00[Europe/Stockholm]' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #16
+  - name: s10_should_select_date_and_time_into_date_time_16
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #16"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS otherDate, datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42, timezone: 'Pacific/Honolulu'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T01:00:42-10:00[Pacific/Honolulu]' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #17
+  - name: s10_should_select_date_and_time_into_date_time_17
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #17"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-07T12:31:14.645876123Z' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #18
+  - name: s10_should_select_date_and_time_into_date_time_18
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #18"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-07T12:31:14.645876123+05:00' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #19
+  - name: s10_should_select_date_and_time_into_date_time_19
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #19"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-28T12:31:42.645876123Z' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #20
+  - name: s10_should_select_date_and_time_into_date_time_20
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #20"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42, timezone: 'Pacific/Honolulu'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-28T12:31:42.645876123-10:00[Pacific/Honolulu]' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #21
+  - name: s10_should_select_date_and_time_into_date_time_21
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #21"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-07T12:31:14.645876+01:00' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #22
+  - name: s10_should_select_date_and_time_into_date_time_22
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #22"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-07T16:31:14.645876+05:00' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #23
+  - name: s10_should_select_date_and_time_into_date_time_23
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #23"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-28T12:31:42.645876+01:00' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #24
+  - name: s10_should_select_date_and_time_into_date_time_24
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #24"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42, timezone: 'Pacific/Honolulu'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-28T01:31:42.645876-10:00[Pacific/Honolulu]' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #25
+  - name: s10_should_select_date_and_time_into_date_time_25
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #25"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-07T12:31:14.645Z' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #26
+  - name: s10_should_select_date_and_time_into_date_time_26
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #26"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-07T12:31:14.645+05:00' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #27
+  - name: s10_should_select_date_and_time_into_date_time_27
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #27"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-28T12:31:42.645Z' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #28
+  - name: s10_should_select_date_and_time_into_date_time_28
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #28"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42, timezone: 'Pacific/Honolulu'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-28T12:31:42.645-10:00[Pacific/Honolulu]' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #29
+  - name: s10_should_select_date_and_time_into_date_time_29
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #29"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-07T12:00+01:00[Europe/Stockholm]' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #30
+  - name: s10_should_select_date_and_time_into_date_time_30
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #30"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-07T16:00+05:00' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #31
+  - name: s10_should_select_date_and_time_into_date_time_31
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #31"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-28T12:00:42+02:00[Europe/Stockholm]' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #32
+  - name: s10_should_select_date_and_time_into_date_time_32
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #32"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherDate, datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42, timezone: 'Pacific/Honolulu'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-28T00:00:42-10:00[Pacific/Honolulu]' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #33
+  - name: s10_should_select_date_and_time_into_date_time_33
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #33"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645876123Z' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #34
+  - name: s10_should_select_date_and_time_into_date_time_34
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #34"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645876123+05:00' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #35
+  - name: s10_should_select_date_and_time_into_date_time_35
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #35"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:31:42.645876123Z' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #36
+  - name: s10_should_select_date_and_time_into_date_time_36
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #36"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42, timezone: 'Pacific/Honolulu'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:31:42.645876123-10:00[Pacific/Honolulu]' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #37
+  - name: s10_should_select_date_and_time_into_date_time_37
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #37"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645876+01:00' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #38
+  - name: s10_should_select_date_and_time_into_date_time_38
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #38"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T16:31:14.645876+05:00' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #39
+  - name: s10_should_select_date_and_time_into_date_time_39
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #39"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:31:42.645876+01:00' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #40
+  - name: s10_should_select_date_and_time_into_date_time_40
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #40"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42, timezone: 'Pacific/Honolulu'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T01:31:42.645876-10:00[Pacific/Honolulu]' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #41
+  - name: s10_should_select_date_and_time_into_date_time_41
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #41"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645Z' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #42
+  - name: s10_should_select_date_and_time_into_date_time_42
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #42"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:31:14.645+05:00' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #43
+  - name: s10_should_select_date_and_time_into_date_time_43
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #43"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:31:42.645Z' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #44
+  - name: s10_should_select_date_and_time_into_date_time_44
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #44"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42, timezone: 'Pacific/Honolulu'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:31:42.645-10:00[Pacific/Honolulu]' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #45
+  - name: s10_should_select_date_and_time_into_date_time_45
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #45"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:00+01:00[Europe/Stockholm]' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #46
+  - name: s10_should_select_date_and_time_into_date_time_46
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #46"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T16:00+05:00' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #47
+  - name: s10_should_select_date_and_time_into_date_time_47
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #47"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:00:42+01:00[Europe/Stockholm]' |
+      side_effects: {}
+
+  # [10] Should select date and time into date time #48
+  - name: s10_should_select_date_and_time_into_date_time_48
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [10] Should select date and time into date time #48"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS otherDate, datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS otherTime
+      RETURN datetime({date: otherDate, time: otherTime, day: 28, second: 42, timezone: 'Pacific/Honolulu'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T01:00:42-10:00[Pacific/Honolulu]' |
+      side_effects: {}
+
+  # [11] Should datetime into date time #1
+  - name: s11_should_datetime_into_date_time_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [11] Should datetime into date time #1"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN datetime(other) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-07T12:31:14.645Z' |
+      side_effects: {}
+
+  # [11] Should datetime into date time #2
+  - name: s11_should_datetime_into_date_time_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [11] Should datetime into date time #2"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN datetime({datetime: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-07T12:31:14.645Z' |
+      side_effects: {}
+
+  # [11] Should datetime into date time #3
+  - name: s11_should_datetime_into_date_time_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [11] Should datetime into date time #3"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN datetime({datetime: other, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-07T12:31:14.645+05:00' |
+      side_effects: {}
+
+  # [11] Should datetime into date time #4
+  - name: s11_should_datetime_into_date_time_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [11] Should datetime into date time #4"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN datetime({datetime: other, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-28T12:31:42.645Z' |
+      side_effects: {}
+
+  # [11] Should datetime into date time #5
+  - name: s11_should_datetime_into_date_time_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [11] Should datetime into date time #5"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS other
+      RETURN datetime({datetime: other, day: 28, second: 42, timezone: 'Pacific/Honolulu'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-03-28T12:31:42.645-10:00[Pacific/Honolulu]' |
+      side_effects: {}
+
+  # [11] Should datetime into date time #6
+  - name: s11_should_datetime_into_date_time_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [11] Should datetime into date time #6"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS other
+      RETURN datetime(other) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:00+01:00[Europe/Stockholm]' |
+      side_effects: {}
+
+  # [11] Should datetime into date time #7
+  - name: s11_should_datetime_into_date_time_7
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [11] Should datetime into date time #7"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS other
+      RETURN datetime({datetime: other}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T12:00+01:00[Europe/Stockholm]' |
+      side_effects: {}
+
+  # [11] Should datetime into date time #8
+  - name: s11_should_datetime_into_date_time_8
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [11] Should datetime into date time #8"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS other
+      RETURN datetime({datetime: other, timezone: '+05:00'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-11T16:00+05:00' |
+      side_effects: {}
+
+  # [11] Should datetime into date time #9
+  - name: s11_should_datetime_into_date_time_9
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [11] Should datetime into date time #9"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS other
+      RETURN datetime({datetime: other, day: 28, second: 42}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T12:00:42+01:00[Europe/Stockholm]' |
+      side_effects: {}
+
+  # [11] Should datetime into date time #10
+  - name: s11_should_datetime_into_date_time_10
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal3: [11] Should datetime into date time #10"
+      issue: fix in 0.6.5
+    runner_gap:
+      runners: [wasm]
+      issue: fix in 0.7.0
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS other
+      RETURN datetime({datetime: other, day: 28, second: 42, timezone: 'Pacific/Honolulu'}) AS result
+    expect:
+      values: |
+        | result |
+        | '1984-10-28T01:00:42-10:00[Pacific/Honolulu]' |
+      side_effects: {}

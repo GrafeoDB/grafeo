@@ -13,8 +13,9 @@ import (
 
 // Options are the memory and spill settings a database opens with (see OpenWithOptions). A nil
 // field is the default: 75% of the memory the process may use for MemoryLimit, MemoryLimit for
-// QueryMemoryLimit, a quarter of MemoryLimit (at most 256 MiB) for PathSearchBudget, half the
-// spill volume's free space for SpillLimit. A write past the memory limit fails with
+// QueryMemoryLimit, a quarter of MemoryLimit (at most 256 MiB) for PathSearchBudget, a quarter
+// of MemoryLimit (at least 1 MiB) for SnapshotRetentionLimit, half the spill volume's free space
+// for SpillLimit. A write past the memory limit fails with
 // GRAFEO-S001, and so does a path search over its budget. One Options value may open several
 // databases.
 type Options struct {
@@ -28,6 +29,16 @@ type Options struct {
 	// ANY SHORTEST or shortestPath search visits are not counted yet). Never more than
 	// MemoryLimit; zero fails at the open.
 	PathSearchBudget *uint64
+	// SnapshotRetentionLimit is how many bytes of replaced data an open transaction's snapshot may
+	// keep: what the commits since it began replaced that it can still read. Past it the
+	// transaction's next call fails with the retryable GRAFEO-T012 and rolls it back. Below 1 MiB
+	// fails at the open.
+	SnapshotRetentionLimit *uint64
+	// HistoryRetentionLimit is how many bytes of replaced data the history window may keep: once the
+	// commits since its start replaced more, the start moves forward, whichever of time or bytes
+	// comes first, and a read before it is refused. No limit by default; zero fails at the open. Not
+	// stored with the database: pass it at every open.
+	HistoryRetentionLimit *uint64
 	// SpillLimit is how many bytes may spill to disk; zero means nothing spills.
 	SpillLimit *uint64
 	// UnlimitedSpill lifts the spill limit; it wins over SpillLimit. An in-memory database
@@ -50,6 +61,16 @@ func (o *Options) apply(native *C.GrafeoOptions) error {
 	}
 	if o.PathSearchBudget != nil {
 		if err := statusToError(C.grafeo_options_set_path_search_budget(native, C.uint64_t(*o.PathSearchBudget))); err != nil {
+			return err
+		}
+	}
+	if o.SnapshotRetentionLimit != nil {
+		if err := statusToError(C.grafeo_options_set_snapshot_retention_limit(native, C.uint64_t(*o.SnapshotRetentionLimit))); err != nil {
+			return err
+		}
+	}
+	if o.HistoryRetentionLimit != nil {
+		if err := statusToError(C.grafeo_options_set_history_retention_limit(native, C.uint64_t(*o.HistoryRetentionLimit))); err != nil {
 			return err
 		}
 	}
@@ -124,6 +145,10 @@ type MemoryUsage struct {
 // MemoryUsage returns the database's memory report.
 func (db *Database) MemoryUsage() (*MemoryUsage, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 *MemoryUsage
+		return zero0, err
+	}
 	runtime.LockOSThread()
 	cJSON := C.grafeo_memory_usage_json(db.handle)
 	if cJSON == nil {
@@ -153,6 +178,10 @@ type OpenWarning struct {
 // OpenWarnings returns what the open had to say; empty for a clean open.
 func (db *Database) OpenWarnings() ([]OpenWarning, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 []OpenWarning
+		return zero0, err
+	}
 	runtime.LockOSThread()
 	cJSON := C.grafeo_open_warnings(db.handle)
 	if cJSON == nil {

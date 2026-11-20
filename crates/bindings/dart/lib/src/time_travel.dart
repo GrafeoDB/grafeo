@@ -89,14 +89,10 @@ class AsOfView implements Finalizable {
   Pointer<Void> _handle;
   bool _closed = false;
 
-  /// The epoch the view reads at.
-  final int epoch;
-
   static NativeFinalizer? _finalizer;
 
   /// Wraps a native view handle; typically called by [GrafeoDB.asOf].
-  AsOfView(this._handle, this._bindings)
-      : epoch = _bindings.grafeoAsOfEpoch(_handle) {
+  AsOfView(this._handle, this._bindings) {
     _finalizer ??= NativeFinalizer(
       _bindings.library.lookup<NativeFunction<Void Function(Pointer<Void>)>>(
         'grafeo_free_as_of',
@@ -112,6 +108,16 @@ class AsOfView implements Finalizable {
     _finalizer!.detach(this);
     _bindings.grafeoFreeAsOf(_handle);
     _handle = nullptr;
+  }
+
+  /// The epoch the view reads at. Throws the GRAFEO-T007 error once the
+  /// database that handed the view out is closed.
+  int get epoch {
+    // No error return in C: a closed database answers 0 and sets the last
+    // error, which the call clears when it starts.
+    final epoch = _bindings.grafeoAsOfEpoch(_open);
+    if (_bindings.grafeoLastError() != nullptr) throwLastError(_bindings);
+    return epoch;
   }
 
   Pointer<Void> get _open {

@@ -171,7 +171,8 @@ impl Executor {
     pub fn execute(&self, operator: &mut dyn Operator) -> Result<QueryResult> {
         let _span = grafeo_debug_span!("grafeo::query::execute");
         let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone())?;
-        let mut types_captured = !result.column_types.iter().all(|t| *t == LogicalType::Any);
+        // Types the planner declared stay; otherwise every chunk says its own.
+        let declared = !result.column_types.iter().all(|t| *t == LogicalType::Any);
         // The operators check the deadline in their own loops too.
         let _deadline = deadline::enter(self.deadline);
 
@@ -180,10 +181,8 @@ impl Executor {
 
             match operator.next() {
                 Ok(Some(chunk)) => {
-                    // Capture column types from first non-empty chunk
-                    if !types_captured && chunk.column_count() > 0 {
-                        self.capture_column_types(&chunk, &mut result);
-                        types_captured = true;
+                    if !declared {
+                        note_column_types(&chunk, &mut result);
                     }
                     self.collect_chunk(&chunk, &mut result)?;
                 }
@@ -240,12 +239,12 @@ impl Executor {
             .expect("sink should be ChunkCollector");
         let chunks = collector.into_chunks();
 
-        let mut types_captured = !result.column_types.iter().all(|t| *t == LogicalType::Any);
+        // Types the planner declared stay; otherwise every chunk says its own.
+        let declared = !result.column_types.iter().all(|t| *t == LogicalType::Any);
 
         for chunk in &chunks {
-            if !types_captured && chunk.column_count() > 0 {
-                self.capture_column_types(chunk, &mut result);
-                types_captured = true;
+            if !declared {
+                note_column_types(chunk, &mut result);
             }
             self.collect_chunk(chunk, &mut result)?;
         }
@@ -265,7 +264,8 @@ impl Executor {
     ) -> Result<QueryResult> {
         let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone())?;
         let mut collected = 0;
-        let mut types_captured = !result.column_types.iter().all(|t| *t == LogicalType::Any);
+        // Types the planner declared stay; otherwise every chunk says its own.
+        let declared = !result.column_types.iter().all(|t| *t == LogicalType::Any);
         // The operators check the deadline in their own loops too.
         let _deadline = deadline::enter(self.deadline);
 
@@ -278,10 +278,8 @@ impl Executor {
 
             match operator.next() {
                 Ok(Some(chunk)) => {
-                    // Capture column types from first non-empty chunk
-                    if !types_captured && chunk.column_count() > 0 {
-                        self.capture_column_types(&chunk, &mut result);
-                        types_captured = true;
+                    if !declared {
+                        note_column_types(&chunk, &mut result);
                     }
                     let remaining = limit - collected;
                     collected += self.collect_chunk_limited(&chunk, &mut result, remaining)?;
@@ -292,18 +290,6 @@ impl Executor {
         }
 
         Ok(self.with_counters(result))
-    }
-
-    /// Captures column types from a DataChunk.
-    fn capture_column_types(&self, chunk: &DataChunk, result: &mut QueryResult) {
-        let col_count = chunk.column_count();
-        result.column_types = Vec::with_capacity(col_count);
-        for col_idx in 0..col_count {
-            let col_type = chunk
-                .column(col_idx)
-                .map_or(LogicalType::Any, |col| col.data_type().clone());
-            result.column_types.push(col_type);
-        }
     }
 
     /// Collects all rows from a DataChunk into the result.
@@ -406,6 +392,21 @@ pub(crate) fn convert_operator_error(err: OperatorError) -> Error {
         OperatorError::Timeout => Error::from(QueryError::timeout()),
         _ => Error::Internal(format!("{err}")),
     }
+}
+
+/// Notes the column types of `chunk` for the rows it adds to `result`.
+fn note_column_types(chunk: &DataChunk, result: &mut QueryResult) {
+    if chunk.column_count() == 0 {
+        return;
+    }
+    let types: Vec<LogicalType> = (0..chunk.column_count())
+        .map(|column| {
+            chunk
+                .column(column)
+                .map_or(LogicalType::Any, |vector| vector.data_type().clone())
+        })
+        .collect();
+    result.note_types(&types);
 }
 
 #[cfg(test)]

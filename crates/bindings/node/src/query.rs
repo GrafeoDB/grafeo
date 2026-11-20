@@ -74,6 +74,8 @@ pub struct QueryResult {
     pub(crate) profile: Option<grafeo_engine::database::QueryProfile>,
     pub(crate) kind: grafeo_engine::database::ResultKind,
     pub(crate) warnings: Vec<grafeo_bindings_common::warning::Warning>,
+    /// The type each cell was built with (see `cellType`).
+    pub(crate) cell_types: grafeo_engine::database::CellTypes,
 }
 
 /// The operators of a `PROFILE` statement as a tree.
@@ -133,6 +135,22 @@ impl QueryResult {
     #[napi(getter)]
     pub fn columns(&self) -> Vec<String> {
         self.columns.clone()
+    }
+
+    /// The type the value in `row` and `column` was built with: `"node"`,
+    /// `"edge"` or `"path"`; `{list: t}`, `{tuple: [t, ...]}`,
+    /// `{struct: {key: t}}` or `{map: t}` for what an array or an object
+    /// holds; `"any"`; or the name of another type (`"int64"`). An object is
+    /// a node or an edge exactly where its type says so: `{_id: 1,
+    /// _labels: []}` returned as a map is a map.
+    ///
+    /// Experimental, new in 0.6.4: it may change or be removed in any
+    /// release.
+    #[napi]
+    pub fn cell_type(&self, row: u32, column: u32) -> serde_json::Value {
+        grafeo_bindings_common::entity::type_to_json(
+            self.cell_types.get(row as usize, column as usize),
+        )
     }
 
     /// The warnings the statement raised, ordered by code: a deprecated form
@@ -394,6 +412,7 @@ impl QueryResult {
             profile: None,
             kind: grafeo_engine::database::ResultKind::Rows,
             warnings: Vec::new(),
+            cell_types: grafeo_engine::database::CellTypes::default(),
         }
     }
 
@@ -416,6 +435,7 @@ impl QueryResult {
             profile: None,
             kind: grafeo_engine::database::ResultKind::Rows,
             warnings: Vec::new(),
+            cell_types: grafeo_engine::database::CellTypes::default(),
         }
     }
 
@@ -426,6 +446,16 @@ impl QueryResult {
         profile: Option<grafeo_engine::database::QueryProfile>,
     ) -> Self {
         self.profile = profile;
+        self
+    }
+
+    /// Sets the type each cell was built with.
+    #[must_use]
+    pub(crate) fn with_cell_types(
+        mut self,
+        cell_types: grafeo_engine::database::CellTypes,
+    ) -> Self {
+        self.cell_types = cell_types;
         self
     }
 
@@ -468,6 +498,7 @@ impl QueryResult {
             profile: None,
             kind: grafeo_engine::database::ResultKind::Rows,
             warnings: Vec::new(),
+            cell_types: grafeo_engine::database::CellTypes::default(),
         }
     }
 }

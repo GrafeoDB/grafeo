@@ -1,0 +1,247 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/create/Create3.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Create3"
+  title: "Create3 - Interoperation with other clauses"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] MATCH-CREATE
+  - name: s1_match_create
+    setup:
+      - |
+        CREATE (), ()
+    query: |
+      MATCH ()
+      CREATE ()
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 2
+
+  # [2] WITH-CREATE
+  - name: s2_with_create
+    setup:
+      - |
+        CREATE (), ()
+    query: |
+      MATCH ()
+      CREATE ()
+      WITH *
+      CREATE ()
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 4
+
+  # [3] MATCH-CREATE-WITH-CREATE
+  - name: s3_match_create_with_create
+    setup:
+      - |
+        CREATE (), ()
+    query: |
+      MATCH ()
+      CREATE ()
+      WITH *
+      MATCH ()
+      CREATE ()
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 10
+
+  # [4] MATCH-CREATE: Newly-created nodes not visible to preceding MATCH
+  - name: s4_match_create_newly_created_nodes_not_visible_to_preceding_match
+    setup:
+      - |
+        CREATE ()
+    query: |
+      MATCH ()
+      CREATE ()
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+
+  # [5] WITH-CREATE: Nodes are not created when aliases are applied to variable names
+  - name: s5_with_create_nodes_are_not_created_when_aliases_are_applied_to_variable_names
+    setup:
+      - |
+        CREATE ({num: 1})
+    query: |
+      MATCH (n)
+      MATCH (m)
+      WITH n AS a, m AS b
+      CREATE (a)-[:T]->(b)
+      RETURN a, b
+    expect:
+      values: |
+        | a | b |
+        | ({num: 1}) | ({num: 1}) |
+      side_effects:
+        +relationships: 1
+
+  # [6] WITH-CREATE: Only a single node is created when an alias is applied to a variable name
+  - name: s6_with_create_only_a_single_node_is_created_when_an_alias_is_applied_to_a_variable_name
+    setup:
+      - |
+        CREATE (:X)
+    query: |
+      MATCH (n)
+      WITH n AS a
+      CREATE (a)-[:T]->()
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:X) |
+      side_effects:
+        +nodes: 1
+        +relationships: 1
+
+  # [7] WITH-CREATE: Nodes are not created when aliases are applied to variable names multiple times
+  - name: s7_with_create_nodes_are_not_created_when_aliases_are_applied_to_variable_names_multiple_times
+    setup:
+      - |
+        CREATE ({name: 'A'})
+    query: |
+      MATCH (n)
+      MATCH (m)
+      WITH n AS a, m AS b
+      CREATE (a)-[:T]->(b)
+      WITH a AS x, b AS y
+      CREATE (x)-[:T]->(y)
+      RETURN x, y
+    expect:
+      values: |
+        | x | y |
+        | ({name: 'A'}) | ({name: 'A'}) |
+      side_effects:
+        +relationships: 2
+
+  # [8] WITH-CREATE: Only a single node is created when an alias is applied to a variable name multiple times
+  - name: s8_with_create_only_a_single_node_is_created_when_an_alias_is_applied_to_a_variable_name_multiple_times
+    setup:
+      - |
+        CREATE ({num: 5})
+    query: |
+      MATCH (n)
+      WITH n AS a
+      CREATE (a)-[:T]->()
+      WITH a AS x
+      CREATE (x)-[:T]->()
+      RETURN x
+    expect:
+      values: |
+        | x |
+        | ({num: 5}) |
+      side_effects:
+        +nodes: 2
+        +relationships: 2
+
+  # [9] WITH-CREATE: A bound node should be recognized after projection with WITH + WITH
+  - name: s9_with_create_a_bound_node_should_be_recognized_after_projection_with_with_with
+    query: |
+      CREATE (a)
+      WITH a
+      WITH *
+      CREATE (b)
+      CREATE (a)<-[:T]-(b)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 2
+        +relationships: 1
+
+  # [10] WITH-UNWIND-CREATE: A bound node should be recognized after projection with WITH + UNWIND
+  - name: s10_with_unwind_create_a_bound_node_should_be_recognized_after_projection_with_with_unwind
+    query: |
+      CREATE (a)
+      WITH a
+      UNWIND [0] AS i
+      CREATE (b)
+      CREATE (a)<-[:T]-(b)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 2
+        +relationships: 1
+
+  # [11] WITH-MERGE-CREATE: A bound node should be recognized after projection with WITH + MERGE node
+  - name: s11_with_merge_create_a_bound_node_should_be_recognized_after_projection_with_with_merge_node
+    query: |
+      CREATE (a)
+      WITH a
+      MERGE ()
+      CREATE (b)
+      CREATE (a)<-[:T]-(b)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 2
+        +relationships: 1
+
+  # [12] WITH-MERGE-CREATE: A bound node should be recognized after projection with WITH + MERGE pattern
+  - name: s12_with_merge_create_a_bound_node_should_be_recognized_after_projection_with_with_merge_pattern
+    query: |
+      CREATE (a)
+      WITH a
+      MERGE (x)
+      MERGE (y)
+      MERGE (x)-[:T]->(y)
+      CREATE (b)
+      CREATE (a)<-[:T]-(b)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 2
+        +relationships: 2
+
+  # [13] Merge followed by multiple creates
+  - name: s13_merge_followed_by_multiple_creates
+    query: |
+      MERGE (t:T {id: 42})
+      CREATE (f:R)
+      CREATE (t)-[:REL]->(f)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 2
+        +relationships: 1
+        +labels: 2
+        +properties: 1

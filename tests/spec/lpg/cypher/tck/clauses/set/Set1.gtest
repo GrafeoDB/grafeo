@@ -1,0 +1,214 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/set/Set1.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Set1"
+  title: "Set1 - Set a Property"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Set a property
+  - name: s1_set_a_property
+    setup:
+      - |
+        CREATE (:A {name: 'Andres'})
+    query: |
+      MATCH (n:A)
+      WHERE n.name = 'Andres'
+      SET n.name = 'Michael'
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | (:A {name: 'Michael'}) |
+      side_effects:
+        +properties: 1
+        -properties: 1
+
+  # [2] Set a property to an expression
+  - name: s2_set_a_property_to_an_expression
+    setup:
+      - |
+        CREATE (:A {name: 'Andres'})
+    query: |
+      MATCH (n:A)
+      WHERE n.name = 'Andres'
+      SET n.name = n.name + ' was here'
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | (:A {name: 'Andres was here'}) |
+      side_effects:
+        +properties: 1
+        -properties: 1
+
+  # [3] Set a property by selecting the node using a simple expression
+  # a product name in the TCK's data is replaced by 'Grafeo'
+  - name: s3_set_a_property_by_selecting_the_node_using_a_simple_expression
+    xfail:
+      spec: "openCypher TCK 2024.3 Set1: [3] Set a property by selecting the node using a simple expression"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        CREATE (:A)
+    query: |
+      MATCH (n:A)
+      SET (n).name = 'Grafeo'
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | (:A {name: 'Grafeo'}) |
+      side_effects:
+        +properties: 1
+
+  # [4] Set a property by selecting the relationship using a simple expression
+  # a product name in the TCK's data is replaced by 'Grafeo'
+  - name: s4_set_a_property_by_selecting_the_relationship_using_a_simple_expression
+    xfail:
+      spec: "openCypher TCK 2024.3 Set1: [4] Set a property by selecting the relationship using a simple expression"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        CREATE ()-[:REL]->()
+    query: |
+      MATCH ()-[r:REL]->()
+      SET (r).name = 'Grafeo'
+      RETURN r
+    expect:
+      values: |
+        | r |
+        | [:REL {name: 'Grafeo'}] |
+      side_effects:
+        +properties: 1
+
+  # [5] Adding a list property
+  - name: s5_adding_a_list_property
+    setup:
+      - |
+        CREATE (:A)
+    query: |
+      MATCH (n:A)
+      SET n.numbers = [1, 2, 3]
+      RETURN [i IN n.numbers | i / 2.0] AS x
+    expect:
+      values: |
+        | x |
+        | [0.5, 1.0, 1.5] |
+      side_effects:
+        +properties: 1
+
+  # [6] Concatenate elements onto a list property
+  - name: s6_concatenate_elements_onto_a_list_property
+    query: |
+      CREATE (a {numbers: [1, 2, 3]})
+      SET a.numbers = a.numbers + [4, 5]
+      RETURN a.numbers
+    expect:
+      values: |
+        | a.numbers |
+        | [1, 2, 3, 4, 5] |
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [7] Concatenate elements in reverse onto a list property
+  - name: s7_concatenate_elements_in_reverse_onto_a_list_property
+    query: |
+      CREATE (a {numbers: [3, 4, 5]})
+      SET a.numbers = [1, 2] + a.numbers
+      RETURN a.numbers
+    expect:
+      values: |
+        | a.numbers |
+        | [1, 2, 3, 4, 5] |
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [8] Ignore null when setting property
+  - name: s8_ignore_null_when_setting_property
+    query: |
+      OPTIONAL MATCH (a:DoesNotExist)
+      SET a.num = 42
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | null |
+      side_effects: {}
+
+  # [9] Failing when using undefined variable in SET
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s9_failing_when_using_undefined_variable_in_set
+    query: |
+      MATCH (a)
+      SET a.name = missing
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [10] Failing when setting a list of maps as a property
+  # TCK: TypeError at runtime: InvalidPropertyType
+  - name: s10_failing_when_setting_a_list_of_maps_as_a_property
+    xfail:
+      spec: "openCypher TCK 2024.3 Set1: [10] Failing when setting a list of maps as a property"
+      issue: fix in 0.6.5
+    query: |
+      CREATE (a)
+      SET a.maplist = [{num: 1}]
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [11] Set multiple node properties
+  - name: s11_set_multiple_node_properties
+    setup:
+      - |
+        CREATE (:X)
+    query: |
+      MATCH (n:X)
+      SET n.name = 'A', n.name2 = 'B', n.num = 5
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | (:X {name: 'A', name2: 'B', num: 5}) |
+      side_effects:
+        +properties: 3

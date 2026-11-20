@@ -13,13 +13,13 @@ use grafeo_core::graph::rowgroup::RowGroupStore;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use super::Session;
 use super::SessionConfig;
+use super::SessionInner;
 
 #[cfg(rdf_language)]
 mod query;
 
-impl Session {
+impl SessionInner {
     /// Creates a session that reads and writes `store` and `rdf_store`.
     pub(crate) fn with_rdf_store(
         store: Arc<RowGroupStore>,
@@ -39,6 +39,8 @@ impl Session {
             rdf_store,
             transaction_manager: cfg.transaction_manager,
             query_cache: cfg.query_cache,
+            #[cfg(feature = "gql")]
+            slots: cfg.slots,
             current_transaction: parking_lot::Mutex::new(None),
             read_only_tx: parking_lot::Mutex::new(cfg.read_only),
             db_read_only: cfg.read_only,
@@ -56,11 +58,11 @@ impl Session {
             #[cfg(query_language)]
             query_timeout: cfg.query_timeout,
             max_property_size: cfg.max_property_size,
-            #[cfg(feature = "spill")]
+            #[cfg(any(lpg_language, rdf_language))]
             buffer_manager: cfg.buffer_manager,
             #[cfg(feature = "spill")]
             spill_account: cfg.spill_account,
-            #[cfg(feature = "spill")]
+            #[cfg(any(lpg_language, rdf_language))]
             query_memory_limit: cfg.query_memory_limit,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
@@ -81,6 +83,11 @@ impl Session {
             session_params: parking_lot::Mutex::new(std::collections::HashMap::new()),
             viewing_epoch_override: parking_lot::Mutex::new(None),
             savepoints: parking_lot::Mutex::new(Vec::new()),
+            statement_marks: std::sync::atomic::AtomicUsize::new(0),
+            running_statements: std::sync::atomic::AtomicUsize::new(0),
+            explicit_transaction: std::sync::atomic::AtomicBool::new(false),
+            limit_notice: parking_lot::Mutex::new(None),
+            failed: parking_lot::Mutex::new(None),
             rules_at_begin: std::sync::atomic::AtomicU64::new(0),
             pending_schema: parking_lot::Mutex::new(None),
             transaction_nesting_depth: parking_lot::Mutex::new(0),

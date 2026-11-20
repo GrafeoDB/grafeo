@@ -1,0 +1,1166 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/quantifier/Quantifier4.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Quantifier4"
+  title: "Quantifier4 - All quantifier"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] All quantifier is always true on empty list
+  - name: s1_all_quantifier_is_always_true_on_empty_list
+    query: |
+      RETURN all(x IN [] WHERE true) AS a, all(x IN [] WHERE false) AS b, all(x IN [] WHERE x) AS c
+    expect:
+      values: |
+        | a | b | c |
+        | true | true | true |
+      side_effects: {}
+
+  # [2] All quantifier on list literal #1
+  - name: s2_all_quantifier_on_list_literal_1
+    query: |
+      RETURN all(x IN [] WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [2] All quantifier on list literal #2
+  - name: s2_all_quantifier_on_list_literal_2
+    query: |
+      RETURN all(x IN [true] WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [2] All quantifier on list literal #3
+  - name: s2_all_quantifier_on_list_literal_3
+    query: |
+      RETURN all(x IN [false] WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [2] All quantifier on list literal #4
+  - name: s2_all_quantifier_on_list_literal_4
+    query: |
+      RETURN all(x IN [true, false] WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [2] All quantifier on list literal #5
+  - name: s2_all_quantifier_on_list_literal_5
+    query: |
+      RETURN all(x IN [false, true] WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [2] All quantifier on list literal #6
+  - name: s2_all_quantifier_on_list_literal_6
+    query: |
+      RETURN all(x IN [true, false, true] WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [2] All quantifier on list literal #7
+  - name: s2_all_quantifier_on_list_literal_7
+    query: |
+      RETURN all(x IN [false, true, false] WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [2] All quantifier on list literal #8
+  - name: s2_all_quantifier_on_list_literal_8
+    query: |
+      RETURN all(x IN [true, true, true] WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [2] All quantifier on list literal #9
+  - name: s2_all_quantifier_on_list_literal_9
+    query: |
+      RETURN all(x IN [false, false, false] WHERE x) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [3] All quantifier on list literal containing integers #1
+  - name: s3_all_quantifier_on_list_literal_containing_integers_1
+    query: |
+      RETURN all(x IN [] WHERE x = 2) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [3] All quantifier on list literal containing integers #2
+  - name: s3_all_quantifier_on_list_literal_containing_integers_2
+    query: |
+      RETURN all(x IN [1] WHERE x = 2) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [3] All quantifier on list literal containing integers #3
+  - name: s3_all_quantifier_on_list_literal_containing_integers_3
+    query: |
+      RETURN all(x IN [1, 3] WHERE x = 2) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [3] All quantifier on list literal containing integers #4
+  - name: s3_all_quantifier_on_list_literal_containing_integers_4
+    query: |
+      RETURN all(x IN [1, 3, 20, 5000] WHERE x = 2) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [3] All quantifier on list literal containing integers #5
+  - name: s3_all_quantifier_on_list_literal_containing_integers_5
+    query: |
+      RETURN all(x IN [20, 3, 5000, -2] WHERE x = 2) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [3] All quantifier on list literal containing integers #6
+  - name: s3_all_quantifier_on_list_literal_containing_integers_6
+    query: |
+      RETURN all(x IN [2] WHERE x = 2) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [3] All quantifier on list literal containing integers #7
+  - name: s3_all_quantifier_on_list_literal_containing_integers_7
+    query: |
+      RETURN all(x IN [1, 2] WHERE x = 2) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [3] All quantifier on list literal containing integers #8
+  - name: s3_all_quantifier_on_list_literal_containing_integers_8
+    query: |
+      RETURN all(x IN [1, 2, 3] WHERE x = 2) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [3] All quantifier on list literal containing integers #9
+  - name: s3_all_quantifier_on_list_literal_containing_integers_9
+    query: |
+      RETURN all(x IN [2, 2] WHERE x = 2) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [3] All quantifier on list literal containing integers #10
+  - name: s3_all_quantifier_on_list_literal_containing_integers_10
+    query: |
+      RETURN all(x IN [2, 3] WHERE x = 2) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [3] All quantifier on list literal containing integers #11
+  - name: s3_all_quantifier_on_list_literal_containing_integers_11
+    query: |
+      RETURN all(x IN [3, 2, 3] WHERE x = 2) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [3] All quantifier on list literal containing integers #12
+  - name: s3_all_quantifier_on_list_literal_containing_integers_12
+    query: |
+      RETURN all(x IN [2, 3, 2] WHERE x = 2) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [3] All quantifier on list literal containing integers #13
+  - name: s3_all_quantifier_on_list_literal_containing_integers_13
+    query: |
+      RETURN all(x IN [2, -10, 3, 9, 0] WHERE x < 10) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [3] All quantifier on list literal containing integers #14
+  - name: s3_all_quantifier_on_list_literal_containing_integers_14
+    query: |
+      RETURN all(x IN [2, -10, 3, 2, 10] WHERE x < 10) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [3] All quantifier on list literal containing integers #15
+  - name: s3_all_quantifier_on_list_literal_containing_integers_15
+    query: |
+      RETURN all(x IN [2, -10, 3, 21, 10] WHERE x < 10) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [3] All quantifier on list literal containing integers #16
+  - name: s3_all_quantifier_on_list_literal_containing_integers_16
+    query: |
+      RETURN all(x IN [200, -10, 36, 21, 10] WHERE x < 10) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [3] All quantifier on list literal containing integers #17
+  - name: s3_all_quantifier_on_list_literal_containing_integers_17
+    query: |
+      RETURN all(x IN [200, 15, 36, 21, 10] WHERE x < 10) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [4] All quantifier on list literal containing floats #1
+  - name: s4_all_quantifier_on_list_literal_containing_floats_1
+    query: |
+      RETURN all(x IN [] WHERE x = 2.1) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [4] All quantifier on list literal containing floats #2
+  - name: s4_all_quantifier_on_list_literal_containing_floats_2
+    query: |
+      RETURN all(x IN [1.1] WHERE x = 2.1) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [4] All quantifier on list literal containing floats #3
+  - name: s4_all_quantifier_on_list_literal_containing_floats_3
+    query: |
+      RETURN all(x IN [1.1, 3.5] WHERE x = 2.1) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [4] All quantifier on list literal containing floats #4
+  - name: s4_all_quantifier_on_list_literal_containing_floats_4
+    query: |
+      RETURN all(x IN [1.1, 3.5, 20.0, 50.42435] WHERE x = 2.1) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [4] All quantifier on list literal containing floats #5
+  - name: s4_all_quantifier_on_list_literal_containing_floats_5
+    query: |
+      RETURN all(x IN [20.0, 3.4, 50.2, -2.1] WHERE x = 2.1) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [4] All quantifier on list literal containing floats #6
+  - name: s4_all_quantifier_on_list_literal_containing_floats_6
+    query: |
+      RETURN all(x IN [2.1] WHERE x = 2.1) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [4] All quantifier on list literal containing floats #7
+  - name: s4_all_quantifier_on_list_literal_containing_floats_7
+    query: |
+      RETURN all(x IN [1.43, 2.1] WHERE x = 2.1) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [4] All quantifier on list literal containing floats #8
+  - name: s4_all_quantifier_on_list_literal_containing_floats_8
+    query: |
+      RETURN all(x IN [1.43, 2.1, 3.5] WHERE x = 2.1) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [4] All quantifier on list literal containing floats #9
+  - name: s4_all_quantifier_on_list_literal_containing_floats_9
+    query: |
+      RETURN all(x IN [2.1, 2.1] WHERE x = 2.1) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [4] All quantifier on list literal containing floats #10
+  - name: s4_all_quantifier_on_list_literal_containing_floats_10
+    query: |
+      RETURN all(x IN [2.1, 3.5] WHERE x = 2.1) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [4] All quantifier on list literal containing floats #11
+  - name: s4_all_quantifier_on_list_literal_containing_floats_11
+    query: |
+      RETURN all(x IN [3.5, 2.1, 3.5] WHERE x = 2.1) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [4] All quantifier on list literal containing floats #12
+  - name: s4_all_quantifier_on_list_literal_containing_floats_12
+    query: |
+      RETURN all(x IN [2.1, 3.5, 2.1] WHERE x = 2.1) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [5] All quantifier on list literal containing strings #1
+  - name: s5_all_quantifier_on_list_literal_containing_strings_1
+    query: |
+      RETURN all(x IN [] WHERE size(x) = 3) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [5] All quantifier on list literal containing strings #2
+  - name: s5_all_quantifier_on_list_literal_containing_strings_2
+    query: |
+      RETURN all(x IN ['abc'] WHERE size(x) = 3) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [5] All quantifier on list literal containing strings #3
+  - name: s5_all_quantifier_on_list_literal_containing_strings_3
+    query: |
+      RETURN all(x IN ['ef'] WHERE size(x) = 3) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [5] All quantifier on list literal containing strings #4
+  - name: s5_all_quantifier_on_list_literal_containing_strings_4
+    query: |
+      RETURN all(x IN ['abc', 'ef'] WHERE size(x) = 3) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [5] All quantifier on list literal containing strings #5
+  - name: s5_all_quantifier_on_list_literal_containing_strings_5
+    query: |
+      RETURN all(x IN ['ef', 'abc'] WHERE size(x) = 3) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [5] All quantifier on list literal containing strings #6
+  - name: s5_all_quantifier_on_list_literal_containing_strings_6
+    query: |
+      RETURN all(x IN ['abc', 'ef', 'abc'] WHERE size(x) = 3) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [5] All quantifier on list literal containing strings #7
+  - name: s5_all_quantifier_on_list_literal_containing_strings_7
+    query: |
+      RETURN all(x IN ['ef', 'abc', 'ef'] WHERE size(x) = 3) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [5] All quantifier on list literal containing strings #8
+  - name: s5_all_quantifier_on_list_literal_containing_strings_8
+    query: |
+      RETURN all(x IN ['abc', 'abc', 'abc'] WHERE size(x) = 3) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [5] All quantifier on list literal containing strings #9
+  - name: s5_all_quantifier_on_list_literal_containing_strings_9
+    query: |
+      RETURN all(x IN ['ef', 'ef', 'ef'] WHERE size(x) = 3) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [6] All quantifier on list literal containing lists #1
+  - name: s6_all_quantifier_on_list_literal_containing_lists_1
+    query: |
+      RETURN all(x IN [] WHERE size(x) = 3) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [6] All quantifier on list literal containing lists #2
+  - name: s6_all_quantifier_on_list_literal_containing_lists_2
+    query: |
+      RETURN all(x IN [[1, 2, 3]] WHERE size(x) = 3) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [6] All quantifier on list literal containing lists #3
+  - name: s6_all_quantifier_on_list_literal_containing_lists_3
+    query: |
+      RETURN all(x IN [['a']] WHERE size(x) = 3) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [6] All quantifier on list literal containing lists #4
+  - name: s6_all_quantifier_on_list_literal_containing_lists_4
+    query: |
+      RETURN all(x IN [[1, 2, 3], ['a']] WHERE size(x) = 3) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [6] All quantifier on list literal containing lists #5
+  - name: s6_all_quantifier_on_list_literal_containing_lists_5
+    query: |
+      RETURN all(x IN [['a'], [1, 2, 3]] WHERE size(x) = 3) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [6] All quantifier on list literal containing lists #6
+  - name: s6_all_quantifier_on_list_literal_containing_lists_6
+    query: |
+      RETURN all(x IN [[1, 2, 3], ['a'], [1, 2, 3]] WHERE size(x) = 3) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [6] All quantifier on list literal containing lists #7
+  - name: s6_all_quantifier_on_list_literal_containing_lists_7
+    query: |
+      RETURN all(x IN [['a'], [1, 2, 3], ['a']] WHERE size(x) = 3) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [6] All quantifier on list literal containing lists #8
+  - name: s6_all_quantifier_on_list_literal_containing_lists_8
+    query: |
+      RETURN all(x IN [[1, 2, 3], [1, 2, 3], [1, 2, 3]] WHERE size(x) = 3) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [6] All quantifier on list literal containing lists #9
+  - name: s6_all_quantifier_on_list_literal_containing_lists_9
+    query: |
+      RETURN all(x IN [['a'], ['a'], ['a']] WHERE size(x) = 3) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [7] All quantifier on list literal containing maps #1
+  - name: s7_all_quantifier_on_list_literal_containing_maps_1
+    query: |
+      RETURN all(x IN [] WHERE x.a = 2) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [7] All quantifier on list literal containing maps #2
+  - name: s7_all_quantifier_on_list_literal_containing_maps_2
+    query: |
+      RETURN all(x IN [{a: 2, b: 5}] WHERE x.a = 2) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [7] All quantifier on list literal containing maps #3
+  - name: s7_all_quantifier_on_list_literal_containing_maps_3
+    query: |
+      RETURN all(x IN [{a: 4}] WHERE x.a = 2) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [7] All quantifier on list literal containing maps #4
+  - name: s7_all_quantifier_on_list_literal_containing_maps_4
+    query: |
+      RETURN all(x IN [{a: 2, b: 5}, {a: 4}] WHERE x.a = 2) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [7] All quantifier on list literal containing maps #5
+  - name: s7_all_quantifier_on_list_literal_containing_maps_5
+    query: |
+      RETURN all(x IN [{a: 4}, {a: 2, b: 5}] WHERE x.a = 2) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [7] All quantifier on list literal containing maps #6
+  - name: s7_all_quantifier_on_list_literal_containing_maps_6
+    query: |
+      RETURN all(x IN [{a: 2, b: 5}, {a: 4}, {a: 2, b: 5}] WHERE x.a = 2) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [7] All quantifier on list literal containing maps #7
+  - name: s7_all_quantifier_on_list_literal_containing_maps_7
+    query: |
+      RETURN all(x IN [{a: 4}, {a: 2, b: 5}, {a: 4}] WHERE x.a = 2) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [7] All quantifier on list literal containing maps #8
+  - name: s7_all_quantifier_on_list_literal_containing_maps_8
+    query: |
+      RETURN all(x IN [{a: 2, b: 5}, {a: 2, b: 5}, {a: 2, b: 5}] WHERE x.a = 2) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [7] All quantifier on list literal containing maps #9
+  - name: s7_all_quantifier_on_list_literal_containing_maps_9
+    query: |
+      RETURN all(x IN [{a: 4}, {a: 4}, {a: 4}] WHERE x.a = 2) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [8] All quantifier on list containing nodes
+  - name: s8_all_quantifier_on_list_containing_nodes
+    setup:
+      - |
+        CREATE (s1:SRelationships), (s2:SNodes)
+        CREATE (a:A {name: 'a'}), (b:B {name: 'b'})
+        CREATE (aa:A {name: 'a'}), (ab:B {name: 'b'}),
+               (ba:A {name: 'a'}), (bb:B {name: 'b'})
+        CREATE (aaa:A {name: 'a'}), (aab:B {name: 'b'}),
+               (aba:A {name: 'a'}), (abb:B {name: 'b'}),
+               (baa:A {name: 'a'}), (bab:B {name: 'b'}),
+               (bba:A {name: 'a'}), (bbb:B {name: 'b'})
+        CREATE (s1)-[:I]->(s2),
+               (s2)-[:RA {name: 'a'}]->(a), (s2)-[:RB {name: 'b'}]->(b)
+        CREATE (a)-[:RA {name: 'a'}]->(aa), (a)-[:RB {name: 'b'}]->(ab),
+               (b)-[:RA {name: 'a'}]->(ba), (b)-[:RB {name: 'b'}]->(bb)
+        CREATE (aa)-[:RA {name: 'a'}]->(aaa), (aa)-[:RB {name: 'b'}]->(aab),
+               (ab)-[:RA {name: 'a'}]->(aba), (ab)-[:RB {name: 'b'}]->(abb),
+               (ba)-[:RA {name: 'a'}]->(baa), (ba)-[:RB {name: 'b'}]->(bab),
+               (bb)-[:RA {name: 'a'}]->(bba), (bb)-[:RB {name: 'b'}]->(bbb)
+    query: |
+      MATCH p = (:SNodes)-[*0..3]->(x)
+      WITH tail(nodes(p)) AS nodes
+      RETURN nodes, all(x IN nodes WHERE x.name = 'a') AS result
+    expect:
+      values: |
+        | nodes | result |
+        | [] | true |
+        | [(:A {name: 'a'})] | true |
+        | [(:A {name: 'a'}), (:A {name: 'a'})] | true |
+        | [(:A {name: 'a'}), (:A {name: 'a'}), (:A {name: 'a'})] | true |
+        | [(:A {name: 'a'}), (:A {name: 'a'}), (:B {name: 'b'})] | false |
+        | [(:A {name: 'a'}), (:B {name: 'b'})] | false |
+        | [(:A {name: 'a'}), (:B {name: 'b'}), (:A {name: 'a'})] | false |
+        | [(:A {name: 'a'}), (:B {name: 'b'}), (:B {name: 'b'})] | false |
+        | [(:B {name: 'b'})] | false |
+        | [(:B {name: 'b'}), (:A {name: 'a'})] | false |
+        | [(:B {name: 'b'}), (:A {name: 'a'}), (:A {name: 'a'})] | false |
+        | [(:B {name: 'b'}), (:A {name: 'a'}), (:B {name: 'b'})] | false |
+        | [(:B {name: 'b'}), (:B {name: 'b'})] | false |
+        | [(:B {name: 'b'}), (:B {name: 'b'}), (:A {name: 'a'})] | false |
+        | [(:B {name: 'b'}), (:B {name: 'b'}), (:B {name: 'b'})] | false |
+      side_effects: {}
+
+  # [9] All quantifier on list containing relationships
+  - name: s9_all_quantifier_on_list_containing_relationships
+    setup:
+      - |
+        CREATE (s1:SRelationships), (s2:SNodes)
+        CREATE (a:A {name: 'a'}), (b:B {name: 'b'})
+        CREATE (aa:A {name: 'a'}), (ab:B {name: 'b'}),
+               (ba:A {name: 'a'}), (bb:B {name: 'b'})
+        CREATE (aaa:A {name: 'a'}), (aab:B {name: 'b'}),
+               (aba:A {name: 'a'}), (abb:B {name: 'b'}),
+               (baa:A {name: 'a'}), (bab:B {name: 'b'}),
+               (bba:A {name: 'a'}), (bbb:B {name: 'b'})
+        CREATE (s1)-[:I]->(s2),
+               (s2)-[:RA {name: 'a'}]->(a), (s2)-[:RB {name: 'b'}]->(b)
+        CREATE (a)-[:RA {name: 'a'}]->(aa), (a)-[:RB {name: 'b'}]->(ab),
+               (b)-[:RA {name: 'a'}]->(ba), (b)-[:RB {name: 'b'}]->(bb)
+        CREATE (aa)-[:RA {name: 'a'}]->(aaa), (aa)-[:RB {name: 'b'}]->(aab),
+               (ab)-[:RA {name: 'a'}]->(aba), (ab)-[:RB {name: 'b'}]->(abb),
+               (ba)-[:RA {name: 'a'}]->(baa), (ba)-[:RB {name: 'b'}]->(bab),
+               (bb)-[:RA {name: 'a'}]->(bba), (bb)-[:RB {name: 'b'}]->(bbb)
+    query: |
+      MATCH p = (:SRelationships)-[*0..4]->(x)
+      WITH tail(relationships(p)) AS relationships, COUNT(*) AS c
+      RETURN relationships, all(x IN relationships WHERE x.name = 'a') AS result
+    expect:
+      values: |
+        | relationships | result |
+        | [] | true |
+        | [[:RA {name: 'a'}]] | true |
+        | [[:RA {name: 'a'}], [:RA {name: 'a'}]] | true |
+        | [[:RA {name: 'a'}], [:RA {name: 'a'}], [:RA {name: 'a'}]] | true |
+        | [[:RA {name: 'a'}], [:RA {name: 'a'}], [:RB {name: 'b'}]] | false |
+        | [[:RA {name: 'a'}], [:RB {name: 'b'}]] | false |
+        | [[:RA {name: 'a'}], [:RB {name: 'b'}], [:RA {name: 'a'}]] | false |
+        | [[:RA {name: 'a'}], [:RB {name: 'b'}], [:RB {name: 'b'}]] | false |
+        | [[:RB {name: 'b'}]] | false |
+        | [[:RB {name: 'b'}], [:RA {name: 'a'}]] | false |
+        | [[:RB {name: 'b'}], [:RA {name: 'a'}], [:RA {name: 'a'}]] | false |
+        | [[:RB {name: 'b'}], [:RA {name: 'a'}], [:RB {name: 'b'}]] | false |
+        | [[:RB {name: 'b'}], [:RB {name: 'b'}]] | false |
+        | [[:RB {name: 'b'}], [:RB {name: 'b'}], [:RA {name: 'a'}]] | false |
+        | [[:RB {name: 'b'}], [:RB {name: 'b'}], [:RB {name: 'b'}]] | false |
+      side_effects: {}
+
+  # [10] All quantifier on lists containing nulls #1
+  - name: s10_all_quantifier_on_lists_containing_nulls_1
+    query: |
+      RETURN all(x IN [null] WHERE x = 2) AS result
+    expect:
+      values: |
+        | result |
+        | null |
+      side_effects: {}
+
+  # [10] All quantifier on lists containing nulls #2
+  - name: s10_all_quantifier_on_lists_containing_nulls_2
+    query: |
+      RETURN all(x IN [null, null] WHERE x = 2) AS result
+    expect:
+      values: |
+        | result |
+        | null |
+      side_effects: {}
+
+  # [10] All quantifier on lists containing nulls #3
+  - name: s10_all_quantifier_on_lists_containing_nulls_3
+    query: |
+      RETURN all(x IN [0, null] WHERE x = 2) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [10] All quantifier on lists containing nulls #4
+  - name: s10_all_quantifier_on_lists_containing_nulls_4
+    query: |
+      RETURN all(x IN [2, null] WHERE x = 2) AS result
+    expect:
+      values: |
+        | result |
+        | null |
+      side_effects: {}
+
+  # [10] All quantifier on lists containing nulls #5
+  - name: s10_all_quantifier_on_lists_containing_nulls_5
+    query: |
+      RETURN all(x IN [null, 2] WHERE x = 2) AS result
+    expect:
+      values: |
+        | result |
+        | null |
+      side_effects: {}
+
+  # [10] All quantifier on lists containing nulls #6
+  - name: s10_all_quantifier_on_lists_containing_nulls_6
+    query: |
+      RETURN all(x IN [34, 0, null, 5, 900] WHERE x < 10) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [10] All quantifier on lists containing nulls #7
+  - name: s10_all_quantifier_on_lists_containing_nulls_7
+    query: |
+      RETURN all(x IN [34, 10, null, 15, 900] WHERE x < 10) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [10] All quantifier on lists containing nulls #8
+  - name: s10_all_quantifier_on_lists_containing_nulls_8
+    query: |
+      RETURN all(x IN [4, 0, null, -15, 9] WHERE x < 10) AS result
+    expect:
+      values: |
+        | result |
+        | null |
+      side_effects: {}
+
+  # [11] All quantifier with IS NULL predicate #1
+  - name: s11_all_quantifier_with_is_null_predicate_1
+    query: |
+      RETURN all(x IN [] WHERE x IS NULL) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [11] All quantifier with IS NULL predicate #2
+  - name: s11_all_quantifier_with_is_null_predicate_2
+    query: |
+      RETURN all(x IN [0] WHERE x IS NULL) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [11] All quantifier with IS NULL predicate #3
+  - name: s11_all_quantifier_with_is_null_predicate_3
+    query: |
+      RETURN all(x IN [34, 0, 8, 900] WHERE x IS NULL) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [11] All quantifier with IS NULL predicate #4
+  - name: s11_all_quantifier_with_is_null_predicate_4
+    query: |
+      RETURN all(x IN [null] WHERE x IS NULL) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [11] All quantifier with IS NULL predicate #5
+  - name: s11_all_quantifier_with_is_null_predicate_5
+    query: |
+      RETURN all(x IN [null, null] WHERE x IS NULL) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [11] All quantifier with IS NULL predicate #6
+  - name: s11_all_quantifier_with_is_null_predicate_6
+    query: |
+      RETURN all(x IN [0, null] WHERE x IS NULL) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [11] All quantifier with IS NULL predicate #7
+  - name: s11_all_quantifier_with_is_null_predicate_7
+    query: |
+      RETURN all(x IN [2, null] WHERE x IS NULL) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [11] All quantifier with IS NULL predicate #8
+  - name: s11_all_quantifier_with_is_null_predicate_8
+    query: |
+      RETURN all(x IN [null, 2] WHERE x IS NULL) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [11] All quantifier with IS NULL predicate #9
+  - name: s11_all_quantifier_with_is_null_predicate_9
+    query: |
+      RETURN all(x IN [34, 0, null, 8, 900] WHERE x IS NULL) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [11] All quantifier with IS NULL predicate #10
+  - name: s11_all_quantifier_with_is_null_predicate_10
+    query: |
+      RETURN all(x IN [34, 0, null, 8, null] WHERE x IS NULL) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [11] All quantifier with IS NULL predicate #11
+  - name: s11_all_quantifier_with_is_null_predicate_11
+    query: |
+      RETURN all(x IN [null, 123, null, null] WHERE x IS NULL) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [11] All quantifier with IS NULL predicate #12
+  - name: s11_all_quantifier_with_is_null_predicate_12
+    query: |
+      RETURN all(x IN [null, null, null, null] WHERE x IS NULL) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [12] All quantifier with IS NOT NULL predicate #1
+  - name: s12_all_quantifier_with_is_not_null_predicate_1
+    query: |
+      RETURN all(x IN [] WHERE x IS NOT NULL) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [12] All quantifier with IS NOT NULL predicate #2
+  - name: s12_all_quantifier_with_is_not_null_predicate_2
+    query: |
+      RETURN all(x IN [0] WHERE x IS NOT NULL) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [12] All quantifier with IS NOT NULL predicate #3
+  - name: s12_all_quantifier_with_is_not_null_predicate_3
+    query: |
+      RETURN all(x IN [34, 0, 8, 900] WHERE x IS NOT NULL) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [12] All quantifier with IS NOT NULL predicate #4
+  - name: s12_all_quantifier_with_is_not_null_predicate_4
+    query: |
+      RETURN all(x IN [null] WHERE x IS NOT NULL) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [12] All quantifier with IS NOT NULL predicate #5
+  - name: s12_all_quantifier_with_is_not_null_predicate_5
+    query: |
+      RETURN all(x IN [null, null] WHERE x IS NOT NULL) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [12] All quantifier with IS NOT NULL predicate #6
+  - name: s12_all_quantifier_with_is_not_null_predicate_6
+    query: |
+      RETURN all(x IN [0, null] WHERE x IS NOT NULL) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [12] All quantifier with IS NOT NULL predicate #7
+  - name: s12_all_quantifier_with_is_not_null_predicate_7
+    query: |
+      RETURN all(x IN [2, null] WHERE x IS NOT NULL) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [12] All quantifier with IS NOT NULL predicate #8
+  - name: s12_all_quantifier_with_is_not_null_predicate_8
+    query: |
+      RETURN all(x IN [null, 2] WHERE x IS NOT NULL) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [12] All quantifier with IS NOT NULL predicate #9
+  - name: s12_all_quantifier_with_is_not_null_predicate_9
+    query: |
+      RETURN all(x IN [34, 0, null, 8, 900] WHERE x IS NOT NULL) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [12] All quantifier with IS NOT NULL predicate #10
+  - name: s12_all_quantifier_with_is_not_null_predicate_10
+    query: |
+      RETURN all(x IN [34, 0, null, 8, null] WHERE x IS NOT NULL) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [12] All quantifier with IS NOT NULL predicate #11
+  - name: s12_all_quantifier_with_is_not_null_predicate_11
+    query: |
+      RETURN all(x IN [null, 123, null, null] WHERE x IS NOT NULL) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [12] All quantifier with IS NOT NULL predicate #12
+  - name: s12_all_quantifier_with_is_not_null_predicate_12
+    query: |
+      RETURN all(x IN [null, null, null, null] WHERE x IS NOT NULL) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [13] All quantifier is false if the predicate is statically false and the list is not empty
+  - name: s13_all_quantifier_is_false_if_the_predicate_is_statically_false_and_the_list_is_not_empty
+    query: |
+      RETURN all(x IN [1, null, true, 4.5, 'abc', false] WHERE false) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [14] All quantifier is true if the predicate is statically true and the list is not empty
+  - name: s14_all_quantifier_is_true_if_the_predicate_is_statically_true_and_the_list_is_not_empty
+    query: |
+      RETURN all(x IN [1, null, true, 4.5, 'abc', false] WHERE true) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [15] Fail all quantifier on type mismatch between list elements and predicate #1
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s15_fail_all_quantifier_on_type_mismatch_between_list_elements_and_predicate_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Quantifier4: [15] Fail all quantifier on type mismatch between list elements and predicate #1"
+      issue: fix in 0.6.5
+    query: |
+      RETURN all(x IN ['Clara'] WHERE x % 2 = 0) AS result
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [15] Fail all quantifier on type mismatch between list elements and predicate #2
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s15_fail_all_quantifier_on_type_mismatch_between_list_elements_and_predicate_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Quantifier4: [15] Fail all quantifier on type mismatch between list elements and predicate #2"
+      issue: fix in 0.6.5
+    query: |
+      RETURN all(x IN [false, true] WHERE x % 2 = 0) AS result
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [15] Fail all quantifier on type mismatch between list elements and predicate #3
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s15_fail_all_quantifier_on_type_mismatch_between_list_elements_and_predicate_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Quantifier4: [15] Fail all quantifier on type mismatch between list elements and predicate #3"
+      issue: fix in 0.6.5
+    query: |
+      RETURN all(x IN ['Clara', 'Bob', 'Dave', 'Alice'] WHERE x % 2 = 0) AS result
+    expect:
+      gql_status: "42"
+      side_effects: {}

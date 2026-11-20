@@ -579,8 +579,8 @@ mod tests {
     /// The rows of `query`, planned with the reachability search where it
     /// applies, or with every walk enumerated (the plan before it).
     fn run(db: &GrafeoDB, language: &str, query: &str, reachability: bool) -> Vec<Vec<Value>> {
-        let mut session = db.session();
-        session.set_reachability(reachability);
+        let session = db.session();
+        session.inner_mut().unwrap().set_reachability(reachability);
         session
             .execute_language(query, language, Some(params()))
             .unwrap_or_else(|error| panic!("{language}: {query}: {error}"))
@@ -1048,8 +1048,8 @@ mod tests {
         language: &str,
         query: &str,
     ) -> (Vec<Vec<Value>>, Vec<Vec<Value>>, Vec<String>) {
-        let mut execute = |query: &str, reachability: bool| {
-            session.set_reachability(reachability);
+        let execute = |query: &str, reachability: bool| {
+            session.inner_mut().unwrap().set_reachability(reachability);
             session
                 .execute_language(query, language, Some(params()))
                 .unwrap_or_else(|error| panic!("{language}: {query}: {error}"))
@@ -1125,7 +1125,7 @@ mod tests {
             "MATCH (g:Person {id: 2}) CREATE (:Person {id: 6, name: 'Hans'})-[:KNOWS]->(g)",
         )
         .unwrap();
-        let mut session = db.session();
+        let session = db.session();
         for (tail, mode) in [
             (
                 "MATCH (n)-[*1..3]-(m) RETURN DISTINCT m.id",
@@ -1137,8 +1137,8 @@ mod tests {
             ),
         ] {
             let query = format!("{} {tail}", sources("gql"));
-            let mut at_epoch = |reachability: bool| {
-                session.set_reachability(reachability);
+            let at_epoch = |reachability: bool| {
+                session.inner_mut().unwrap().set_reachability(reachability);
                 session
                     .execute_at_epoch_with_params(&query, epoch, Some(params()))
                     .unwrap()

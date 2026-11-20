@@ -407,6 +407,7 @@ mod tests {
                 alias: Some("total".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             input: Box::new(input),
             having: None,

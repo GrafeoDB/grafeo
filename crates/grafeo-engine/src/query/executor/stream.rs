@@ -29,7 +29,7 @@ use std::sync::Arc;
 use grafeo_common::utils::warning::{QueryWarning, WarningSink};
 
 use crate::database::QueryResult;
-use crate::transaction::ReadPin;
+use crate::transaction::ReadHold;
 
 /// What a stream runs: the pipeline `Session::build_streaming_plan` built, with its columns,
 /// its deadline, its snapshot pin and its warnings.
@@ -37,7 +37,7 @@ pub(crate) struct StreamPlan {
     pub(crate) operator: Box<dyn Operator>,
     pub(crate) columns: Vec<String>,
     pub(crate) deadline: Option<Instant>,
-    pub(crate) pin: Option<ReadPin>,
+    pub(crate) pin: Option<ReadHold>,
     /// Where the statement raises its warnings: its translation's, there when the stream
     /// opens, and its run's, as the rows that raise them are pulled.
     pub(crate) warnings: Arc<WarningSink>,
@@ -48,13 +48,17 @@ pub(crate) struct StreamPlan {
 /// The counter prevents `commit()` / `rollback()` from racing with in-flight
 /// streams that still hold references to the session's read snapshot.
 pub(crate) struct StreamGuard<'s> {
-    counter: &'s AtomicUsize,
+    counter: Arc<AtomicUsize>,
+    _session: std::marker::PhantomData<&'s ()>,
 }
 
-impl<'s> StreamGuard<'s> {
-    pub(crate) fn new(counter: &'s AtomicUsize) -> Self {
+impl StreamGuard<'_> {
+    pub(crate) fn new(counter: &Arc<AtomicUsize>) -> Self {
         counter.fetch_add(1, Ordering::AcqRel);
-        Self { counter }
+        Self {
+            counter: Arc::clone(counter),
+            _session: std::marker::PhantomData,
+        }
     }
 }
 
@@ -103,14 +107,14 @@ impl Drop for OwnedStreamGuard {
 ///
 /// # Stability: Experimental
 pub struct ResultStream<'session> {
-    operator: Box<dyn Operator>,
+    operator: crate::session::OperatorSlot,
     columns: Vec<String>,
     column_types: Vec<LogicalType>,
     deadline: Option<Instant>,
     exhausted: bool,
     _guard: StreamGuard<'session>,
     /// The stream's committed snapshot pin, including a historical override.
-    _pin: Option<ReadPin>,
+    _pin: Option<ReadHold>,
     warnings: Arc<WarningSink>,
 }
 
@@ -121,11 +125,15 @@ impl<'s> ResultStream<'s> {
     ///
     /// Returns [`QueryErrorKind::Semantic`](grafeo_common::utils::error::QueryErrorKind)
     /// if `columns` contains a repeated column name.
-    pub(crate) fn new(plan: StreamPlan, guard: StreamGuard<'s>) -> Result<Self> {
+    pub(crate) fn new(
+        plan: StreamPlan,
+        slots: &crate::session::Slots,
+        guard: StreamGuard<'s>,
+    ) -> Result<Self> {
         QueryResult::validate_unique_columns(&plan.columns)?;
         let len = plan.columns.len();
         Ok(Self {
-            operator: plan.operator,
+            operator: slots.register_stream(plan.operator),
             columns: plan.columns,
             column_types: vec![LogicalType::Any; len],
             deadline: plan.deadline,
@@ -179,7 +187,12 @@ impl<'s> ResultStream<'s> {
         check_deadline(self.deadline)?;
         // The operators check the deadline in their own loops too.
         let _deadline = deadline::enter(self.deadline);
-        match self.operator.next() {
+        let Some(next) = self.operator.next() else {
+            return Err(Error::Transaction(
+                grafeo_common::utils::error::TransactionError::DatabaseClosed,
+            ));
+        };
+        match next {
             Ok(Some(chunk)) => {
                 refine_column_types(&chunk, &mut self.column_types);
                 Ok(Some(chunk))
@@ -213,9 +226,9 @@ impl<'s> ResultStream<'s> {
     pub fn collect(mut self) -> Result<QueryResult> {
         let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone())?;
         while let Some(chunk) = self.next_chunk()? {
+            super::note_column_types(&chunk, &mut result);
             append_chunk(&chunk, &mut result);
         }
-        result.column_types = self.column_types;
         result.warnings = self.warnings.raised().to_query_warnings();
         Ok(result)
     }
@@ -296,13 +309,13 @@ impl Iterator for RowIterator<'_> {
 ///
 /// # Stability: Experimental
 pub struct OwnedResultStream {
-    operator: Box<dyn Operator>,
+    operator: crate::session::OperatorSlot,
     columns: Vec<String>,
     column_types: Vec<LogicalType>,
     deadline: Option<Instant>,
     exhausted: bool,
     /// The stream's committed snapshot pin, including a historical override.
-    _pin: Option<ReadPin>,
+    _pin: Option<ReadHold>,
     warnings: Arc<WarningSink>,
     /// The session's active-stream count while the stream is open, when a
     /// session's transaction may be reading through it: let go of when the
@@ -330,11 +343,15 @@ impl OwnedResultStream {
     ///
     /// Returns [`QueryErrorKind::Semantic`](grafeo_common::utils::error::QueryErrorKind)
     /// if `columns` contains a repeated column name.
-    pub(crate) fn new(plan: StreamPlan, guard: Option<OwnedStreamGuard>) -> Result<Self> {
+    pub(crate) fn new(
+        plan: StreamPlan,
+        slots: &crate::session::Slots,
+        guard: Option<OwnedStreamGuard>,
+    ) -> Result<Self> {
         QueryResult::validate_unique_columns(&plan.columns)?;
         let len = plan.columns.len();
         Ok(Self {
-            operator: plan.operator,
+            operator: slots.register_stream(plan.operator),
             columns: plan.columns,
             column_types: vec![LogicalType::Any; len],
             deadline: plan.deadline,
@@ -397,7 +414,12 @@ impl OwnedResultStream {
         check_deadline(self.deadline)?;
         // The operators check the deadline in their own loops too.
         let _deadline = deadline::enter(self.deadline);
-        match self.operator.next() {
+        let Some(next) = self.operator.next() else {
+            return Err(Error::Transaction(
+                grafeo_common::utils::error::TransactionError::DatabaseClosed,
+            ));
+        };
+        match next {
             Ok(Some(chunk)) => {
                 refine_column_types(&chunk, &mut self.column_types);
                 Ok(Some(chunk))
@@ -430,9 +452,9 @@ impl OwnedResultStream {
     pub fn collect(mut self) -> Result<QueryResult> {
         let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone())?;
         while let Some(chunk) = self.next_chunk()? {
+            super::note_column_types(&chunk, &mut result);
             append_chunk(&chunk, &mut result);
         }
-        result.column_types = self.column_types;
         result.warnings = self.warnings.raised().to_query_warnings();
         Ok(result)
     }
@@ -523,7 +545,7 @@ fn refine_column_types(chunk: &DataChunk, types: &mut Vec<LogicalType>) {
         if matches!(slot, LogicalType::Any)
             && let Some(col) = chunk.column(col_idx)
         {
-            *slot = col.data_type().clone();
+            *slot = crate::database::record_shape(col.data_type());
         }
     }
 }

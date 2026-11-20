@@ -1,0 +1,201 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/useCases/countingSubgraphMatches/CountingSubgraphMatches1.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.CountingSubgraphMatches1"
+  title: "CountingSubgraphMatches1 - Matching subgraph patterns and count the number of matches"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Undirected match in self-relationship graph, count
+  - name: s1_undirected_match_in_self_relationship_graph_count
+    setup:
+      - |
+        CREATE (a:A)-[:LOOP]->(a)
+    query: |
+      MATCH ()--()
+      RETURN count(*)
+    expect:
+      values: |
+        | count(*) |
+        | 1 |
+      side_effects: {}
+
+  # [2] Undirected match of self-relationship in self-relationship graph, count
+  - name: s2_undirected_match_of_self_relationship_in_self_relationship_graph_count
+    setup:
+      - |
+        CREATE (a:A)-[:LOOP]->(a)
+    query: |
+      MATCH (n)--(n)
+      RETURN count(*)
+    expect:
+      values: |
+        | count(*) |
+        | 1 |
+      side_effects: {}
+
+  # [3] Undirected match on simple relationship graph, count
+  - name: s3_undirected_match_on_simple_relationship_graph_count
+    setup:
+      - |
+        CREATE (:A)-[:LOOP]->(:B)
+    query: |
+      MATCH ()--()
+      RETURN count(*)
+    expect:
+      values: |
+        | count(*) |
+        | 2 |
+      side_effects: {}
+
+  # [4] Directed match on self-relationship graph, count
+  - name: s4_directed_match_on_self_relationship_graph_count
+    setup:
+      - |
+        CREATE (a:A)-[:LOOP]->(a)
+    query: |
+      MATCH ()-->()
+      RETURN count(*)
+    expect:
+      values: |
+        | count(*) |
+        | 1 |
+      side_effects: {}
+
+  # [5] Directed match of self-relationship on self-relationship graph, count
+  - name: s5_directed_match_of_self_relationship_on_self_relationship_graph_count
+    setup:
+      - |
+        CREATE (a:A)-[:LOOP]->(a)
+    query: |
+      MATCH (n)-->(n)
+      RETURN count(*)
+    expect:
+      values: |
+        | count(*) |
+        | 1 |
+      side_effects: {}
+
+  # [6] Counting undirected self-relationships in self-relationship graph
+  - name: s6_counting_undirected_self_relationships_in_self_relationship_graph
+    setup:
+      - |
+        CREATE (a:A)-[:LOOP]->(a)
+    query: |
+      MATCH (n)-[r]-(n)
+      RETURN count(r)
+    expect:
+      values: |
+        | count(r) |
+        | 1 |
+      side_effects: {}
+
+  # [7] Counting distinct undirected self-relationships in self-relationship graph
+  - name: s7_counting_distinct_undirected_self_relationships_in_self_relationship_graph
+    setup:
+      - |
+        CREATE (a:A)-[:LOOP]->(a)
+    query: |
+      MATCH (n)-[r]-(n)
+      RETURN count(DISTINCT r)
+    expect:
+      values: |
+        | count(DISTINCT r) |
+        | 1 |
+      side_effects: {}
+
+  # [8] Directed match of a simple relationship, count
+  - name: s8_directed_match_of_a_simple_relationship_count
+    setup:
+      - |
+        CREATE (:A)-[:LOOP]->(:B)
+    query: |
+      MATCH ()-->()
+      RETURN count(*)
+    expect:
+      values: |
+        | count(*) |
+        | 1 |
+      side_effects: {}
+
+  # [9] Counting directed self-relationships
+  - name: s9_counting_directed_self_relationships
+    setup:
+      - |
+        CREATE (a:A)-[:LOOP]->(a),
+               ()-[:T]->()
+    query: |
+      MATCH (n)-[r]->(n)
+      RETURN count(r)
+    expect:
+      values: |
+        | count(r) |
+        | 1 |
+      side_effects: {}
+
+  # [10] Mixing directed and undirected pattern parts with self-relationship, count
+  - name: s10_mixing_directed_and_undirected_pattern_parts_with_self_relationship_count
+    setup:
+      - |
+        CREATE (:A)-[:T1]->(l:Looper),
+               (l)-[:LOOP]->(l),
+               (l)-[:T2]->(:B)
+    query: |
+      MATCH (:A)-->()--()
+      RETURN count(*)
+    expect:
+      values: |
+        | count(*) |
+        | 2 |
+      side_effects: {}
+
+  # [11] Mixing directed and undirected pattern parts with self-relationship, undirected count
+  - name: s11_mixing_directed_and_undirected_pattern_parts_with_self_relationship_undirected_count
+    setup:
+      - |
+        CREATE (:A)-[:T1]->(l:Looper),
+               (l)-[:LOOP]->(l),
+               (l)-[:T2]->(:B)
+    query: |
+      MATCH ()-[]-()-[]-()
+      RETURN count(*)
+    expect:
+      values: |
+        | count(*) |
+        | 6 |
+      side_effects: {}

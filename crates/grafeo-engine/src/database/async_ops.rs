@@ -16,7 +16,41 @@ use std::sync::Arc;
 use grafeo_common::utils::error::{Error, Result};
 
 use super::GrafeoDB;
+use super::Open;
 
+impl Open {
+    pub(crate) async fn async_wal_checkpoint(self: &Arc<Self>) -> Result<()> {
+        let db = Arc::clone(self);
+        tokio::task::spawn_blocking(move || db.wal_checkpoint())
+            .await
+            .map_err(|e| Error::Internal(format!("async checkpoint task failed: {e}")))?
+    }
+
+    #[cfg(feature = "grafeo-file")]
+    pub(crate) async fn async_write_snapshot(self: &Arc<Self>) -> Result<()> {
+        let db = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            // `close()` waits for the write, and none runs after it.
+            let _open = db.hold_open()?;
+            // Read-only databases have nothing to flush.
+            if db.read_only {
+                return Ok(());
+            }
+            let Some(ref fm) = db.file_manager else {
+                return Err(Error::from(
+                    grafeo_common::utils::error::QueryError::unsupported(
+                        "a snapshot write needs a persistent database",
+                    ),
+                ));
+            };
+            db.checkpoint_to_file(fm).map(|_| ())
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("async snapshot task failed: {e}")))?
+    }
+}
+
+// The database's public methods: each reaches the open state for its call (#712).
 impl GrafeoDB {
     /// Asynchronous WAL checkpoint.
     ///
@@ -54,10 +88,7 @@ impl GrafeoDB {
         note = "call `wal_checkpoint()` from `tokio::task::spawn_blocking`; removed in 0.7.0 with the `async-storage` feature"
     )]
     pub async fn async_wal_checkpoint(self: &Arc<Self>) -> Result<()> {
-        let db = Arc::clone(self);
-        tokio::task::spawn_blocking(move || db.wal_checkpoint())
-            .await
-            .map_err(|e| Error::Internal(format!("async checkpoint task failed: {e}")))?
+        self.live_arc()?.async_wal_checkpoint().await
     }
 
     /// Asynchronous snapshot write to the `.grafeo` file.
@@ -98,25 +129,7 @@ impl GrafeoDB {
         note = "`wal_checkpoint()` writes the same file, and refuses one with an incomplete commit: call it from `tokio::task::spawn_blocking`; removed in 0.7.0 with the `async-storage` feature"
     )]
     pub async fn async_write_snapshot(self: &Arc<Self>) -> Result<()> {
-        let db = Arc::clone(self);
-        tokio::task::spawn_blocking(move || {
-            // `close()` waits for the write, and none runs after it.
-            let _open = db.hold_open()?;
-            // Read-only databases have nothing to flush.
-            if db.read_only {
-                return Ok(());
-            }
-            let Some(ref fm) = db.file_manager else {
-                return Err(Error::from(
-                    grafeo_common::utils::error::QueryError::unsupported(
-                        "a snapshot write needs a persistent database",
-                    ),
-                ));
-            };
-            db.checkpoint_to_file(fm).map(|_| ())
-        })
-        .await
-        .map_err(|e| Error::Internal(format!("async snapshot task failed: {e}")))?
+        self.live_arc()?.async_write_snapshot().await
     }
 }
 
@@ -199,7 +212,13 @@ mod tests {
 
         db.async_write_snapshot().await.unwrap();
 
-        let header = db.file_manager.as_ref().unwrap().active_header();
+        let header = db
+            .live()
+            .unwrap()
+            .file_manager
+            .as_ref()
+            .unwrap()
+            .active_header();
         assert_eq!((header.node_count, header.edge_count), (2, 1));
     }
 

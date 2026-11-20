@@ -730,6 +730,7 @@ impl SparqlTranslator {
                 alias: Some(SOLUTIONS.to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             input: Box::new(plan),
             having: None,
@@ -2384,6 +2385,7 @@ impl SparqlTranslator {
                 alias: alias.clone(),
                 percentile: None, // SPARQL doesn't support percentile functions
                 separator,
+                keep_nulls: false,
             }))
         } else {
             Ok(None)
@@ -2413,7 +2415,7 @@ impl SparqlTranslator {
                             &aggregate.expression2,
                             aggregate.distinct,
                             &aggregate.separator,
-                            aggregate.percentile,
+                            &aggregate.percentile,
                         )
                     )
                 };

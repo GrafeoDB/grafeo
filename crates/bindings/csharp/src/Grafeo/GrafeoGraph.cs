@@ -16,10 +16,9 @@ public sealed class GrafeoGraph : IDisposable
     private readonly GraphHandle _handle;
     private volatile bool _disposed;
 
-    internal GrafeoGraph(nint ptr)
+    internal GrafeoGraph(GraphHandle handle)
     {
-        _handle = new GraphHandle();
-        Marshal.InitHandle(_handle, ptr);
+        _handle = handle;
     }
 
     /// <inheritdoc/>
@@ -58,9 +57,9 @@ public sealed class GrafeoGraph : IDisposable
         Result(NativeMethods.grafeo_graph_execute_language(
             Handle, language, query, parameters is not null ? ValueConverter.EncodeParams(parameters) : null));
 
-    private static QueryResult Result(nint resultPtr)
+    private static QueryResult Result(ResultHandle resultPtr)
     {
-        if (resultPtr == nint.Zero)
+        if (resultPtr.IsInvalid)
             throw GrafeoException.FromLastError(GrafeoStatus.Query);
         return GrafeoDB.BuildResult(resultPtr);
     }
@@ -90,7 +89,7 @@ public sealed class GrafeoGraph : IDisposable
     public Node? GetNode(long id)
     {
         GrafeoException.ThrowIfFailed(NativeMethods.grafeo_graph_get_node(Handle, (ulong)id, out var nodePtr));
-        if (nodePtr == nint.Zero)
+        if (nodePtr.IsInvalid)
             return null;
         try
         {
@@ -98,7 +97,7 @@ public sealed class GrafeoGraph : IDisposable
         }
         finally
         {
-            NativeMethods.grafeo_free_node(nodePtr);
+            nodePtr.Dispose();
         }
     }
 
@@ -107,7 +106,7 @@ public sealed class GrafeoGraph : IDisposable
     public Edge? GetEdge(long id)
     {
         GrafeoException.ThrowIfFailed(NativeMethods.grafeo_graph_get_edge(Handle, (ulong)id, out var edgePtr));
-        if (edgePtr == nint.Zero)
+        if (edgePtr.IsInvalid)
             return null;
         try
         {
@@ -115,7 +114,7 @@ public sealed class GrafeoGraph : IDisposable
         }
         finally
         {
-            NativeMethods.grafeo_free_edge(edgePtr);
+            edgePtr.Dispose();
         }
     }
 

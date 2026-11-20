@@ -47,7 +47,6 @@ pub use collector::{
     Collector, CollectorStats, CountCollector, LimitCollector, MaterializeCollector,
     PartitionCollector, StatsCollector,
 };
-#[cfg(feature = "spill")]
 pub use memory::{
     ConsumerRegistration, OperatorGrant, OperatorMemoryContext, QueryMemory,
     current as current_operator_memory,

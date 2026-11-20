@@ -39,7 +39,7 @@ my_graph.db.wal/    # Write-ahead log, while the database is open
 
 Once a backup has been taken, `close()` keeps the part of the write-ahead log written since the last backup, with the backup's position in it, so the next incremental backup after a restart has it (see [Backups](../../languages/python/database.md#backup-and-restore)). A database that never takes a backup removes its write-ahead log at `close()`.
 
-In Rust the write-ahead log needs the `wal` feature, which the `lpg` profile and the `storage` group include and the default features do not. Without it, `GrafeoDB::open` works the same, but commits reach the file only at a checkpoint (`close()`, dropping the database, or `wal_checkpoint()`), and a process that crashes loses the commits since. The Python, Node.js, C, Go, C# and Dart packages include it.
+In Rust the write-ahead log needs the `wal` feature, which the default features (since 0.6.4), the `lpg` profile and the `storage` group include. Without it (`default-features = false`, or the `edge` profile), `GrafeoDB::open` works the same, but commits reach the file only at a checkpoint (`close()`, dropping the database, or `wal_checkpoint()`), and a process that crashes loses the commits since. The Python, Node.js, C, Go, C# and Dart packages include it.
 
 A path with a trailing separator (`./data/`) names the same database as `./data`, and `path()` (`db.path` in Python) returns the path as you gave it.
 
@@ -137,9 +137,13 @@ To share a database between processes, run it behind [Grafeo Server](https://git
 
 ## After `close()`
 
-Once `close()` of a persistent database starts, the handle takes no more writes: commits and statements that write (in every query language, SPARQL updates included), schema statements and graph commands, the direct calls that write (nodes, edges, properties and labels, named graphs, property, vector and text indexes, imports, `batch_insert_rdf` and `restore_snapshot`), and the calls that persist (`wal_checkpoint()`, `save()`, the backups, `compact()`) fail with the database-closed error (`GRAFEO-T007`, Python `DatabaseClosedError`). A write already in progress, `restore_snapshot` included, completes first and is saved; so does an import or `batch_insert_rdf` that is already writing, while one still reading its input is refused. Reads still work. Open the database again to write. An in-memory database has nothing to persist and keeps working.
+`close()` saves the database and releases what it holds: its data, indexes and caches, and the file with its lock. A statement already running finishes first and is saved. From then on every call fails with the database-closed error (`GRAFEO-T007`, Python `DatabaseClosedError`): queries and reads, writes, getters and `memory_usage()` included, on an in-memory database as on a persistent one. So does every call on what the database handed out before: sessions, transactions, result streams, graph handles, time-travel views and the algorithm adapters. Calling `close()` again does nothing. Open the database again to go on. A call with no way to return an error answers its neutral value instead: the C functions `grafeo.h` lists in its error section (with `GRAFEO-T007` as the last error), and Go's `HasPropertyIndex`, `SetCDCEnabled`, `IsCDCEnabled` and `CurrentEpoch`; Go's `ResultStream.Columns()` and `AsOfView.Epoch()` answer what they had at the open, and `ResultStream.Warnings()` none. In C# a call after `Dispose()` throws `ObjectDisposedException` with the `GRAFEO-T007` text.
 
-A transaction still open when `close()` runs is left out of the file: the final checkpoint writes the committed state (see above). Its commit then fails with the database-closed error; it can only roll back.
+A transaction still open when `close()` runs is rolled back and left out of the file: the final checkpoint writes the committed state (see above). Its commit then fails with the database-closed error.
+
+What deleting data removes from the file and from memory, and when, is in [Deleting Data](../security.md#deleting-data).
+
+In Rust, the methods of `GrafeoDB` that return no `Result` (`node_count()`, `memory_usage()`, `list_graphs()` and the like) answer an empty value after `close()` instead of an error; they return a `Result` from 0.7.0. Dropping a `GrafeoDB` without `close()` saves it as `close()` does, releases the file and refuses writes; a session, stream or view still held reads on until it is dropped. One exception to "every call fails" in Rust, until 0.7.0: a `Snapshot` taken before `close()` (from `snapshot()`, `projection()`, a graph handle's or a time-travel view's `snapshot()`, and the store its `shared()` hands out) and the iterators of `iter_nodes()` and `iter_edges()` read on, keeping the graph in memory until they are dropped.
 
 ## Reopening a Database
 
@@ -245,7 +249,7 @@ Stop every 0.5.x process that uses the database. 0.5.x cannot open the migrated 
 
 ### Builds Without the `wal` Feature
 
-A build without the `wal` feature cannot replay a WAL, so it refuses to open (or migrate) a 0.5.x WAL directory, whose WAL holds all of its data, and a 0.5.x file whose sidecar WAL holds files, and changes nothing. The `grafeo` Rust crate's default profile (`embedded`) is such a build. Open these databases read-write once with a build that has `wal`: the `grafeo` crate with the `lpg` or `storage` feature, the Python, Node.js or C bindings, or the `grafeo` command line tool. A 0.5.x file that was closed cleanly (its sidecar WAL is gone or empty) migrates in every build. For the same reason, a read-only and a read-write open in such a build refuse a 0.6 file whose WAL holds commits a writer left when it exited without `close()`, and change nothing: open it with a build that has `wal`, which replays them.
+A build without the `wal` feature cannot replay a WAL, so it refuses to open (or migrate) a 0.5.x WAL directory, whose WAL holds all of its data, and a 0.5.x file whose sidecar WAL holds files, and changes nothing. The `grafeo` Rust crate's default profile (`embedded`) was such a build in 0.6.0 to 0.6.3. Open these databases read-write once with a build that has `wal`: the `grafeo` crate with its default features (0.6.4 and later) or the `lpg` or `storage` feature, the Python, Node.js or C bindings, or the `grafeo` command line tool. A 0.5.x file that was closed cleanly (its sidecar WAL is gone or empty) migrates in every build. For the same reason, a read-only and a read-write open in such a build refuse a 0.6 file whose WAL holds commits a writer left when it exited without `close()`, and change nothing: open it with a build that has `wal`, which replays them.
 
 ### Builds Without the `triple-store`, `vector-index` or `text-index` Feature
 

@@ -30,7 +30,7 @@ mod writes;
 pub use graph_handle::GraphHandle;
 pub use time_travel::AsOfView;
 
-use std::cell::{Cell, Ref, RefCell};
+use std::cell::{Ref, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -46,9 +46,10 @@ pub(crate) fn js_error(message: &str) -> JsValue {
     JsError::new(message).into()
 }
 
-/// The bytes `options[key]` sets (`memoryLimit`, `pathSearchBudget`): `None` when the options or
-/// the key are left out, an error naming the key for a number that is not a positive whole
-/// number of bytes.
+/// The bytes `options[key]` sets (`memoryLimit`, `pathSearchBudget`, `snapshotRetentionLimit`,
+/// `historyRetentionLimit`):
+/// `None` when the options or the key are left out, an error naming the key for a number that is
+/// not a positive whole number of bytes.
 fn positive_bytes(options: Option<&js_sys::Object>, key: &str) -> Result<Option<usize>, JsValue> {
     let Some(options) = options else {
         return Ok(None);
@@ -74,7 +75,8 @@ fn positive_bytes(options: Option<&js_sys::Object>, key: &str) -> Result<Option<
 }
 
 /// The in-memory configuration `options` set (`historyRetention`, `memoryLimit`,
-/// `pathSearchBudget`), the defaults for `None`.
+/// `pathSearchBudget`, `snapshotRetentionLimit`, `historyRetentionLimit`), the defaults for
+/// `None`.
 fn in_memory_config(options: Option<&js_sys::Object>) -> Result<grafeo_engine::Config, JsValue> {
     let mut config = grafeo_engine::Config::in_memory();
     if let Some(options) = options
@@ -87,6 +89,12 @@ fn in_memory_config(options: Option<&js_sys::Object>) -> Result<grafeo_engine::C
     }
     if let Some(bytes) = positive_bytes(options, "pathSearchBudget")? {
         config = config.with_path_search_budget(bytes);
+    }
+    if let Some(bytes) = positive_bytes(options, "snapshotRetentionLimit")? {
+        config = config.with_snapshot_retention_limit(bytes as u64);
+    }
+    if let Some(bytes) = positive_bytes(options, "historyRetentionLimit")? {
+        config = config.with_history_retention_limit(bytes as u64);
     }
     Ok(config)
 }
@@ -108,14 +116,59 @@ pub(crate) fn js_error_with_status(
     js.into()
 }
 
-/// The error of a call on a closed database (GQLSTATUS 25000, as the
-/// database reports a write to a closed database).
+/// The error of a call on a closed database (`GRAFEO-T007`, GQLSTATUS 25000).
 pub(crate) fn closed_error() -> JsValue {
-    js_error_with_status(
-        "Database is closed. Create a new instance with `new Database()` or \
-         `Database.importSnapshot()` to continue.",
-        &grafeo_common::utils::GqlStatus::INVALID_TX_STATE,
-    )
+    database_error(grafeo_common::utils::error::Error::Transaction(
+        grafeo_common::utils::error::TransactionError::DatabaseClosed,
+    ))
+}
+
+/// The database a `Database` shares with the graph handles and views it hands out.
+///
+/// The only ways to reach it check that it is open, so no call answers from a closed
+/// database: each fails with `GRAFEO-T007` after `close()`, a getter as much as a query.
+/// Only [`close`](Self::close) reaches a closed one, as a no-op.
+pub(crate) struct SharedDb(Rc<RefCell<GrafeoDB>>);
+
+impl SharedDb {
+    fn new(db: GrafeoDB) -> Self {
+        Self(Rc::new(RefCell::new(db)))
+    }
+
+    /// The open database; `GRAFEO-T007` once closed.
+    pub(crate) fn borrow(&self) -> Result<Ref<'_, GrafeoDB>, JsValue> {
+        let db = self.0.borrow();
+        if db.is_closed() {
+            return Err(closed_error());
+        }
+        Ok(db)
+    }
+
+    /// The open database, alone; `GRAFEO-T007` once closed.
+    fn borrow_mut(&self) -> Result<std::cell::RefMut<'_, GrafeoDB>, JsValue> {
+        let db = self.0.borrow_mut();
+        if db.is_closed() {
+            return Err(closed_error());
+        }
+        Ok(db)
+    }
+
+    /// `GRAFEO-T007` once closed, for a call that reaches the database only later.
+    pub(crate) fn check(&self) -> Result<(), JsValue> {
+        self.borrow().map(drop)
+    }
+
+    /// Another handle on the same database, for a handle or view it hands out;
+    /// `GRAFEO-T007` once closed.
+    pub(crate) fn share(&self) -> Result<Self, JsValue> {
+        self.check()?;
+        Ok(Self(Rc::clone(&self.0)))
+    }
+
+    /// Closes the database and releases what it holds; a no-op once closed.
+    fn close(&self) -> Result<(), JsValue> {
+        self.0.borrow().close().map_err(database_error)
+    }
 }
 
 /// The JS `Error` of a database error: its message, and its GQLSTATUS as
@@ -139,14 +192,12 @@ pub(crate) fn database_error(error: grafeo_common::utils::Error) -> JsValue {
 /// the higher-level `@grafeo-db/web` package.
 #[wasm_bindgen]
 pub struct Database {
-    inner: Rc<RefCell<GrafeoDB>>,
+    inner: SharedDb,
     /// Active transaction session, set by `beginTransaction()` and cleared by
     /// `commitTransaction()` / `rollbackTransaction()` / `close()`.
     /// When present, `execute*` methods route through this session so
     /// uncommitted writes are visible only to the transaction.
     tx: Rc<RefCell<Option<Session>>>,
-    /// Once set by `close()`, every subsequent method call errors.
-    closed: Rc<Cell<bool>>,
 }
 
 impl Database {
@@ -210,7 +261,7 @@ impl Database {
                 &grafeo_common::utils::GqlStatus::INVALID_TX_ACTIVE,
             ));
         }
-        let mut session = self.db().session();
+        let mut session = self.db()?.session();
         session.begin_transaction().map_err(database_error)?;
         // It ends with commitTransaction() or rollbackTransaction(), never
         // with a statement.
@@ -268,33 +319,36 @@ impl Database {
 
     /// Returns `true` while a transaction started by `beginTransaction()` is
     /// still active (not yet committed or rolled back).
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` (`GRAFEO-T007`) once the database is closed.
     #[wasm_bindgen(js_name = "isTransactionActive")]
-    pub fn is_transaction_active(&self) -> bool {
-        !self.closed.get() && self.tx.borrow().is_some()
+    pub fn is_transaction_active(&self) -> Result<bool, JsValue> {
+        self.inner.check()?;
+        Ok(self.tx.borrow().is_some())
     }
 
-    /// Closes the database, rolling back any active transaction and
-    /// clearing the query plan cache. Subsequent method calls return an
-    /// error. Calling `close()` more than once is a no-op.
+    /// Closes the database: rolls back an active transaction and releases
+    /// what the database holds. Every later call, on the database and on the
+    /// graph handles and views it handed out, throws `GRAFEO-T007`. Calling
+    /// `close()` more than once is a no-op.
     ///
     /// Because WASM keeps all data in memory, `close()` does not persist
     /// anything: call `exportSnapshot()` first if you need persistence.
-    pub fn close(&self) {
-        if self.closed.get() {
-            return;
-        }
-        if let Some(mut session) = self.tx.borrow_mut().take() {
-            let _ = session.rollback();
-        }
-        self.db().clear_plan_cache();
-        self.closed.set(true);
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` if closing the database fails.
+    pub fn close(&self) -> Result<(), JsValue> {
+        // Closing rolls the transaction back; its emptied session goes after.
+        let closed = self.inner.close();
+        self.tx.borrow_mut().take();
+        closed
     }
 
     fn check_open(&self) -> Result<(), JsValue> {
-        if self.closed.get() {
-            return Err(closed_error());
-        }
-        Ok(())
+        self.inner.check()
     }
 
     /// Runs a GQL query, routing through the active transaction session when
@@ -305,7 +359,7 @@ impl Database {
             session.execute(query).map_err(database_error)
         } else {
             drop(tx_slot);
-            self.db().execute(query).map_err(database_error)
+            self.db()?.execute(query).map_err(database_error)
         }
     }
 
@@ -324,7 +378,7 @@ impl Database {
                 .map_err(database_error)
         } else {
             drop(tx_slot);
-            self.db()
+            self.db()?
                 .execute_language(query, language, params)
                 .map_err(database_error)
         }
@@ -354,13 +408,20 @@ impl Database {
     /// Returns `{ columns: string[], rows: any[][], executionTimeMs?: number,
     /// counters, warnings, profile? }`, `profile` for a `PROFILE` statement
     /// only. `warnings` lists what the statement raised (`{ code, kind,
-    /// message }`, ordered by code), empty when nothing.
+    /// message }`, ordered by code), empty when nothing. `cellTypes` is the
+    /// type each cell was built with, `{ columns: T[], runs: { from, columns:
+    /// T[] }[] }`: the rows before the first run have `columns`, a run's rows
+    /// its own. `T` is `"node"`, `"edge"`, `"path"`, `{ list: T }`, `{ tuple:
+    /// T[] }`, `{ struct: { key: T } }`, `{ map: T }`, `"any"` or another
+    /// type's name; an object in a row is a node or an edge exactly where its
+    /// type says so (`{_id: 1, _labels: []}` returned as a map is a map).
     ///
     /// # Stability: Experimental
     ///
     /// The `profile` key: new in 0.6.0, its operators and keys may still
     /// change. The `warnings` key: new in 0.6.2, new warnings and kinds may
-    /// come. The rest is stable. See <https://grafeo.dev/stability/>.
+    /// come. The `cellTypes` key: new in 0.6.4, it may change or be removed.
+    /// The rest is stable. See <https://grafeo.dev/stability/>.
     ///
     /// # Errors
     ///
@@ -412,7 +473,7 @@ impl Database {
         let edge_types: Vec<&str> = edge_types.iter().map(String::as_str).collect();
         let edges = match self.tx.borrow().as_ref() {
             Some(session) => session.get_node_edges(node, direction, &edge_types),
-            None => self.db().get_node_edges(node, direction, &edge_types),
+            None => self.db()?.get_node_edges(node, direction, &edge_types),
         }
         .map_err(database_error)?;
         let array = Array::new_with_length(edges.len() as u32);
@@ -443,7 +504,7 @@ impl Database {
             session.detach_delete_node(id).map_err(database_error)
         } else {
             drop(tx_slot);
-            self.db().detach_delete_node(id).map_err(database_error)
+            self.db()?.detach_delete_node(id).map_err(database_error)
         }
     }
 
@@ -454,7 +515,7 @@ impl Database {
     /// Throws the error of a read the store cannot do.
     #[wasm_bindgen(js_name = "nodeCount")]
     pub fn node_count(&self) -> Result<usize, JsValue> {
-        self.db().node_count().map_err(database_error)
+        self.db()?.node_count().map_err(database_error)
     }
 
     /// Returns the number of edges in the database.
@@ -464,15 +525,20 @@ impl Database {
     /// Throws the error of a read the store cannot do.
     #[wasm_bindgen(js_name = "edgeCount")]
     pub fn edge_count(&self) -> Result<usize, JsValue> {
-        self.db().edge_count().map_err(database_error)
+        self.db()?.edge_count().map_err(database_error)
     }
 
     /// Clears all cached query plans.
     ///
     /// Forces re-parsing and re-optimization on next execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` (`GRAFEO-T007`) once the database is closed.
     #[wasm_bindgen(js_name = "clearPlanCache")]
-    pub fn clear_plan_cache(&self) {
-        self.db().clear_plan_cache();
+    pub fn clear_plan_cache(&self) -> Result<(), JsValue> {
+        self.db()?.clear_plan_cache();
+        Ok(())
     }
 
     /// Executes a query using a specific query language.
@@ -511,7 +577,7 @@ impl Database {
     #[wasm_bindgen(js_name = "exportSnapshot")]
     pub fn export_snapshot(&self) -> Result<Vec<u8>, JsValue> {
         self.check_open()?;
-        self.db().export_snapshot().map_err(database_error)
+        self.db()?.export_snapshot().map_err(database_error)
     }
 
     /// Exports the database to a tamper-evident binary snapshot.
@@ -548,7 +614,7 @@ impl Database {
                 "exportSnapshotSigned: key must not be empty (recommended: 32 random bytes)",
             ));
         }
-        let payload = self.db().export_snapshot().map_err(database_error)?;
+        let payload = self.db()?.export_snapshot().map_err(database_error)?;
         Ok(signed_snapshot::wrap(key, &payload))
     }
 
@@ -650,7 +716,7 @@ impl Database {
     /// Returns `JsError` if the schema info cannot be serialised to a JS value,
     /// and the error of a read the store cannot do.
     pub fn schema(&self) -> Result<JsValue, JsValue> {
-        let info = self.db().schema().map_err(database_error)?;
+        let info = self.db()?.schema().map_err(database_error)?;
         serde_wasm_bindgen::to_value(&info).map_err(|e| js_error(&e.to_string()))
     }
 
@@ -693,7 +759,7 @@ impl Database {
             opts.stop_words.as_deref(),
         )
         .map_err(database_error)?;
-        self.db()
+        self.db()?
             .create_text_index_with(label, property, options)
             .map_err(database_error)
     }
@@ -708,7 +774,7 @@ impl Database {
     #[cfg(feature = "text-index")]
     #[wasm_bindgen(js_name = "dropTextIndex")]
     pub fn drop_text_index(&self, label: &str, property: &str) -> Result<bool, JsValue> {
-        self.db()
+        self.db()?
             .drop_text_index(label, property)
             .map_err(database_error)
     }
@@ -723,7 +789,7 @@ impl Database {
     #[cfg(feature = "text-index")]
     #[wasm_bindgen(js_name = "rebuildTextIndex")]
     pub fn rebuild_text_index(&self, label: &str, property: &str) -> Result<(), JsValue> {
-        self.db()
+        self.db()?
             .rebuild_text_index(label, property)
             .map_err(database_error)
     }
@@ -760,7 +826,7 @@ impl Database {
         let raw_options = options.unwrap_or(JsValue::UNDEFINED);
         let filters = search_filters(&raw_options)?;
         let results = self
-            .db()
+            .db()?
             .text_search(label, property, query, k, filters.as_ref())
             .map_err(database_error)?;
 
@@ -815,7 +881,7 @@ impl Database {
         let filters = search_filters(&raw_options)?;
 
         let results = self
-            .db()
+            .db()?
             .hybrid_search(
                 label,
                 text_property,
@@ -879,7 +945,7 @@ impl Database {
                 .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
         };
 
-        self.db()
+        self.db()?
             .create_vector_index(
                 label,
                 property,
@@ -902,7 +968,7 @@ impl Database {
     #[cfg(feature = "vector-index")]
     #[wasm_bindgen(js_name = "dropVectorIndex")]
     pub fn drop_vector_index(&self, label: &str, property: &str) -> Result<bool, JsValue> {
-        self.db()
+        self.db()?
             .drop_vector_index(label, property)
             .map_err(database_error)
     }
@@ -918,7 +984,7 @@ impl Database {
     #[cfg(feature = "vector-index")]
     #[wasm_bindgen(js_name = "rebuildVectorIndex")]
     pub fn rebuild_vector_index(&self, label: &str, property: &str) -> Result<(), JsValue> {
-        self.db()
+        self.db()?
             .rebuild_vector_index(label, property)
             .map_err(database_error)
     }
@@ -958,7 +1024,7 @@ impl Database {
         let filters = search_filters(&raw_options)?;
 
         let results = self
-            .db()
+            .db()?
             .vector_search(label, property, query, k, opts.ef, filters.as_ref())
             .map_err(database_error)?;
 
@@ -1001,7 +1067,7 @@ impl Database {
         };
         let filters = search_filters(&raw_options)?;
         let results = self
-            .db()
+            .db()?
             .batch_vector_search(label, property, &queries, k, options.ef, filters.as_ref())
             .map_err(database_error)?;
         let array = Array::new_with_length(results.len() as u32);
@@ -1046,7 +1112,7 @@ impl Database {
         let filters = search_filters(&raw_options)?;
 
         let results = self
-            .db()
+            .db()?
             .mmr_search(
                 label,
                 property,
@@ -1292,6 +1358,7 @@ impl Database {
     /// The import is one transaction: after an error nothing of it is kept.
     #[wasm_bindgen(js_name = "importLpg")]
     pub fn import_lpg(&self, data: JsValue) -> Result<JsValue, JsValue> {
+        self.check_open()?;
         let import: LpgImport = serde_wasm_bindgen::from_value(data.clone())
             .map_err(|e| JsError::new(&format!("Invalid LPG data: {e}")))?;
         // The properties straight from the JavaScript value, as a property is
@@ -1320,7 +1387,7 @@ impl Database {
         // One transaction: a node or edge that fails, or an edge index out of
         // bounds, rolls back everything before it (the session's drop rolls
         // back).
-        let mut session = self.db().session();
+        let mut session = self.db()?.session();
         session.begin_transaction().map_err(database_error)?;
 
         // Phase 1: create all nodes, collecting their IDs
@@ -1412,6 +1479,7 @@ impl Database {
     pub fn import_rdf(&self, data: JsValue) -> Result<JsValue, JsValue> {
         use grafeo_core::graph::rdf::Term;
 
+        self.check_open()?;
         let import: RdfImport = serde_wasm_bindgen::from_value(data)
             .map_err(|e| JsError::new(&format!("Invalid RDF data: {e}")))?;
 
@@ -1438,7 +1506,7 @@ impl Database {
         });
 
         let inserted = self
-            .db()
+            .db()?
             .batch_insert_rdf(triples)
             .map_err(database_error)?;
 
@@ -1477,7 +1545,7 @@ impl Database {
     /// Returns `JsError` if the memory usage data cannot be serialised to a JS value.
     #[wasm_bindgen(js_name = "memoryUsage")]
     pub fn memory_usage(&self) -> Result<JsValue, JsValue> {
-        let usage = self.db().memory_usage();
+        let usage = self.db()?.memory_usage();
         serde_wasm_bindgen::to_value(&usage).map_err(|e| js_error(&e.to_string()))
     }
 
@@ -1488,7 +1556,7 @@ impl Database {
     /// Returns `JsError` if the info data cannot be serialised to a JS value,
     /// and the error of a read the store cannot do.
     pub fn info(&self) -> Result<JsValue, JsValue> {
-        let info = self.db().info().map_err(database_error)?;
+        let info = self.db()?.info().map_err(database_error)?;
         serde_wasm_bindgen::to_value(&info).map_err(|e| js_error(&e.to_string()))
     }
 
@@ -1502,7 +1570,7 @@ impl Database {
     ///
     /// Returns `JsError` after a commit that did not complete.
     pub fn compact(&self) -> Result<JsValue, JsValue> {
-        let report = self.inner.borrow_mut().compact().map_err(database_error)?;
+        let report = self.inner.borrow_mut()?.compact().map_err(database_error)?;
         serde_wasm_bindgen::to_value(&report).map_err(|e| js_error(&e.to_string()))
     }
 
@@ -1552,6 +1620,7 @@ impl Database {
     /// The rows go in as one transaction: after an error none of them is kept.
     #[wasm_bindgen(js_name = "importRows")]
     pub fn import_rows(&self, rows: JsValue, options: JsValue) -> Result<u32, JsValue> {
+        self.check_open()?;
         let opts: ImportRowsOptions = serde_wasm_bindgen::from_value(options)
             .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?;
         // Each row straight from the JavaScript value, as a property is.
@@ -1559,7 +1628,7 @@ impl Database {
 
         // One transaction: a row that fails rolls back every row before it
         // (the session's drop rolls back).
-        let mut session = self.db().session();
+        let mut session = self.db()?.session();
         session.begin_transaction().map_err(database_error)?;
         let mut count: u32 = 0;
 
@@ -1645,7 +1714,7 @@ impl Database {
     /// ```
     #[wasm_bindgen(js_name = "setSchema")]
     pub fn set_schema(&self, name: &str) -> Result<(), JsValue> {
-        self.db()
+        self.db()?
             .set_current_schema(Some(name))
             .map_err(|e| JsError::new(&e.to_string()).into())
     }
@@ -1653,15 +1722,24 @@ impl Database {
     /// Clears the current schema context.
     ///
     /// Subsequent `execute()` calls will use the default (no-schema) namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` (`GRAFEO-T007`) once the database is closed.
     #[wasm_bindgen(js_name = "resetSchema")]
-    pub fn reset_schema(&self) {
-        let _ = self.db().set_current_schema(None);
+    pub fn reset_schema(&self) -> Result<(), JsValue> {
+        let _ = self.db()?.set_current_schema(None);
+        Ok(())
     }
 
     /// Returns the current schema name, or `undefined` if no schema is set.
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` (`GRAFEO-T007`) once the database is closed.
     #[wasm_bindgen(js_name = "currentSchema")]
-    pub fn current_schema(&self) -> Option<String> {
-        self.db().current_schema()
+    pub fn current_schema(&self) -> Result<Option<String>, JsValue> {
+        Ok(self.db()?.current_schema())
     }
 
     // ── Graph projections ───────────────────────────────────────────────
@@ -1692,21 +1770,29 @@ impl Database {
         if let Some(types) = edge_types.filter(|t| !t.is_empty()) {
             spec = spec.with_edge_types(types);
         }
-        self.db()
+        self.db()?
             .create_projection(name, spec)
             .map_err(database_error)
     }
 
     /// Drops a named graph projection. Returns `true` if it existed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` (`GRAFEO-T007`) once the database is closed.
     #[wasm_bindgen(js_name = "dropProjection")]
-    pub fn drop_projection(&self, name: &str) -> bool {
-        self.db().drop_projection(name)
+    pub fn drop_projection(&self, name: &str) -> Result<bool, JsValue> {
+        Ok(self.db()?.drop_projection(name))
     }
 
     /// Returns the names of all graph projections.
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` (`GRAFEO-T007`) once the database is closed.
     #[wasm_bindgen(js_name = "listProjections")]
-    pub fn list_projections(&self) -> Vec<String> {
-        self.db().list_projections()
+    pub fn list_projections(&self) -> Result<Vec<String>, JsValue> {
+        Ok(self.db()?.list_projections())
     }
 }
 
@@ -1718,14 +1804,13 @@ impl Database {
     /// A database around an engine, with no transaction open.
     fn from_engine(db: GrafeoDB) -> Database {
         Database {
-            inner: Rc::new(RefCell::new(db)),
+            inner: SharedDb::new(db),
             tx: Rc::new(RefCell::new(None)),
-            closed: Rc::new(Cell::new(false)),
         }
     }
 
-    /// The engine, borrowed for one call.
-    fn db(&self) -> Ref<'_, GrafeoDB> {
+    /// The engine, borrowed for one call; `GRAFEO-T007` once closed.
+    fn db(&self) -> Result<Ref<'_, GrafeoDB>, JsValue> {
         self.inner.borrow()
     }
 
@@ -1857,10 +1942,65 @@ fn counters_to_js(counters: &grafeo_engine::database::WriteCounters) -> JsValue 
     obj.into()
 }
 
-/// Converts a query result to `{ columns: string[], rows: any[][], kind, boolean?,
-/// executionTimeMs?: number, counters, profile? }`, the shape of the `executeRaw*` methods
-/// (`kind` `"rows"`, `"boolean"` for a SPARQL ASK with its `boolean`, or `"graph"` for
-/// CONSTRUCT and DESCRIBE; `profile` for a `PROFILE` statement only).
+/// The cell types of a result as `grafeo_bindings_common::entity::cell_types_to_json`
+/// writes them, built as JS values directly (JSON text would bring `serde_json`
+/// into every build).
+fn cell_types_to_js(types: &grafeo_engine::database::CellTypes) -> JsValue {
+    let columns = |types: &[grafeo_common::types::LogicalType]| -> JsValue {
+        types.iter().map(type_to_js).collect::<Array>().into()
+    };
+    let runs: Array = types
+        .runs()
+        .iter()
+        .map(|(from, types)| {
+            let run = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(&run, &"from".into(), &JsValue::from_f64(*from as f64));
+            let _ = js_sys::Reflect::set(&run, &"columns".into(), &columns(types));
+            JsValue::from(run)
+        })
+        .collect();
+    let obj = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&obj, &"columns".into(), &columns(types.columns()));
+    let _ = js_sys::Reflect::set(&obj, &"runs".into(), &runs);
+    obj.into()
+}
+
+/// A cell type as `grafeo_bindings_common::entity::type_to_json` writes it.
+fn type_to_js(ty: &grafeo_common::types::LogicalType) -> JsValue {
+    use grafeo_common::types::LogicalType;
+    let tagged = |key: &str, value: JsValue| -> JsValue {
+        let obj = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&obj, &key.into(), &value);
+        obj.into()
+    };
+    match ty {
+        LogicalType::Node => "node".into(),
+        LogicalType::Edge => "edge".into(),
+        LogicalType::Path => "path".into(),
+        LogicalType::Any => "any".into(),
+        LogicalType::List(item) => tagged("list", type_to_js(item)),
+        LogicalType::Tuple(items) => tagged(
+            "tuple",
+            items.iter().map(type_to_js).collect::<Array>().into(),
+        ),
+        LogicalType::Struct(fields) => {
+            let obj = js_sys::Object::new();
+            for (name, ty) in fields {
+                let _ = js_sys::Reflect::set(&obj, &name.as_str().into(), &type_to_js(ty));
+            }
+            tagged("struct", obj.into())
+        }
+        LogicalType::Map { value, .. } => tagged("map", type_to_js(value)),
+        LogicalType::Records(shape) => type_to_js(shape),
+        other => other.to_string().to_lowercase().into(),
+    }
+}
+
+/// Converts a query result to `{ columns: string[], rows: any[][], cellTypes, kind,
+/// boolean?, executionTimeMs?: number, counters, profile? }`, the shape of the
+/// `executeRaw*` methods (`kind` `"rows"`, `"boolean"` for a SPARQL ASK with its `boolean`,
+/// or `"graph"` for CONSTRUCT and DESCRIBE; `profile` for a `PROFILE` statement only;
+/// `cellTypes` as `grafeo_bindings_common::entity::cell_types_to_json` writes it).
 ///
 /// # Errors
 ///
@@ -1885,6 +2025,10 @@ fn raw_result_to_js(result: &grafeo_engine::database::QueryResult) -> Result<JsV
         rows.set(i as u32, js_row.into());
     }
     let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("rows"), &rows);
+
+    // cellTypes: the type each cell was built with (Experimental, 0.6.4)
+    let cell_types = cell_types_to_js(&result.cell_types());
+    let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("cellTypes"), &cell_types);
 
     // kind: "rows" | "boolean" | "graph", and boolean for a SPARQL ASK
     let kind = match result.kind {

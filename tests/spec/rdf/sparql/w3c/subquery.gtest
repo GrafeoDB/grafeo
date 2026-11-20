@@ -1,0 +1,271 @@
+# W3C SPARQL 1.1 Test Suite: Subquery
+# Generated from the W3C manifest by scripts/convert_w3c_sparql.py
+# Source: https://github.com/w3c/rdf-tests at 7b5afb91857a9c282c03d2e45d3f76485797c901
+# Copyright W3C (MIT, ERCIM, Keio, Beihang), used under the W3C test suite
+# licences: https://www.w3.org/Consortium/Legal/2008/04-testsuite-copyright.html
+# Not converted:
+#   subquery01: named graphs (qt:graphData)
+#   subquery02: named graphs (qt:graphData)
+#   subquery03: named graphs (qt:graphData)
+#   subquery04: named graphs (qt:graphData)
+#   subquery05: named graphs (qt:graphData)
+#   subquery07: named graphs (qt:graphData)
+#   subquery12: .ttl result (a graph, not a result set)
+#   subquery14: .ttl result (a graph, not a result set)
+#   subquery15: named graphs (qt:graphData)
+#   subquery16: named graphs (qt:graphData)
+
+meta:
+  language: sparql
+  model: rdf
+  section: "w3c.subquery"
+  title: W3C Subquery
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # sq06 - Subquery with graph pattern, from named applies
+  - name: subquery06
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p> <http://www.example.org/instance#b> .
+          <http://www.example.org/instance#c> <http://www.example.org/schema#p> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/subquery/sq05.rdf> .
+        }
+    query: |
+      prefix ex:	<http://www.example.org/schema#>
+      prefix in:	<http://www.example.org/instance#>
+
+      select ?x
+      where {
+      {select * where {?x ?p ?y}}
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/instance#c>']
+        - ['<http://www.example.org/instance#a>']
+
+  # sq08 - Subquery with aggregate
+  - name: subquery08
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/instance#b> <http://www.example.org/schema#p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      prefix ex:	<http://www.example.org/schema#>
+      prefix in:	<http://www.example.org/instance#>
+
+      select ?x ?max where {
+      {select (max(?y) as ?max) where {?x ex:p ?y} }
+      ?x ex:p ?max
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/instance#b>', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # sq09 - Nested Subqueries
+  - name: subquery09
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p> <http://www.example.org/instance#b> .
+          <http://www.example.org/instance#a> <http://www.example.org/schema#q> <http://www.example.org/instance#c> .
+          <http://www.example.org/instance#d> <http://www.example.org/schema#p> <http://www.example.org/instance#e> .
+        }
+    query: |
+      prefix ex:	<http://www.example.org/schema#>
+      prefix in:	<http://www.example.org/instance#>
+
+      select * where {
+
+      {select * where {
+        {select ?x where {?x ex:q ?t}}
+      }}
+
+      ?x ex:p ?y
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/instance#a>', '<http://www.example.org/instance#b>']
+
+  # sq10 - Subquery with exists
+  - name: subquery10
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p> <http://www.example.org/instance#b> .
+          <http://www.example.org/instance#a> <http://www.example.org/schema#q> <http://www.example.org/instance#c> .
+        }
+    query: |
+      prefix ex:	<http://www.example.org/schema#>
+      prefix in:	<http://www.example.org/instance#>
+
+      select ?x  where {
+      {select * where {?x ex:p ?y}}
+      filter(exists {?x ex:q ?y})
+      }
+    expect:
+      empty: true
+
+  # sq11 - Subquery limit per resource
+  - name: subquery11
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.orgorder1> <http://www.example.orghasItem> _:b0 .
+          <http://www.example.orgorder1> <http://www.example.orghasItem> _:b1 .
+          <http://www.example.orgorder1> <http://www.example.orghasItem> _:b2 .
+          <http://www.example.orgorder1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.example.orgOrder> .
+          <http://www.example.orgorder2> <http://www.example.orghasItem> _:b3 .
+          <http://www.example.orgorder2> <http://www.example.orghasItem> _:b4 .
+          <http://www.example.orgorder2> <http://www.example.orghasItem> _:b5 .
+          <http://www.example.orgorder2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.example.orgOrder> .
+          <http://www.example.orgorder3> <http://www.example.orghasItem> _:b6 .
+          <http://www.example.orgorder3> <http://www.example.orghasItem> _:b7 .
+          <http://www.example.orgorder3> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.example.orgOrder> .
+          <http://www.example.orgorder4> <http://www.example.orghasItem> _:b8 .
+          <http://www.example.orgorder4> <http://www.example.orghasItem> _:b9 .
+          <http://www.example.orgorder4> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.example.orgOrder> .
+          _:b0 <http://www.example.orgamount> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b0 <http://www.example.orgprice> "10"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b0 <http://www.w3.org/2000/01/rdf-schema#label> "Pizza" .
+          _:b1 <http://www.example.orgamount> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b1 <http://www.example.orgprice> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b1 <http://www.w3.org/2000/01/rdf-schema#label> "Ice Cream" .
+          _:b2 <http://www.example.orgamount> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b2 <http://www.example.orgprice> "8"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b2 <http://www.w3.org/2000/01/rdf-schema#label> "Wine" .
+          _:b3 <http://www.example.orgamount> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b3 <http://www.example.orgprice> "6"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b3 <http://www.w3.org/2000/01/rdf-schema#label> "Soft Drink" .
+          _:b4 <http://www.example.orgamount> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b4 <http://www.example.orgprice> "8"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b4 <http://www.w3.org/2000/01/rdf-schema#label> "Pasta" .
+          _:b5 <http://www.example.orgamount> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b5 <http://www.example.orgprice> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b5 <http://www.w3.org/2000/01/rdf-schema#label> "Ice Cream" .
+          _:b6 <http://www.example.orgamount> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b6 <http://www.example.orgprice> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b6 <http://www.w3.org/2000/01/rdf-schema#label> "Soft Drink" .
+          _:b7 <http://www.example.orgamount> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b7 <http://www.example.orgprice> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b7 <http://www.w3.org/2000/01/rdf-schema#label> "Sandwich" .
+          _:b8 <http://www.example.orgamount> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b8 <http://www.example.orgprice> "3.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          _:b8 <http://www.w3.org/2000/01/rdf-schema#label> "Bagel" .
+          _:b9 <http://www.example.orgamount> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b9 <http://www.example.orgprice> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b9 <http://www.w3.org/2000/01/rdf-schema#label> "Soft Drink" .
+        }
+    query: |
+      # return labels of items for the first 2 orders
+
+      PREFIX : <http://www.example.org>
+      PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+      SELECT ?L
+      WHERE {
+       ?O :hasItem [ rdfs:label ?L ] .
+       {
+       SELECT DISTINCT ?O
+       WHERE { ?O a :Order }
+       ORDER BY ?O
+       LIMIT 2
+       }
+      } ORDER BY ?L
+    expect:
+      terms:
+        - ['"Ice Cream"']
+        - ['"Ice Cream"']
+        - ['"Pasta"']
+        - ['"Pizza"']
+        - ['"Soft Drink"']
+        - ['"Wine"']
+
+  # sq13 - Subqueries don't inject bindings
+  - name: subquery13
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.orgorder1> <http://www.example.orghasItem> _:b0 .
+          <http://www.example.orgorder1> <http://www.example.orghasItem> _:b1 .
+          <http://www.example.orgorder1> <http://www.example.orghasItem> _:b2 .
+          <http://www.example.orgorder1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.example.orgOrder> .
+          <http://www.example.orgorder2> <http://www.example.orghasItem> _:b3 .
+          <http://www.example.orgorder2> <http://www.example.orghasItem> _:b4 .
+          <http://www.example.orgorder2> <http://www.example.orghasItem> _:b5 .
+          <http://www.example.orgorder2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.example.orgOrder> .
+          <http://www.example.orgorder3> <http://www.example.orghasItem> _:b6 .
+          <http://www.example.orgorder3> <http://www.example.orghasItem> _:b7 .
+          <http://www.example.orgorder3> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.example.orgOrder> .
+          <http://www.example.orgorder4> <http://www.example.orghasItem> _:b8 .
+          <http://www.example.orgorder4> <http://www.example.orghasItem> _:b9 .
+          <http://www.example.orgorder4> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.example.orgOrder> .
+          _:b0 <http://www.example.orgamount> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b0 <http://www.example.orgprice> "10"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b0 <http://www.w3.org/2000/01/rdf-schema#label> "Pizza" .
+          _:b1 <http://www.example.orgamount> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b1 <http://www.example.orgprice> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b1 <http://www.w3.org/2000/01/rdf-schema#label> "Ice Cream" .
+          _:b2 <http://www.example.orgamount> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b2 <http://www.example.orgprice> "8"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b2 <http://www.w3.org/2000/01/rdf-schema#label> "Wine" .
+          _:b3 <http://www.example.orgamount> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b3 <http://www.example.orgprice> "6"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b3 <http://www.w3.org/2000/01/rdf-schema#label> "Soft Drink" .
+          _:b4 <http://www.example.orgamount> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b4 <http://www.example.orgprice> "8"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b4 <http://www.w3.org/2000/01/rdf-schema#label> "Pasta" .
+          _:b5 <http://www.example.orgamount> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b5 <http://www.example.orgprice> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b5 <http://www.w3.org/2000/01/rdf-schema#label> "Ice Cream" .
+          _:b6 <http://www.example.orgamount> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b6 <http://www.example.orgprice> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b6 <http://www.w3.org/2000/01/rdf-schema#label> "Soft Drink" .
+          _:b7 <http://www.example.orgamount> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b7 <http://www.example.orgprice> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b7 <http://www.w3.org/2000/01/rdf-schema#label> "Sandwich" .
+          _:b8 <http://www.example.orgamount> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b8 <http://www.example.orgprice> "3.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          _:b8 <http://www.w3.org/2000/01/rdf-schema#label> "Bagel" .
+          _:b9 <http://www.example.orgamount> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b9 <http://www.example.orgprice> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          _:b9 <http://www.w3.org/2000/01/rdf-schema#label> "Soft Drink" .
+        }
+    query: |
+      # return labels of items for the first 2 orders
+
+      PREFIX : <http://www.example.org>
+      PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+      SELECT DISTINCT ?O1 ?O2
+      WHERE {
+       ?O1 :hasItem [ rdfs:label ?L ] .
+       {
+       SELECT ?O2
+       WHERE {
+       ?O2 :hasItem [ rdfs:label ?L ] .
+       }
+      }} ORDER BY ?O1 ?O2
+    expect:
+      terms:
+        - ['<http://www.example.orgorder1>', '<http://www.example.orgorder1>']
+        - ['<http://www.example.orgorder1>', '<http://www.example.orgorder2>']
+        - ['<http://www.example.orgorder1>', '<http://www.example.orgorder3>']
+        - ['<http://www.example.orgorder1>', '<http://www.example.orgorder4>']
+        - ['<http://www.example.orgorder2>', '<http://www.example.orgorder1>']
+        - ['<http://www.example.orgorder2>', '<http://www.example.orgorder2>']
+        - ['<http://www.example.orgorder2>', '<http://www.example.orgorder3>']
+        - ['<http://www.example.orgorder2>', '<http://www.example.orgorder4>']
+        - ['<http://www.example.orgorder3>', '<http://www.example.orgorder1>']
+        - ['<http://www.example.orgorder3>', '<http://www.example.orgorder2>']
+        - ['<http://www.example.orgorder3>', '<http://www.example.orgorder3>']
+        - ['<http://www.example.orgorder3>', '<http://www.example.orgorder4>']
+        - ['<http://www.example.orgorder4>', '<http://www.example.orgorder1>']
+        - ['<http://www.example.orgorder4>', '<http://www.example.orgorder2>']
+        - ['<http://www.example.orgorder4>', '<http://www.example.orgorder3>']
+        - ['<http://www.example.orgorder4>', '<http://www.example.orgorder4>']

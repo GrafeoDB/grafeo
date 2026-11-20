@@ -71,12 +71,14 @@ pub(crate) fn query_result(mut result: QueryResult) -> PyQueryResult {
     let profile = result.profile.take();
     let kind = result.kind;
     let warnings = grafeo_bindings_common::warning::of_result(&result);
+    let cell_types = result.cell_types();
     let mut query_result =
         PyQueryResult::with_metrics(columns, result.into_rows(), execution_time, rows_scanned);
     query_result.counters = counters;
     query_result.profile = profile;
     query_result.kind = kind;
     query_result.warnings = warnings;
+    query_result.cell_types = cell_types;
     query_result
 }
 

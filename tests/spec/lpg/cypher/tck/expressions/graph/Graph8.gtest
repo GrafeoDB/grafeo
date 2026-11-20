@@ -1,0 +1,165 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/graph/Graph8.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Graph8"
+  title: "Graph8 - Property keys function"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Using `keys()` on a single node, non-empty result
+  - name: s1_using_keys_on_a_single_node_non_empty_result
+    setup:
+      - |
+        CREATE ({name: 'Andres', surname: 'Lopez'})
+    query: |
+      MATCH (n)
+      UNWIND keys(n) AS x
+      RETURN DISTINCT x AS theProps
+    expect:
+      values: |
+        | theProps |
+        | 'name' |
+        | 'surname' |
+      side_effects: {}
+
+  # [2] Using `keys()` on multiple nodes, non-empty result
+  - name: s2_using_keys_on_multiple_nodes_non_empty_result
+    setup:
+      - |
+        CREATE ({name: 'Andres', surname: 'Lopez'}),
+               ({otherName: 'Andres', otherSurname: 'Lopez'})
+    query: |
+      MATCH (n)
+      UNWIND keys(n) AS x
+      RETURN DISTINCT x AS theProps
+    expect:
+      values: |
+        | theProps |
+        | 'name' |
+        | 'surname' |
+        | 'otherName' |
+        | 'otherSurname' |
+      side_effects: {}
+
+  # [3] Using `keys()` on a single node, empty result
+  - name: s3_using_keys_on_a_single_node_empty_result
+    setup:
+      - |
+        CREATE ()
+    query: |
+      MATCH (n)
+      UNWIND keys(n) AS x
+      RETURN DISTINCT x AS theProps
+    expect:
+      values: |
+        | theProps |
+      side_effects: {}
+
+  # [4] Using `keys()` on an optionally matched node
+  - name: s4_using_keys_on_an_optionally_matched_node
+    setup:
+      - |
+        CREATE ()
+    query: |
+      OPTIONAL MATCH (n)
+      UNWIND keys(n) AS x
+      RETURN DISTINCT x AS theProps
+    expect:
+      values: |
+        | theProps |
+      side_effects: {}
+
+  # [5] Using `keys()` on a relationship, non-empty result
+  - name: s5_using_keys_on_a_relationship_non_empty_result
+    setup:
+      - |
+        CREATE ()-[:KNOWS {status: 'bad', year: '2015'}]->()
+    query: |
+      MATCH ()-[r:KNOWS]-()
+      UNWIND keys(r) AS x
+      RETURN DISTINCT x AS theProps
+    expect:
+      values: |
+        | theProps |
+        | 'status' |
+        | 'year' |
+      side_effects: {}
+
+  # [6] Using `keys()` on a relationship, empty result
+  - name: s6_using_keys_on_a_relationship_empty_result
+    setup:
+      - |
+        CREATE ()-[:KNOWS]->()
+    query: |
+      MATCH ()-[r:KNOWS]-()
+      UNWIND keys(r) AS x
+      RETURN DISTINCT x AS theProps
+    expect:
+      values: |
+        | theProps |
+      side_effects: {}
+
+  # [7] Using `keys()` on an optionally matched relationship
+  - name: s7_using_keys_on_an_optionally_matched_relationship
+    setup:
+      - |
+        CREATE ()-[:KNOWS]->()
+    query: |
+      OPTIONAL MATCH ()-[r:KNOWS]-()
+      UNWIND keys(r) AS x
+      RETURN DISTINCT x AS theProps
+    expect:
+      values: |
+        | theProps |
+      side_effects: {}
+
+  # [8] Using `keys()` and `IN` to check property existence
+  - name: s8_using_keys_and_in_to_check_property_existence
+    setup:
+      - |
+        CREATE ({exists: 42, missing: null})
+    query: |
+      MATCH (n)
+      RETURN 'exists' IN keys(n) AS a,
+             'missing' IN keys(n) AS b,
+             'missingToo' IN keys(n) AS c
+    expect:
+      values: |
+        | a | b | c |
+        | true | false | false |
+      side_effects: {}

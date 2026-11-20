@@ -6,9 +6,13 @@ Python runner validates results identically to the Rust runner.
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import math
 from typing import Any
+
+import grafeo
+import tck_values
 
 # ---------------------------------------------------------------------------
 # Value to canonical string
@@ -47,6 +51,12 @@ def value_to_string(val: Any) -> str:
     if isinstance(val, list):
         inner = ", ".join(value_to_string(v) for v in val)
         return f"[{inner}]"
+    if isinstance(val, datetime.timedelta):
+        # A duration without months: days and a time part with one sign, as
+        # the binding reads a timedelta parameter, in the Rust runner's text.
+        micros = val // datetime.timedelta(microseconds=1)
+        days = abs(micros) // 86_400_000_000 * (1 if micros >= 0 else -1)
+        return _duration_to_iso(0, days, (micros - days * 86_400_000_000) * 1000)
     if isinstance(val, dict):
         # Duration is returned as {months, days, nanos} from the C FFI.
         # Convert to ISO 8601 duration format to match the Rust runner.
@@ -225,9 +235,12 @@ def assert_gql_status(exc: Exception, expected_status: str) -> None:
     """
     status = getattr(exc, "gql_status", None)
     assert status is not None, f"Error '{exc}' ({type(exc).__name__}) has no GQLSTATUS"
-    assert str(status) == expected_status, (
-        f"Error '{exc}' has GQLSTATUS {status}, expected {expected_status}"
-    )
+    # Two characters name a class (``42``), five a status (``42001``)
+    if len(expected_status) == 2:
+        holds = str(status).startswith(expected_status)
+    else:
+        holds = str(status) == expected_status
+    assert holds, f"Error '{exc}' has GQLSTATUS {status}, expected {expected_status}"
 
 
 def assert_warnings(result, expected_codes: list[str]) -> None:
@@ -408,3 +421,119 @@ def assert_terms(result, expected: list[list[str | None]], ordered: bool) -> Non
                     assert back.setdefault(a, e) == e, (
                         f"blank node {a} has two names\nactual: {actual}"
                     )
+
+
+# ---------------------------------------------------------------------------
+# Typed rows (values:) and side effects (side_effects:), the openCypher TCK's forms
+# ---------------------------------------------------------------------------
+
+
+def temporals_as_text(db, value: Any) -> Any:
+    """``value`` with each temporal in it written as its Cypher ``toString()``, the
+    engine's own text: how a ``values_dialect: tck`` file compares temporals, which
+    the TCK writes as strings."""
+    # Python's own type where it holds the value exactly, else a Grafeo type
+    # (grafeo.Time, grafeo.Duration and the others)
+    grafeo_types = tuple(
+        getattr(grafeo, name)
+        for name in ("Time", "Date", "Timestamp", "ZonedDateTime", "Duration")
+        if hasattr(grafeo, name)
+    )
+    temporal_types = (datetime.date, datetime.time, datetime.timedelta)
+    if isinstance(value, temporal_types + grafeo_types):
+        rows = list(db.execute_cypher("RETURN toString($v) AS s", {"v": value}))
+        return rows[0]["s"]
+    if isinstance(value, list):
+        return [temporals_as_text(db, v) for v in value]
+    if isinstance(value, dict):
+        return {k: temporals_as_text(db, v) for k, v in value.items()}
+    return value
+
+
+def assert_values(
+    db, result, table: str, ordered: bool, unordered_lists: bool, tck_dialect: bool
+) -> None:
+    """Assert the result holds the rows of ``table``, a ``values:`` table in the TCK's
+    value notation whose first row names the columns: in order when ``ordered``,
+    otherwise as a bag."""
+    header, *rows = tck_values.table_rows(table)
+    header = [name for name in header if name]
+    columns = list(result.columns)
+    assert columns == header, f"Columns differ: {columns}, expected {header}"
+    expected = [[tck_values.parse(cell) for cell in row] for row in rows]
+    actual = []
+    for index in range(len(result)):
+        row = result[index]
+        values = [row.get(column) for column in columns]
+        if tck_dialect:
+            values = [temporals_as_text(db, v) for v in values]
+        # Each value by its cell type: a map is a node or relationship only where that says so
+        types = [result.cell_type(index, i) for i in range(len(values))]
+        actual.append([tck_values.to_neutral(v, t) for v, t in zip(values, types)])
+
+    def row_matches(cells, values) -> bool:
+        return len(cells) == len(values) and all(
+            tck_values.matches(c, v, unordered_lists=unordered_lists)
+            for c, v in zip(cells, values, strict=True)
+        )
+
+    if ordered:
+        holds = len(expected) == len(actual) and all(
+            row_matches(c, v) for c, v in zip(expected, actual, strict=True)
+        )
+    else:
+        left = list(actual)
+        holds = len(expected) == len(actual)
+        for cells in expected if holds else []:
+            hit = next((i for i, v in enumerate(left) if row_matches(cells, v)), None)
+            if hit is None:
+                holds = False
+                break
+            left.pop(hit)
+    order = " (in order)" if ordered else ""
+    assert holds, f"Rows differ{order}:\nactual:   {actual}\nexpected: {table}"
+
+
+def observe_graph(db) -> dict[str, set]:
+    """What the graph holds, as the openCypher TCK observes side effects: node and
+    relationship ids, the label names in use, and the properties as (entity, key,
+    value) triples, read with two GQL queries every build has."""
+    seen: dict[str, set] = {
+        "nodes": set(),
+        "relationships": set(),
+        "labels": set(),
+        "properties": set(),
+    }
+    for query in ("MATCH (n) RETURN n", "MATCH ()-[r]->() RETURN r"):
+        result = db.execute(query)
+        for index, row in enumerate(result):
+            value = tck_values.to_neutral(
+                next(iter(row.values())), result.cell_type(index, 0)
+            )
+            for kind, key in (("node", "nodes"), ("relationship", "relationships")):
+                if kind in value:
+                    entity = value[kind]
+                    seen[key].add(entity["id"])
+                    seen["labels"].update(entity.get("labels", []))
+                    for name, prop in entity["properties"].items():
+                        triple = (kind, entity["id"], name, repr(prop))
+                        seen["properties"].add(triple)
+    return seen
+
+
+def assert_side_effects(
+    before: dict, after: dict, expected: list[tuple[str, int]]
+) -> None:
+    """Assert the side effects from ``before`` to ``after`` are ``expected`` (each TCK
+    key and its count; an unnamed key is 0)."""
+    want = dict(expected)
+    differ = []
+    for key in ("nodes", "relationships", "labels", "properties"):
+        for sign, count in (
+            ("+", len(after[key] - before[key])),
+            ("-", len(before[key] - after[key])),
+        ):
+            name = sign + key
+            if count != want.get(name, 0):
+                differ.append(f"{name}: {count}, expected {want.get(name, 0)}")
+    assert not differ, "Side effects differ: " + "; ".join(differ)

@@ -1,0 +1,105 @@
+# W3C SPARQL 1.1 Test Suite: Json Res
+# Generated from the W3C manifest by scripts/convert_w3c_sparql.py
+# Source: https://github.com/w3c/rdf-tests at 7b5afb91857a9c282c03d2e45d3f76485797c901
+# Copyright W3C (MIT, ERCIM, Keio, Beihang), used under the W3C test suite
+# licences: https://www.w3.org/Consortium/Legal/2008/04-testsuite-copyright.html
+
+meta:
+  language: sparql
+  model: rdf
+  section: "w3c.json-res"
+  title: W3C Json Res
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # jsonres01 - JSON Result Format
+  - name: jsonres01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/p1> <http://example.org/s2> .
+          <http://example.org/s2> <http://example.org/p2> "foo" .
+          <http://example.org/s3> <http://example.org/p2> "bar"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s4> <http://example.org/p4> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s5> <http://example.org/p5> "5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s6> <http://example.org/p6> _:b0 .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT * WHERE { ?s ?p ?o} ORDER BY ?s ?p ?o
+    expect:
+      terms:
+        - ['<http://example.org/s1>', '<http://example.org/p1>', '<http://example.org/s2>']
+        - ['<http://example.org/s2>', '<http://example.org/p2>', '"foo"']
+        - ['<http://example.org/s3>', '<http://example.org/p2>', '"bar"']
+        - ['<http://example.org/s4>', '<http://example.org/p4>', '"4"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/s5>', '<http://example.org/p5>', '"5"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://example.org/s6>', '<http://example.org/p6>', '_:b']
+
+  # jsonres02 - JSON Result Format
+  - name: jsonres02
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/p1> <http://example.org/s2> .
+          <http://example.org/s2> <http://example.org/p2> "foo" .
+          <http://example.org/s3> <http://example.org/p2> "bar"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s4> <http://example.org/p4> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s5> <http://example.org/p5> "5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s6> <http://example.org/p6> _:b0 .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT * WHERE { ?s ?p ?o OPTIONAL {?o ?p2 ?o2 } } ORDER BY ?s ?p ?o ?p2 ?o2
+    expect:
+      terms:
+        - ['<http://example.org/s1>', '<http://example.org/p1>', '<http://example.org/s2>', '<http://example.org/p2>', '"foo"']
+        - ['<http://example.org/s2>', '<http://example.org/p2>', '"foo"', null, null]
+        - ['<http://example.org/s3>', '<http://example.org/p2>', '"bar"', null, null]
+        - ['<http://example.org/s4>', '<http://example.org/p4>', '"4"^^<http://www.w3.org/2001/XMLSchema#integer>', null, null]
+        - ['<http://example.org/s5>', '<http://example.org/p5>', '"5"^^<http://www.w3.org/2001/XMLSchema#decimal>', null, null]
+        - ['<http://example.org/s6>', '<http://example.org/p6>', '_:b', null, null]
+
+  # jsonres03 - JSON Result Format
+  - name: jsonres03
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/p1> <http://example.org/s2> .
+          <http://example.org/s2> <http://example.org/p2> "foo" .
+          <http://example.org/s3> <http://example.org/p2> "bar"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s4> <http://example.org/p4> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s5> <http://example.org/p5> "5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s6> <http://example.org/p6> _:b0 .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      ASK WHERE { :s1 :p1 :s2 }
+    expect:
+      rows:
+        - [true]
+
+  # jsonres04 - JSON Result Format
+  - name: jsonres04
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/p1> <http://example.org/s2> .
+          <http://example.org/s2> <http://example.org/p2> "foo" .
+          <http://example.org/s3> <http://example.org/p2> "bar"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s4> <http://example.org/p4> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s5> <http://example.org/p5> "5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s6> <http://example.org/p6> _:b0 .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      ASK WHERE { :s1 :p1 :o1 }
+    expect:
+      rows:
+        - [false]

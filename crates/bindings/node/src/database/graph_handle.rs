@@ -1,14 +1,11 @@
 //! `db.graph(name)`: work in one named graph without switching the database's
 //! current graph.
 
-use std::sync::Arc;
-
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use parking_lot::RwLock;
 
 use grafeo_engine::GraphHandle;
-use grafeo_engine::database::{EdgeUpsertOptions, GrafeoDB};
+use grafeo_engine::database::EdgeUpsertOptions;
 
 use super::batch::{BatchEdgeInput, batch_edges, label_list};
 use super::upsert::{
@@ -32,19 +29,19 @@ use crate::types;
 /// graph no longer exists.
 #[napi(js_name = "GraphHandle")]
 pub struct JsGraphHandle {
-    db: Arc<RwLock<GrafeoDB>>,
+    db: crate::database::SharedDb,
     schema: Option<String>,
     name: String,
 }
 
 /// Runs `call` with the engine's handle on graph `name` of `schema`.
 fn in_graph<T>(
-    db: &RwLock<GrafeoDB>,
+    db: &crate::database::SharedDb,
     schema: Option<&str>,
     name: &str,
     call: impl FnOnce(&GraphHandle<'_>) -> Result<T>,
 ) -> Result<T> {
-    let db = db.read();
+    let db = db.read()?;
     let graph = db.graph_in(schema, name).map_err(NodeGrafeoError::from)?;
     call(&graph)
 }
@@ -66,7 +63,7 @@ impl JsGraphHandle {
         &self,
         call: impl FnOnce(&GraphHandle<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        let db = Arc::clone(&self.db);
+        let db = self.db.share()?;
         let schema = self.schema.clone();
         let name = self.name.clone();
         tokio::task::spawn_blocking(move || in_graph(&db, schema.as_deref(), &name, call))
@@ -82,12 +79,12 @@ impl JsGrafeoDB {
     #[napi]
     pub fn graph(&self, name: String) -> Result<JsGraphHandle> {
         let schema = {
-            let db = self.inner.read();
+            let db = self.inner.read()?;
             let graph = db.graph(&name).map_err(NodeGrafeoError::from)?;
             graph.schema().map(ToString::to_string)
         };
         Ok(JsGraphHandle {
-            db: Arc::clone(&self.inner),
+            db: self.inner.share()?,
             schema,
             name,
         })
@@ -98,8 +95,9 @@ impl JsGrafeoDB {
 impl JsGraphHandle {
     /// The graph's name.
     #[napi(getter)]
-    pub fn name(&self) -> String {
-        self.name.clone()
+    pub fn name(&self) -> Result<String> {
+        self.db.check()?;
+        Ok(self.name.clone())
     }
 
     /// Runs a GQL query in this graph. Returns a Promise<QueryResult>.
@@ -133,7 +131,7 @@ impl JsGraphHandle {
     #[napi(js_name = "beginTransaction")]
     pub fn begin_transaction(&self, isolation_level: Option<String>) -> Result<Transaction> {
         let session = self.with_graph(|graph| js(graph.session()))?;
-        Transaction::begin(Arc::clone(&self.db), session, isolation_level.as_deref())
+        Transaction::begin(self.db.share()?, session, isolation_level.as_deref())
     }
 
     /// Creates a node with labels and optional properties.

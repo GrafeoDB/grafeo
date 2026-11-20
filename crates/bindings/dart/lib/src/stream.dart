@@ -91,8 +91,21 @@ class ResultStream implements Finalizable {
     }
   }
 
-  /// Column names in the order they appear in each row map.
-  List<String> get columns => _columns;
+  /// Column names in the order they appear in each row map. Throws the
+  /// GRAFEO-T007 error once the database that handed the stream out is
+  /// closed; after the stream's own [close] it answers what it had.
+  List<String> get columns {
+    if (!_closed) _checkDatabaseOpen();
+    return _columns;
+  }
+
+  /// Throws the GRAFEO-T007 error once the database is closed: the native
+  /// layer refuses the columns then.
+  void _checkDatabaseOpen() {
+    final columns = _bindings.grafeoStreamColumnsJson(_handle);
+    if (columns == nullptr) throwLastError(_bindings);
+    _bindings.grafeoFreeString(columns);
+  }
 
   /// Pulls the next row, or returns `null` when the stream is exhausted.
   ///
@@ -151,8 +164,13 @@ class ResultStream implements Finalizable {
   /// The warnings the statement raised so far, ordered by code: its
   /// translation's from the open, its run's as the rows that raise them are
   /// pulled, all of them once the stream is exhausted. After [close] it
-  /// holds what the stream had then. Experimental (0.6.2+).
-  List<QueryWarning> get warnings => _closed ? _warnings : _readWarnings();
+  /// holds what the stream had then; once the database that handed the stream
+  /// out is closed it throws the GRAFEO-T007 error. Experimental (0.6.2+).
+  List<QueryWarning> get warnings {
+    if (_closed) return _warnings;
+    _checkDatabaseOpen();
+    return _readWarnings();
+  }
 
   List<QueryWarning> _readWarnings() => readWarnings(
         _bindings.grafeoStreamWarningCount(_handle),

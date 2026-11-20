@@ -250,6 +250,7 @@ impl super::Planner {
                 alias: Some(run.column.to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             input: Box::new(counted_input),
             having: None,
@@ -1083,6 +1084,7 @@ mod tests {
                     alias: Some("c".into()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 }],
                 input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "p".into(),

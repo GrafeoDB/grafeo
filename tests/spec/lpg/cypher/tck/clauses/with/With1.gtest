@@ -1,0 +1,148 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/with/With1.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.With1"
+  title: "With1 - Forward single variable"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Forwarind a node variable 1
+  - name: s1_forwarind_a_node_variable_1
+    setup:
+      - |
+        CREATE (:A)-[:REL]->(:B)
+    query: |
+      MATCH (a:A)
+      WITH a
+      MATCH (a)-->(b)
+      RETURN *
+    expect:
+      values: |
+        | a | b |
+        | (:A) | (:B) |
+      side_effects: {}
+
+  # [2] Forwarind a node variable 2
+  - name: s2_forwarind_a_node_variable_2
+    xfail:
+      spec: "openCypher TCK 2024.3 With1: [2] Forwarind a node variable 2"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        CREATE (:A)-[:REL]->(:B)
+        CREATE (:X)
+    query: |
+      MATCH (a:A)
+      WITH a
+      MATCH (x:X), (a)-->(b)
+      RETURN *
+    expect:
+      values: |
+        | a | b | x |
+        | (:A) | (:B) | (:X) |
+      side_effects: {}
+
+  # [3] Forwarding a relationship variable
+  - name: s3_forwarding_a_relationship_variable
+    setup:
+      - |
+        CREATE ()-[:T1]->(:X),
+               ()-[:T2]->(:X),
+               ()-[:T3]->()
+    query: |
+      MATCH ()-[r1]->(:X)
+      WITH r1 AS r2
+      MATCH ()-[r2]->()
+      RETURN r2 AS rel
+    expect:
+      values: |
+        | rel |
+        | [:T1] |
+        | [:T2] |
+      side_effects: {}
+
+  # [4] Forwarding a path variable
+  - name: s4_forwarding_a_path_variable
+    xfail:
+      spec: "openCypher TCK 2024.3 With1: [4] Forwarding a path variable"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        CREATE ()
+    query: |
+      MATCH p = (a)
+      WITH p
+      RETURN p
+    expect:
+      values: |
+        | p |
+        | <()> |
+      side_effects: {}
+
+  # [5] Forwarding null
+  - name: s5_forwarding_null
+    query: |
+      OPTIONAL MATCH (a:Start)
+      WITH a
+      MATCH (a)-->(b)
+      RETURN *
+    expect:
+      values: |
+        | a | b |
+      side_effects: {}
+
+  # [6] Forwarding a node variable possibly null
+  - name: s6_forwarding_a_node_variable_possibly_null
+    setup:
+      - |
+        CREATE (s:Single), (a:A {num: 42}),
+               (b:B {num: 46}), (c:C)
+        CREATE (s)-[:REL]->(a),
+               (s)-[:REL]->(b),
+               (a)-[:REL]->(c),
+               (b)-[:LOOP]->(b)
+    query: |
+      OPTIONAL MATCH (a:A)
+      WITH a AS a
+      MATCH (b:B)
+      RETURN a, b
+    expect:
+      values: |
+        | a | b |
+        | (:A {num: 42}) | (:B {num: 46}) |
+      side_effects: {}

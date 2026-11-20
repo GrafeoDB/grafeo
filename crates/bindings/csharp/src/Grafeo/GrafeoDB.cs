@@ -44,12 +44,10 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     public static GrafeoDB Memory()
     {
         var ptr = NativeMethods.grafeo_open_memory();
-        if (ptr == nint.Zero)
+        if (ptr.IsInvalid)
             throw GrafeoException.FromLastError();
 
-        var handle = new DatabaseHandle();
-        Marshal.InitHandle(handle, ptr);
-        return new GrafeoDB(handle);
+        return new GrafeoDB(ptr);
     }
 
     /// <summary>Open or create a persistent database at <paramref name="path"/>.</summary>
@@ -58,12 +56,10 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         ArgumentException.ThrowIfNullOrEmpty(path);
 
         var ptr = NativeMethods.grafeo_open(path);
-        if (ptr == nint.Zero)
+        if (ptr.IsInvalid)
             throw GrafeoException.FromLastError();
 
-        var handle = new DatabaseHandle();
-        Marshal.InitHandle(handle, ptr);
-        return new GrafeoDB(handle);
+        return new GrafeoDB(ptr);
     }
 
     /// <summary>
@@ -90,34 +86,30 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     public static GrafeoDB Open(string? path, GrafeoOptions? options)
     {
         var native = NativeMethods.grafeo_options_new();
-        if (native == nint.Zero)
+        if (native.IsInvalid)
             throw GrafeoException.FromLastError();
         try
         {
             options?.ApplyTo(native);
             var ptr = NativeMethods.grafeo_open_with_options(path, native);
-            if (ptr == nint.Zero)
+            if (ptr.IsInvalid)
                 throw GrafeoException.FromLastError();
 
-            var handle = new DatabaseHandle();
-            Marshal.InitHandle(handle, ptr);
-            return new GrafeoDB(handle);
+            return new GrafeoDB(ptr);
         }
         finally
         {
-            NativeMethods.grafeo_options_free(native);
+            native.Dispose();
         }
     }
 
     private static GrafeoDB OpenWithHistory(string? path, HistoryRetention history)
     {
         var ptr = NativeMethods.grafeo_open_with_history(path, history.Kind, history.DurationMs);
-        if (ptr == nint.Zero)
+        if (ptr.IsInvalid)
             throw GrafeoException.FromLastError();
 
-        var handle = new DatabaseHandle();
-        Marshal.InitHandle(handle, ptr);
-        return new GrafeoDB(handle);
+        return new GrafeoDB(ptr);
     }
 
     /// <inheritdoc/>
@@ -144,7 +136,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     {
         ThrowIfDisposed();
         var resultPtr = NativeMethods.grafeo_execute(Handle, query);
-        if (resultPtr == nint.Zero)
+        if (resultPtr.IsInvalid)
             throw GrafeoException.FromLastError(GrafeoStatus.Query);
         return BuildResult(resultPtr);
     }
@@ -161,7 +153,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     {
         ThrowIfDisposed();
         var streamPtr = NativeMethods.grafeo_stream_open(Handle, query);
-        if (streamPtr == nint.Zero)
+        if (streamPtr.IsInvalid)
             throw GrafeoException.FromLastError(GrafeoStatus.Query);
 
         // Read columns once; the JSON string is heap-allocated and must be freed.
@@ -188,7 +180,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         }
         catch
         {
-            NativeMethods.grafeo_stream_free(streamPtr);
+            streamPtr.Dispose();
             throw;
         }
     }
@@ -202,7 +194,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         {
             ct.ThrowIfCancellationRequested();
             var resultPtr = NativeMethods.grafeo_execute(h, query);
-            if (resultPtr == nint.Zero)
+            if (resultPtr.IsInvalid)
                 throw GrafeoException.FromLastError(GrafeoStatus.Query);
             return BuildResult(resultPtr);
         }, ct);
@@ -214,7 +206,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         ThrowIfDisposed();
         var paramsJson = ValueConverter.EncodeParams(parameters);
         var resultPtr = NativeMethods.grafeo_execute_with_params(Handle, query, paramsJson);
-        if (resultPtr == nint.Zero)
+        if (resultPtr.IsInvalid)
             throw GrafeoException.FromLastError(GrafeoStatus.Query);
         return BuildResult(resultPtr);
     }
@@ -232,7 +224,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         {
             ct.ThrowIfCancellationRequested();
             var resultPtr = NativeMethods.grafeo_execute_with_params(h, query, paramsJson);
-            if (resultPtr == nint.Zero)
+            if (resultPtr.IsInvalid)
                 throw GrafeoException.FromLastError(GrafeoStatus.Query);
             return BuildResult(resultPtr);
         }, ct);
@@ -243,7 +235,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     {
         ThrowIfDisposed();
         var resultPtr = NativeMethods.grafeo_execute_cypher(Handle, query);
-        if (resultPtr == nint.Zero)
+        if (resultPtr.IsInvalid)
             throw GrafeoException.FromLastError(GrafeoStatus.Query);
         return BuildResult(resultPtr);
     }
@@ -257,7 +249,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     {
         ThrowIfDisposed();
         var resultPtr = NativeMethods.grafeo_execute_sparql(Handle, query);
-        if (resultPtr == nint.Zero)
+        if (resultPtr.IsInvalid)
             throw GrafeoException.FromLastError(GrafeoStatus.Query);
         return BuildResult(resultPtr);
     }
@@ -271,7 +263,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     {
         ThrowIfDisposed();
         var resultPtr = NativeMethods.grafeo_execute_gremlin(Handle, query);
-        if (resultPtr == nint.Zero)
+        if (resultPtr.IsInvalid)
             throw GrafeoException.FromLastError(GrafeoStatus.Query);
         return BuildResult(resultPtr);
     }
@@ -285,7 +277,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     {
         ThrowIfDisposed();
         var resultPtr = NativeMethods.grafeo_execute_graphql(Handle, query);
-        if (resultPtr == nint.Zero)
+        if (resultPtr.IsInvalid)
             throw GrafeoException.FromLastError(GrafeoStatus.Query);
         return BuildResult(resultPtr);
     }
@@ -299,7 +291,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     {
         ThrowIfDisposed();
         var resultPtr = NativeMethods.grafeo_execute_sql(Handle, query);
-        if (resultPtr == nint.Zero)
+        if (resultPtr.IsInvalid)
             throw GrafeoException.FromLastError(GrafeoStatus.Query);
         return BuildResult(resultPtr);
     }
@@ -320,7 +312,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         ThrowIfDisposed();
         string? paramsJson = parameters is not null ? ValueConverter.EncodeParams(parameters) : null;
         var resultPtr = NativeMethods.grafeo_execute_language(Handle, language, query, paramsJson);
-        if (resultPtr == nint.Zero)
+        if (resultPtr.IsInvalid)
             throw GrafeoException.FromLastError(GrafeoStatus.Query);
         return BuildResult(resultPtr);
     }
@@ -334,7 +326,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     {
         ThrowIfDisposed();
         var txPtr = NativeMethods.grafeo_begin_transaction(Handle);
-        if (txPtr == nint.Zero)
+        if (txPtr.IsInvalid)
             throw GrafeoException.FromLastError(GrafeoStatus.Transaction);
         return new Transaction(txPtr);
     }
@@ -350,7 +342,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         ThrowIfDisposed();
         var level = ParseIsolationLevel(isolationLevel);
         var txPtr = NativeMethods.grafeo_begin_transaction_with_isolation(Handle, level);
-        if (txPtr == nint.Zero)
+        if (txPtr.IsInvalid)
             throw GrafeoException.FromLastError(GrafeoStatus.Transaction);
         return new Transaction(txPtr);
     }
@@ -360,7 +352,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     {
         ThrowIfDisposed();
         var txPtr = NativeMethods.grafeo_begin_transaction_with_isolation(Handle, (int)isolationLevel);
-        if (txPtr == nint.Zero)
+        if (txPtr.IsInvalid)
             throw GrafeoException.FromLastError(GrafeoStatus.Transaction);
         return new Transaction(txPtr);
     }
@@ -390,7 +382,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     {
         ThrowIfDisposed();
         GrafeoException.ThrowIfFailed(NativeMethods.grafeo_get_node(Handle, (ulong)id, out var nodePtr));
-        if (nodePtr == nint.Zero)
+        if (nodePtr.IsInvalid)
             return null;
         try
         {
@@ -398,7 +390,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         }
         finally
         {
-            NativeMethods.grafeo_free_node(nodePtr);
+            nodePtr.Dispose();
         }
     }
 
@@ -477,7 +469,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     {
         ThrowIfDisposed();
         GrafeoException.ThrowIfFailed(NativeMethods.grafeo_get_edge(Handle, (ulong)id, out var edgePtr));
-        if (edgePtr == nint.Zero)
+        if (edgePtr.IsInvalid)
             return null;
         try
         {
@@ -485,7 +477,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         }
         finally
         {
-            NativeMethods.grafeo_free_edge(edgePtr);
+            edgePtr.Dispose();
         }
     }
 
@@ -804,7 +796,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     {
         ThrowIfDisposed();
         var ptr = NativeMethods.grafeo_as_of(Handle, point.Kind, point.Value);
-        if (ptr == nint.Zero)
+        if (ptr.IsInvalid)
             throw GrafeoException.FromLastError();
         return new AsOfView(ptr);
     }
@@ -816,7 +808,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         ThrowIfDisposed();
         var paramsJson = parameters is not null ? ValueConverter.EncodeParams(parameters) : null;
         var resultPtr = NativeMethods.grafeo_execute_as_of(Handle, query, paramsJson, point.Kind, point.Value);
-        if (resultPtr == nint.Zero)
+        if (resultPtr.IsInvalid)
             throw GrafeoException.FromLastError(GrafeoStatus.Query);
         return BuildResult(resultPtr);
     }
@@ -835,7 +827,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     {
         ThrowIfDisposed();
         var ptr = NativeMethods.grafeo_graph(Handle, name);
-        if (ptr == nint.Zero)
+        if (ptr.IsInvalid)
             throw GrafeoException.FromLastError();
         return new GrafeoGraph(ptr);
     }
@@ -1125,7 +1117,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     // =========================================================================
 
     private Task<QueryResult> ExecuteLanguageAsync(
-        Func<DatabaseHandle, string, nint> nativeMethod,
+        Func<DatabaseHandle, string, ResultHandle> nativeMethod,
         string query,
         CancellationToken ct)
     {
@@ -1135,7 +1127,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         {
             ct.ThrowIfCancellationRequested();
             var resultPtr = nativeMethod(h, query);
-            if (resultPtr == nint.Zero)
+            if (resultPtr.IsInvalid)
                 throw GrafeoException.FromLastError(GrafeoStatus.Query);
             return BuildResult(resultPtr);
         }, ct);
@@ -1151,9 +1143,18 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         }
     }
 
+    /// <summary>The message of every call on a disposed database (GRAFEO-T007).</summary>
+    internal const string ClosedMessage = "GRAFEO-T007: the database is closed: open it again";
+
+    /// <summary>
+    /// Every call after <see cref="Dispose"/> throws <see cref="ObjectDisposedException"/>, as the
+    /// .NET contract asks, with the GRAFEO-T007 text; what the database handed out throws a
+    /// <see cref="GrafeoException"/> with GRAFEO-T007 from the native layer.
+    /// </summary>
     private void ThrowIfDisposed()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_disposed)
+            throw new ObjectDisposedException(nameof(GrafeoDB), ClosedMessage);
     }
 
     /// <summary>Parse a string isolation level name to the integer value expected by the C API.</summary>
@@ -1170,7 +1171,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         };
 
     /// <summary>Parse a native result pointer into a QueryResult, then free the native result.</summary>
-    internal static QueryResult BuildResult(nint resultPtr)
+    internal static QueryResult BuildResult(ResultHandle resultPtr)
     {
         try
         {
@@ -1180,8 +1181,11 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
             var rowsScanned = (long)NativeMethods.grafeo_result_rows_scanned(resultPtr);
 
             var rows = ValueConverter.ParseRows(json);
-            var columns = ValueConverter.ExtractColumns(rows);
-            var (nodes, edges) = ValueConverter.ExtractEntities(rows);
+            var columns = ValueConverter.ParseStringArray(
+                Marshal.PtrToStringUTF8(NativeMethods.grafeo_result_columns_json(resultPtr)) ?? "[]");
+            var (nodes, edges) = ValueConverter.ParseEntities(
+                Marshal.PtrToStringUTF8(NativeMethods.grafeo_result_nodes_json(resultPtr)) ?? "[]",
+                Marshal.PtrToStringUTF8(NativeMethods.grafeo_result_edges_json(resultPtr)) ?? "[]");
 
             return new QueryResult(columns, rows, nodes, edges, executionTimeMs, rowsScanned)
             {
@@ -1203,7 +1207,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         }
         finally
         {
-            NativeMethods.grafeo_free_result(resultPtr);
+            resultPtr.Dispose();
         }
     }
 
@@ -1226,7 +1230,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     }
 
     /// <summary>Read a node from a native GrafeoNode pointer.</summary>
-    internal static Node ReadNode(nint nodePtr)
+    internal static Node ReadNode(NodeHandle nodePtr)
     {
         var id = (long)NativeMethods.grafeo_node_id(nodePtr);
         var labelsJsonPtr = NativeMethods.grafeo_node_labels_json(nodePtr);
@@ -1241,7 +1245,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     }
 
     /// <summary>Read an edge from a native GrafeoEdge pointer.</summary>
-    internal static Edge ReadEdge(nint edgePtr)
+    internal static Edge ReadEdge(EdgeHandle edgePtr)
     {
         var id = (long)NativeMethods.grafeo_edge_id(edgePtr);
         var sourceId = (long)NativeMethods.grafeo_edge_source_id(edgePtr);

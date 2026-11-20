@@ -1,0 +1,206 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/delete/Delete5.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Delete5"
+  title: "Delete5 - Delete clause interoperation with built-in data types"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Delete node from a list
+  - name: s1_delete_node_from_a_list
+    xfail:
+      spec: "openCypher TCK 2024.3 Delete5: [1] Delete node from a list"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        CREATE (u:User)
+        CREATE (u)-[:FRIEND]->()
+        CREATE (u)-[:FRIEND]->()
+        CREATE (u)-[:FRIEND]->()
+        CREATE (u)-[:FRIEND]->()
+    params:
+      friendIndex: 1
+    query: |
+      MATCH (:User)-[:FRIEND]->(n)
+      WITH collect(n) AS friends
+      DETACH DELETE friends[$friendIndex]
+    expect:
+      empty: true
+      side_effects:
+        -nodes: 1
+        -relationships: 1
+
+  # [2] Delete relationship from a list
+  - name: s2_delete_relationship_from_a_list
+    xfail:
+      spec: "openCypher TCK 2024.3 Delete5: [2] Delete relationship from a list"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        CREATE (u:User)
+        CREATE (u)-[:FRIEND]->()
+        CREATE (u)-[:FRIEND]->()
+        CREATE (u)-[:FRIEND]->()
+        CREATE (u)-[:FRIEND]->()
+    params:
+      friendIndex: 1
+    query: |
+      MATCH (:User)-[r:FRIEND]->()
+      WITH collect(r) AS friendships
+      DETACH DELETE friendships[$friendIndex]
+    expect:
+      empty: true
+      side_effects:
+        -relationships: 1
+
+  # [3] Delete nodes from a map
+  - name: s3_delete_nodes_from_a_map
+    xfail:
+      spec: "openCypher TCK 2024.3 Delete5: [3] Delete nodes from a map"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        CREATE (:User), (:User)
+    query: |
+      MATCH (u:User)
+      WITH {key: u} AS nodes
+      DELETE nodes.key
+    expect:
+      empty: true
+      side_effects:
+        -nodes: 2
+        -labels: 1
+
+  # [4] Delete relationships from a map
+  - name: s4_delete_relationships_from_a_map
+    xfail:
+      spec: "openCypher TCK 2024.3 Delete5: [4] Delete relationships from a map"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        CREATE (a:User), (b:User)
+        CREATE (a)-[:R]->(b)
+        CREATE (b)-[:R]->(a)
+    query: |
+      MATCH (:User)-[r]->(:User)
+      WITH {key: r} AS rels
+      DELETE rels.key
+    expect:
+      empty: true
+      side_effects:
+        -relationships: 2
+
+  # [5] Detach delete nodes from nested map/list
+  - name: s5_detach_delete_nodes_from_nested_map_list
+    xfail:
+      spec: "openCypher TCK 2024.3 Delete5: [5] Detach delete nodes from nested map/list"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        CREATE (a:User), (b:User)
+        CREATE (a)-[:R]->(b)
+        CREATE (b)-[:R]->(a)
+    query: |
+      MATCH (u:User)
+      WITH {key: collect(u)} AS nodeMap
+      DETACH DELETE nodeMap.key[0]
+    expect:
+      empty: true
+      side_effects:
+        -nodes: 1
+        -relationships: 2
+
+  # [6] Delete relationships from nested map/list
+  - name: s6_delete_relationships_from_nested_map_list
+    xfail:
+      spec: "openCypher TCK 2024.3 Delete5: [6] Delete relationships from nested map/list"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        CREATE (a:User), (b:User)
+        CREATE (a)-[:R]->(b)
+        CREATE (b)-[:R]->(a)
+    query: |
+      MATCH (:User)-[r]->(:User)
+      WITH {key: {key: collect(r)}} AS rels
+      DELETE rels.key.key[0]
+    expect:
+      empty: true
+      side_effects:
+        -relationships: 1
+
+  # [7] Delete paths from nested map/list
+  - name: s7_delete_paths_from_nested_map_list
+    xfail:
+      spec: "openCypher TCK 2024.3 Delete5: [7] Delete paths from nested map/list"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        CREATE (a:User), (b:User)
+        CREATE (a)-[:R]->(b)
+        CREATE (b)-[:R]->(a)
+    query: |
+      MATCH p = (:User)-[r]->(:User)
+      WITH {key: collect(p)} AS pathColls
+      DELETE pathColls.key[0], pathColls.key[1]
+    expect:
+      empty: true
+      side_effects:
+        -nodes: 2
+        -relationships: 2
+        -labels: 1
+
+  # [8] Failing when using undefined variable in DELETE
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_failing_when_using_undefined_variable_in_delete
+    query: |
+      MATCH (a)
+      DELETE x
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [9] Failing when deleting an integer expression
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s9_failing_when_deleting_an_integer_expression
+    query: |
+      MATCH ()
+      DELETE 1 + 1
+    expect:
+      gql_status: "42"
+      side_effects: {}

@@ -1,6 +1,7 @@
-//! The operator memory of builds with spilling: one statement's cap
+//! The operator memory, in every build: one statement's cap
 //! ([`QueryMemory`]), the grants its operators take under it and the buffer
-//! manager's limit, and the memory consumers of the operators that spill.
+//! manager's limit, and (with spilling) the memory consumers of the operators
+//! that spill.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -269,6 +270,17 @@ impl OperatorMemory {
         }
     }
 
+    /// Gives back the grant above what it counts or `at_least`, whichever is
+    /// more (kept to a whole step), so the operators after it can take that
+    /// room: a merge between batches, whose rows went on to them, keeping the
+    /// room its plan promised. It never grows the grant.
+    pub fn trim_to(&mut self, at_least: usize) {
+        if let Some(counted) = &mut self.counted {
+            let keep = counted.bytes.max(at_least);
+            counted.ctx.shrink(&mut counted.grant, keep);
+        }
+    }
+
     /// The bytes its grant holds (0 when it counts nothing).
     #[must_use]
     pub fn granted(&self) -> usize {
@@ -304,6 +316,7 @@ pub struct OperatorMemoryContext {
     buffer_manager: Arc<BufferManager>,
     /// Per-query spill manager for creating spill files (`None`: this open
     /// has no spill path, so its operators cannot spill).
+    #[cfg(feature = "spill")]
     spill_manager: Option<Arc<crate::execution::spill::SpillManager>>,
     /// The statement's memory, shared by its operators.
     query: Arc<QueryMemory>,
@@ -312,18 +325,30 @@ pub struct OperatorMemoryContext {
 impl OperatorMemoryContext {
     /// Creates the context of one statement, capped by the buffer manager's
     /// budget until [`with_query_limit`](Self::with_query_limit) sets a lower
-    /// cap.
+    /// cap. Its operators cannot spill until
+    /// [`with_spill_manager`](Self::with_spill_manager) gives it a spill
+    /// manager.
     #[must_use]
-    pub fn new(
-        buffer_manager: Arc<BufferManager>,
-        spill_manager: Option<Arc<crate::execution::spill::SpillManager>>,
-    ) -> Self {
+    pub fn new(buffer_manager: Arc<BufferManager>) -> Self {
         let query = QueryMemory::new(buffer_manager.budget(), buffer_manager.grant_step());
         Self {
             buffer_manager,
-            spill_manager,
+            #[cfg(feature = "spill")]
+            spill_manager: None,
             query,
         }
+    }
+
+    /// Sets the per-query spill manager the statement's operators spill
+    /// through (`None`: the open has no spill path, so they cannot spill).
+    #[cfg(feature = "spill")]
+    #[must_use]
+    pub fn with_spill_manager(
+        mut self,
+        spill_manager: Option<Arc<crate::execution::spill::SpillManager>>,
+    ) -> Self {
+        self.spill_manager = spill_manager;
+        self
     }
 
     /// Sets the query memory limit this statement's operators are bounded by
@@ -402,6 +427,25 @@ impl OperatorMemoryContext {
         Ok(())
     }
 
+    /// Gives back what `grant` holds above `keep` bytes, rounded up to the
+    /// step its grants grow by, to the statement's cap and the buffer manager.
+    pub fn shrink(&self, grant: &mut OperatorGrant, keep: usize) {
+        let keep = keep
+            .checked_next_multiple_of(self.query.step)
+            .unwrap_or(keep);
+        let extra = grant.held.saturating_sub(keep);
+        if extra == 0 {
+            return;
+        }
+        if let Some(held) = &mut grant.grant {
+            held.shrink(extra);
+        }
+        if let Some(query) = &grant.query {
+            query.give_back(extra);
+        }
+        grant.held -= extra;
+    }
+
     /// Gives back what `grant` holds, to the statement's cap and the buffer
     /// manager (after a spill, or at the end).
     pub fn release(&self, grant: &mut OperatorGrant) {
@@ -456,6 +500,7 @@ impl OperatorMemoryContext {
     }
 
     /// Returns the spill manager, when this open has a spill path.
+    #[cfg(feature = "spill")]
     #[must_use]
     pub fn spill_manager(&self) -> Option<&Arc<crate::execution::spill::SpillManager>> {
         self.spill_manager.as_ref()

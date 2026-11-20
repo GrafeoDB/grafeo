@@ -13,7 +13,7 @@ use grafeo_common::types::Value;
 #[must_use]
 pub fn matches_filter(node_value: &Value, filter_value: &Value) -> bool {
     match filter_value {
-        Value::Map(ops) if ops.keys().any(|k| k.as_str().starts_with('$')) => {
+        Value::Map(ops) if is_operator_map(filter_value) => {
             ops.iter().all(|(op_key, op_val)| match op_key.as_str() {
                 "$gt" => compare_values(node_value, op_val) == Some(Ordering::Greater),
                 "$gte" => matches!(
@@ -45,6 +45,82 @@ pub fn matches_filter(node_value: &Value, filter_value: &Value) -> bool {
     }
 }
 
+/// The operators a filter map may hold.
+const OPERATORS: [&str; 8] = [
+    "$gt",
+    "$gte",
+    "$lt",
+    "$lte",
+    "$ne",
+    "$in",
+    "$nin",
+    "$contains",
+];
+
+/// Whether `filter_value` is a map of `$`-prefixed operators, not a value to
+/// equal.
+#[must_use]
+pub fn is_operator_map(filter_value: &Value) -> bool {
+    matches!(filter_value, Value::Map(ops) if ops.keys().any(|k| k.as_str().starts_with('$')))
+}
+
+/// Why the filter `filter_value` on the property `key` is refused, or `None`
+/// when it is well formed: a null value (no value equals null; `$ne` keeps
+/// the nodes without the property), an unknown operator, `$in` or `$nin`
+/// without a list, `$contains` without a string. A search checks its filters
+/// once, before it runs.
+#[must_use]
+pub fn filter_problem(key: &str, filter_value: &Value) -> Option<String> {
+    let null = || {
+        Some(format!(
+            "the filter on `{key}` compares with null, which no value equals; to keep the nodes without `{key}`, use `$ne`"
+        ))
+    };
+    let Value::Map(ops) = filter_value else {
+        return if filter_value.is_null() { null() } else { None };
+    };
+    if !is_operator_map(filter_value) {
+        return None;
+    }
+    for (op, operand) in ops.iter() {
+        let op = op.as_str();
+        if !OPERATORS.contains(&op) {
+            return Some(format!(
+                "the filter on `{key}` uses `{op}`, which is not an operator (they are {})",
+                OPERATORS.join(", ")
+            ));
+        }
+        match (op, operand) {
+            (_, Value::Null) => return null(),
+            ("$in" | "$nin", Value::List(items)) if items.iter().any(Value::is_null) => {
+                return null();
+            }
+            ("$in" | "$nin", Value::List(_)) | ("$contains", Value::String(_)) => {}
+            ("$in" | "$nin", _) => {
+                return Some(format!("the filter on `{key}`: `{op}` takes a list"));
+            }
+            ("$contains", _) => {
+                return Some(format!("the filter on `{key}`: `$contains` takes a string"));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether the filter `filter_value` keeps a node without the property: only
+/// a map whose every operator is `$ne` or `$nin` does ("not equal to true"
+/// holds for a missing flag); equality and the other operators need a value.
+#[must_use]
+pub fn keeps_missing(filter_value: &Value) -> bool {
+    match filter_value {
+        Value::Map(ops) if is_operator_map(filter_value) => {
+            ops.keys().all(|op| matches!(op.as_str(), "$ne" | "$nin"))
+        }
+        _ => false,
+    }
+}
+
 /// Orders two values for a filter (numbers across their types).
 fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
     match (a, b) {
@@ -73,7 +149,7 @@ fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
 mod tests {
     use grafeo_common::types::{PropertyKey, Value};
 
-    use super::matches_filter;
+    use super::{filter_problem, keeps_missing, matches_filter};
 
     fn operators(pairs: &[(&str, Value)]) -> Value {
         Value::Map(std::sync::Arc::new(
@@ -107,5 +183,63 @@ mod tests {
             &Value::from(1),
             &operators(&[("$near", Value::from(1))])
         ));
+    }
+
+    /// Only `$ne` and `$nin`, alone or together, keep a node without the
+    /// property.
+    #[test]
+    fn only_ne_and_nin_keep_a_node_without_the_value() {
+        let yes = Value::Bool(true);
+        let list = Value::List(vec![yes.clone()].into());
+        assert!(keeps_missing(&operators(&[("$ne", yes.clone())])));
+        assert!(keeps_missing(&operators(&[("$nin", list.clone())])));
+        assert!(keeps_missing(&operators(&[
+            ("$ne", yes.clone()),
+            ("$nin", list.clone())
+        ])));
+        assert!(!keeps_missing(&operators(&[
+            ("$ne", yes.clone()),
+            ("$in", list)
+        ])));
+        assert!(!keeps_missing(&operators(&[("$gt", Value::from(1))])));
+        assert!(!keeps_missing(&yes));
+    }
+
+    /// Nulls and malformed operators are refused with a reason naming the
+    /// key, and `$ne` or the operator; well-formed filters pass.
+    #[test]
+    fn nulls_and_malformed_operators_are_refused_by_name() {
+        let refused = |value: &Value, also: &str| {
+            let problem = filter_problem("deleted", value).expect("refused");
+            assert!(
+                problem.contains("deleted") && problem.contains(also),
+                "{problem}"
+            );
+        };
+        let null = Value::Null;
+        refused(&null, "$ne");
+        refused(&operators(&[("$ne", null.clone())]), "$ne");
+        refused(&operators(&[("$gt", null.clone())]), "$ne");
+        refused(
+            &operators(&[("$in", Value::List(vec![null.clone()].into()))]),
+            "$ne",
+        );
+        refused(
+            &operators(&[("$nin", Value::List(vec![Value::from(1), null].into()))]),
+            "$ne",
+        );
+        refused(&operators(&[("$near", Value::from(1))]), "$near");
+        refused(&operators(&[("$in", Value::from(1))]), "$in");
+        refused(&operators(&[("$nin", Value::from("x"))]), "$nin");
+        refused(&operators(&[("$contains", Value::from(5))]), "$contains");
+        for fine in [
+            Value::Bool(false),
+            operators(&[("$ne", Value::Bool(true))]),
+            operators(&[("$gte", Value::from(3)), ("$lt", Value::from(19.5))]),
+            operators(&[("$nin", Value::List(vec![Value::Bool(true)].into()))]),
+            operators(&[("$contains", Value::from("castle"))]),
+        ] {
+            assert_eq!(filter_problem("deleted", &fine), None, "{fine:?}");
+        }
     }
 }

@@ -41,7 +41,7 @@ def test_vectors_shape():
 def test_scripts_are_text():
     assert sv.gql().lstrip().startswith("INSERT")
     assert "richard-hendricks" in sv.cypher()
-    assert "https://grafeo.dev/datasets/silicon-valley/" in sv.turtle()
+    assert "https://docs.grafeo.dev/datasets/silicon-valley/" in sv.turtle()
 
 
 def grafeo_db():
@@ -95,6 +95,11 @@ def test_load_with_vectors_searches():
 
 
 def test_wheel_contains_exactly_the_expected_files(tmp_path):
+    # Against an installed wheel (a release check in a fresh venv) there is nothing to build.
+    if not (PACKAGE / "pyproject.toml").is_file() or not importlib.util.find_spec(
+        "build"
+    ):
+        pytest.skip("needs the package source and the build module")
     command = [sys.executable, "-m", "build", "--wheel", "--outdir", str(tmp_path)]
     # Without network, build in the current environment when it has the build tools.
     if importlib.util.find_spec("hatchling") and importlib.util.find_spec("build"):

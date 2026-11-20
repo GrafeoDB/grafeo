@@ -14,7 +14,7 @@ GQL supports variable-length paths for traversing the graph.
 
 ```sql
 -- One or more hops
-MATCH (a:Person)-[:KNOWS*]->(b:Person)
+MATCH TRAIL (a:Person)-[:KNOWS*]->(b:Person)
 RETURN a.name, b.name
 
 -- Exactly 2 hops
@@ -30,7 +30,7 @@ MATCH (a:Person)-[:KNOWS*..5]->(b:Person)
 RETURN a.name, b.name
 
 -- At least 2 hops
-MATCH (a:Person)-[:KNOWS*2..]->(b:Person)
+MATCH TRAIL (a:Person)-[:KNOWS*2..]->(b:Person)
 RETURN a.name, b.name
 ```
 
@@ -38,12 +38,12 @@ RETURN a.name, b.name
 
 ```sql
 -- Capture the path
-MATCH path = (a:Person)-[:KNOWS*]->(b:Person)
+MATCH path = TRAIL (a:Person)-[:KNOWS*]->(b:Person)
 WHERE a.name = 'Alix' AND b.name = 'Dave'
 RETURN path
 
 -- Path length
-MATCH path = (a:Person)-[:KNOWS*]->(b:Person)
+MATCH path = TRAIL (a:Person)-[:KNOWS*]->(b:Person)
 WHERE a.name = 'Alix'
 RETURN b.name, length(path) AS distance
 ORDER BY distance
@@ -75,13 +75,13 @@ RETURN path
 
 ```sql
 -- Filter paths by node properties
-MATCH path = (a:Person)-[:KNOWS*]->(b:Person)
+MATCH path = TRAIL (a:Person)-[:KNOWS*]->(b:Person)
 WHERE a.name = 'Alix'
   AND all(n IN nodes(path) WHERE n.active = true)
 RETURN path
 
 -- Filter by relationship properties
-MATCH path = (a:Person)-[:KNOWS*]->(b:Person)
+MATCH path = TRAIL (a:Person)-[:KNOWS*]->(b:Person)
 WHERE a.name = 'Alix'
   AND all(r IN relationships(path) WHERE r.strength > 0.5)
 RETURN path
@@ -114,11 +114,11 @@ RETURN a.name, b.name
 
 ## Path Modes
 
-Path modes restrict which traversals are valid. Place the mode keyword after the path variable, as below, or after `MATCH` for every pattern of the clause.
+Path modes restrict which traversals are valid. Place the mode keyword after the path variable, as below, or after `MATCH` for every pattern of the clause. A walk can go round a cycle without end, so an unbounded quantifier needs a mode other than `WALK` or a selector (see [Unbounded quantifiers](patterns.md#unbounded-quantifiers-need-a-mode-or-a-selector)); a `WALK` takes an upper bound.
 
 ```sql
--- WALK (default): repeated nodes and edges allowed
-MATCH path = WALK (a:Person)-[:KNOWS*]->(b:Person)
+-- WALK (default): repeated nodes and edges allowed, up to an upper bound
+MATCH path = WALK (a:Person)-[:KNOWS*1..5]->(b:Person)
 WHERE a.name = 'Alix'
 RETURN b.name, length(path)
 
@@ -140,7 +140,7 @@ RETURN b.name, length(path)
 
 Use path modes to control traversal behavior in cyclic graphs. `ACYCLIC` prevents infinite loops, while `TRAIL` allows revisiting nodes but not edges.
 
-An unbounded `WALK` (`-[:KNOWS*]->`) returns every walk on a graph without a cycle, whatever its length. Around a cycle its walks never end: it fails once the path search reaches its memory budget, with an error that says to bound the quantifier or use `TRAIL`, `ACYCLIC` or `ANY SHORTEST`.
+An unbounded `WALK` (`-[:KNOWS*]->` without a path mode or selector) is refused with `42001` before it runs: around a cycle its walks never end, so ISO GQL requires an upper bound, a path mode such as `TRAIL` or `ACYCLIC`, or a selector such as `ANY SHORTEST` (see [Unbounded quantifiers](patterns.md#unbounded-quantifiers-need-a-mode-or-a-selector)). A bounded walk (`-[:KNOWS*1..5]->`) returns every walk within its bounds.
 
 ### Path Mode Inside Parenthesized Patterns (G049)
 
@@ -172,7 +172,8 @@ RETURN a.name, b.name
 
 The `WHERE` holds for each step of the path, in every direction and path mode, also a condition on the step's
 nodes (`a.x < b.x`). The node patterns around the quantified pattern (`(s)(...){1,3}(t)`) and its own end nodes
-both hold, and `+` and `*` are accepted after a parenthesized pattern.
+both hold, and `+` and `*` are accepted after a parenthesized pattern, with a path mode or selector
+(see [Unbounded quantifiers](patterns.md#unbounded-quantifiers-need-a-mode-or-a-selector)).
 
 A parenthesized pattern of more than one edge repeats as a whole within its bounds:
 `((a)-[e1]->(m)-[e2]->(b)){1,3}` matches 1 to 3 repetitions of the segment, its `WHERE` holds for each repetition,
@@ -231,7 +232,7 @@ RETURN [n IN nodes(path) | n.name] AS stops, [x IN r | x.km] AS legs
 Test structural properties of a captured path:
 
 ```sql
-MATCH path = (a:Person)-[:KNOWS*]->(b:Person)
+MATCH path = TRAIL (a:Person)-[:KNOWS*]->(b:Person)
 WHERE a.name = 'Alix'
 RETURN
     b.name,
@@ -241,7 +242,7 @@ RETURN
     isTrail(path) AS trail
 
 -- Filter: only acyclic paths
-MATCH path = (a:Person)-[:KNOWS*]->(b:Person)
+MATCH path = TRAIL (a:Person)-[:KNOWS*]->(b:Person)
 WHERE a.name = 'Alix' AND isAcyclic(path)
 RETURN b.name, length(path)
 ```

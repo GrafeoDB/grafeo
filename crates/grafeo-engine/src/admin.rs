@@ -285,7 +285,7 @@ impl LpgSchemaInfo {
 }
 
 /// Schema information for RDF databases.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct RdfSchemaInfo {
     /// All predicates used in the database.
@@ -340,7 +340,7 @@ pub struct IndexInfo {
 }
 
 /// WAL (Write-Ahead Log) status.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct WalStatus {
     /// Whether WAL is enabled.

@@ -407,7 +407,7 @@ impl QueryProcessor {
             && optimized_plan.root.has_mutations()
             && self.write_store.is_some()
         {
-            let transaction = self.transaction_manager.begin();
+            let transaction = self.transaction_manager.begin_statement();
             let epoch = self
                 .transaction_manager
                 .start_epoch(transaction)
@@ -446,6 +446,11 @@ impl QueryProcessor {
         let _pin = context
             .is_none()
             .then(|| self.transaction_manager.pin_read());
+        // In a caller's transaction the statement reads at its snapshot, held for its run:
+        // `GRAFEO-T012` once the snapshot expired.
+        let _read = context
+            .map(|(_, transaction_id)| self.transaction_manager.read_in(transaction_id))
+            .transpose()?;
         let planner = if let Some((epoch, transaction_id)) = context {
             Planner::with_context(
                 Arc::clone(&self.graph_store),
@@ -1043,6 +1048,7 @@ pub(crate) fn explain_result(
     QueryResult {
         columns: vec!["plan".to_string()],
         column_types: vec![grafeo_common::types::LogicalType::String],
+        type_runs: Vec::new(),
         rows: vec![vec![Value::String(tree_text.into())]],
         execution_time_ms: None,
         rows_scanned: None,
@@ -1071,6 +1077,7 @@ pub(crate) fn physical_explain_result(
     Ok(QueryResult {
         columns: vec!["plan".to_string()],
         column_types: vec![grafeo_common::types::LogicalType::String],
+        type_runs: Vec::new(),
         rows: vec![vec![Value::String(output.into())]],
         execution_time_ms: None,
         rows_scanned: None,
@@ -1280,9 +1287,13 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &Substitution<'_>) -
                 }
             }
             for agg_expr in &mut agg.aggregates {
-                for expr in [&mut agg_expr.expression, &mut agg_expr.expression2]
-                    .into_iter()
-                    .flatten()
+                for expr in [
+                    &mut agg_expr.expression,
+                    &mut agg_expr.expression2,
+                    &mut agg_expr.percentile,
+                ]
+                .into_iter()
+                .flatten()
                 {
                     substitute_in_expression(expr, params)?;
                 }
@@ -1434,6 +1445,9 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &Substitution<'_>) -
         | LogicalOperator::MoveGraph(_)
         | LogicalOperator::AddGraph(_) => {}
         LogicalOperator::HorizontalAggregate(op) => {
+            if let Some(percentile) = &mut op.percentile {
+                substitute_in_expression(percentile, params)?;
+            }
             substitute_in_operator(&mut op.input, params)?;
         }
         LogicalOperator::Empty => {}

@@ -20,3 +20,4 @@ mod rdf_store_concurrency;
 mod rdf_store_term_lookups;
 mod rdf_tests;
 mod spill_account;
+mod spilled_sort_reads_back;

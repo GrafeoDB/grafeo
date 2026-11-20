@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use grafeo_common::types::{EdgeId, EpochId, NodeId, Timestamp};
 use grafeo_engine::{AsOfView, Config, GrafeoDB, HistoryRetention, TimePoint};
-use parking_lot::RwLock;
 
 use crate::database::{build_result, edge_out, node_out};
 use crate::error::{GrafeoStatus, set_error, set_last_error, str_from_ptr};
@@ -36,8 +35,8 @@ pub const GRAFEO_HISTORY_DURATION: i32 = 2;
 /// Opaque read-only view of the database as of a past epoch. Created by
 /// `grafeo_as_of`, freed by `grafeo_free_as_of`.
 pub struct GrafeoAsOf {
-    /// Keeps the database open while the view lives.
-    _db: std::sync::Arc<RwLock<GrafeoDB>>,
+    /// The database the view reads; every call fails with `GRAFEO-T007` once it is closed.
+    db: crate::types::SharedDb,
     view: AsOfView,
 }
 
@@ -106,7 +105,7 @@ pub extern "C" fn grafeo_open_with_history(
     };
     match GrafeoDB::with_config(config.with_history_retention(retention)) {
         Ok(db) => Box::into_raw(Box::new(GrafeoDatabase {
-            inner: std::sync::Arc::new(RwLock::new(db)),
+            inner: crate::types::SharedDb::new(db),
         })),
         Err(e) => {
             set_error(&e);
@@ -118,13 +117,9 @@ pub extern "C" fn grafeo_open_with_history(
 /// The epoch of the last commit (0 for a NULL database).
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_current_epoch(db: *mut GrafeoDatabase) -> u64 {
-    if db.is_null() {
-        set_last_error("Null database pointer");
-        return 0;
-    }
-    // SAFETY: Caller guarantees ptr from grafeo_open* and not yet freed.
-    let db = unsafe { &*db };
-    db.inner.read().current_epoch().as_u64()
+    crate::error::grafeo_clear_error();
+    let db = db_ref_or!(db, 0);
+    or_fail!(db.inner.read(), 0).current_epoch().as_u64()
 }
 
 /// Writes to `epoch_out` the epoch a read as of the point (`point_kind`,
@@ -146,7 +141,7 @@ pub extern "C" fn grafeo_epoch_as_of(
     };
     // SAFETY: Caller guarantees ptr from grafeo_open* and not yet freed.
     let db = unsafe { &*db };
-    match db.inner.read().epoch_as_of(point) {
+    match or_fail!(db.inner.read()).epoch_as_of(point) {
         Ok(epoch) => {
             // SAFETY: Caller guarantees `epoch_out` points to a u64.
             unsafe { *epoch_out = epoch.as_u64() };
@@ -182,7 +177,7 @@ pub extern "C" fn grafeo_execute_as_of(
     };
     // SAFETY: Caller guarantees ptr from grafeo_open* and not yet freed.
     let db = unsafe { &*db };
-    let guard = db.inner.read();
+    let guard = or_fail!(db.inner.read(), std::ptr::null_mut());
     let result = guard.epoch_as_of(point).and_then(|epoch| {
         guard
             .session()
@@ -216,10 +211,10 @@ pub extern "C" fn grafeo_as_of(
     };
     // SAFETY: Caller guarantees ptr from grafeo_open* and not yet freed.
     let db = unsafe { &*db };
-    let view = db.inner.read().as_of(point);
+    let view = or_fail!(db.inner.read(), std::ptr::null_mut()).as_of(point);
     match view {
         Ok(view) => Box::into_raw(Box::new(GrafeoAsOf {
-            _db: std::sync::Arc::clone(&db.inner),
+            db: or_fail!(db.inner.share(), std::ptr::null_mut()),
             view,
         })),
         Err(e) => {
@@ -232,12 +227,15 @@ pub extern "C" fn grafeo_as_of(
 /// The epoch a view reads at (0 for a NULL view).
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_as_of_epoch(view: *const GrafeoAsOf) -> u64 {
+    crate::error::grafeo_clear_error();
     if view.is_null() {
         set_last_error("Null view pointer");
         return 0;
     }
     // SAFETY: Caller guarantees ptr from grafeo_as_of and not yet freed.
-    unsafe { &*view }.view.epoch().as_u64()
+    let view = unsafe { &*view };
+    drop(or_fail!(view.db.read(), 0));
+    view.view.epoch().as_u64()
 }
 
 /// Runs a GQL query with `params_json` (a JSON object, or NULL) at the
@@ -257,7 +255,9 @@ pub extern "C" fn grafeo_as_of_execute(
         return std::ptr::null_mut();
     };
     // SAFETY: Caller guarantees ptr from grafeo_as_of and not yet freed.
-    let view = &unsafe { &*view }.view;
+    let view = unsafe { &*view };
+    drop(or_fail!(view.db.read(), std::ptr::null_mut()));
+    let view = &view.view;
     let Ok(params) = parse_params(params_json) else {
         return std::ptr::null_mut();
     };
@@ -288,7 +288,9 @@ pub extern "C" fn grafeo_as_of_get_node(
         return GrafeoStatus::ErrorNullPointer;
     }
     // SAFETY: Caller guarantees ptr from grafeo_as_of and not yet freed.
-    let view = &unsafe { &*view }.view;
+    let view = unsafe { &*view };
+    drop(or_fail!(view.db.read()));
+    let view = &view.view;
     match view.get_node(NodeId::new(id)) {
         Ok(node) => node_out(node, out),
         Err(err) => set_error(&err),
@@ -309,7 +311,9 @@ pub extern "C" fn grafeo_as_of_get_edge(
         return GrafeoStatus::ErrorNullPointer;
     }
     // SAFETY: Caller guarantees ptr from grafeo_as_of and not yet freed.
-    let view = &unsafe { &*view }.view;
+    let view = unsafe { &*view };
+    drop(or_fail!(view.db.read()));
+    let view = &view.view;
     match view.get_edge(EdgeId(id)) {
         Ok(edge) => edge_out(edge, out),
         Err(err) => set_error(&err),
@@ -339,7 +343,9 @@ pub extern "C" fn grafeo_as_of_get_node_property(
         Err(status) => return status,
     };
     // SAFETY: Caller guarantees ptr from grafeo_as_of and not yet freed.
-    let view = &unsafe { &*view }.view;
+    let view = unsafe { &*view };
+    drop(or_fail!(view.db.read()));
+    let view = &view.view;
     match view.get_node_property(NodeId::new(id), key) {
         Ok(Some(value)) => {
             let json = match value_to_json(&value) {

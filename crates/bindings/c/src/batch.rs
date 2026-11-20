@@ -158,11 +158,7 @@ pub extern "C" fn grafeo_batch_create_nodes_with_props(
         Err(status) => return status,
     };
     let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-    match db
-        .inner
-        .read()
-        .batch_create_nodes_with_labels(&label_refs, rows)
-    {
+    match or_fail!(db.inner.read()).batch_create_nodes_with_labels(&label_refs, rows) {
         Ok(ids) => write_ids(
             ids.iter().map(|id| id.as_u64()).collect(),
             out_ids,
@@ -211,7 +207,7 @@ pub extern "C" fn grafeo_batch_create_edges(
         Ok(edges) => edges,
         Err(status) => return status,
     };
-    match db.inner.read().batch_create_edges(edges) {
+    match or_fail!(db.inner.read()).batch_create_edges(edges) {
         Ok(ids) => write_ids(
             ids.iter().map(|id| id.as_u64()).collect(),
             out_ids,
@@ -281,11 +277,14 @@ pub extern "C" fn grafeo_batch_vector_search(
         }
     };
     let ef = (ef > 0).then_some(ef);
-    match db
-        .inner
-        .read()
-        .batch_vector_search(label, property, &vectors, k, ef, filters.as_ref())
-    {
+    match or_fail!(db.inner.read()).batch_vector_search(
+        label,
+        property,
+        &vectors,
+        k,
+        ef,
+        filters.as_ref(),
+    ) {
         Ok(results) => {
             let json = serde_json::Value::Array(
                 results

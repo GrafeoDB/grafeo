@@ -1,6 +1,6 @@
 //! Async spill file management (moved from grafeo-core to keep grafeo-core free of tokio).
 //!
-//! The sync spill infrastructure (`SpillManager`, `SpillFile`, `ExternalSort`)
+//! The sync spill infrastructure (`SpillManager`, `SpillFile`, `SortedRuns`)
 //! remains in `grafeo-core::execution::spill`. These async wrappers live here
 //! because they require a tokio runtime.
 //!

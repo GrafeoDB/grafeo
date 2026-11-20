@@ -103,6 +103,13 @@ impl OverlayEntry {
         }
     }
 
+    /// The bytes it keeps for readers at an older snapshot: its changes and
+    /// the partitions it swapped out.
+    #[must_use]
+    pub fn kept_bytes(&self) -> usize {
+        self.bytes + self.retained
+    }
+
     /// The heap bytes `changes` hold that nothing else does, and those of
     /// the partitions they swapped out (see the fields): measured once, when
     /// the entry is made, and again by a walk of the overlay.

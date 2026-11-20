@@ -69,7 +69,7 @@ MATCH (m:Message&!Post)
 MATCH (p:Person WHERE p.age > 30)-[e:KNOWS WHERE e.since > 2020]->(f)
 
 -- Quantifiers after an edge: ->*, -+, {2}, {1,3}, {,2} (0 to 2), {2,}
-MATCH (a:Person)-[:KNOWS]->+(b:Person)
+MATCH TRAIL (a:Person)-[:KNOWS]->+(b:Person)
 
 -- Path search prefixes, path modes and path variables
 MATCH p = ANY SHORTEST (a:Person)-[:KNOWS]->+(b:Person)

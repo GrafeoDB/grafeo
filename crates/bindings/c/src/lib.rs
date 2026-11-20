@@ -17,8 +17,10 @@
 //!
 //! # Thread Safety
 //!
-//! A [`GrafeoDatabase`] handle can be shared across threads. Internally it uses
-//! `Arc<RwLock<GrafeoDB>>` for safe concurrent access.
+//! A [`GrafeoDatabase`] handle can be shared across threads: it holds the
+//! database behind a read-write lock. After `grafeo_close`, every call on it,
+//! and on the graphs, sessions, streams and views it handed out, fails with
+//! `GRAFEO-T007`.
 
 #![allow(unsafe_code)]
 
@@ -27,6 +29,8 @@ mod database;
 mod batch;
 #[cfg(feature = "cdc")]
 mod cdc;
+#[cfg(test)]
+mod close_tests;
 mod edges;
 mod error;
 mod graph;

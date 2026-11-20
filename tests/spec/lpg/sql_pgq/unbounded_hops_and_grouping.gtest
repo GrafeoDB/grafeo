@@ -22,7 +22,7 @@ tests:
   - name: an_unbounded_edge_is_one_or_more_hops
     query: |
       SELECT g.name FROM GRAPH_TABLE (
-        MATCH (a:Person {name: 'Alix'})-[:KNOWS*]->(b:Person)
+        MATCH TRAIL (a:Person {name: 'Alix'})-[:KNOWS*]->(b:Person)
         COLUMNS (b.name AS name)
       ) AS g ORDER BY g.name
     expect:
@@ -34,7 +34,7 @@ tests:
   - name: an_unbounded_edge_reads_as_one_or_more
     query: |
       SELECT g.name FROM GRAPH_TABLE (
-        MATCH (a:Person {name: 'Alix'})-[:KNOWS*1..]->(b:Person)
+        MATCH TRAIL (a:Person {name: 'Alix'})-[:KNOWS*1..]->(b:Person)
         COLUMNS (b.name AS name)
       ) AS g ORDER BY g.name
     expect:
@@ -46,7 +46,7 @@ tests:
   - name: a_lower_bound_only
     query: |
       SELECT g.name FROM GRAPH_TABLE (
-        MATCH (a:Person {name: 'Alix'})-[:KNOWS*2..]->(b:Person)
+        MATCH TRAIL (a:Person {name: 'Alix'})-[:KNOWS*2..]->(b:Person)
         COLUMNS (b.name AS name)
       ) AS g
     expect:
@@ -56,7 +56,7 @@ tests:
   - name: an_unbounded_edge_from_the_end_of_the_chain_finds_nothing
     query: |
       SELECT g.name FROM GRAPH_TABLE (
-        MATCH (a:Person {name: 'Vincent'})-[:KNOWS*]->(b:Person)
+        MATCH TRAIL (a:Person {name: 'Vincent'})-[:KNOWS*]->(b:Person)
         COLUMNS (b.name AS name)
       ) AS g
     expect:

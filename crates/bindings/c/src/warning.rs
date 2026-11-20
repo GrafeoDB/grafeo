@@ -6,6 +6,7 @@ use std::os::raw::c_char;
 
 use grafeo_bindings_common::warning::Warning;
 
+use crate::error::{grafeo_clear_error, set_last_error};
 use crate::stream::GrafeoStream;
 use crate::types::GrafeoResult;
 
@@ -108,23 +109,31 @@ pub extern "C" fn grafeo_result_warning_message(
 /// The number of warnings the stream's statement raised so far, taking
 /// them for `grafeo_stream_warning_code` and the other accessors: its
 /// translation's from the open, its run's as the rows that raise them are
-/// pulled, all of them once the stream is exhausted (0 for NULL).
+/// pulled, all of them once the stream is exhausted (0 for NULL, with the error set).
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_stream_warning_count(stream: *const GrafeoStream) -> usize {
+    grafeo_clear_error();
     if stream.is_null() {
+        set_last_error("Null stream pointer");
         return 0;
     }
     // SAFETY: Caller guarantees stream was produced by grafeo_stream_open.
-    unsafe { &*stream }.take_warnings()
+    let stream = unsafe { &*stream };
+    or_fail!(stream.check(), 0);
+    stream.take_warnings()
 }
 
 /// The `part` of a stream's `index`th warning, as the last count took them.
 fn stream_part(stream: *const GrafeoStream, index: usize, which: Part) -> *const c_char {
+    grafeo_clear_error();
     if stream.is_null() {
+        set_last_error("Null stream pointer");
         return std::ptr::null();
     }
     // SAFETY: Caller guarantees stream was produced by grafeo_stream_open.
-    unsafe { &*stream }.with_warnings(|warnings| part(warnings, index, which))
+    let stream = unsafe { &*stream };
+    or_fail!(stream.check(), std::ptr::null());
+    stream.with_warnings(|warnings| part(warnings, index, which))
 }
 
 /// The code of the `index`th warning `grafeo_stream_warning_count` took;

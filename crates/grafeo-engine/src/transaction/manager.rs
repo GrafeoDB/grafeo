@@ -366,6 +366,8 @@ pub struct TransactionInfo {
     /// Inverses of new claims since the first savepoint or statement mark.
     /// Direct writes and auto-commit transactions never allocate this log.
     claim_undo: Option<Vec<ClaimUndo>>,
+    /// Its snapshot as a reader of the read horizon (see [`SnapshotReader`]).
+    reader: Arc<SnapshotReader>,
 }
 
 /// A claim-log position inside one active transaction.
@@ -388,6 +390,7 @@ impl TransactionInfo {
         isolation_level: IsolationLevel,
         changes: Arc<TransactionChanges>,
         private: bool,
+        reader: Arc<SnapshotReader>,
     ) -> Self {
         Self {
             state: TransactionState::Active,
@@ -405,6 +408,7 @@ impl TransactionInfo {
             rdf_writes: None,
             private,
             claim_undo: None,
+            reader,
         }
     }
 
@@ -428,6 +432,8 @@ impl TransactionInfo {
             rdf_writes: Some(writes),
             private: false,
             claim_undo: None,
+            // A load reads at no snapshot: nothing to hold or release.
+            reader: Arc::new(SnapshotReader::ended(epoch)),
         }
     }
 
@@ -669,6 +675,11 @@ pub struct TransactionManager {
     /// conflict checks of older ones (see `KeptRdfWrites`).
     #[cfg(feature = "triple-store")]
     kept_rdf_bytes: Arc<std::sync::atomic::AtomicUsize>,
+    /// How many bytes of committed state the commits since the oldest open
+    /// transaction's snapshot may replace before that transaction expires
+    /// (see [`set_snapshot_retention_limit`](Self::set_snapshot_retention_limit));
+    /// `u64::MAX` until the database sets it: no bound.
+    snapshot_retention_limit: AtomicU64,
 }
 
 /// The most emptied change sets the manager keeps for new transactions.
@@ -685,10 +696,39 @@ const SPARE_CHANGE_SETS: usize = 16;
 /// nothing).
 #[derive(Debug, Default)]
 struct ReadPins {
-    epochs: Mutex<VecDeque<(u64, usize)>>,
+    epochs: Mutex<Readers>,
     /// What runs once a reader ends, its pin or its transaction (see
     /// [`TransactionManager::on_reader_end`]), with no lock held.
     reader_end: std::sync::OnceLock<ReaderEnd>,
+}
+
+/// The readers by epoch (see [`ReadPins`]), and the ledger the snapshot
+/// retention limit reads: the bytes of committed state every published
+/// commit replaced, the labeled property graph's and the RDF overlay's apart
+/// (a history window keeps the first anyway; the overlay keeps the second for
+/// the readers alone).
+#[derive(Debug, Default)]
+struct Readers {
+    pinned: VecDeque<PinnedEpoch>,
+    replaced: Replaced,
+    /// The newest oldest epoch whose readers the bound expired or warned
+    /// about: no transaction begins at it again, so it is not scanned again.
+    handled_through: Option<u64>,
+}
+
+/// Bytes of committed state replaced, in total since the manager began.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Replaced {
+    lpg: u64,
+    rdf: u64,
+}
+
+/// The readers at one epoch, and the ledger when the first was counted.
+#[derive(Debug)]
+struct PinnedEpoch {
+    epoch: u64,
+    readers: usize,
+    replaced_at: Replaced,
 }
 
 /// The work a reader's end may let go (see `ReadPins::reader_end`).
@@ -712,16 +752,24 @@ impl ReadPins {
     /// and returns that epoch: the read horizon reads the published epoch
     /// under the same lock, so it never passes a reader it has not counted.
     fn hold_published(&self, published: &AtomicU64) -> EpochId {
-        let mut epochs = self.epochs.lock();
+        let mut readers = self.epochs.lock();
         let epoch = published.load(Ordering::Acquire);
-        match epochs.back_mut() {
-            Some((newest, readers)) if *newest == epoch => *readers += 1,
+        let replaced = readers.replaced;
+        match readers.pinned.back_mut() {
+            Some(newest) if newest.epoch == epoch => newest.readers += 1,
             _ => {
                 debug_assert!(
-                    epochs.back().is_none_or(|(newest, _)| *newest < epoch),
+                    readers
+                        .pinned
+                        .back()
+                        .is_none_or(|newest| newest.epoch < epoch),
                     "the published epoch only moves forward"
                 );
-                epochs.push_back((epoch, 1));
+                readers.pinned.push_back(PinnedEpoch {
+                    epoch,
+                    readers: 1,
+                    replaced_at: replaced,
+                });
             }
         }
         EpochId::new(epoch)
@@ -729,29 +777,253 @@ impl ReadPins {
 
     /// Counts a reader at `epoch`, at or before the published epoch, in its
     /// place among the readers (ascending).
-    fn hold_at(epochs: &mut VecDeque<(u64, usize)>, epoch: u64) {
-        match epochs.binary_search_by_key(&epoch, |(at, _)| *at) {
-            Ok(index) => epochs[index].1 += 1,
-            Err(index) => epochs.insert(index, (epoch, 1)),
+    /// A reader counted below the newest epoch takes the ledger of the epoch after it, an
+    /// undercount only for pins that never expire (time-travel reads).
+    fn hold_at(readers: &mut Readers, epoch: u64) {
+        match readers
+            .pinned
+            .binary_search_by_key(&epoch, |pinned| pinned.epoch)
+        {
+            Ok(index) => readers.pinned[index].readers += 1,
+            Err(index) => {
+                let replaced_at = readers
+                    .pinned
+                    .get(index)
+                    .map_or(readers.replaced, |next| next.replaced_at);
+                readers.pinned.insert(
+                    index,
+                    PinnedEpoch {
+                        epoch,
+                        readers: 1,
+                        replaced_at,
+                    },
+                );
+            }
         }
     }
 
     /// Releases one reader at `epoch`.
     fn release(&self, epoch: EpochId) {
-        let mut epochs = self.epochs.lock();
-        if let Ok(index) = epochs.binary_search_by_key(&epoch.as_u64(), |(at, _)| *at) {
-            let readers = &mut epochs[index].1;
-            *readers -= 1;
-            if *readers == 0 {
-                epochs.remove(index);
+        Self::release_in(&mut self.epochs.lock(), epoch);
+    }
+
+    /// Releases one reader at `epoch`, with the lock held.
+    fn release_in(readers: &mut Readers, epoch: EpochId) {
+        if let Ok(index) = readers
+            .pinned
+            .binary_search_by_key(&epoch.as_u64(), |pinned| pinned.epoch)
+        {
+            let pinned = &mut readers.pinned[index];
+            pinned.readers -= 1;
+            if pinned.readers == 0 {
+                readers.pinned.remove(index);
             }
         }
     }
 
     /// The oldest epoch a reader reads at, `None` with no reader.
-    fn oldest(epochs: &VecDeque<(u64, usize)>) -> Option<u64> {
-        epochs.front().map(|(epoch, _)| *epoch)
+    fn oldest(readers: &Readers) -> Option<u64> {
+        readers.pinned.front().map(|pinned| pinned.epoch)
     }
+}
+
+/// A reader that cannot expire (a pin outside a transaction, a private or statement
+/// transaction) holding replaced data past the snapshot retention limit: reported once per
+/// epoch by the commit that crossed it, on its statement's result and to `tracing`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HeldPastLimit {
+    /// The oldest epoch, which only such readers hold.
+    pub(crate) epoch: u64,
+    /// The bytes the commits since it replaced.
+    pub(crate) kept: u64,
+    /// The snapshot retention limit.
+    pub(crate) limit: u64,
+}
+
+impl HeldPastLimit {
+    /// The notice on the result of the statement whose commit crossed the limit.
+    pub(crate) fn query_warning(self) -> grafeo_common::utils::warning::QueryWarning {
+        grafeo_common::utils::warning::QueryWarning::with_message(
+            grafeo_common::utils::warning::Warning::SnapshotHeldPastLimit,
+            self.message(),
+        )
+    }
+
+    /// The notice's text.
+    pub(crate) fn message(self) -> String {
+        let Self { epoch, kept, limit } = self;
+        format!(
+            "a snapshot, view, stream outside a transaction, iterator or export holds epoch              {epoch}, keeping {kept} bytes of replaced data past the snapshot retention limit of              {limit} bytes; drop it when done"
+        )
+    }
+}
+
+/// A transaction's snapshot as a reader of the read horizon: counted from the transaction's
+/// start until it is released, once, when the transaction ends or, once it expired (the
+/// snapshot retention limit, see [`TransactionManager::set_snapshot_retention_limit`]), when
+/// no read of it is in progress.
+#[derive(Debug)]
+pub(crate) struct SnapshotReader {
+    pins: Arc<ReadPins>,
+    epoch: EpochId,
+    /// The reads in progress (low bits), [`EXPIRED`] and [`RELEASED`].
+    state: AtomicU64,
+    /// The bytes replaced since the snapshot when it expired, for its error.
+    kept: AtomicU64,
+    /// The limit when it expired.
+    limit: AtomicU64,
+    /// False for a private transaction (one direct call): it never expires.
+    expirable: bool,
+}
+
+/// The reader's count is released.
+const RELEASED: u64 = 1 << 63;
+/// The reader expired.
+const EXPIRED: u64 = 1 << 62;
+/// The reads in progress.
+const READS: u64 = EXPIRED - 1;
+
+impl SnapshotReader {
+    fn new(pins: Arc<ReadPins>, epoch: EpochId, expirable: bool) -> Self {
+        Self {
+            pins,
+            epoch,
+            state: AtomicU64::new(0),
+            kept: AtomicU64::new(0),
+            limit: AtomicU64::new(0),
+            expirable,
+        }
+    }
+
+    /// A reader already released, for a committed writer that never read at a snapshot.
+    #[cfg(feature = "triple-store")]
+    fn ended(epoch: EpochId) -> Self {
+        let reader = Self::new(Arc::default(), epoch, false);
+        reader.state.store(RELEASED, Ordering::Relaxed);
+        reader
+    }
+
+    /// Starts a read at the snapshot, held while the returned read lives.
+    ///
+    /// # Errors
+    ///
+    /// [`TransactionError::SnapshotExpired`] once the snapshot expired.
+    pub(crate) fn read(self: &Arc<Self>) -> Result<SnapshotRead> {
+        let before = self.state.fetch_add(1, Ordering::AcqRel);
+        if before & EXPIRED != 0 {
+            self.end_read();
+            return Err(self.expired_error());
+        }
+        Ok(SnapshotRead(Arc::clone(self)))
+    }
+
+    /// Whether the snapshot expired.
+    pub(crate) fn is_expired(&self) -> bool {
+        self.state.load(Ordering::Acquire) & EXPIRED != 0
+    }
+
+    /// The error of an expired snapshot, with what it kept and the limit then.
+    pub(crate) fn expired_error(&self) -> Error {
+        Error::Transaction(self.expired_transaction_error())
+    }
+
+    /// [`expired_error`](Self::expired_error) as the transaction error.
+    fn expired_transaction_error(&self) -> TransactionError {
+        TransactionError::SnapshotExpired {
+            kept: self.kept.load(Ordering::Acquire),
+            limit: self.limit.load(Ordering::Acquire),
+        }
+    }
+
+    /// A read ended: the last read of an expired snapshot releases its count (exactly one of
+    /// it, the expiry and the transaction's end does: the compare-exchange from `EXPIRED`).
+    fn end_read(&self) {
+        let after = self.state.fetch_sub(1, Ordering::AcqRel) - 1;
+        if after == EXPIRED
+            && self
+                .state
+                .compare_exchange(
+                    EXPIRED,
+                    EXPIRED | RELEASED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+        {
+            self.pins.release(self.epoch);
+            self.pins.reader_ended();
+        }
+    }
+
+    /// Expires the snapshot, with the readers' lock held: its count is released at once when
+    /// no read is in progress (the caller runs the reader-end work after its locks), else by
+    /// the last read's end.
+    fn expire(&self, readers: &mut Readers, kept: u64, limit: u64) {
+        self.kept.store(kept, Ordering::Relaxed);
+        self.limit.store(limit, Ordering::Relaxed);
+        let before = self.state.fetch_or(EXPIRED, Ordering::AcqRel);
+        if before & (EXPIRED | RELEASED) == 0
+            && before & READS == 0
+            && self
+                .state
+                .compare_exchange(
+                    EXPIRED,
+                    EXPIRED | RELEASED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+        {
+            ReadPins::release_in(readers, self.epoch);
+        }
+    }
+
+    /// The transaction ended: releases the count unless it is released already.
+    fn end(&self) {
+        self.end_in(&mut self.pins.epochs.lock());
+    }
+
+    /// [`end`](Self::end) with the readers' lock held.
+    fn end_in(&self, readers: &mut Readers) {
+        if self.state.fetch_or(RELEASED, Ordering::AcqRel) & RELEASED == 0 {
+            ReadPins::release_in(readers, self.epoch);
+        }
+    }
+}
+
+/// A read in progress at a transaction's snapshot: while it lives, an expiry does not release
+/// the snapshot, so what the read reads stays.
+#[must_use = "the snapshot is held only while the read lives"]
+#[derive(Debug)]
+pub(crate) struct SnapshotRead(Arc<SnapshotReader>);
+
+impl SnapshotRead {
+    /// The epoch the snapshot reads at.
+    pub(crate) fn epoch(&self) -> EpochId {
+        self.0.epoch
+    }
+}
+
+impl Drop for SnapshotRead {
+    fn drop(&mut self) {
+        self.0.end_read();
+    }
+}
+
+/// What a read holds while it runs, released when it drops: a pin (a read outside a
+/// transaction, a time-travel read), or a read at its transaction's snapshot.
+#[derive(Debug)]
+pub(crate) enum ReadHold {
+    /// A pinned read.
+    Pin {
+        /// Held until the hold drops.
+        _pin: ReadPin,
+    },
+    /// A read at the transaction's snapshot.
+    Snapshot {
+        /// Held until the hold drops.
+        _read: SnapshotRead,
+    },
 }
 
 /// A committed read, including a historical override inside a transaction,
@@ -776,8 +1048,8 @@ impl ReadPin {
     /// Another pin at the same epoch, released on its own: this pin keeps
     /// the epoch at or after the history floor while the new one is made.
     pub(crate) fn again(&self) -> ReadPin {
-        let mut epochs = self.pins.epochs.lock();
-        ReadPins::hold_at(&mut epochs, self.epoch.as_u64());
+        let mut readers = self.pins.epochs.lock();
+        ReadPins::hold_at(&mut readers, self.epoch.as_u64());
         ReadPin {
             pins: Arc::clone(&self.pins),
             epoch: self.epoch,
@@ -993,15 +1265,18 @@ pub(crate) enum WrittenCommit<'a> {
 }
 
 impl WrittenCommit<'_> {
-    /// Publishes the commit as [`Publish::complete_with`] does.
+    /// Publishes the commit as [`Publish::complete_replacing`] does.
     ///
     /// # Errors
     ///
     /// As [`Publish::complete_with`].
-    pub(crate) fn complete_with(self, ordered: impl FnOnce() -> Result<()>) -> Result<()> {
+    pub(crate) fn complete_replacing(
+        self,
+        ordered: impl FnOnce() -> Result<u64>,
+    ) -> Result<Option<HeldPastLimit>> {
         match self {
-            Self::Released(publish) => publish.complete_with(ordered),
-            Self::Held(CommitGuard { commit, _commit }) => commit.complete_with(ordered),
+            Self::Released(publish) => publish.complete_replacing(ordered),
+            Self::Held(CommitGuard { commit, _commit }) => commit.complete_replacing(ordered),
         }
     }
 }
@@ -1040,7 +1315,22 @@ impl Publish<'_> {
     /// versions) and stays `Committing`, in the log as it was written, until
     /// the database is reopened. The error of `ordered`, which leaves the
     /// commit incomplete as a dropped handle does.
-    pub(crate) fn complete_with(mut self, ordered: impl FnOnce() -> Result<()>) -> Result<()> {
+    pub(crate) fn complete_with(self, ordered: impl FnOnce() -> Result<()>) -> Result<()> {
+        self.complete_replacing(|| ordered().map(|()| 0))
+            .map(|_| ())
+    }
+
+    /// [`complete_with`](Self::complete_with) for a commit whose `ordered` step reports the
+    /// bytes of RDF state it replaced (the overlay's growth for older readers), which the
+    /// snapshot retention ledger counts beside the change set's own.
+    ///
+    /// # Errors
+    ///
+    /// As [`complete_with`](Self::complete_with).
+    pub(crate) fn complete_replacing(
+        mut self,
+        ordered: impl FnOnce() -> Result<u64>,
+    ) -> Result<Option<HeldPastLimit>> {
         let manager = self.manager;
         let mut turn = manager.publish_turn.lock();
         loop {
@@ -1054,17 +1344,24 @@ impl Publish<'_> {
             }
             manager.published.wait(&mut turn);
         }
-        if let Err(error) = ordered() {
-            // Not published: the handle, dropped unfinished, poisons the
-            // manager once the turn is free.
-            drop(turn);
-            return Err(error);
-        }
+        let rdf_replaced = match ordered() {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                // Not published: the handle, dropped unfinished, poisons the
+                // manager once the turn is free.
+                drop(turn);
+                return Err(error);
+            }
+        };
         // Writes kept for nobody, dropped once the lock is released.
         #[cfg(feature = "triple-store")]
         let mut released: Option<KeptRdfWrites> = None;
+        let held_past_limit;
+        // What the commit replaced, for the ledger and the history's time index.
+        let mut lpg_replaced = 0;
         {
             let mut transactions = manager.transactions.write();
+            let mut ended = None;
             if let Some(info) = transactions.get_mut(&self.transaction_id) {
                 info.state = TransactionState::Committed;
                 info.claim_undo = None;
@@ -1076,10 +1373,13 @@ impl Publish<'_> {
                 if manager.active_count.load(Ordering::Acquire) <= 1 {
                     released = info.rdf_writes.take();
                 }
-                // Stamped: what it changed is committed state now.
-                info.changes = None;
-                // It reads no more: its snapshot holds the horizon no more.
-                manager.reads.release(info.start_epoch);
+                // Stamped: what it changed is committed state now, and what
+                // it replaced is kept for the readers older than this commit.
+                if let Some(changes) = info.changes.take() {
+                    lpg_replaced = changes.superseded_bytes() as u64;
+                }
+                // It reads no more: released below, with the ledger.
+                ended = Some(Arc::clone(&info.reader));
                 // A private transaction no open one began before: only a
                 // transaction that began before this commit was published
                 // can conflict with it, and each is counted while the
@@ -1096,11 +1396,20 @@ impl Publish<'_> {
             // Counted down under the `transactions` lock, like the count up
             // of a transaction that begins.
             manager.active_count.fetch_sub(1, Ordering::Release);
+            // Under the readers' lock: a reader counted at the published
+            // epoch sees the ledger that goes with it.
+            let mut readers = manager.reads.epochs.lock();
+            if let Some(reader) = ended {
+                reader.end_in(&mut readers);
+            }
+            readers.replaced.lpg = readers.replaced.lpg.saturating_add(lpg_replaced);
+            readers.replaced.rdf = readers.replaced.rdf.saturating_add(rdf_replaced);
             // Commits publish one at a time and in epoch order (the turn), so
             // the published epoch only moves forward.
             manager
                 .published_epoch
                 .fetch_max(self.epoch.as_u64(), Ordering::Release);
+            held_past_limit = manager.bound_snapshots(&transactions, &mut readers);
         }
         // In the turn: the hook's arming reads it there (see
         // `arm_first_commit_hook`).
@@ -1108,9 +1417,11 @@ impl Publish<'_> {
         if self.changed {
             manager.change_count.fetch_add(1, Ordering::AcqRel);
         }
-        // In the turn, so the times are recorded in epoch order.
+        // In the turn, so the times are recorded in epoch order, with what the commit replaced.
         if let Some(time) = self.commit_time {
-            manager.history.record(self.epoch, time);
+            manager
+                .history
+                .record_replacing(self.epoch, time, lpg_replaced);
         }
         self.finished = true;
         drop(turn);
@@ -1124,7 +1435,10 @@ impl Publish<'_> {
         #[cfg(feature = "triple-store")]
         drop(released);
         manager.reads.reader_ended();
-        Ok(())
+        if let Some(held) = held_past_limit {
+            grafeo_common::grafeo_warn!("{}", held.message());
+        }
+        Ok(held_past_limit)
     }
 }
 
@@ -1240,6 +1554,7 @@ impl TransactionManager {
             memory: std::sync::OnceLock::new(),
             #[cfg(feature = "triple-store")]
             kept_rdf_bytes: Arc::default(),
+            snapshot_retention_limit: AtomicU64::new(u64::MAX),
         }
     }
 
@@ -1349,7 +1664,16 @@ impl TransactionManager {
         // published epoch, which holds every commit up to it, complete, and
         // none of one still being written or synced.
         let _gate = self.idle_gate.lock();
-        self.register(isolation_level, false).0
+        self.register(isolation_level, false, true).0
+    }
+
+    /// Begins the transaction one statement runs in outside an explicit transaction (an
+    /// auto-commit write): as [`begin`](Self::begin), except that its snapshot never expires
+    /// under the snapshot retention limit, since a statement outside a transaction is bounded
+    /// by its query timeout and must not fail for a limit it never asked for.
+    pub(crate) fn begin_statement(&self) -> TransactionId {
+        let _gate = self.idle_gate.lock();
+        self.register(IsolationLevel::default(), false, false).0
     }
 
     /// Exclusive access for a direct call that commits at once: `Some` while
@@ -1379,7 +1703,7 @@ impl TransactionManager {
     pub(crate) fn begin_private(&self) -> Result<(TransactionId, Arc<TransactionChanges>)> {
         let _gate = self.idle_gate.lock();
         self.check_open()?;
-        Ok(self.register(IsolationLevel::default(), true))
+        Ok(self.register(IsolationLevel::default(), true, false))
     }
 
     /// The writer of a bulk write that holds commits off for its whole run
@@ -1403,6 +1727,7 @@ impl TransactionManager {
         &self,
         isolation_level: IsolationLevel,
         private: bool,
+        expirable: bool,
     ) -> (TransactionId, Arc<TransactionChanges>) {
         let transaction_id =
             TransactionId::new(self.next_transaction_id.fetch_add(1, Ordering::Relaxed));
@@ -1415,7 +1740,18 @@ impl TransactionManager {
         let mut transactions = self.transactions.write();
         let epoch = self.reads.hold_published(&self.published_epoch);
         let changes = self.change_set(transaction_id, epoch);
-        let info = TransactionInfo::new(epoch, isolation_level, Arc::clone(&changes), private);
+        let reader = Arc::new(SnapshotReader::new(
+            Arc::clone(&self.reads),
+            epoch,
+            expirable && !private,
+        ));
+        let info = TransactionInfo::new(
+            epoch,
+            isolation_level,
+            Arc::clone(&changes),
+            private,
+            reader,
+        );
         transactions.insert(transaction_id, info);
         self.active_count.fetch_add(1, Ordering::Release);
         drop(transactions);
@@ -1524,7 +1860,7 @@ impl TransactionManager {
                     info.state,
                     TransactionState::Active | TransactionState::Committing
                 )
-                && info.doomed_by.is_none()
+                && !Self::given_up(info)
                 && info.key_set.contains(key)
         });
         if claimed {
@@ -1592,15 +1928,46 @@ impl TransactionManager {
     /// claim to an older transaction, so it can claim nothing more and
     /// cannot commit.
     fn refuse_doomed(info: &TransactionInfo, transaction_id: TransactionId) -> Result<()> {
-        match &info.doomed_by {
-            Some((older, lost)) => Err(Error::Transaction(TransactionError::WriteConflict(
-                format!(
-                    "{lost}: transaction {transaction_id} lost this claim to transaction {older}, \
-                     which began first; retry the transaction"
-                ),
-            ))),
+        match Self::doom_error(info, transaction_id) {
+            Some(error) => Err(Error::Transaction(error)),
             None => Ok(()),
         }
+    }
+
+    /// The error of a doomed transaction (see [`refuse_doomed`](Self::refuse_doomed)).
+    fn doom_error(
+        info: &TransactionInfo,
+        transaction_id: TransactionId,
+    ) -> Option<TransactionError> {
+        info.doomed_by.as_ref().map(|(older, lost)| {
+            TransactionError::WriteConflict(format!(
+                "{lost}: transaction {transaction_id} lost this claim to transaction {older}, \
+                 which began first; retry the transaction"
+            ))
+        })
+    }
+
+    /// Whether the database gave up on the transaction: it was doomed, or its snapshot
+    /// expired. Its key and MERGE pattern claims no longer count then (they guard no store
+    /// version of it), so a writer of the same key or pattern goes on at once; it cannot
+    /// commit, and its session rolls it back at its next call.
+    fn given_up(info: &TransactionInfo) -> bool {
+        info.doomed_by.is_some() || info.reader.is_expired()
+    }
+
+    /// Why the database gave up on the open transaction `transaction_id`, when it did: its
+    /// snapshot expired (`GRAFEO-T012`), or it lost a key or MERGE pattern claim to an older
+    /// transaction (`GRAFEO-T001`). Its session then rolls it back.
+    pub(crate) fn given_up_on(&self, transaction_id: TransactionId) -> Option<TransactionError> {
+        let txns = self.transactions.read();
+        let info = txns
+            .get(&transaction_id)
+            .filter(|info| info.state == TransactionState::Active)?;
+        Self::doom_error(info, transaction_id).or_else(|| {
+            info.reader
+                .is_expired()
+                .then(|| info.reader.expired_transaction_error())
+        })
     }
 
     /// Settles a key or MERGE pattern claim of `requester` against the other
@@ -1623,13 +1990,16 @@ impl TransactionManager {
         for (other, info) in txns.iter() {
             if *other == requester {
                 Self::refuse_doomed(info, requester)?;
+                if info.reader.is_expired() {
+                    return Err(info.reader.expired_error());
+                }
                 continue;
             }
             let open = matches!(
                 info.state,
                 TransactionState::Active | TransactionState::Committing
             );
-            if !open || info.doomed_by.is_some() || !holds(info) {
+            if !open || Self::given_up(info) || !holds(info) {
                 continue;
             }
             let committing = info.state == TransactionState::Committing;
@@ -2049,6 +2419,9 @@ impl TransactionManager {
             )));
         }
         Self::refuse_doomed(ours, transaction_id)?;
+        if ours.reader.is_expired() {
+            return Err(ours.reader.expired_error());
+        }
         let our_start_epoch = ours.start_epoch;
 
         // Only a transaction that committed after ours began can conflict
@@ -2437,7 +2810,7 @@ impl TransactionManager {
         info.state = TransactionState::Aborted;
         info.claim_undo = None;
         info.changes = None;
-        self.reads.release(info.start_epoch);
+        info.reader.end();
         // An aborted transaction conflicts with nobody: a private one, whose
         // state nobody asks for, leaves at once (others at the next `gc`).
         if info.private {
@@ -2463,6 +2836,25 @@ impl TransactionManager {
         Ok(ClaimMark(
             info.claim_undo.get_or_insert_with(Vec::new).len(),
         ))
+    }
+
+    /// The length of the open transaction's claim log, `None` without one (tests).
+    #[cfg(test)]
+    pub(crate) fn claim_log_len(&self, transaction_id: TransactionId) -> Option<usize> {
+        self.transactions
+            .read()
+            .get(&transaction_id)
+            .and_then(|info| info.claim_undo.as_ref().map(Vec::len))
+    }
+
+    /// Drops the claim log of an active transaction: no mark can rewind it any more (the
+    /// session holds no statement mark and no savepoint). Its claims stay in its sets.
+    pub(crate) fn trim_claims(&self, transaction_id: TransactionId) {
+        if let Some(info) = self.transactions.write().get_mut(&transaction_id)
+            && info.state == TransactionState::Active
+        {
+            info.claim_undo = None;
+        }
     }
 
     /// Rewinds conflict claims after the caller has successfully undone the
@@ -2543,7 +2935,7 @@ impl TransactionManager {
                 info.state = TransactionState::Aborted;
                 info.claim_undo = None;
                 info.changes = None;
-                self.reads.release(info.start_epoch);
+                info.reader.end();
                 self.active_count.fetch_sub(1, Ordering::Relaxed);
             }
         }
@@ -2684,6 +3076,153 @@ impl TransactionManager {
         EpochId::new(ReadPins::oldest(&readers).map_or(published, |oldest| oldest.min(published)))
     }
 
+    /// Whether the bytes a write replaces matter to anyone now: a read holds an epoch (a
+    /// transaction's snapshot, a snapshot, a view, a stream), or the database keeps history. A
+    /// direct call that commits at once builds its before-images to count them only then (see
+    /// [`add_replaced`](Self::add_replaced)); a reader that comes later reads after it.
+    pub(crate) fn counts_replaced(&self) -> bool {
+        self.history.is_on() || !self.reads.epochs.lock().pinned.is_empty()
+    }
+
+    /// Adds `lpg` bytes a direct call that commits at once replaced to the ledger, before its
+    /// epoch is published, as a publish adds a commit's: the readers that hold older epochs
+    /// count them, and one held past the snapshot retention limit is noticed. The call has no
+    /// result to carry the notice, so it goes to `tracing` only.
+    pub(crate) fn add_replaced(&self, lpg: u64) {
+        if lpg == 0 {
+            return;
+        }
+        let held = {
+            let transactions = self.transactions.read();
+            let mut readers = self.reads.epochs.lock();
+            readers.replaced.lpg = readers.replaced.lpg.saturating_add(lpg);
+            self.bound_snapshots(&transactions, &mut readers)
+        };
+        if let Some(held) = held {
+            grafeo_common::grafeo_warn!("{}", held.message());
+        }
+    }
+
+    /// Each time-index entry's epoch and the bytes the commits replaced up to it, for tests.
+    #[cfg(test)]
+    pub(crate) fn history_totals(&self) -> Vec<(u64, u64)> {
+        self.history.totals()
+    }
+
+    /// The bytes of the labeled property graph's committed state the commits replaced so far,
+    /// for tests.
+    #[cfg(test)]
+    pub(crate) fn replaced_lpg(&self) -> u64 {
+        self.reads.epochs.lock().replaced.lpg
+    }
+
+    /// Sets the snapshot retention limit: how many bytes of committed state the commits since
+    /// the oldest open transaction's snapshot may replace before that transaction expires
+    /// (`GRAFEO-T012` from its next statement on), so a forgotten transaction cannot hold old
+    /// versions without bound. `u64::MAX` sets no bound.
+    pub fn set_snapshot_retention_limit(&self, bytes: u64) {
+        self.snapshot_retention_limit
+            .store(bytes, Ordering::Relaxed);
+    }
+
+    /// The snapshot retention limit (see
+    /// [`set_snapshot_retention_limit`](Self::set_snapshot_retention_limit)).
+    #[must_use]
+    pub fn snapshot_retention_limit(&self) -> u64 {
+        self.snapshot_retention_limit.load(Ordering::Relaxed)
+    }
+
+    /// The snapshot reader of an open transaction, for its session to keep.
+    fn snapshot_reader(&self, transaction_id: TransactionId) -> Option<Arc<SnapshotReader>> {
+        self.transactions
+            .read()
+            .get(&transaction_id)
+            .filter(|info| info.state == TransactionState::Active)
+            .map(|info| Arc::clone(&info.reader))
+    }
+
+    /// A read at the snapshot of transaction `transaction_id`, for a caller that runs plans in
+    /// a transaction it does not own.
+    ///
+    /// # Errors
+    ///
+    /// [`TransactionError::SnapshotExpired`] once the snapshot expired. `None` for a
+    /// transaction that is not active (ended, or committing), whose snapshot holds nothing for
+    /// a new read.
+    pub(crate) fn read_in(&self, transaction_id: TransactionId) -> Result<Option<SnapshotRead>> {
+        self.snapshot_reader(transaction_id)
+            .map(|reader| reader.read())
+            .transpose()
+    }
+
+    /// The snapshot retention limit's check, at each publish with both locks held: while the
+    /// bytes the commits since the oldest reader's epoch replaced exceed the limit, the open
+    /// transactions reading at that epoch expire. Only what the reader adds beyond what is kept
+    /// anyway counts: a history window keeps the labeled property graph's versions, so a reader
+    /// inside it counts only the RDF overlay's. A reader that cannot expire (a pin outside a
+    /// transaction, a private or statement transaction) is returned, once per epoch, for the
+    /// publisher to report after its locks. O(1) unless over the limit.
+    #[must_use = "the warning about a reader that cannot expire is the caller's, after its locks"]
+    fn bound_snapshots(
+        &self,
+        transactions: &FxHashMap<TransactionId, TransactionInfo>,
+        readers: &mut Readers,
+    ) -> Option<HeldPastLimit> {
+        let limit = self.snapshot_retention_limit.load(Ordering::Relaxed);
+        if limit == u64::MAX {
+            return None;
+        }
+        let mut held = None;
+        loop {
+            let Some(front) = readers.pinned.front() else {
+                return held;
+            };
+            let (epoch, at) = (front.epoch, front.replaced_at);
+            if readers
+                .handled_through
+                .is_some_and(|handled| handled >= epoch)
+            {
+                return held;
+            }
+            let rdf = readers.replaced.rdf.saturating_sub(at.rdf);
+            let lpg = readers.replaced.lpg.saturating_sub(at.lpg);
+            // The common case, before the history window is asked.
+            if lpg.saturating_add(rdf) <= limit {
+                return held;
+            }
+            let in_window = self
+                .history
+                .retention_horizon()
+                .is_some_and(|start| start <= epoch);
+            let kept = if in_window {
+                rdf
+            } else {
+                lpg.saturating_add(rdf)
+            };
+            if kept <= limit {
+                return held;
+            }
+            let mut expired = 0usize;
+            for info in transactions.values() {
+                if info.state == TransactionState::Active
+                    && info.reader.expirable
+                    && info.start_epoch.as_u64() == epoch
+                    && !info.reader.is_expired()
+                {
+                    info.reader.expire(readers, kept, limit);
+                    expired += 1;
+                }
+            }
+            if expired == 0 {
+                held = Some(HeldPastLimit { epoch, kept, limit });
+            }
+            readers.handled_through = Some(epoch);
+            if readers.pinned.front().map(|pinned| pinned.epoch) == Some(epoch) {
+                return held;
+            }
+        }
+    }
+
     /// Pins a read outside any transaction at the published epoch, for as
     /// long as the returned pin lives: the [read horizon](Self::read_horizon)
     /// stays at its epoch or before. The read may read at that epoch or at
@@ -2711,12 +3250,12 @@ impl TransactionManager {
     /// retained". The floor is read under the lock the collect horizon moves
     /// it under, so a read pinned here is never collected past.
     pub(crate) fn pin_read_at(&self, epoch: EpochId) -> Result<ReadPin> {
-        let mut epochs = self.reads.epochs.lock();
+        let mut readers = self.reads.epochs.lock();
         if epoch < self.history.floor() {
             return Err(self.history.before_floor(epoch));
         }
         let epoch = self.readable_epoch(epoch);
-        ReadPins::hold_at(&mut epochs, epoch.as_u64());
+        ReadPins::hold_at(&mut readers, epoch.as_u64());
         Ok(ReadPin {
             pins: Arc::clone(&self.reads),
             epoch,
@@ -2732,8 +3271,13 @@ impl TransactionManager {
     #[must_use]
     pub fn collect_horizon(&self) -> EpochId {
         let readers = self.reads.epochs.lock();
+        self.collect_horizon_in(&readers)
+    }
+
+    /// [`collect_horizon`](Self::collect_horizon) with the readers' lock held.
+    fn collect_horizon_in(&self, readers: &Readers) -> EpochId {
         let published = self.published_epoch.load(Ordering::Acquire);
-        let read = ReadPins::oldest(&readers).map_or(published, |oldest| oldest.min(published));
+        let read = ReadPins::oldest(readers).map_or(published, |oldest| oldest.min(published));
         let horizon = match self.history.retention_horizon() {
             Some(start) => read.min(start),
             None => read,
@@ -2758,6 +3302,13 @@ impl TransactionManager {
     pub fn set_history_retention(&self, retention: HistoryRetention) {
         self.history
             .set_retention(retention, self.published_epoch.load(Ordering::Acquire));
+    }
+
+    /// Sets how many bytes of replaced data the history window may keep (`None`: no limit): once
+    /// the commits since its start replaced more, the start moves forward, whichever of time or
+    /// bytes comes first (see [`Config::with_history_retention_limit`](crate::Config::with_history_retention_limit)).
+    pub(crate) fn set_history_retention_limit(&self, bytes: Option<u64>) {
+        self.history.set_retention_limit(bytes);
     }
 
     /// How long the database keeps history.
@@ -2794,8 +3345,10 @@ impl TransactionManager {
     /// Records that `epoch` committed at `millis`: a write outside a
     /// transaction, once published, and a replayed WAL group. Nothing while
     /// history is off.
-    pub(crate) fn record_commit_time(&self, epoch: EpochId, millis: u64) {
-        self.history.record(epoch, millis);
+    /// It replaced `lpg` bytes of the labeled property graph's committed state, which the
+    /// history window keeps: 0 for a replayed group, which the end of the open counts.
+    pub(crate) fn record_commit_time(&self, epoch: EpochId, millis: u64, lpg: u64) {
+        self.history.record_replacing(epoch, millis, lpg);
     }
 
     /// What a checkpoint writes of the history, `None` while it is off.
@@ -2831,6 +3384,48 @@ impl TransactionManager {
         let _readers = self.reads.epochs.lock();
         self.history
             .restart(EpochId::new(self.published_epoch.load(Ordering::Acquire)));
+    }
+
+    /// The epoch a checkpoint writes history from, while the database keeps it: the collect
+    /// horizon now (the later of the window's starts by time and by bytes, never past an open
+    /// reader), which the floor moves to first, so the time index the checkpoint writes starts
+    /// where the history it writes does. `None` while history is off.
+    pub(crate) fn history_checkpoint_floor(&self) -> Option<EpochId> {
+        self.history.is_on().then(|| {
+            // The floor moves to the horizon when it is later: the later of the two.
+            let horizon = self.collect_horizon();
+            horizon.max(self.history.floor())
+        })
+    }
+
+    /// [`history_checkpoint_floor`](Self::history_checkpoint_floor) with a read pinned there,
+    /// under the one lock the floor moves under, so no collect passes it before the image is
+    /// read (`None` while history is off). The pin's epoch is where the history starts.
+    #[cfg(feature = "grafeo-file")]
+    pub(crate) fn pin_history_checkpoint(&self) -> Option<ReadPin> {
+        if !self.history.is_on() {
+            return None;
+        }
+        let mut readers = self.reads.epochs.lock();
+        let floor = self.collect_horizon_in(&readers).max(self.history.floor());
+        ReadPins::hold_at(&mut readers, floor.as_u64());
+        Some(ReadPin {
+            pins: Arc::clone(&self.reads),
+            epoch: floor,
+        })
+    }
+
+    /// Whether the history's time index counts bytes: history is on and a retention limit is
+    /// set (see [`set_history_retention_limit`](Self::set_history_retention_limit)).
+    pub(crate) fn history_counts_bytes(&self) -> bool {
+        self.history.counts_bytes()
+    }
+
+    /// Counts what the store keeps of replaced state (`kept`, see
+    /// `RowGroupStore::kept_superseded`) into the history's time index, at the end of an open:
+    /// the history a load restored and a replay kept counts as the commits that made it did.
+    pub(crate) fn count_kept_history(&self, kept: Vec<(u64, usize)>) {
+        self.history.count_kept(kept);
     }
 
     /// At the end of an open or a new database: a history that is on and
@@ -2945,6 +3540,193 @@ impl Default for TransactionManager {
 mod tests {
     use super::*;
 
+    /// Commits a transaction of its own that replaced `rdf` bytes of RDF state.
+    fn commit_replacing(mgr: &TransactionManager, rdf: u64) {
+        let writer = mgr.begin();
+        mgr.start_commit(writer)
+            .unwrap()
+            .written()
+            .complete_replacing(|| Ok(rdf))
+            .unwrap();
+    }
+
+    fn expired(result: Result<Option<SnapshotRead>>) -> (u64, u64) {
+        match result {
+            Err(Error::Transaction(TransactionError::SnapshotExpired { kept, limit })) => {
+                (kept, limit)
+            }
+            other => panic!("expected the snapshot to expire, got {other:?}"),
+        }
+    }
+
+    /// An open transaction's snapshot expires once the commits since it began replaced more
+    /// than the limit: its next read and its commit fail with `GRAFEO-T012` naming both
+    /// numbers, and its snapshot no longer holds the read horizon. Under the limit it reads on.
+    #[test]
+    fn a_snapshot_expires_once_the_commits_since_it_replaced_past_the_limit() {
+        let mgr = TransactionManager::new();
+        mgr.set_snapshot_retention_limit(1000);
+        let reader = mgr.begin();
+        let at = mgr.read_horizon();
+        commit_replacing(&mgr, 600);
+        assert!(mgr.read_in(reader).unwrap().is_some(), "under the limit");
+        assert_eq!(mgr.read_horizon(), at, "the reader holds the horizon");
+        commit_replacing(&mgr, 600);
+        assert_eq!(expired(mgr.read_in(reader)), (1200, 1000));
+        assert_eq!(
+            mgr.read_horizon(),
+            mgr.current_epoch(),
+            "released: the horizon moved past it"
+        );
+        let Err(error) = mgr.start_commit(reader) else {
+            panic!("an expired transaction commits");
+        };
+        assert_eq!(error.error_code().as_str(), "GRAFEO-T012");
+        mgr.abort(reader).unwrap();
+        assert_eq!(mgr.read_horizon(), mgr.current_epoch(), "released once");
+    }
+
+    /// A read in progress keeps an expired snapshot until it ends: the horizon stays, a new
+    /// read fails, and the end of the last read releases it and runs the reader-end work.
+    #[test]
+    fn an_expiry_waits_for_the_read_in_progress() {
+        let mgr = TransactionManager::new();
+        // The reader-end work (pruning the RDF overlay) exists with the triple store.
+        #[cfg(feature = "triple-store")]
+        let ended = {
+            let ended = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counted = Arc::clone(&ended);
+            mgr.on_reader_end(move || {
+                counted.fetch_add(1, Ordering::Relaxed);
+            });
+            ended
+        };
+        mgr.set_snapshot_retention_limit(1000);
+        let reader = mgr.begin();
+        let at = mgr.read_horizon();
+        let read = mgr.read_in(reader).unwrap().unwrap();
+        commit_replacing(&mgr, 2000);
+        assert_eq!(mgr.read_horizon(), at, "the read in progress holds it");
+        expired(mgr.read_in(reader));
+        #[cfg(feature = "triple-store")]
+        let before = ended.load(Ordering::Relaxed);
+        drop(read);
+        assert_eq!(mgr.read_horizon(), mgr.current_epoch());
+        #[cfg(feature = "triple-store")]
+        assert_eq!(
+            ended.load(Ordering::Relaxed),
+            before + 1,
+            "the release runs the reader-end work"
+        );
+        mgr.abort(reader).unwrap();
+    }
+
+    /// The readers at the oldest epoch expire together; one that began later, under the limit
+    /// for its own epoch, reads on.
+    #[test]
+    fn the_readers_at_the_oldest_epoch_expire_together() {
+        let mgr = TransactionManager::new();
+        mgr.set_snapshot_retention_limit(1000);
+        let first = mgr.begin();
+        let second = mgr.begin();
+        commit_replacing(&mgr, 600);
+        let later = mgr.begin();
+        commit_replacing(&mgr, 600);
+        expired(mgr.read_in(first));
+        expired(mgr.read_in(second));
+        assert!(mgr.read_in(later).unwrap().is_some(), "600 since it began");
+        for transaction in [first, second, later] {
+            mgr.abort(transaction).unwrap();
+        }
+    }
+
+    /// What cannot fail never expires: a private transaction (one direct call) and a read pin
+    /// outside a transaction, at the oldest epoch, past the limit. A transaction that began
+    /// with them expires; the pin keeps the horizon.
+    #[test]
+    fn a_private_transaction_and_a_pin_never_expire() {
+        let mgr = TransactionManager::new();
+        mgr.set_snapshot_retention_limit(1000);
+        let pin = mgr.pin_read();
+        let (private, _changes) = mgr.begin_private().unwrap();
+        let reader = mgr.begin();
+        commit_replacing(&mgr, 5000);
+        expired(mgr.read_in(reader));
+        assert_eq!(mgr.read_horizon(), pin.epoch(), "the pin holds the horizon");
+        mgr.start_commit(private)
+            .expect("a private transaction never expires")
+            .complete()
+            .unwrap();
+        drop(pin);
+        mgr.abort(reader).unwrap();
+        assert_eq!(mgr.read_horizon(), mgr.current_epoch());
+    }
+
+    /// Reads that start and end on several threads while commits expire their snapshot: the
+    /// count is released exactly once. A pin at the same epoch catches a second release (the
+    /// horizon would pass the pin while it lives).
+    #[test]
+    fn reads_racing_an_expiry_release_the_snapshot_once() {
+        for _ in 0..20 {
+            let mgr = Arc::new(TransactionManager::new());
+            mgr.set_snapshot_retention_limit(1000);
+            let reader = mgr.begin();
+            let pin = mgr.pin_read();
+            let readers: Vec<_> = (0..4)
+                .map(|_| {
+                    let mgr = Arc::clone(&mgr);
+                    std::thread::spawn(move || {
+                        for _ in 0..2000 {
+                            match mgr.read_in(reader) {
+                                Ok(Some(read)) => drop(read),
+                                Ok(None) => return,
+                                Err(_) => {}
+                            }
+                        }
+                    })
+                })
+                .collect();
+            commit_replacing(&mgr, 2000);
+            for thread in readers {
+                thread.join().unwrap();
+            }
+            expired(mgr.read_in(reader));
+            mgr.abort(reader).unwrap();
+            assert_eq!(
+                mgr.read_horizon(),
+                pin.epoch(),
+                "the pin still holds its epoch"
+            );
+            drop(pin);
+            assert_eq!(mgr.read_horizon(), mgr.current_epoch());
+        }
+    }
+
+    /// With no limit set (the manager's own default), nothing expires.
+    #[test]
+    fn without_a_limit_no_snapshot_expires() {
+        let mgr = TransactionManager::new();
+        let reader = mgr.begin();
+        commit_replacing(&mgr, u64::MAX / 2);
+        assert!(mgr.read_in(reader).unwrap().is_some());
+        mgr.abort(reader).unwrap();
+    }
+
+    /// The RDF overlay keeps nothing for history: a reader inside a history window still
+    /// expires on RDF bytes past the limit. (That the window keeps a reader on the labeled
+    /// property graph's bytes, which take a real write, is the session test
+    /// `a_reader_inside_the_history_window_keeps_its_snapshot`.)
+    #[test]
+    fn a_history_window_does_not_keep_the_rdf_overlay_unbounded() {
+        let mgr = TransactionManager::new();
+        mgr.set_history_retention(HistoryRetention::Forever);
+        mgr.set_snapshot_retention_limit(1000);
+        let reader = mgr.begin();
+        commit_replacing(&mgr, 2000);
+        assert_eq!(expired(mgr.read_in(reader)), (2000, 1000));
+        mgr.abort(reader).unwrap();
+    }
+
     /// The pattern set answers as a set past its inline fingerprints: each
     /// held once, removed from either part, and its length both parts.
     #[test]
@@ -3006,12 +3788,12 @@ mod tests {
             let mut session = db.session();
             session.begin_transaction().unwrap();
             session.execute("INSERT (:Item {v: 0})").unwrap();
-            let tx = session.current_transaction_id().unwrap();
-            let mgr = session.transaction_manager();
-            seed_claims(mgr, tx, 100);
+            let tx = session.inner().unwrap().current_transaction_id().unwrap();
+            let mgr = Arc::clone(&db.live().unwrap().transaction_manager);
+            seed_claims(&mgr, tx, 100);
             session.savepoint("before").unwrap();
             session.execute("INSERT (:Item {v: 1})").unwrap();
-            seed_claims(mgr, tx, 200);
+            seed_claims(&mgr, tx, 200);
             let before = {
                 let txns = mgr.transactions.read();
                 let info = &txns[&tx];
@@ -3058,9 +3840,9 @@ mod tests {
             let mut session = db.session();
             session.execute("INSERT (:Item {v: 0})").unwrap();
             session.begin_transaction().unwrap();
-            let tx = session.current_transaction_id().unwrap();
-            let mgr = session.transaction_manager();
-            seed_claims(mgr, tx, 100);
+            let tx = session.inner().unwrap().current_transaction_id().unwrap();
+            let mgr = Arc::clone(&db.live().unwrap().transaction_manager);
+            seed_claims(&mgr, tx, 100);
             let earlier_writes = mgr.get_write_set(tx).unwrap();
             store.refuse.store(true, Ordering::Relaxed);
             let error = session

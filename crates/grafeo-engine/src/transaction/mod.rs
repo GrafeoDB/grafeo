@@ -218,13 +218,13 @@ pub(crate) use changes::{StreamingChanges, TransactionChanges};
 pub(crate) use history::HistoryImage;
 #[cfg(feature = "wal")]
 pub(crate) use manager::CommitGuard;
-pub(crate) use manager::ReadPin;
 pub(crate) use manager::WrittenCommit;
 pub(crate) use manager::{ClaimMark, CommitsHeld};
 pub use manager::{
     EntityId, GraphEntity, IsolationLevel, KeyClaim, TransactionInfo, TransactionManager,
     TransactionState,
 };
+pub(crate) use manager::{HeldPastLimit, ReadHold, ReadPin, SnapshotRead};
 #[doc(hidden)]
 pub use mvcc::{VersionChain, VersionInfo};
 pub use prepared::{CommitInfo, PreparedCommit};

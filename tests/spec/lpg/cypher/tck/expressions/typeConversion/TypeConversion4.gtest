@@ -1,0 +1,229 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/typeConversion/TypeConversion4.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.TypeConversion4"
+  title: "TypeConversion4 - To String"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] `toString()` handling integer literal
+  - name: s1_tostring_handling_integer_literal
+    query: |
+      RETURN toString(42) AS bool
+    expect:
+      values: |
+        | bool |
+        | '42' |
+      side_effects: {}
+
+  # [2] `toString()` handling boolean literal
+  - name: s2_tostring_handling_boolean_literal
+    query: |
+      RETURN toString(true) AS bool
+    expect:
+      values: |
+        | bool |
+        | 'true' |
+      side_effects: {}
+
+  # [3] `toString()` handling inlined boolean
+  - name: s3_tostring_handling_inlined_boolean
+    query: |
+      RETURN toString(1 < 0) AS bool
+    expect:
+      values: |
+        | bool |
+        | 'false' |
+      side_effects: {}
+
+  # [4] `toString()` handling boolean properties
+  - name: s4_tostring_handling_boolean_properties
+    setup:
+      - |
+        CREATE (:Movie {watched: true})
+    query: |
+      MATCH (m:Movie)
+      RETURN toString(m.watched)
+    expect:
+      values: |
+        | toString(m.watched) |
+        | 'true' |
+      side_effects: {}
+
+  # [5] `toString()` should work on Any type
+  - name: s5_tostring_should_work_on_any_type
+    query: |
+      RETURN [x IN [1, 2.3, true, 'apa'] | toString(x) ] AS list
+    expect:
+      values: |
+        | list |
+        | ['1', '2.3', 'true', 'apa'] |
+      side_effects: {}
+
+  # [6] `toString()` on a list of integers
+  - name: s6_tostring_on_a_list_of_integers
+    query: |
+      WITH [1, 2, 3] AS numbers
+      RETURN [n IN numbers | toString(n)] AS string_numbers
+    expect:
+      values: |
+        | string_numbers |
+        | ['1', '2', '3'] |
+      side_effects: {}
+
+  # [7] `toString()` on node property
+  - name: s7_tostring_on_node_property
+    setup:
+      - |
+        CREATE (:Movie {rating: 4})
+    query: |
+      MATCH (m:Movie { rating: 4 })
+      WITH *
+      MATCH (n)
+      RETURN toString(n.rating)
+    expect:
+      values: |
+        | toString(n.rating) |
+        | '4' |
+      side_effects: {}
+
+  # [8] `toString()` should accept potentially correct types 1
+  - name: s8_tostring_should_accept_potentially_correct_types_1
+    query: |
+      UNWIND ['male', 'female', null] AS gen
+      RETURN coalesce(toString(gen), 'x') AS result
+    expect:
+      values: |
+        | result |
+        | 'male' |
+        | 'female' |
+        | 'x' |
+      side_effects: {}
+
+  # [9] `toString()` should accept potentially correct types 2
+  - name: s9_tostring_should_accept_potentially_correct_types_2
+    query: |
+      UNWIND ['male', 'female', null] AS gen
+      RETURN toString(coalesce(gen, 'x')) AS result
+    expect:
+      values: |
+        | result |
+        | 'male' |
+        | 'female' |
+        | 'x' |
+      side_effects: {}
+
+  # [10] Fail `toString()` on invalid types #Example: list #1
+  # TCK: TypeError at runtime: InvalidArgumentValue
+  - name: s10_fail_tostring_on_invalid_types_example_list_1
+    xfail:
+      spec: "openCypher TCK 2024.3 TypeConversion4: [10] Fail `toString()` on invalid types #Example: list #1"
+      issue: fix in 0.7.0
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH p = (n)-[r:T]->()
+      RETURN [x IN [1, '', []] | toString(x) ] AS list
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [10] Fail `toString()` on invalid types #Example: map #2
+  # TCK: TypeError at runtime: InvalidArgumentValue
+  - name: s10_fail_tostring_on_invalid_types_example_map_2
+    xfail:
+      spec: "openCypher TCK 2024.3 TypeConversion4: [10] Fail `toString()` on invalid types #Example: map #2"
+      issue: fix in 0.7.0
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH p = (n)-[r:T]->()
+      RETURN [x IN [1, '', {}] | toString(x) ] AS list
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [10] Fail `toString()` on invalid types #Example: node #3
+  # TCK: TypeError at runtime: InvalidArgumentValue
+  - name: s10_fail_tostring_on_invalid_types_example_node_3
+    xfail:
+      spec: "openCypher TCK 2024.3 TypeConversion4: [10] Fail `toString()` on invalid types #Example: node #3"
+      issue: fix in 0.7.0
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH p = (n)-[r:T]->()
+      RETURN [x IN [1, '', n] | toString(x) ] AS list
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [10] Fail `toString()` on invalid types #Example: relationship #4
+  # TCK: TypeError at runtime: InvalidArgumentValue
+  - name: s10_fail_tostring_on_invalid_types_example_relationship_4
+    xfail:
+      spec: "openCypher TCK 2024.3 TypeConversion4: [10] Fail `toString()` on invalid types #Example: relationship #4"
+      issue: fix in 0.7.0
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH p = (n)-[r:T]->()
+      RETURN [x IN [1, '', r] | toString(x) ] AS list
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [10] Fail `toString()` on invalid types #Example: path #5
+  # TCK: TypeError at runtime: InvalidArgumentValue
+  - name: s10_fail_tostring_on_invalid_types_example_path_5
+    xfail:
+      spec: "openCypher TCK 2024.3 TypeConversion4: [10] Fail `toString()` on invalid types #Example: path #5"
+      issue: fix in 0.7.0
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH p = (n)-[r:T]->()
+      RETURN [x IN [1, '', p] | toString(x) ] AS list
+    expect:
+      gql_status: "22"
+      side_effects: {}

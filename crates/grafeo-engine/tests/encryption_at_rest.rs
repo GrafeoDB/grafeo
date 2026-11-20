@@ -258,6 +258,10 @@ fn write_in_child_and_exit(path: &Path, key: Option<u8>) {
 /// Child-process entry for [`write_in_child_and_exit`]; a no-op when run
 /// directly.
 #[test]
+#[expect(
+    deprecated,
+    reason = "reads the database's WAL directly; the accessor goes in 0.7.0"
+)]
 fn write_child() {
     let (Some(path), Ok(key)) = (
         std::env::var_os(CHILD_PATH_VAR),
@@ -700,6 +704,10 @@ fn an_in_memory_database_with_a_key_is_a_configuration_error() {
 }
 
 #[test]
+#[expect(
+    deprecated,
+    reason = "reads the database's buffer manager directly; the accessor goes in 0.7.0"
+)]
 fn an_encrypted_database_has_no_spill_path() {
     let dir = tempfile::tempdir().unwrap();
     let plain = GrafeoDB::open(dir.path().join("plain.grafeo")).unwrap();
@@ -738,6 +746,10 @@ fn an_encrypted_database_has_no_spill_path() {
 /// WAL. (The vectors spill only without `temporal`.)
 #[cfg(all(feature = "vector-index", feature = "spill", feature = "mmap"))]
 #[test]
+#[expect(
+    deprecated,
+    reason = "reads the database's buffer manager directly; the accessor goes in 0.7.0"
+)]
 fn an_encrypted_database_spills_nothing_to_disk() {
     let dir = tempfile::tempdir().unwrap();
     let spilled = |root: &Path, key: Option<u8>| {

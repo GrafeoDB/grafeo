@@ -1,0 +1,258 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/conditional/Conditional2.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Conditional2"
+  title: "Conditional2 - Case Expression"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Simple cases over integers #1
+  - name: s1_simple_cases_over_integers_1
+    query: |
+      RETURN CASE -10
+          WHEN -10 THEN 'minus ten'
+          WHEN 0 THEN 'zero'
+          WHEN 1 THEN 'one'
+          WHEN 5 THEN 'five'
+          WHEN 10 THEN 'ten'
+          WHEN 3000 THEN 'three thousand'
+          ELSE 'something else'
+        END AS result
+    expect:
+      values: |
+        | result |
+        | 'minus ten' |
+      side_effects: {}
+
+  # [1] Simple cases over integers #2
+  - name: s1_simple_cases_over_integers_2
+    query: |
+      RETURN CASE 0
+          WHEN -10 THEN 'minus ten'
+          WHEN 0 THEN 'zero'
+          WHEN 1 THEN 'one'
+          WHEN 5 THEN 'five'
+          WHEN 10 THEN 'ten'
+          WHEN 3000 THEN 'three thousand'
+          ELSE 'something else'
+        END AS result
+    expect:
+      values: |
+        | result |
+        | 'zero' |
+      side_effects: {}
+
+  # [1] Simple cases over integers #3
+  - name: s1_simple_cases_over_integers_3
+    query: |
+      RETURN CASE 1
+          WHEN -10 THEN 'minus ten'
+          WHEN 0 THEN 'zero'
+          WHEN 1 THEN 'one'
+          WHEN 5 THEN 'five'
+          WHEN 10 THEN 'ten'
+          WHEN 3000 THEN 'three thousand'
+          ELSE 'something else'
+        END AS result
+    expect:
+      values: |
+        | result |
+        | 'one' |
+      side_effects: {}
+
+  # [1] Simple cases over integers #4
+  - name: s1_simple_cases_over_integers_4
+    query: |
+      RETURN CASE 5
+          WHEN -10 THEN 'minus ten'
+          WHEN 0 THEN 'zero'
+          WHEN 1 THEN 'one'
+          WHEN 5 THEN 'five'
+          WHEN 10 THEN 'ten'
+          WHEN 3000 THEN 'three thousand'
+          ELSE 'something else'
+        END AS result
+    expect:
+      values: |
+        | result |
+        | 'five' |
+      side_effects: {}
+
+  # [1] Simple cases over integers #5
+  - name: s1_simple_cases_over_integers_5
+    query: |
+      RETURN CASE 10
+          WHEN -10 THEN 'minus ten'
+          WHEN 0 THEN 'zero'
+          WHEN 1 THEN 'one'
+          WHEN 5 THEN 'five'
+          WHEN 10 THEN 'ten'
+          WHEN 3000 THEN 'three thousand'
+          ELSE 'something else'
+        END AS result
+    expect:
+      values: |
+        | result |
+        | 'ten' |
+      side_effects: {}
+
+  # [1] Simple cases over integers #6
+  - name: s1_simple_cases_over_integers_6
+    query: |
+      RETURN CASE 3000
+          WHEN -10 THEN 'minus ten'
+          WHEN 0 THEN 'zero'
+          WHEN 1 THEN 'one'
+          WHEN 5 THEN 'five'
+          WHEN 10 THEN 'ten'
+          WHEN 3000 THEN 'three thousand'
+          ELSE 'something else'
+        END AS result
+    expect:
+      values: |
+        | result |
+        | 'three thousand' |
+      side_effects: {}
+
+  # [1] Simple cases over integers #7
+  - name: s1_simple_cases_over_integers_7
+    query: |
+      RETURN CASE -30
+          WHEN -10 THEN 'minus ten'
+          WHEN 0 THEN 'zero'
+          WHEN 1 THEN 'one'
+          WHEN 5 THEN 'five'
+          WHEN 10 THEN 'ten'
+          WHEN 3000 THEN 'three thousand'
+          ELSE 'something else'
+        END AS result
+    expect:
+      values: |
+        | result |
+        | 'something else' |
+      side_effects: {}
+
+  # [1] Simple cases over integers #8
+  - name: s1_simple_cases_over_integers_8
+    query: |
+      RETURN CASE 3
+          WHEN -10 THEN 'minus ten'
+          WHEN 0 THEN 'zero'
+          WHEN 1 THEN 'one'
+          WHEN 5 THEN 'five'
+          WHEN 10 THEN 'ten'
+          WHEN 3000 THEN 'three thousand'
+          ELSE 'something else'
+        END AS result
+    expect:
+      values: |
+        | result |
+        | 'something else' |
+      side_effects: {}
+
+  # [1] Simple cases over integers #9
+  - name: s1_simple_cases_over_integers_9
+    query: |
+      RETURN CASE 3001
+          WHEN -10 THEN 'minus ten'
+          WHEN 0 THEN 'zero'
+          WHEN 1 THEN 'one'
+          WHEN 5 THEN 'five'
+          WHEN 10 THEN 'ten'
+          WHEN 3000 THEN 'three thousand'
+          ELSE 'something else'
+        END AS result
+    expect:
+      values: |
+        | result |
+        | 'something else' |
+      side_effects: {}
+
+  # [1] Simple cases over integers #10
+  - name: s1_simple_cases_over_integers_10
+    query: |
+      RETURN CASE '0'
+          WHEN -10 THEN 'minus ten'
+          WHEN 0 THEN 'zero'
+          WHEN 1 THEN 'one'
+          WHEN 5 THEN 'five'
+          WHEN 10 THEN 'ten'
+          WHEN 3000 THEN 'three thousand'
+          ELSE 'something else'
+        END AS result
+    expect:
+      values: |
+        | result |
+        | 'something else' |
+      side_effects: {}
+
+  # [1] Simple cases over integers #11
+  - name: s1_simple_cases_over_integers_11
+    query: |
+      RETURN CASE true
+          WHEN -10 THEN 'minus ten'
+          WHEN 0 THEN 'zero'
+          WHEN 1 THEN 'one'
+          WHEN 5 THEN 'five'
+          WHEN 10 THEN 'ten'
+          WHEN 3000 THEN 'three thousand'
+          ELSE 'something else'
+        END AS result
+    expect:
+      values: |
+        | result |
+        | 'something else' |
+      side_effects: {}
+
+  # [1] Simple cases over integers #12
+  - name: s1_simple_cases_over_integers_12
+    query: |
+      RETURN CASE 10.1
+          WHEN -10 THEN 'minus ten'
+          WHEN 0 THEN 'zero'
+          WHEN 1 THEN 'one'
+          WHEN 5 THEN 'five'
+          WHEN 10 THEN 'ten'
+          WHEN 3000 THEN 'three thousand'
+          ELSE 'something else'
+        END AS result
+    expect:
+      values: |
+        | result |
+        | 'something else' |
+      side_effects: {}

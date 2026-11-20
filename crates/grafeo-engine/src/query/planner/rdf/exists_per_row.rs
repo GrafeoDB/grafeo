@@ -96,6 +96,22 @@ pub(super) struct ExistsPerRow {
     rewrites: FxHashMap<Vec<bool>, LogicalOperator>,
     /// The answer for the values of the names, and whether the row binds anything.
     answers: FxHashMap<(Vec<Option<i64>>, bool), bool>,
+    /// What the answers hold under the statement's memory (see
+    /// `RowPlanParts::memory`): a table entry per distinct row, and its values.
+    /// Past the query memory limit or the memory limit the test fails with
+    /// `GRAFEO-S001`.
+    memory: grafeo_core::execution::OperatorMemory,
+}
+
+/// The memory of the answers of a test whose rows have `parts`' statement:
+/// counted when the statement is budgeted.
+fn answers_memory(parts: &RowPlanParts) -> grafeo_core::execution::OperatorMemory {
+    match &parts.memory {
+        Some(grafeo_core::execution::StatementMemory::Budgeted(ctx)) => {
+            grafeo_core::execution::OperatorMemory::new(ctx.clone())
+        }
+        _ => grafeo_core::execution::OperatorMemory::unbudgeted(),
+    }
 }
 
 impl ExistsPerRow {
@@ -104,6 +120,7 @@ impl ExistsPerRow {
     /// names a row binds.
     pub(super) fn reset(&mut self) {
         self.answers.clear();
+        self.memory.clear();
     }
 
     /// The test of `subquery` for rows of `left` and, in a join's pair, then `right`.
@@ -140,6 +157,7 @@ impl ExistsPerRow {
                 .collect()
         };
         Self {
+            memory: answers_memory(&parts),
             parts,
             subquery,
             names,
@@ -219,6 +237,16 @@ impl ExistsPerRow {
         }
         let answer = self.run(&asked.0, binds_anything)?;
         self.answers.insert(asked, answer);
+        // The answers, against the statement's memory: a table resize at a
+        // time, a compare otherwise.
+        let per_entry = std::mem::size_of::<((Vec<Option<i64>>, bool), bool)>() + 1;
+        let values = self.names.len() * std::mem::size_of::<Option<i64>>();
+        self.memory.set(
+            self.answers
+                .capacity()
+                .saturating_mul(per_entry)
+                .saturating_add(self.answers.len().saturating_mul(values)),
+        )?;
         Ok(answer)
     }
 

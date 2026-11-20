@@ -76,6 +76,22 @@ results = db.text_search("Article", "title", "graph", k=10, filters={"tenant": 1
 const results = await db.textSearch("Article", "title", "graph", 10, { tenant: 19 });
 ```
 
+A soft delete works whether the flag is set on every node or only on the deleted ones: `$ne` keeps the nodes without the property (see [Filtering Results](basics.md#filtering-results)).
+
+```python
+results = db.text_search("Doc", "text", "canals", k=10, filters={"deleted": {"$ne": True}})
+```
+
+`CALL grafeo.search.text`, `grafeo.search.vector` and `grafeo.search.mmr` take the same filters as their last, optional argument, a map (after `k`; for MMR after `lambda`), and keep `k` matching nodes. Inside a transaction they see its own writes:
+
+```python
+db.execute(
+    "CALL grafeo.search.text('Doc', 'text', 'canals', 10, $filters) "
+    "YIELD node_id, score RETURN node_id, score",
+    {"filters": {"deleted": {"$ne": True}}},
+)
+```
+
 ## In-Query Text Scoring (0.5.40+)
 
 BM25 is also callable from GQL/Cypher as `text_score()` and `text_match()`,

@@ -2045,10 +2045,12 @@ impl RdfPlanner {
                 column2,
                 distinct: agg_expr.distinct,
                 alias: agg_expr.alias.clone(),
-                percentile: agg_expr.percentile,
+                // SPARQL has no percentile aggregate.
+                percentile: None,
                 separator: agg_expr.separator.clone(),
                 // SPARQL's SUM and AVG: XPath's division for AVG, and an
                 // argument that is no number an error (the result unbound).
+                keep_nulls: false,
                 rdf_literals: matches!(
                     agg_expr.function,
                     LogicalAggregateFunction::Sum | LogicalAggregateFunction::Avg
@@ -2815,6 +2817,17 @@ impl RdfPlanner {
 
         let columns = all_vars.clone();
         let types = vec![LogicalType::RdfTermId; columns.len()];
+        // The join reads its patterns itself, unplanned: each scan's PROFILE
+        // entry is absorbed into its line, as a lookup's scan is.
+        if self.profiling.get() {
+            let mut entries = self.profile_entries.borrow_mut();
+            for input in &mwj.inputs {
+                entries.push(crate::query::profile::ProfileEntry::absorbed(
+                    "RdfTripleScan",
+                    input.display_label(),
+                ));
+            }
+        }
         let operator = Box::new(RdfLeapfrogOperator::new(
             ring,
             annotated,
@@ -3140,6 +3153,7 @@ impl RdfPlanner {
             column_map,
             terms: Arc::clone(&self.terms),
             done: false,
+            memory: grafeo_core::execution::memory::capture(),
         });
 
         Ok((operator, Vec::new(), Vec::new()))
@@ -3551,6 +3565,11 @@ struct RdfModifyOperator {
     column_map: HashMap<String, usize>,
     terms: Arc<QueryTermIds>,
     done: bool,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](grafeo_core::execution::memory::capture)): the chunks of the WHERE clause's solutions, kept until the templates run.
+    /// Past the query memory limit or the memory limit it fails with
+    /// `GRAFEO-S001`, before it writes anything.
+    memory: grafeo_core::execution::OperatorMemory,
 }
 
 impl Operator for RdfModifyOperator {
@@ -3560,26 +3579,31 @@ impl Operator for RdfModifyOperator {
         }
         let writer = update_writer(&self.writer)?;
 
-        // Step 1: every solution of the WHERE clause, before any change.
-        let mut bindings: Vec<(DataChunk, usize)> = Vec::new();
+        // Step 1: every solution of the WHERE clause, before any change: each
+        // chunk kept once, its selected rows the solutions.
+        let mut chunks: Vec<DataChunk> = Vec::new();
         while let Some(chunk) = self.input.next()? {
-            for row in chunk.selected_indices() {
-                bindings.push((chunk.clone(), row));
-            }
+            self.memory
+                .add_with(|| grafeo_core::execution::memory::chunk_bytes(&chunk))?;
+            chunks.push(chunk);
         }
+        let bindings: Vec<(&DataChunk, usize)> = chunks
+            .iter()
+            .flat_map(|chunk| chunk.selected_indices().map(move |row| (chunk, row)))
+            .collect();
 
         // Step 2: the DELETE templates, each variable its exact bound term.
         for template in &self.delete_templates {
             let graph = template.graph.as_deref();
             check_mutation_graph(graph)?;
-            for (chunk, row) in &bindings {
+            for &(chunk, row) in &bindings {
                 let mut blanks = FreshBlankNodes::default();
                 let mut term = |component| {
                     template_term(
                         component,
                         &self.column_map,
                         chunk,
-                        *row,
+                        row,
                         &self.terms,
                         &mut blanks,
                     )
@@ -3596,7 +3620,7 @@ impl Operator for RdfModifyOperator {
 
         // Step 3: the INSERT templates over the same solutions, a template
         // blank node fresh for each solution.
-        for (chunk, row) in &bindings {
+        for &(chunk, row) in &bindings {
             let mut blanks = FreshBlankNodes::default();
             for template in &self.insert_templates {
                 let graph = template.graph.as_deref();
@@ -3606,7 +3630,7 @@ impl Operator for RdfModifyOperator {
                         component,
                         &self.column_map,
                         chunk,
-                        *row,
+                        row,
                         &self.terms,
                         &mut blanks,
                     )
@@ -3621,6 +3645,9 @@ impl Operator for RdfModifyOperator {
                 }
             }
         }
+        drop(bindings);
+        drop(chunks);
+        self.memory.release();
 
         self.done = true;
         Ok(None)
@@ -4003,6 +4030,11 @@ struct RdfLeapfrogOperator {
     /// Whether the leapfrog join has been executed.
     executed: bool,
     terms: Arc<QueryTermIds>,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](grafeo_core::execution::memory::capture)): the matches it
+    /// buffers, a slot per matched triple (their terms are the ring's). Past
+    /// the query memory limit or the memory limit it fails with `GRAFEO-S001`.
+    memory: grafeo_core::execution::OperatorMemory,
 }
 
 #[cfg(feature = "ring-index")]
@@ -4021,12 +4053,15 @@ impl RdfLeapfrogOperator {
             position: 0,
             executed: false,
             terms,
+            memory: grafeo_core::execution::memory::capture(),
         }
     }
 
-    fn execute_join(&mut self) {
+    /// Runs the join once, buffering its matches against the statement's
+    /// memory.
+    fn execute_join(&mut self) -> std::result::Result<(), OperatorError> {
         if self.executed {
-            return;
+            return Ok(());
         }
         self.executed = true;
 
@@ -4034,7 +4069,18 @@ impl RdfLeapfrogOperator {
             &self.ring,
             self.annotated_patterns.clone(),
         );
-        self.results = join.collect();
+        for matched in join {
+            let bytes =
+                std::mem::size_of::<Vec<Triple>>() + matched.len() * std::mem::size_of::<Triple>();
+            if let Err(refused) = self.memory.add(bytes) {
+                // Refused: no call after this one serves the matches so far.
+                self.results = Vec::new();
+                self.memory.release();
+                return Err(refused);
+            }
+            self.results.push(matched);
+        }
+        Ok(())
     }
 
     /// The term a variable is bound to in a set of matched triples.
@@ -4067,7 +4113,7 @@ impl RdfLeapfrogOperator {
 #[cfg(feature = "ring-index")]
 impl Operator for RdfLeapfrogOperator {
     fn next(&mut self) -> grafeo_core::execution::operators::OperatorResult {
-        self.execute_join();
+        self.execute_join()?;
 
         if self.position >= self.results.len() {
             return Ok(None);
@@ -5607,6 +5653,7 @@ mod tests {
                 alias: Some("cnt".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             having: None,
         });
@@ -5751,6 +5798,7 @@ mod tests {
                 alias: Some("cnt".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             having: None,
         });
@@ -5799,6 +5847,7 @@ mod tests {
                 alias: Some("cnt".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             having: Some(LogicalExpression::Binary {
                 left: Box::new(LogicalExpression::Variable("cnt".to_string())),
@@ -5850,6 +5899,7 @@ mod tests {
                     alias: Some("total".to_string()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 },
                 AggregateExpr {
                     function: AggregateFunction::Avg,
@@ -5859,6 +5909,7 @@ mod tests {
                     alias: Some("average".to_string()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 },
             ],
             having: None,
@@ -7031,6 +7082,7 @@ mod tests {
                 alias: Some("cnt".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             having: None,
         });
@@ -7137,6 +7189,59 @@ mod tests {
         assert!(any.downcast::<RdfGraphOperator>().is_ok());
     }
 
+    /// A refused leapfrog join serves no partial matches: every call after the
+    /// refusal fails or returns nothing, never rows.
+    #[cfg(feature = "ring-index")]
+    #[test]
+    fn a_refused_leapfrog_join_serves_no_partial_matches() {
+        use grafeo_common::memory::buffer::BufferManager;
+        use grafeo_core::execution::memory::{self, OperatorMemoryContext, StatementMemory};
+        use grafeo_core::graph::rdf::TriplePattern;
+        use grafeo_core::index::ring::{AnnotatedPattern, TripleRing};
+
+        let knows = Term::iri("urn:knows");
+        let triangles = (0..2_000).flat_map(|i| {
+            let [a, b, c] = ["a", "b", "c"].map(|name| Term::iri(format!("urn:{name}{i}")));
+            [
+                Triple::new(a.clone(), knows.clone(), b.clone()),
+                Triple::new(b, knows.clone(), c.clone()),
+                Triple::new(c, knows.clone(), a),
+            ]
+        });
+        let ring = Arc::new(TripleRing::from_triples(triangles));
+        let pattern = |subject: &str, object: &str| AnnotatedPattern {
+            pattern: TriplePattern {
+                subject: None,
+                predicate: Some(knows.clone()),
+                object: None,
+            },
+            subject_var: Some(subject.to_string()),
+            predicate_var: None,
+            object_var: Some(object.to_string()),
+        };
+        let ctx = OperatorMemoryContext::new(BufferManager::with_budget(256 << 20))
+            .with_query_limit(64 << 10);
+        let mut join = {
+            let _scope = memory::enter(StatementMemory::Budgeted(ctx.clone()));
+            RdfLeapfrogOperator::new(
+                ring,
+                vec![pattern("x", "y"), pattern("y", "z"), pattern("z", "x")],
+                ["x", "y", "z"].map(String::from).to_vec(),
+                Arc::new(QueryTermIds::default()),
+            )
+        };
+        assert!(join.next().is_err(), "refused at 64 KiB");
+        for call in 0..3 {
+            if let Ok(Some(chunk)) = join.next() {
+                panic!(
+                    "call {call} after the refusal served {} rows",
+                    chunk.row_count()
+                );
+            }
+        }
+        assert_eq!(ctx.query().used(), 0, "the refusal gave its grant back");
+    }
+
     #[test]
     fn test_into_any_rdf_modify_operator() {
         let child: Box<dyn Operator> = Box::new(SingleRowOperator::new());
@@ -7148,6 +7253,7 @@ mod tests {
             column_map: HashMap::new(),
             terms: Arc::default(),
             done: false,
+            memory: grafeo_core::execution::OperatorMemory::unbudgeted(),
         });
         let any = op.into_any();
         assert!(any.downcast::<RdfModifyOperator>().is_ok());

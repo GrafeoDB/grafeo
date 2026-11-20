@@ -309,7 +309,7 @@ fn functions_called_with_another_number_of_arguments_are_semantic_errors() {
     for query in [
         "MATCH (p:Paper)-[r]->(q) RETURN type()",
         "MATCH (p:Paper)-[r]->(q) RETURN type(r, r)",
-        "MATCH path = (p:Paper)-[*]->(q) RETURN length()",
+        "MATCH path = TRAIL (p:Paper)-[*]->(q) RETURN length()",
         "MATCH (p:Paper) RETURN labels()",
         "MATCH (p:Paper) RETURN id()",
     ] {

@@ -192,7 +192,7 @@ fn every_entry_point_binds_them() {
         .unwrap();
     assert_eq!(result.row_count(), 1, "execute_language");
 
-    let processor = QueryProcessor::with_rdf(db.store().unwrap(), Arc::clone(db.rdf_store()));
+    let processor = QueryProcessor::with_rdf(db.store().unwrap(), Arc::clone(&db.rdf_store()));
     let result = processor
         .process(query, QueryLanguage::Sparql, Some(&bound))
         .unwrap();

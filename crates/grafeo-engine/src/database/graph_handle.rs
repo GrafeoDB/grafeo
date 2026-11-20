@@ -56,33 +56,6 @@ impl std::fmt::Debug for GraphHandle<'_> {
     }
 }
 
-impl GrafeoDB {
-    /// Returns a handle on the named graph of the current schema.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the graph does not exist.
-    pub fn graph(&self, name: &str) -> Result<GraphHandle<'_>> {
-        let schema = self.current_schema();
-        self.graph_in(schema.as_deref(), name)
-    }
-
-    /// Returns a handle on the named graph of `schema` (`None`: no schema).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the graph does not exist.
-    pub fn graph_in(&self, schema: Option<&str>, name: &str) -> Result<GraphHandle<'_>> {
-        let handle = GraphHandle {
-            db: self,
-            schema: schema.map(ToString::to_string),
-            name: name.to_string(),
-        };
-        handle.check_exists()?;
-        Ok(handle)
-    }
-}
-
 impl GraphHandle<'_> {
     /// The graph's name.
     #[must_use]
@@ -98,14 +71,16 @@ impl GraphHandle<'_> {
 
     /// A [`Snapshot`](crate::Snapshot) of the graph, as a committed reader at
     /// the current epoch sees it, pinned while it lives: for reads such as
-    /// graph algorithms.
+    /// graph algorithms. Holding it keeps the graph alive past `close()`, and the spill files it
+    /// reads stay until it drops.
     ///
     /// # Errors
     ///
     /// Returns an error if the graph no longer exists.
     pub fn snapshot(&self) -> Result<crate::Snapshot> {
-        let pin = self.db.transaction_manager.pin_read();
-        let store = self.db.read_store(DirectTarget::Named {
+        let open = self.db.live()?;
+        let pin = open.transaction_manager.pin_read();
+        let store = open.read_store(DirectTarget::Named {
             schema: self.schema.as_deref(),
             name: &self.name,
         })?;
@@ -119,13 +94,9 @@ impl GraphHandle<'_> {
     ///
     /// Returns an error if the graph no longer exists.
     pub fn session(&self) -> Result<Session> {
-        self.check_exists()?;
-        let mut session = self.db.session();
-        // The session starts in the handle's graph, its home, where SESSION RESET returns
-        session.set_home(self.schema.clone(), Some(self.name.clone()));
-        session.reset_schema();
-        session.reset_graph();
-        Ok(session)
+        let open = self.db.live()?;
+        let inner = open.graph_session(self.schema.as_deref(), &self.name)?;
+        Ok(open.slots.register_session(inner))
     }
 
     /// Runs a GQL query on this graph.
@@ -134,7 +105,7 @@ impl GraphHandle<'_> {
     ///
     /// Returns an error if the graph no longer exists or the query fails.
     pub fn execute(&self, query: &str) -> Result<QueryResult> {
-        self.one_call_session()?.execute(query)
+        self.with_one_call_session(|session| session.execute(query))
     }
 
     /// Runs a GQL query with parameters on this graph.
@@ -147,7 +118,7 @@ impl GraphHandle<'_> {
         query: &str,
         params: HashMap<String, Value>,
     ) -> Result<QueryResult> {
-        self.one_call_session()?.execute_with_params(query, params)
+        self.with_one_call_session(|session| session.execute_with_params(query, params))
     }
 
     /// Runs a query in the named language (`"gql"`, `"cypher"`, ...) on this
@@ -163,36 +134,32 @@ impl GraphHandle<'_> {
         language: &str,
         params: Option<HashMap<String, Value>>,
     ) -> Result<QueryResult> {
-        self.one_call_session()?
-            .execute_language(query, language, params)
+        self.with_one_call_session(|session| session.execute_language(query, language, params))
     }
 
-    /// A session of this graph for one call.
-    fn one_call_session(&self) -> Result<crate::session::Session> {
-        let mut session = self.session()?;
+    /// Runs `call` on a session of this graph for this call alone, not listed with the slots,
+    /// holding the open state while it runs, so `close()` waits for it.
+    pub(super) fn with_one_call_session<T>(
+        &self,
+        call: impl FnOnce(&crate::session::SessionInner) -> Result<T>,
+    ) -> Result<T> {
+        let open = self.db.live()?;
+        let mut session = open.graph_session(self.schema.as_deref(), &self.name)?;
         session.last_for_one_call();
-        Ok(session)
+        call(&session)
     }
 
     fn check_exists(&self) -> Result<()> {
-        let exists = match graph_storage_key(self.schema.as_deref(), Some(&self.name)) {
-            // The database's default graph always exists; a schema's default
-            // graph only while the schema does.
-            None => true,
-            Some(key) => self
-                .db
-                .root_store()
-                .is_some_and(|store| store.graph(&key).is_some()),
-        };
-        if exists {
-            Ok(())
-        } else {
-            Err(missing_graph(&self.name))
-        }
+        self.db
+            .live()?
+            .graph_exists(self.schema.as_deref(), &self.name)
     }
 
-    fn direct(&self) -> DirectCalls<'_> {
-        self.db.direct(DirectTarget::Named {
+    /// The direct API on this graph for one call: it holds the open state's read guard while it
+    /// runs, so `close()` waits for it.
+    fn direct(&self) -> Result<DirectHandle<'_>> {
+        Ok(DirectHandle {
+            open: self.db.live()?,
             schema: self.schema.as_deref(),
             name: &self.name,
         })
@@ -222,7 +189,16 @@ impl GraphHandle<'_> {
         labels: &[&str],
         properties: impl IntoIterator<Item = (impl Into<PropertyKey>, impl Into<Value>)>,
     ) -> Result<NodeId> {
-        self.direct().create_node_with_props(labels, properties)
+        // The caller's iterator runs before the lock: one that calls the database cannot
+        // deadlock against a close() waiting for it. A closed database pulls nothing.
+        self.db.refuse_if_closed()?;
+        let properties: Vec<(PropertyKey, Value)> = properties
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+        self.direct()?
+            .calls()
+            .create_node_with_props(labels, properties)
     }
 
     /// Creates an edge in this graph, like [`GrafeoDB::create_edge`].
@@ -254,7 +230,14 @@ impl GraphHandle<'_> {
         edge_type: &str,
         properties: impl IntoIterator<Item = (impl Into<PropertyKey>, impl Into<Value>)>,
     ) -> Result<EdgeId> {
-        self.direct()
+        // As `create_node_with_props`: the caller's iterator runs before the lock.
+        self.db.refuse_if_closed()?;
+        let properties: Vec<(PropertyKey, Value)> = properties
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+        self.direct()?
+            .calls()
             .create_edge_with_props(src, dst, edge_type, properties)
     }
 
@@ -265,7 +248,7 @@ impl GraphHandle<'_> {
     /// Returns an error if the graph or the node does not exist, or the
     /// value violates a constraint.
     pub fn set_node_property(&self, id: NodeId, key: &str, value: Value) -> Result<()> {
-        self.direct().set_node_property(id, key, value)
+        self.direct()?.calls().set_node_property(id, key, value)
     }
 
     /// Sets an edge property, like [`GrafeoDB::set_edge_property`].
@@ -275,7 +258,7 @@ impl GraphHandle<'_> {
     /// Returns an error if the graph or the edge does not exist, or the
     /// value violates the edge's type.
     pub fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) -> Result<()> {
-        self.direct().set_edge_property(id, key, value)
+        self.direct()?.calls().set_edge_property(id, key, value)
     }
 
     /// Removes a node property; whether the node had it.
@@ -285,7 +268,7 @@ impl GraphHandle<'_> {
     /// Returns an error if the graph no longer exists or a constraint
     /// requires the property.
     pub fn remove_node_property(&self, id: NodeId, key: &str) -> Result<bool> {
-        self.direct().remove_node_property(id, key)
+        self.direct()?.calls().remove_node_property(id, key)
     }
 
     /// Removes an edge property; whether the edge had it.
@@ -295,7 +278,7 @@ impl GraphHandle<'_> {
     /// Returns an error if the graph no longer exists or the edge's type
     /// requires the property.
     pub fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<bool> {
-        self.direct().remove_edge_property(id, key)
+        self.direct()?.calls().remove_edge_property(id, key)
     }
 
     /// Adds a label; whether the node exists and lacked it.
@@ -305,7 +288,7 @@ impl GraphHandle<'_> {
     /// Returns an error if the graph no longer exists or the node violates a
     /// constraint of the label.
     pub fn add_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
-        self.direct().add_node_label(id, label)
+        self.direct()?.calls().add_node_label(id, label)
     }
 
     /// Removes a label; whether the node exists and had it.
@@ -314,7 +297,7 @@ impl GraphHandle<'_> {
     ///
     /// Returns an error if the graph no longer exists.
     pub fn remove_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
-        self.direct().remove_node_label(id, label)
+        self.direct()?.calls().remove_node_label(id, label)
     }
 
     /// Deletes a node without edges; whether it existed.
@@ -324,7 +307,7 @@ impl GraphHandle<'_> {
     /// Returns an error if the graph no longer exists or the node still has
     /// edges.
     pub fn delete_node(&self, id: NodeId) -> Result<bool> {
-        self.direct().delete_node(id)
+        self.direct()?.calls().delete_node(id)
     }
 
     /// Deletes a node with all its edges, as `DETACH DELETE` does, and
@@ -338,7 +321,7 @@ impl GraphHandle<'_> {
     /// Returns an error if the graph no longer exists, and a write conflict
     /// with a transaction that writes the node or one of its edges.
     pub fn detach_delete_node(&self, id: NodeId) -> Result<bool> {
-        self.direct().detach_delete_node(id)
+        self.direct()?.calls().detach_delete_node(id)
     }
 
     /// Deletes an edge; whether it existed.
@@ -347,7 +330,7 @@ impl GraphHandle<'_> {
     ///
     /// Returns an error if the graph no longer exists.
     pub fn delete_edge(&self, id: EdgeId) -> Result<bool> {
-        self.direct().delete_edge(id)
+        self.direct()?.calls().delete_edge(id)
     }
 
     /// Creates one node with `label` per vector, all or none, like
@@ -363,7 +346,9 @@ impl GraphHandle<'_> {
         property: &str,
         vectors: Vec<Vec<f32>>,
     ) -> Result<Vec<NodeId>> {
-        self.direct().batch_create_nodes(label, property, vectors)
+        self.direct()?
+            .calls()
+            .batch_create_nodes(label, property, vectors)
     }
 
     /// Creates one node with `label` per property map, all or none, like
@@ -393,7 +378,8 @@ impl GraphHandle<'_> {
         labels: &[&str],
         properties_list: Vec<HashMap<PropertyKey, Value>>,
     ) -> Result<Vec<NodeId>> {
-        self.direct()
+        self.direct()?
+            .calls()
             .batch_create_nodes_with_labels(labels, properties_list)
     }
 
@@ -404,7 +390,7 @@ impl GraphHandle<'_> {
     /// Returns an error if the graph no longer exists, or the first edge's
     /// error; nothing of the batch is created then.
     pub fn batch_create_edges(&self, edges: Vec<BatchEdge>) -> Result<Vec<EdgeId>> {
-        self.direct().batch_create_edges(edges)
+        self.direct()?.calls().batch_create_edges(edges)
     }
 
     /// The edges of a node of this graph, like [`GrafeoDB::get_node_edges`].
@@ -418,7 +404,9 @@ impl GraphHandle<'_> {
         direction: Direction,
         edge_types: &[&str],
     ) -> Result<Vec<(NodeId, EdgeId)>> {
-        self.direct().get_node_edges(node, direction, edge_types)
+        self.direct()?
+            .calls()
+            .get_node_edges(node, direction, edge_types)
     }
 
     /// Gets a node of this graph.
@@ -427,7 +415,7 @@ impl GraphHandle<'_> {
     ///
     /// Returns an error if the graph no longer exists.
     pub fn get_node(&self, id: NodeId) -> Result<Option<Node>> {
-        self.direct().get_node(id)
+        self.direct()?.calls().get_node(id)
     }
 
     /// Gets an edge of this graph.
@@ -436,6 +424,84 @@ impl GraphHandle<'_> {
     ///
     /// Returns an error if the graph no longer exists.
     pub fn get_edge(&self, id: EdgeId) -> Result<Option<Edge>> {
-        self.direct().get_edge(id)
+        self.direct()?.calls().get_edge(id)
+    }
+}
+
+// The database's public methods: each reaches the open state for its call (#712).
+impl GrafeoDB {
+    /// Returns a handle on the named graph of the current schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the graph does not exist.
+    pub fn graph(&self, name: &str) -> Result<GraphHandle<'_>> {
+        let schema = self.current_schema();
+        self.graph_in(schema.as_deref(), name)
+    }
+
+    /// Returns a handle on the named graph of `schema` (`None`: no schema).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the graph does not exist.
+    pub fn graph_in(&self, schema: Option<&str>, name: &str) -> Result<GraphHandle<'_>> {
+        let handle = GraphHandle {
+            db: self,
+            schema: schema.map(ToString::to_string),
+            name: name.to_string(),
+        };
+        handle.check_exists()?;
+        Ok(handle)
+    }
+}
+
+/// A graph handle's direct API for one call: the open state, held while the call runs.
+struct DirectHandle<'h> {
+    open: parking_lot::MappedRwLockReadGuard<'h, super::Open>,
+    schema: Option<&'h str>,
+    name: &'h str,
+}
+
+impl DirectHandle<'_> {
+    fn calls(&self) -> DirectCalls<'_> {
+        self.open.direct(DirectTarget::Named {
+            schema: self.schema,
+            name: self.name,
+        })
+    }
+}
+
+impl super::Open {
+    /// Fails with the missing-graph error unless graph `name` of `schema` exists.
+    pub(crate) fn graph_exists(&self, schema: Option<&str>, name: &str) -> Result<()> {
+        let exists = match graph_storage_key(schema, Some(name)) {
+            // The database's default graph always exists; a schema's default
+            // graph only while the schema does.
+            None => true,
+            Some(key) => self
+                .root_store()
+                .is_some_and(|store| store.graph(&key).is_some()),
+        };
+        if exists {
+            Ok(())
+        } else {
+            Err(missing_graph(name))
+        }
+    }
+
+    /// A session working in graph `name` of `schema`, its home, where SESSION RESET returns;
+    /// not listed with the slots.
+    pub(crate) fn graph_session(
+        &self,
+        schema: Option<&str>,
+        name: &str,
+    ) -> Result<crate::session::SessionInner> {
+        self.graph_exists(schema, name)?;
+        let mut session = self.session_unlisted();
+        session.set_home(schema.map(ToString::to_string), Some(name.to_string()));
+        session.reset_schema();
+        session.reset_graph();
+        Ok(session)
     }
 }

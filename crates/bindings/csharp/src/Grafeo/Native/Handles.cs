@@ -57,7 +57,7 @@ internal sealed class ResultHandle : SafeHandle
 
     protected override bool ReleaseHandle()
     {
-        NativeMethods.grafeo_free_result(handle);
+        ReleaseMethods.grafeo_free_result(handle);
         return true;
     }
 }
@@ -97,6 +97,74 @@ internal sealed class AsOfHandle : SafeHandle
 }
 
 /// <summary>
+/// Safe handle wrapping a <c>GrafeoStream*</c>.
+/// Frees the stream, and its hold on the database, on release.
+/// </summary>
+internal sealed class StreamHandle : SafeHandle
+{
+    public StreamHandle() : base(nint.Zero, ownsHandle: true) { }
+
+    public override bool IsInvalid => handle == nint.Zero;
+
+    protected override bool ReleaseHandle()
+    {
+        ReleaseMethods.grafeo_stream_free(handle);
+        return true;
+    }
+}
+
+/// <summary>
+/// Safe handle wrapping a <c>GrafeoNode*</c>.
+/// Frees the node on release.
+/// </summary>
+internal sealed class NodeHandle : SafeHandle
+{
+    public NodeHandle() : base(nint.Zero, ownsHandle: true) { }
+
+    public override bool IsInvalid => handle == nint.Zero;
+
+    protected override bool ReleaseHandle()
+    {
+        ReleaseMethods.grafeo_free_node(handle);
+        return true;
+    }
+}
+
+/// <summary>
+/// Safe handle wrapping a <c>GrafeoEdge*</c>.
+/// Frees the edge on release.
+/// </summary>
+internal sealed class EdgeHandle : SafeHandle
+{
+    public EdgeHandle() : base(nint.Zero, ownsHandle: true) { }
+
+    public override bool IsInvalid => handle == nint.Zero;
+
+    protected override bool ReleaseHandle()
+    {
+        ReleaseMethods.grafeo_free_edge(handle);
+        return true;
+    }
+}
+
+/// <summary>
+/// Safe handle wrapping a <c>GrafeoOptions*</c>.
+/// Frees the open options on release.
+/// </summary>
+internal sealed class OptionsHandle : SafeHandle
+{
+    public OptionsHandle() : base(nint.Zero, ownsHandle: true) { }
+
+    public override bool IsInvalid => handle == nint.Zero;
+
+    protected override bool ReleaseHandle()
+    {
+        ReleaseMethods.grafeo_options_free(handle);
+        return true;
+    }
+}
+
+/// <summary>
 /// The native calls a handle's <c>ReleaseHandle</c> makes, with the raw
 /// pointer: a SafeHandle being released cannot add a reference to itself.
 /// Every other native call takes the SafeHandle type (see
@@ -126,4 +194,24 @@ internal static partial class ReleaseMethods
     /// <summary>Rollback a transaction.</summary>
     [LibraryImport(NativeMethods.LibName)]
     internal static partial int grafeo_rollback(nint tx);
+
+    /// <summary>Free a query result.</summary>
+    [LibraryImport(NativeMethods.LibName)]
+    internal static partial void grafeo_free_result(nint result);
+
+    /// <summary>Free a stream, and its hold on the database.</summary>
+    [LibraryImport(NativeMethods.LibName)]
+    internal static partial void grafeo_stream_free(nint stream);
+
+    /// <summary>Free a node.</summary>
+    [LibraryImport(NativeMethods.LibName)]
+    internal static partial void grafeo_free_node(nint node);
+
+    /// <summary>Free an edge.</summary>
+    [LibraryImport(NativeMethods.LibName)]
+    internal static partial void grafeo_free_edge(nint edge);
+
+    /// <summary>Free open options; null is ignored.</summary>
+    [LibraryImport(NativeMethods.LibName)]
+    internal static partial void grafeo_options_free(nint options);
 }

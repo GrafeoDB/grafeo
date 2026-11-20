@@ -170,14 +170,19 @@ fn quoted_types_and_alternatives_match_what_they_name() {
     let db = code_graph();
     let both = vec!["Amsterdam/Alix.py".to_string()];
     for language in ["gql", "cypher"] {
+        // GQL bounds the unbounded pattern with TRAIL, Cypher's semantics
+        let mode = if language == "gql" { "TRAIL " } else { "" };
         // The quoted name is one type, also in a variable-length pattern
-        let query = "MATCH (r:Repository)-[:`Graph:CONTAINS`*]->(f:File) RETURN f.filePath";
-        assert_eq!(column(&db, language, query), both, "{language}: {query}");
+        let query =
+            format!("MATCH {mode}(r:Repository)-[:`Graph:CONTAINS`*]->(f:File) RETURN f.filePath");
+        assert_eq!(column(&db, language, &query), both, "{language}: {query}");
         // Alternatives match either type
-        let query = "MATCH (r:Repository)-[:`Graph:CONTAINS`*]->(d)-[:`Graph:CONTAINS`|CONTAINS]->(f:File) \
-             RETURN f.filePath";
+        let query = format!(
+            "MATCH {mode}(r:Repository)-[:`Graph:CONTAINS`*]->(d)-[:`Graph:CONTAINS`|CONTAINS]->(f:File) \
+             RETURN f.filePath"
+        );
         assert_eq!(
-            column(&db, language, query),
+            column(&db, language, &query),
             vec![
                 "Amsterdam/Alix.py".to_string(),
                 "Amsterdam/Gus.py".to_string()

@@ -4140,20 +4140,23 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    /// `a ^ b`, binding tighter than `*` and right associative
-    /// (`2 ^ 3 ^ 2` is `2 ^ 9`), as in Cypher.
+    /// `a ^ b`, binding tighter than `*`: a Grafeo extension, `POWER(a, b)`
+    /// in ISO GQL. GQL has no power operator, so it says nothing of how a
+    /// chain groups: `2 ^ 3 ^ 2` is a syntax error that names `POWER`, and
+    /// parentheses group it.
     fn parse_power_expression(&mut self) -> Result<Expression> {
         let left = self.parse_unary_expression()?;
         if self.current.kind != TokenKind::Caret {
             return Ok(left);
         }
         self.advance();
-        // Each `^` nests one level (right associative): bound the depth so a
-        // long chain is an error, not a stack overflow.
-        self.enter_nesting()?;
-        let right = self.parse_power_expression();
-        self.exit_nesting();
-        let right = right?;
+        let right = self.parse_unary_expression()?;
+        if self.current.kind == TokenKind::Caret {
+            return Err(self.error(
+                "a chain of ^ needs parentheses, as (a ^ b) ^ c or a ^ (b ^ c); \
+                 POWER(x, y) is the ISO GQL form",
+            ));
+        }
         Ok(Expression::Binary {
             left: Box::new(left),
             op: BinaryOp::Pow,
@@ -7289,27 +7292,29 @@ impl<'a> Parser<'a> {
     /// but false for `CREATE GRAPH TYPE <name>` (which is schema DDL).
     fn peek_is_graph_instance_keyword(&mut self) -> bool {
         let pk = self.peek_kind();
-        if pk != TokenKind::Identifier {
-            return false;
+        let peeked_token = self
+            .peeked
+            .as_ref()
+            .expect("peek_kind guarantees peeked is Some");
+        // The tokens after the peeked one, read by a temporary lexer.
+        let mut rest = Lexer::new(&self.source[peeked_token.span.end..]);
+        let is_word = |token: &Token, word: &str| {
+            token.kind == TokenKind::Identifier && token.text.eq_ignore_ascii_case(word)
+        };
+        let first = if pk == TokenKind::Or {
+            // CREATE OR REPLACE [PROPERTY] GRAPH ...
+            if !is_word(&rest.next_token(), "REPLACE") {
+                return false;
+            }
+            rest.next_token()
+        } else {
+            peeked_token.clone()
+        };
+        if is_word(&first, "PROPERTY") {
+            return true; // CREATE [OR REPLACE] PROPERTY GRAPH ...
         }
-        let text = self.peek_text_upper();
-        if text == "PROPERTY" {
-            return true; // CREATE PROPERTY GRAPH ...
-        }
-        if text == "GRAPH" {
-            // Need to check the token after GRAPH. If it's TYPE, this is GRAPH TYPE (schema).
-            // Use a temporary lexer to peek 2 tokens ahead from the current source position.
-            let peeked_token = self
-                .peeked
-                .as_ref()
-                .expect("peek_kind guarantees peeked is Some");
-            let remaining = &self.source[peeked_token.span.end..];
-            let mut temp_lexer = Lexer::new(remaining);
-            let next_after_graph = temp_lexer.next_token();
-            // If it's TYPE, this is CREATE GRAPH TYPE, not a graph instance
-            return next_after_graph.kind != TokenKind::Type;
-        }
-        false
+        // GRAPH followed by TYPE is CREATE GRAPH TYPE, a schema statement.
+        is_word(&first, "GRAPH") && rest.next_token().kind != TokenKind::Type
     }
 
     /// Parses `CREATE [OR REPLACE] PROCEDURE name(params) RETURNS (cols) AS { body }`.
@@ -7422,9 +7427,10 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parses `CREATE [PROPERTY] GRAPH [IF NOT EXISTS] <name>`.
+    /// Parses `CREATE [OR REPLACE] [PROPERTY] GRAPH [IF NOT EXISTS] <name>`.
     fn parse_create_graph(&mut self) -> Result<SessionCommand> {
         self.expect(TokenKind::Create)?;
+        let or_replace = self.try_parse_or_replace();
 
         // Skip optional PROPERTY keyword
         if self.is_identifier() && self.get_identifier_name().eq_ignore_ascii_case("PROPERTY") {
@@ -7449,6 +7455,10 @@ impl<'a> Parser<'a> {
         } else {
             false
         };
+        // ISO/IEC 39075 12.4: OR REPLACE and IF NOT EXISTS exclude each other.
+        if or_replace && if_not_exists {
+            return Err(self.error("OR REPLACE and IF NOT EXISTS cannot both be given"));
+        }
 
         // Parse graph name
         if !self.is_identifier() {
@@ -7549,6 +7559,7 @@ impl<'a> Parser<'a> {
 
         Ok(SessionCommand::CreateGraph {
             name,
+            or_replace,
             if_not_exists,
             typed,
             like_graph,
@@ -9106,11 +9117,14 @@ mod tests {
     }
 
     #[test]
-    fn test_power_operator_is_right_associative() {
-        let Statement::Query(query) = Parser::new("RETURN 2 ^ 3 ^ 2 * 4").parse().unwrap() else {
+    fn test_power_chain_needs_parentheses() {
+        // ISO GQL has no `^`: a chain is refused, naming POWER.
+        let error = Parser::new("RETURN 2 ^ 3 ^ 2 * 4").parse().unwrap_err();
+        assert!(error.to_string().contains("POWER"), "{error}");
+        // Parenthesized, it parses as written: (2 ^ (3 ^ 2)) * 4.
+        let Statement::Query(query) = Parser::new("RETURN 2 ^ (3 ^ 2) * 4").parse().unwrap() else {
             panic!("expected a query");
         };
-        // (2 ^ (3 ^ 2)) * 4
         let Expression::Binary { left, op, .. } = &query.return_clause.items[0].expression else {
             panic!("expected a binary expression");
         };
@@ -10390,6 +10404,68 @@ mod tests {
         } else {
             panic!("Expected CreateGraph session command");
         }
+    }
+
+    /// `CREATE OR REPLACE [PROPERTY] GRAPH` (ISO/IEC 39075 12.4), in each form `CREATE GRAPH`
+    /// takes, and the graph type statement it must not swallow.
+    #[test]
+    fn test_parse_create_or_replace_graph() {
+        for (query, name, typed, copy_of) in [
+            ("CREATE OR REPLACE GRAPH g80", "g80", None, None),
+            ("CREATE OR REPLACE GRAPH `g80`", "g80", None, None),
+            ("CREATE OR REPLACE PROPERTY GRAPH g80", "g80", None, None),
+            (
+                "CREATE OR REPLACE GRAPH g80 TYPED social",
+                "g80",
+                Some("social"),
+                None,
+            ),
+            (
+                "CREATE OR REPLACE GRAPH g80 AS COPY OF src",
+                "g80",
+                None,
+                Some("src"),
+            ),
+        ] {
+            let statement = Parser::new(query)
+                .parse()
+                .unwrap_or_else(|error| panic!("{query}: {error:?}"));
+            let Statement::SessionCommand(SessionCommand::CreateGraph {
+                name: parsed,
+                or_replace,
+                if_not_exists,
+                typed: parsed_type,
+                copy_of: parsed_copy,
+                ..
+            }) = statement
+            else {
+                panic!("{query}: expected CreateGraph, got {statement:?}");
+            };
+            assert_eq!(parsed, name, "{query}");
+            assert!(or_replace, "{query}");
+            assert!(!if_not_exists, "{query}");
+            assert_eq!(parsed_type.as_deref(), typed, "{query}");
+            assert_eq!(parsed_copy.as_deref(), copy_of, "{query}");
+        }
+        let Ok(Statement::SessionCommand(SessionCommand::CreateGraph { or_replace, .. })) =
+            Parser::new("CREATE GRAPH g80").parse()
+        else {
+            panic!("CREATE GRAPH parses");
+        };
+        assert!(!or_replace, "plain CREATE GRAPH does not replace");
+        assert!(
+            matches!(
+                Parser::new("CREATE OR REPLACE GRAPH TYPE social (NODE TYPE Person)").parse(),
+                Ok(Statement::Schema(_))
+            ),
+            "CREATE OR REPLACE GRAPH TYPE stays a graph type statement"
+        );
+        // ISO 12.4: OR REPLACE and IF NOT EXISTS exclude each other.
+        assert!(
+            Parser::new("CREATE OR REPLACE GRAPH IF NOT EXISTS g80")
+                .parse()
+                .is_err()
+        );
     }
 
     #[test]
@@ -12429,7 +12505,6 @@ mod tests {
     #[test]
     fn test_long_power_and_sign_chains_error_not_stack_overflow() {
         for query in [
-            format!("RETURN 2{}", " ^ 2".repeat(50_000)),
             format!("RETURN {}1", "- ".repeat(50_000)),
             format!("RETURN {}1", "+ ".repeat(50_000)),
             format!("RETURN {}true", "NOT ".repeat(50_000)),
@@ -12437,12 +12512,14 @@ mod tests {
             let err = Parser::new(&query).parse().unwrap_err().to_string();
             assert!(err.contains("nesting depth"), "got: {err}");
         }
+        // A `^` chain is refused at its second `^`, without recursing.
+        let err = Parser::new(&format!("RETURN 2{}", " ^ 2".repeat(50_000)))
+            .parse()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("POWER"), "got: {err}");
         // Short chains are unaffected.
-        assert!(
-            Parser::new(&format!("RETURN 2{}", " ^ 1".repeat(20)))
-                .parse()
-                .is_ok()
-        );
+        assert!(Parser::new("RETURN 2 ^ 1").parse().is_ok());
         assert!(Parser::new("RETURN - - 1").parse().is_ok());
         assert!(Parser::new("RETURN NOT NOT true").parse().is_ok());
     }

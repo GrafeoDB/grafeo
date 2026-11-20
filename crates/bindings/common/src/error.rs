@@ -16,7 +16,7 @@ pub enum ErrorCategory {
     Query,
     /// Transaction conflict, timeout, or invalid state.
     Transaction,
-    /// The database is closed and takes no more writes.
+    /// The database is closed and takes no more calls.
     DatabaseClosed,
     /// Storage-layer error (disk, memory limit).
     Storage,
@@ -101,6 +101,22 @@ mod tests {
     /// A commit whose log write failed was rolled back: a transaction error,
     /// which a retry can fix. An unknown outcome and a log that takes no more
     /// writes need a reopen: database errors.
+    /// An expired snapshot is a transaction error a retry fixes, with its own code.
+    #[test]
+    fn classifies_an_expired_snapshot_as_a_retryable_transaction_error() {
+        let err = Error::Transaction(TransactionError::SnapshotExpired {
+            kept: 2 << 20,
+            limit: 1 << 20,
+        });
+        assert_eq!(classify_error(&err), ErrorCategory::Transaction);
+        assert_eq!(err.error_code().as_str(), "GRAFEO-T012");
+        assert!(err.error_code().is_retryable());
+        assert!(
+            err.to_string().contains("2097152 bytes") && err.to_string().contains("1048576 bytes"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn classifies_the_commit_log_errors_by_what_helps() {
         let err = Error::Transaction(TransactionError::LogWriteFailed("disk full".into()));

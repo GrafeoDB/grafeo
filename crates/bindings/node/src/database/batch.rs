@@ -63,11 +63,11 @@ impl JsGrafeoDB {
     ) -> Result<Vec<f64>> {
         let labels = label_list(labels);
         let properties_list = Properties::rows(properties_list)?;
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
             let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
             let ids = db
-                .read()
+                .read()?
                 .batch_create_nodes_with_labels(&labels, properties_list)
                 .map_err(NodeGrafeoError::from)?;
             Ok(ids.into_iter().map(|id| id.as_u64() as f64).collect())
@@ -83,10 +83,10 @@ impl JsGrafeoDB {
     #[napi(js_name = "batchCreateEdges")]
     pub async fn batch_create_edges(&self, edges: Vec<BatchEdgeInput>) -> Result<Vec<f64>> {
         let edges = batch_edges(edges)?;
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
             let ids = db
-                .read()
+                .read()?
                 .batch_create_edges(edges)
                 .map_err(NodeGrafeoError::from)?;
             Ok(ids.into_iter().map(|id| id.as_u64() as f64).collect())

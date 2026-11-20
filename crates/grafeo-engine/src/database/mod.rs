@@ -49,6 +49,8 @@ pub use graph_handle::GraphHandle;
 pub use hybrid_search_options::HybridSearchOptions;
 #[cfg(feature = "gql")]
 pub use upsert::{EdgeUpsertOptions, UpsertSummary};
+#[cfg(all(test, feature = "gql", feature = "grafeo-file"))]
+mod history_limit_tests;
 #[cfg(feature = "hybrid-search")]
 mod hybrid_search_options;
 mod import;
@@ -68,6 +70,8 @@ mod rdf_ops;
 #[cfg(feature = "wal")]
 mod schema_replay;
 mod search;
+#[cfg(any(feature = "vector-index", feature = "text-index"))]
+pub(crate) use search::filter_allowlist;
 // The consumers of the RDF sections, the only sections it wraps.
 #[cfg(any(feature = "triple-store", test))]
 pub(crate) mod section_consumer;
@@ -137,29 +141,12 @@ use crate::query::cache::QueryCache;
 use crate::session::Session;
 use crate::transaction::TransactionManager;
 
-/// Your handle to a Grafeo database.
-///
-/// Start here. Create one with [`new_in_memory()`](Self::new_in_memory) for
-/// quick experiments, or [`open()`](Self::open) for persistent storage.
-/// Then grab a [`session()`](Self::session) to start querying.
-///
-/// # Examples
-///
-/// ```
-/// use grafeo_engine::GrafeoDB;
-///
-/// // Quick in-memory database
-/// let db = GrafeoDB::new_in_memory();
-///
-/// // Add some data
-/// db.create_node(&["Person"]);
-///
-/// // Query it
-/// let session = db.session();
-/// let result = session.execute("MATCH (p:Person) RETURN p")?;
-/// # Ok::<(), grafeo_common::utils::error::Error>(())
-/// ```
-pub struct GrafeoDB {
+/// The open state of a database: every store, index, cache, log and file it holds, owned
+/// by its [`GrafeoDB`] alone and taken by `close()`, so it goes with the close whatever a
+/// caller still holds (#712). A session or stream holds what its statements need in a slot
+/// the open state lists and `close()` empties; the checkpoint timer's job holds strong
+/// handles, and `close()` stops and joins it before it persists.
+pub(crate) struct Open {
     /// Database configuration.
     pub(super) config: Config,
     /// The underlying graph store (None when using an external store). Read
@@ -191,6 +178,8 @@ pub struct GrafeoDB {
     pub(super) commit_counter: Arc<AtomicUsize>,
     /// Whether the database is open.
     pub(super) is_open: RwLock<bool>,
+    /// The sessions it handed out, which `close()` takes (#712).
+    pub(crate) slots: Arc<crate::session::Slots>,
     /// Serializes backups, including their shared WAL cursor.
     #[cfg(feature = "wal")]
     backup_lock: parking_lot::Mutex<()>,
@@ -279,7 +268,117 @@ pub struct GrafeoDB {
         Arc<RwLock<std::collections::HashMap<String, Arc<grafeo_core::graph::GraphProjection>>>>,
 }
 
+/// Your handle to a Grafeo database.
+///
+/// Start here. Create one with [`new_in_memory()`](Self::new_in_memory) for
+/// quick experiments, or [`open()`](Self::open) for persistent storage.
+/// Then grab a [`session()`](Self::session) to start querying.
+///
+/// # Examples
+///
+/// ```
+/// use grafeo_engine::GrafeoDB;
+///
+/// // Quick in-memory database
+/// let db = GrafeoDB::new_in_memory();
+///
+/// // Add some data
+/// db.create_node(&["Person"]);
+///
+/// // Query it
+/// let session = db.session();
+/// let result = session.execute("MATCH (p:Person) RETURN p")?;
+/// # Ok::<(), grafeo_common::utils::error::Error>(())
+/// ```
+pub struct GrafeoDB {
+    /// The open state; `None` once `close()` took it.
+    state: RwLock<Option<Arc<Open>>>,
+    /// The configuration it was opened with, which answers after `close()`.
+    config: Config,
+    /// What the open found, which answers after `close()`.
+    open_warnings: Vec<crate::admin::OpenWarning>,
+    /// Whether it was opened read-only, which answers after `close()`.
+    read_only: bool,
+}
+
 impl GrafeoDB {
+    /// The facade of an open state.
+    fn from_open(open: Open) -> Self {
+        Self {
+            config: open.config.clone(),
+            open_warnings: open.open_warnings.clone(),
+            read_only: open.read_only,
+            state: RwLock::new(Some(Arc::new(open))),
+        }
+    }
+
+    /// The open state for one call; `GRAFEO-T007` once the database is closed. It holds the
+    /// state's read lock for the call, so `close()` waits for the calls in flight (#712). No
+    /// public method runs a caller's code under it (a caller's iterator is collected before it
+    /// is taken), and none takes it twice in one call, so a pending `close()` never waits behind
+    /// a call that waits for it.
+    pub(crate) fn live(&self) -> Result<parking_lot::MappedRwLockReadGuard<'_, Open>> {
+        self.live_if().ok_or(Error::Transaction(
+            grafeo_common::utils::error::TransactionError::DatabaseClosed,
+        ))
+    }
+
+    /// `GRAFEO-T007` once the database is closed, for a call that must refuse before it does
+    /// any work of the caller's (pulling an iterator) and then takes [`live`](Self::live).
+    pub(crate) fn refuse_if_closed(&self) -> Result<()> {
+        self.live().map(drop)
+    }
+
+    /// [`live`](Self::live), `None` once the database is closed.
+    pub(crate) fn live_if(&self) -> Option<parking_lot::MappedRwLockReadGuard<'_, Open>> {
+        parking_lot::RwLockReadGuard::try_map(self.state.read(), |state| state.as_deref()).ok()
+    }
+
+    /// The open state as an owned handle, for work that outlives the call's borrow of the
+    /// database (an async task); `GRAFEO-T007` once closed.
+    #[cfg(any(feature = "async-storage", test))]
+    pub(crate) fn live_arc(&self) -> Result<Arc<Open>> {
+        self.state.read().clone().ok_or(Error::Transaction(
+            grafeo_common::utils::error::TransactionError::DatabaseClosed,
+        ))
+    }
+
+    /// Whether `close()` ran: every later call fails with `GRAFEO-T007`, and the calls that
+    /// cannot fail answer an empty value.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.state.read().is_none()
+    }
+}
+
+/// The open state `close()` took: put back unless the close completed.
+struct Taken<'a> {
+    state: &'a RwLock<Option<Arc<Open>>>,
+    open: Option<Arc<Open>>,
+}
+
+impl Drop for Taken<'_> {
+    fn drop(&mut self) {
+        if let Some(open) = self.open.take() {
+            *self.state.write() = Some(open);
+        }
+    }
+}
+
+impl Drop for GrafeoDB {
+    /// `close()` releases everything and every later call fails with `GRAFEO-T007`; dropping
+    /// the database without `close()` persists, refuses writes and releases the file, and
+    /// what a still-held session, stream or view holds is released when it drops.
+    fn drop(&mut self) {
+        if let Some(open) = self.state.get_mut().take()
+            && let Err(e) = open.close()
+        {
+            grafeo_error!("Error closing database: {}", e);
+        }
+    }
+}
+
+impl Open {
     /// The built-in store, which what only it has (named graphs, indexes,
     /// search, the database file, imports, backups) works on.
     ///
@@ -309,28 +408,8 @@ impl GrafeoDB {
         self.cdc_enabled.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Creates an in-memory database, fast to create, gone when dropped.
-    ///
-    /// Use this for tests, experiments, or when you don't need persistence.
-    /// For data that survives restarts, use [`open()`](Self::open) instead.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal arena allocator cannot be initialized (out of memory).
-    /// Use [`with_config()`](Self::with_config) for a fallible alternative.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use grafeo_engine::GrafeoDB;
-    ///
-    /// let db = GrafeoDB::new_in_memory();
-    /// let session = db.session();
-    /// session.execute("INSERT (:Person {name: 'Alix'})")?;
-    /// # Ok::<(), grafeo_common::utils::error::Error>(())
-    /// ```
     #[must_use]
-    pub fn new_in_memory() -> Self {
+    pub(crate) fn new_in_memory() -> Self {
         Self::with_config(Config::in_memory()).expect("In-memory database creation should not fail")
     }
 
@@ -359,143 +438,17 @@ impl GrafeoDB {
         warnings
     }
 
-    /// What the open found that the caller should know, without failing:
-    /// a graph type's rules that no longer reach elements, a memory limit
-    /// taken of a fallback figure, a database over its memory limit. Each
-    /// was logged at the open too.
-    #[must_use]
-    pub fn open_warnings(&self) -> &[crate::admin::OpenWarning] {
-        &self.open_warnings
-    }
-
-    /// Opens a database at the given path, creating it if it doesn't exist.
-    ///
-    /// If you've used this path before, Grafeo recovers your data from the
-    /// write-ahead log automatically. First open on a new path creates an
-    /// empty database: a single file, whatever the path's extension, with its
-    /// write-ahead log in the sidecar directory `<path>.wal/` while it is open.
-    ///
-    /// A build without the `wal` feature (the `grafeo` crate's default
-    /// features have none; its `storage` group and `lpg` profile add it)
-    /// keeps no write-ahead log: commits stay in memory until a checkpoint
-    /// writes them to the file (`close()`, dropping the database, or
-    /// [`wal_checkpoint`](Self::wal_checkpoint)), and a process that exits
-    /// without one loses the commits since the last.
-    ///
-    /// A database written by 0.5.x is migrated to the 0.6 file format first:
-    /// a `.grafeo` file, or a WAL directory (a directory holding `wal/`),
-    /// which becomes a single file at the same path. The old files are kept,
-    /// byte for byte: the file (or the whole directory) as `<path>.pre-0.6`,
-    /// a file's sidecar WAL as `<path>.pre-0.6.wal`, a checkpoint image
-    /// 0.5.44 left pending as `<path>.pre-0.6.checkpoint` and the spill
-    /// directory as `<path>.pre-0.6.spill` (embeddings spilled before the
-    /// database was closed are read into the 0.6 file). The migration
-    /// refuses to start while one of these names is taken (it never replaces
-    /// a kept copy), and an open waits up to five seconds for a migration
-    /// another process is running before it fails. A kept copy itself (a
-    /// 0.5.x database whose name ends in `.pre-0.6`) is never migrated: its
-    /// read-write open fails, and a read-only open reads it.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the path isn't writable or recovery fails.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use grafeo_engine::GrafeoDB;
-    ///
-    /// let db = GrafeoDB::open("./my_social_network")?;
-    /// # Ok::<(), grafeo_common::utils::error::Error>(())
-    /// ```
     #[cfg(feature = "grafeo-file")]
-    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
+    pub(crate) fn open_at(path: impl AsRef<std::path::Path>) -> Result<Self> {
         Self::with_config(Config::persistent(path.as_ref()))
     }
 
-    /// Opens an existing database in read-only mode: it does not allow
-    /// mutations, and writes nothing to the file.
-    ///
-    /// A file written by 0.6 or later is held under a shared file lock until
-    /// the database is closed, so multiple processes can read the same
-    /// `.grafeo` file concurrently. The database loads the last checkpoint
-    /// and replays the sidecar WAL `<path>.wal/` into memory, where a writer
-    /// that exited without `close()` left its last commits. Nothing is
-    /// written: the WAL stays for the next read-write open. A build without
-    /// the `wal` feature cannot replay it, and refuses a file whose sidecar
-    /// WAL holds files.
-    ///
-    /// A database written by 0.5.x is different: it is read once into
-    /// memory, a file with its sidecar WAL replayed, a WAL directory by
-    /// replaying its WAL, and no lock is held once it is loaded. It is not
-    /// migrated, and nothing in it changes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database doesn't exist or can't be read, and,
-    /// in a build without the `wal` feature, if its sidecar WAL holds commits
-    /// to replay (a non-empty log file; for a 0.5.x file, any file); also
-    /// if the database holds data this build cannot read (by 0.5.x too): RDF
-    /// triples without `triple-store`, vector or text indexes without
-    /// `vector-index` or `text-index`.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use grafeo_engine::GrafeoDB;
-    ///
-    /// let db = GrafeoDB::open_read_only("./my_graph.grafeo")?;
-    /// let session = db.session();
-    /// let result = session.execute("MATCH (n) RETURN n LIMIT 10")?;
-    /// // Mutations will return an error:
-    /// // session.execute("INSERT (:Person)") => Err(ReadOnly)
-    /// # Ok::<(), grafeo_common::utils::error::Error>(())
-    /// ```
     #[cfg(feature = "grafeo-file")]
-    pub fn open_read_only(path: impl AsRef<std::path::Path>) -> Result<Self> {
+    pub(crate) fn open_read_only(path: impl AsRef<std::path::Path>) -> Result<Self> {
         Self::with_config(Config::read_only(path.as_ref()))
     }
 
-    /// Creates a database with custom configuration.
-    ///
-    /// Use this when you need fine-grained control over memory limits,
-    /// thread counts, or persistence settings. For most cases,
-    /// [`new_in_memory()`](Self::new_in_memory) or [`open()`](Self::open)
-    /// are simpler.
-    ///
-    /// With `Config::encryption` (feature `encryption`), a new database is
-    /// created encrypted, and an existing one opens only with the key chain
-    /// it was created with.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database can't be created or recovery fails,
-    /// if the deprecated `StorageFormat::WalDirectory` is given for a path
-    /// where nothing exists (WAL directories are no longer created), or if
-    /// the path holds neither a database file nor a 0.5.x WAL directory; with
-    /// encryption, also if an encrypted database is opened without its key or
-    /// with another one, or an unencrypted one is opened with a key; in a
-    /// build without the `wal` feature, also if the sidecar WAL of the
-    /// database file holds commits only a build with `wal` can replay (a
-    /// non-empty log file; for a 0.5.x file, any file); and if the database
-    /// holds data this build cannot read, which it would open without and
-    /// its next checkpoint drop (by 0.5.x too): RDF triples (in the file or
-    /// its WAL) without `triple-store`, vector or text indexes without
-    /// `vector-index` or `text-index`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use grafeo_engine::{GrafeoDB, Config};
-    ///
-    /// // In-memory with a 512MB limit
-    /// let config = Config::in_memory()
-    ///     .with_memory_limit(512 * 1024 * 1024);
-    ///
-    /// let db = GrafeoDB::with_config(config)?;
-    /// # Ok::<(), grafeo_common::utils::error::Error>(())
-    /// ```
-    pub fn with_config(config: Config) -> Result<Self> {
+    pub(crate) fn with_config(config: Config) -> Result<Self> {
         Self::with_config_and_spill(config, true)
     }
 
@@ -545,6 +498,7 @@ impl GrafeoDB {
         // keeps what replay replaces while the database keeps history; a
         // load sets it again from the history the file holds.
         transaction_manager.open_history(config.history_retention());
+        transaction_manager.set_history_retention_limit(config.history_retention_limit());
         store.set_keeps_history(transaction_manager.history_image().is_some());
 
         let is_read_only = config.access_mode() == crate::config::AccessMode::ReadOnly;
@@ -569,6 +523,8 @@ impl GrafeoDB {
 
         // Create buffer manager with configured limits
         let (budget, detected_memory) = memory_budget(&config);
+        transaction_manager
+            .set_snapshot_retention_limit(config.snapshot_retention_limit_for(budget));
         let config = config.with_open_memory_budget(budget);
         let buffer_config = BufferManagerConfig {
             spill_path: spill_layout.root.clone(),
@@ -1019,6 +975,7 @@ impl GrafeoDB {
             query_cache,
             commit_counter: Arc::new(AtomicUsize::new(0)),
             is_open: RwLock::new(true),
+            slots: Arc::default(),
             #[cfg(feature = "wal")]
             backup_lock: parking_lot::Mutex::new(()),
             #[cfg(feature = "cdc")]
@@ -1178,56 +1135,7 @@ impl GrafeoDB {
         Ok(db)
     }
 
-    /// Creates a database on a backend of one's own: a [`GraphBackend`],
-    /// the store contract's write side over its read side
-    /// ([`GraphStore`]).
-    ///
-    /// Queries in every language, the optimizer and the planner read the
-    /// backend, and every write applies in a transaction the backend opens
-    /// ([`GraphBackend::begin`]) and the engine commits or rolls back through
-    /// it, also a rollback to a savepoint and the rollback of a failed
-    /// statement. The engine reserves the ids of what a write creates. The
-    /// built-in store's features are not there: named graphs (and schemas,
-    /// whose default graph is one), property, vector and text indexes, and the
-    /// `.grafeo` file: such a statement or call is an unsupported error. A
-    /// schema statement applies its types and constraints.
-    ///
-    /// With a path (`Config::persistent(path)`) and the WAL on, the database
-    /// logs every commit to its own write-ahead log, `<path>.wal`, which this
-    /// process holds while it is open, and writes no database file. An open
-    /// replays the log: the catalog, and the commits after the backend's
-    /// [`durable_epoch`](GraphBackend::durable_epoch). A checkpoint
-    /// ([`wal_checkpoint`](Self::wal_checkpoint), and `close()`) asks the
-    /// backend to [`flush`](GraphBackend::flush) up to the committed epoch;
-    /// once the backend reports it durable, the log starts again with the
-    /// catalog and drops the older commits. A backend that keeps nothing
-    /// across a restart reports [`EpochId::INITIAL`](grafeo_common::types::EpochId::INITIAL):
-    /// its log keeps every commit and replays them all at every open. Change
-    /// data capture hears its commits as it hears the built-in store's.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use std::sync::Arc;
-    /// use grafeo_core::graph::GraphBackend;
-    /// use grafeo_engine::{Config, GrafeoDB};
-    ///
-    /// fn example(store: Arc<dyn GraphBackend>) -> grafeo_common::utils::error::Result<()> {
-    ///     let db = GrafeoDB::with_store(store, Config::in_memory())?;
-    ///     db.execute("INSERT (:Person {name: 'Alix'})")?;
-    ///     let result = db.execute("MATCH (n) RETURN count(n)")?;
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if config validation fails.
-    ///
-    /// # Stability: Experimental
-    ///
-    /// Implementing [`GraphBackend`] is experimental through 0.6.x.
-    pub fn with_store(store: Arc<dyn GraphBackend>, config: Config) -> Result<Self> {
+    pub(crate) fn with_store(store: Arc<dyn GraphBackend>, config: Config) -> Result<Self> {
         config.validate().map_err(config_error)?;
 
         // Commits continue from the epoch the store is at.
@@ -1235,6 +1143,8 @@ impl GrafeoDB {
         transaction_manager.sync_epoch(store.committed_epoch());
 
         let (budget, detected_memory) = memory_budget(&config);
+        transaction_manager
+            .set_snapshot_retention_limit(config.snapshot_retention_limit_for(budget));
         let config = config.with_open_memory_budget(budget);
         let memory_warning = undetected_memory(budget, detected_memory);
         if let Some(warning) = &memory_warning {
@@ -1283,6 +1193,7 @@ impl GrafeoDB {
             query_cache,
             commit_counter: Arc::new(AtomicUsize::new(0)),
             is_open: RwLock::new(true),
+            slots: Arc::default(),
             #[cfg(feature = "wal")]
             backup_lock: parking_lot::Mutex::new(()),
             #[cfg(feature = "cdc")]
@@ -1335,35 +1246,7 @@ impl GrafeoDB {
         Ok(db)
     }
 
-    /// Creates a database backed by a read-only [`GraphStore`].
-    ///
-    /// The database is set to read-only mode. Write queries (CREATE, SET,
-    /// DELETE) will return `TransactionError::ReadOnly`.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use std::sync::Arc;
-    /// use grafeo_engine::{GrafeoDB, Config};
-    /// use grafeo_core::graph::GraphStore;
-    ///
-    /// fn example(store: Arc<dyn GraphStore>) -> grafeo_common::utils::error::Result<()> {
-    ///     let db = GrafeoDB::with_read_store(store, Config::in_memory())?;
-    ///     let result = db.execute("MATCH (n) RETURN count(n)")?;
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if config validation fails.
-    ///
-    /// # Stability: Experimental
-    ///
-    /// Implementing [`GraphStore`] is experimental through 0.6.x.
-    ///
-    /// [`GraphStore`]: grafeo_core::graph::GraphStore
-    pub fn with_read_store(store: Arc<dyn GraphStore>, config: Config) -> Result<Self> {
+    pub(crate) fn with_read_store(store: Arc<dyn GraphStore>, config: Config) -> Result<Self> {
         config.validate().map_err(config_error)?;
 
         // Commits continue from the epoch the store is at.
@@ -1371,6 +1254,8 @@ impl GrafeoDB {
         transaction_manager.sync_epoch(store.committed_epoch());
 
         let (budget, detected_memory) = memory_budget(&config);
+        transaction_manager
+            .set_snapshot_retention_limit(config.snapshot_retention_limit_for(budget));
         let config = config.with_open_memory_budget(budget);
         let memory_warning = undetected_memory(budget, detected_memory);
         if let Some(warning) = &memory_warning {
@@ -1419,6 +1304,7 @@ impl GrafeoDB {
             query_cache,
             commit_counter: Arc::new(AtomicUsize::new(0)),
             is_open: RwLock::new(true),
+            slots: Arc::default(),
             #[cfg(feature = "wal")]
             backup_lock: parking_lot::Mutex::new(()),
             #[cfg(feature = "cdc")]
@@ -1469,38 +1355,11 @@ impl GrafeoDB {
         Ok(db)
     }
 
-    /// Compacts the database: writes a checkpoint of a persistent database
-    /// (as [`wal_checkpoint()`](Self::wal_checkpoint) does), drops the old
-    /// versions no open transaction can see any more, in every graph (as
-    /// [`gc()`](Self::gc) does), then compresses the property values every
-    /// graph holds decoded in memory, in a persistent database and in memory
-    /// alike, and reports what it did. An in-memory or read-only database
-    /// writes no checkpoint.
-    ///
-    /// Compression encodes each row group's property columns the way a
-    /// database file holds them, kept in memory and read without decoding;
-    /// a column goes back to its decoded form when it is written, until the
-    /// next `compact()`. A column whose old values an open transaction may
-    /// still read stays decoded, as do text and mixed-type columns (they
-    /// cannot be read without decoding them whole). Every read returns what
-    /// it returned before, at every view.
-    ///
-    /// The database keeps its one store throughout: writes after `compact()`
-    /// go through the same path, and to the WAL, as before it, and open
-    /// transactions keep their snapshots and their changes.
-    ///
-    /// # Errors
-    ///
-    /// The errors of [`wal_checkpoint()`](Self::wal_checkpoint): a failed
-    /// checkpoint, a commit that did not complete, and the database-closed
-    /// error after `close()` of a persistent database. No version is dropped
-    /// and nothing is compressed when the checkpoint fails. A value the
-    /// encoder cannot hold fails the compression; the row groups compressed
-    /// before it stay so.
-    pub fn compact(&mut self) -> Result<crate::admin::CompactReport> {
+    pub(crate) fn compact(&self) -> Result<crate::admin::CompactReport> {
         let started = grafeo_common::clock::Instant::now();
         let checkpointed = self.checkpoint_now()?;
         let versions_collected = u64::try_from(self.collect_garbage()).unwrap_or(u64::MAX);
+        self.clear_plan_cache();
         let rows_compressed = match self.root_store() {
             Some(store) => store.compress()?.rows,
             None => 0,
@@ -1511,16 +1370,6 @@ impl GrafeoDB {
             rows_compressed: u64::try_from(rows_compressed).unwrap_or(u64::MAX),
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         })
-    }
-
-    /// Compacts the database: the same as [`compact()`](Self::compact).
-    ///
-    /// # Errors
-    ///
-    /// The errors of [`compact()`](Self::compact).
-    #[deprecated(since = "0.6.0", note = "use `compact()`, which this calls")]
-    pub fn recompact(&mut self) -> Result<crate::admin::CompactReport> {
-        self.compact()
     }
 
     /// Lets what `rdf_store` keeps for readers at an older snapshot go once
@@ -2284,113 +2133,38 @@ impl GrafeoDB {
     // Session & Configuration
     // =========================================================================
 
-    /// Opens a new session for running queries.
-    ///
-    /// Sessions are cheap to create: spin up as many as you need. Each
-    /// gets its own transaction context, so concurrent sessions won't
-    /// block each other on reads.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the database was configured with an external graph store and
-    /// the internal arena allocator cannot be initialized (out of memory).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use grafeo_engine::GrafeoDB;
-    ///
-    /// let db = GrafeoDB::new_in_memory();
-    /// let session = db.session();
-    ///
-    /// // Run queries through the session
-    /// let result = session.execute("MATCH (n) RETURN count(n)")?;
-    /// # Ok::<(), grafeo_common::utils::error::Error>(())
-    /// ```
     #[must_use]
-    pub fn session(&self) -> Session {
+    pub(crate) fn session(&self) -> Session {
+        self.slots.register_session(self.create_session_inner(None))
+    }
+
+    /// A session for one call of the database, not listed with the slots: it ends with the
+    /// call, which holds the open state while it runs.
+    pub(crate) fn session_unlisted(&self) -> crate::session::SessionInner {
         self.create_session_inner(None)
     }
 
-    /// Creates a session scoped to the given identity.
-    ///
-    /// The identity determines what operations the session is allowed to
-    /// perform. A [`Role::ReadOnly`](crate::auth::Role::ReadOnly) identity
-    /// creates a read-only session; a [`Role::ReadWrite`](crate::auth::Role::ReadWrite)
-    /// identity allows data mutations but not schema DDL; a
-    /// [`Role::Admin`](crate::auth::Role::Admin) identity has full access.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use grafeo_engine::{GrafeoDB, auth::{Identity, Role}};
-    ///
-    /// let db = GrafeoDB::new_in_memory();
-    /// let identity = Identity::new("app-service", [Role::ReadWrite]);
-    /// let session = db.session_with_identity(identity);
-    /// ```
     #[must_use]
-    pub fn session_with_identity(&self, identity: crate::auth::Identity) -> Session {
+    pub(crate) fn session_with_identity(&self, identity: crate::auth::Identity) -> Session {
         let force_read_only = !identity.can_write();
-        self.create_session_inner_full(None, force_read_only, identity)
+        self.slots
+            .register_session(self.create_session_inner_full(None, force_read_only, identity))
     }
 
-    /// Creates a session scoped to a single role.
-    ///
-    /// Convenience shorthand for
-    /// `session_with_identity(Identity::new("anonymous", [role]))`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use grafeo_engine::{GrafeoDB, auth::Role};
-    ///
-    /// let db = GrafeoDB::new_in_memory();
-    /// let reader = db.session_with_role(Role::ReadOnly);
-    /// ```
     #[must_use]
-    pub fn session_with_role(&self, role: crate::auth::Role) -> Session {
+    pub(crate) fn session_with_role(&self, role: crate::auth::Role) -> Session {
         self.session_with_identity(crate::auth::Identity::new("anonymous", [role]))
     }
 
-    /// Creates a session with an explicit CDC override.
-    ///
-    /// When `cdc_enabled` is `true`, mutations in this session are tracked
-    /// regardless of the database default. When `false`, mutations are not
-    /// tracked regardless of the database default.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use grafeo_engine::GrafeoDB;
-    ///
-    /// let db = GrafeoDB::new_in_memory();
-    ///
-    /// // Opt in to CDC for just this session
-    /// let tracked = db.session_with_cdc(true);
-    /// tracked.execute("INSERT (:Person {name: 'Alix'})")?;
-    /// # Ok::<(), grafeo_common::utils::error::Error>(())
-    /// ```
     #[cfg(feature = "cdc")]
     #[must_use]
-    pub fn session_with_cdc(&self, cdc_enabled: bool) -> Session {
-        self.create_session_inner(Some(cdc_enabled))
+    pub(crate) fn session_with_cdc(&self, cdc_enabled: bool) -> Session {
+        self.slots
+            .register_session(self.create_session_inner(Some(cdc_enabled)))
     }
 
-    /// Creates a read-only session regardless of the database's access mode.
-    ///
-    /// Mutations executed through this session will fail with
-    /// `TransactionError::ReadOnly`. Useful for replication replicas where
-    /// the database itself must remain writable (for applying CDC changes)
-    /// but client-facing queries must be read-only.
-    ///
-    /// **Deprecated**: Use `session_with_role(Role::ReadOnly)` instead.
-    #[deprecated(
-        since = "0.5.36",
-        note = "use session_with_role(Role::ReadOnly) instead"
-    )]
     #[must_use]
-    pub fn session_read_only(&self) -> Session {
+    pub(crate) fn session_read_only(&self) -> Session {
         self.session_with_role(crate::auth::Role::ReadOnly)
     }
 
@@ -2399,7 +2173,7 @@ impl GrafeoDB {
     /// `cdc_override` overrides the database-wide `cdc_enabled` default when
     /// `Some`. `None` falls back to the database default.
     #[allow(unused_variables)] // cdc_override unused when cdc feature is off
-    fn create_session_inner(&self, cdc_override: Option<bool>) -> Session {
+    fn create_session_inner(&self, cdc_override: Option<bool>) -> crate::session::SessionInner {
         self.create_session_inner_full(cdc_override, false, crate::auth::Identity::anonymous())
     }
 
@@ -2410,10 +2184,12 @@ impl GrafeoDB {
         cdc_override: Option<bool>,
         force_read_only: bool,
         identity: crate::auth::Identity,
-    ) -> Session {
+    ) -> crate::session::SessionInner {
         let session_cfg = || crate::session::SessionConfig {
             transaction_manager: Arc::clone(&self.transaction_manager),
             query_cache: Arc::clone(&self.query_cache),
+            #[cfg(feature = "gql")]
+            slots: Arc::clone(&self.slots),
             catalog: Arc::clone(&self.catalog),
             #[cfg(lpg_language)]
             factorized_execution: self.config.factorized_execution(),
@@ -2425,11 +2201,11 @@ impl GrafeoDB {
             max_property_size: self.config.max_property_size(),
             #[cfg(query_language)]
             path_search_budget: self.config.path_search_budget(),
-            #[cfg(feature = "spill")]
+            #[cfg(any(lpg_language, rdf_language))]
             buffer_manager: Some(Arc::clone(&self.buffer_manager)),
             #[cfg(feature = "spill")]
             spill_account: self.spill_account.clone(),
-            #[cfg(feature = "spill")]
+            #[cfg(any(lpg_language, rdf_language))]
             query_memory_limit: self.config.query_memory_limit(),
             commit_counter: Arc::clone(&self.commit_counter),
             gc_interval: self.config.gc_interval(),
@@ -2444,13 +2220,16 @@ impl GrafeoDB {
         let mut session = match (self.root_store(), &self.external_read_store) {
             (Some(root), _) => {
                 #[cfg(feature = "triple-store")]
-                let session =
-                    Session::with_rdf_store(root, Arc::clone(&self.rdf_store), session_cfg());
+                let session = crate::session::SessionInner::with_rdf_store(
+                    root,
+                    Arc::clone(&self.rdf_store),
+                    session_cfg(),
+                );
                 #[cfg(not(feature = "triple-store"))]
-                let session = Session::with_store(root, session_cfg());
+                let session = crate::session::SessionInner::with_store(root, session_cfg());
                 session
             }
-            (None, Some(ext_read)) => Session::with_external_store(
+            (None, Some(ext_read)) => crate::session::SessionInner::with_external_store(
                 Arc::clone(ext_read),
                 self.external_write_store.as_ref().map(Arc::clone),
                 session_cfg(),
@@ -2504,25 +2283,12 @@ impl GrafeoDB {
         session
     }
 
-    /// Returns the current graph name, if any.
-    ///
-    /// This is the persistent graph context used by one-shot `execute()` calls.
-    /// It is updated whenever `execute()` encounters `USE GRAPH`, `SESSION SET GRAPH`,
-    /// or `SESSION RESET`.
     #[must_use]
-    pub fn current_graph(&self) -> Option<String> {
+    pub(crate) fn current_graph(&self) -> Option<String> {
         self.current_graph.read().clone()
     }
 
-    /// Sets the current graph context for subsequent one-shot `execute()` calls.
-    ///
-    /// This is equivalent to running `USE GRAPH <name>` but without creating a session.
-    /// Pass `None` to reset to the default graph.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the named graph does not exist.
-    pub fn set_current_graph(&self, name: Option<&str>) -> Result<()> {
+    pub(crate) fn set_current_graph(&self, name: Option<&str>) -> Result<()> {
         if let Some(name) = name
             && !name.eq_ignore_ascii_case("default")
             && self
@@ -2538,24 +2304,12 @@ impl GrafeoDB {
         Ok(())
     }
 
-    /// Returns the current schema name, if any.
-    ///
-    /// This is the persistent schema context used by one-shot `execute()` calls.
-    /// It is updated whenever `execute()` encounters `SESSION SET SCHEMA` or `SESSION RESET`.
     #[must_use]
-    pub fn current_schema(&self) -> Option<String> {
+    pub(crate) fn current_schema(&self) -> Option<String> {
         self.current_schema.read().clone()
     }
 
-    /// Sets the current schema context for subsequent one-shot `execute()` calls.
-    ///
-    /// This is equivalent to running `SESSION SET SCHEMA <name>` but without creating
-    /// a session. Pass `None` to clear the schema context.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the named schema does not exist.
-    pub fn set_current_schema(&self, name: Option<&str>) -> Result<()> {
+    pub(crate) fn set_current_schema(&self, name: Option<&str>) -> Result<()> {
         if let Some(name) = name
             && !self.catalog.schema_exists(name)
         {
@@ -2568,45 +2322,14 @@ impl GrafeoDB {
         Ok(())
     }
 
-    /// Returns `true` if this database was opened in read-only mode.
     #[must_use]
-    pub fn is_read_only(&self) -> bool {
-        self.read_only
-    }
-
-    /// Returns the configuration.
-    #[must_use]
-    pub fn config(&self) -> &Config {
-        &self.config
-    }
-
-    /// The deadline of a statement that starts now under the database's query timeout
-    /// ([`Config::query_timeout`]), as a query reckons it; `None` without a timeout. A binding's
-    /// algorithm call runs under it, so it stops as `execute` past its timeout does.
-    #[must_use]
-    pub fn query_deadline(&self) -> Option<grafeo_common::clock::Instant> {
+    pub(crate) fn query_deadline(&self) -> Option<grafeo_common::clock::Instant> {
         Config::deadline_after(self.config.query_timeout())
     }
 
-    /// Returns the graph data model of this database.
-    #[must_use]
-    pub fn graph_model(&self) -> crate::config::GraphModel {
-        self.config.graph_model()
-    }
-
-    /// Returns the configured memory limit in bytes, if any.
-    #[must_use]
-    pub fn memory_limit(&self) -> Option<usize> {
-        self.config.memory_limit()
-    }
-
-    /// Returns a point-in-time snapshot of all metrics.
-    ///
-    /// If the `metrics` feature is disabled or the registry is not
-    /// initialized, returns a default (all-zero) snapshot.
     #[cfg(feature = "metrics")]
     #[must_use]
-    pub fn metrics(&self) -> crate::metrics::MetricsSnapshot {
+    pub(crate) fn metrics(&self) -> crate::metrics::MetricsSnapshot {
         let mut snapshot = self
             .metrics
             .as_ref()
@@ -2622,78 +2345,29 @@ impl GrafeoDB {
         snapshot
     }
 
-    /// Returns all metrics in Prometheus text exposition format.
-    ///
-    /// The output is ready to serve from an HTTP `/metrics` endpoint.
     #[cfg(feature = "metrics")]
     #[must_use]
-    pub fn metrics_prometheus(&self) -> String {
+    pub(crate) fn metrics_prometheus(&self) -> String {
         self.metrics
             .as_ref()
             .map_or_else(String::new, |m| m.to_prometheus())
     }
 
-    /// Resets all metrics counters and histograms to zero.
     #[cfg(feature = "metrics")]
-    pub fn reset_metrics(&self) {
+    pub(crate) fn reset_metrics(&self) {
         if let Some(ref m) = self.metrics {
             m.reset();
         }
         self.query_cache.reset_stats();
     }
 
-    /// Returns the underlying (default) row-group store, for admin work
-    /// (index management, schema introspection, MVCC internals) and its own
-    /// writes, which bypass the WAL, transactions and change capture.
-    ///
-    /// To read the graph, take a [`snapshot`](Self::snapshot): it reads one
-    /// pinned state of the selected graph through [`GraphStore`].
-    ///
-    /// # Stability: Experimental
-    ///
-    /// The row-group store's own methods may change in any release.
-    ///
-    /// # Errors
-    ///
-    /// The unsupported error on a database on a store of its own
-    /// ([`with_store`](Self::with_store), [`with_read_store`](Self::with_read_store)).
-    ///
-    /// # Deprecated
-    ///
-    /// Its writes skip the WAL, transactions and change capture, so a crash
-    /// or a rollback loses them unnoticed. Write through a session or the
-    /// direct API and read through [`snapshot`](Self::snapshot). Code that
-    /// denies deprecated items no longer builds with it:
-    ///
-    /// ```compile_fail
-    /// #![deny(deprecated)]
-    /// let _store = grafeo_engine::GrafeoDB::new_in_memory().store();
-    /// ```
-    #[deprecated(
-        since = "0.6.1",
-        note = "its writes skip the WAL and transactions: write through a session or the direct API (`batch_create_nodes`, `batch_create_edges`, the `import_*` calls for bulk loads) and read through `snapshot()` instead; removed in 0.7.0"
-    )]
-    pub fn store(&self) -> Result<Arc<RowGroupStore>> {
+    pub(crate) fn store(&self) -> Result<Arc<RowGroupStore>> {
         self.lpg_store()
     }
 
     // === Named Graph Management ===
 
-    /// Creates a named graph. Returns `true` if created, `false` if it already exists.
-    ///
-    /// The graph exists at once, outside any transaction (also while one is
-    /// open, whose rollback keeps it), and is logged as a change of its own:
-    /// commits are held off meanwhile, so a checkpoint or `close()` sees all
-    /// of it or none of it.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if arena allocation fails, or if the database uses an
-    /// external store ([`with_store`](Self::with_store),
-    /// [`with_read_store`](Self::with_read_store)), which has no named graphs;
-    /// the database-closed error after `close()` of a persistent database,
-    /// and the incomplete-commit error after a commit that did not complete.
-    pub fn create_graph(&self, name: &str) -> Result<bool> {
+    pub(crate) fn create_graph(&self, name: &str) -> Result<bool> {
         if self.root_store().is_none() {
             return Err(grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::new(
@@ -2716,24 +2390,7 @@ impl GrafeoDB {
         Ok(true)
     }
 
-    /// Drops a named graph. Returns `true` if dropped, `false` if it did not
-    /// exist (also on an external store, which has no named graphs).
-    ///
-    /// If the dropped graph was the active graph context, the context is reset
-    /// to the default graph. As [`create_graph`](Self::create_graph), it holds
-    /// commits off while it runs, and it also waits for the writes of open
-    /// transactions in progress: a graph an open transaction has changes in
-    /// is not dropped (the transaction would commit into a graph that no
-    /// longer exists), and a write that resolved the graph before the drop
-    /// fails after it.
-    ///
-    /// # Errors
-    ///
-    /// Returns a write conflict while an open transaction has changes in the
-    /// graph (drop it once that transaction commits or rolls back); the
-    /// database-closed error after `close()` of a persistent database, and
-    /// the incomplete-commit error after a commit that did not complete.
-    pub fn drop_graph(&self, name: &str) -> Result<bool> {
+    pub(crate) fn drop_graph(&self, name: &str) -> Result<bool> {
         if self.root_store().is_none() {
             return Ok(false);
         }
@@ -2762,10 +2419,8 @@ impl GrafeoDB {
         Ok(true)
     }
 
-    /// Returns all named graph names, sorted, so every run gives the same
-    /// order (none on an external store).
     #[must_use]
-    pub fn list_graphs(&self) -> Vec<String> {
+    pub(crate) fn list_graphs(&self) -> Vec<String> {
         let mut names = self
             .root_store()
             .map_or_default(|store| store.graph_names());
@@ -2775,33 +2430,7 @@ impl GrafeoDB {
 
     // === Graph Projections ===
 
-    /// Creates a named graph projection (virtual subgraph).
-    ///
-    /// The projection filters the graph selected now (see
-    /// [`set_current_graph`](Self::set_current_graph); the default graph when
-    /// none is selected) to the nodes with the specified labels and the edges
-    /// with the specified types, and keeps reading that graph whatever is
-    /// selected later. Returns `true` if created, `false` if a projection with
-    /// that name already exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the selected graph no longer exists.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use grafeo_engine::GrafeoDB;
-    /// use grafeo_core::graph::ProjectionSpec;
-    ///
-    /// let db = GrafeoDB::new_in_memory();
-    /// let spec = ProjectionSpec::new()
-    ///     .with_node_labels(["Person", "City"])
-    ///     .with_edge_types(["LIVES_IN"]);
-    /// assert!(db.create_projection("social", spec)?);
-    /// # Ok::<(), grafeo_common::utils::error::Error>(())
-    /// ```
-    pub fn create_projection(
+    pub(crate) fn create_projection(
         &self,
         name: impl Into<String>,
         spec: grafeo_core::graph::ProjectionSpec,
@@ -2821,22 +2450,17 @@ impl GrafeoDB {
         })
     }
 
-    /// Drops a named graph projection. Returns `true` if it existed.
-    pub fn drop_projection(&self, name: &str) -> bool {
+    pub(crate) fn drop_projection(&self, name: &str) -> bool {
         self.projections.write().remove(name).is_some()
     }
 
-    /// Returns the names of all graph projections.
     #[must_use]
-    pub fn list_projections(&self) -> Vec<String> {
+    pub(crate) fn list_projections(&self) -> Vec<String> {
         self.projections.read().keys().cloned().collect()
     }
 
-    /// A [`Snapshot`](crate::Snapshot) of the named projection, as a committed reader at the
-    /// current epoch sees it, pinned while it lives; `None` when there is no
-    /// projection of that name.
     #[must_use]
-    pub fn projection(&self, name: &str) -> Option<crate::Snapshot> {
+    pub(crate) fn projection(&self, name: &str) -> Option<crate::Snapshot> {
         let pin = self.transaction_manager.pin_read();
         let store = self
             .projections
@@ -2847,17 +2471,7 @@ impl GrafeoDB {
         Some(crate::Snapshot::pinned(store, view, pin))
     }
 
-    /// A [`Snapshot`](crate::Snapshot) of the graph
-    /// [`set_current_graph`](Self::set_current_graph) and
-    /// [`set_current_schema`](Self::set_current_schema) select (the default
-    /// graph when they select none), as a committed reader at the current
-    /// epoch sees it: the graph the direct API and graph algorithms read.
-    /// Every read through it sees that one state while it lives.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the selected graph no longer exists.
-    pub fn snapshot(&self) -> Result<crate::Snapshot> {
+    pub(crate) fn snapshot(&self) -> Result<crate::Snapshot> {
         // Pinned first, then read: no collect passes the view meanwhile.
         let pin = self.transaction_manager.pin_read();
         let store = self.read_store(direct::DirectTarget::Current)?;
@@ -2885,14 +2499,7 @@ impl GrafeoDB {
         }
     }
 
-    /// Garbage collects old MVCC versions that are no longer visible.
-    ///
-    /// Determines the minimum epoch required by active transactions and prunes
-    /// the versions older than that threshold, in the default graph and every
-    /// named graph. Also cleans up completed transaction metadata in the
-    /// transaction manager, and prunes the CDC event log according to its
-    /// retention policy.
-    pub fn gc(&self) {
+    pub(crate) fn gc(&self) {
         self.collect_garbage();
     }
 
@@ -2920,33 +2527,23 @@ impl GrafeoDB {
         versions
     }
 
-    /// Returns the buffer manager for memory-aware operations.
     #[must_use]
-    pub fn buffer_manager(&self) -> &Arc<BufferManager> {
+    pub(crate) fn buffer_manager(&self) -> &Arc<BufferManager> {
         &self.buffer_manager
     }
 
-    /// Returns the query cache.
     #[must_use]
-    pub fn query_cache(&self) -> &Arc<QueryCache> {
+    pub(crate) fn query_cache(&self) -> &Arc<QueryCache> {
         &self.query_cache
     }
 
-    /// Holds the plan cache's puts until the returned guard drops: a
-    /// statement that planned waits before it stores its plan (feature
-    /// `testing-plan-cache`, for tests of a change racing a statement's plan).
     #[cfg(feature = "testing-plan-cache")]
     #[must_use]
-    pub fn hold_plan_puts(&self) -> crate::query::cache::PlanPutHold {
+    pub(crate) fn hold_plan_puts(&self) -> crate::query::cache::PlanPutHold {
         self.query_cache.hold_puts()
     }
 
-    /// Clears all cached query plans.
-    ///
-    /// This is called automatically after DDL operations, but can also be
-    /// invoked manually after external schema changes (e.g., WAL replay,
-    /// import) or when you want to force re-optimization of all queries.
-    pub fn clear_plan_cache(&self) {
+    pub(crate) fn clear_plan_cache(&self) {
         self.query_cache.advance();
     }
 
@@ -2954,64 +2551,17 @@ impl GrafeoDB {
     // Lifecycle
     // =========================================================================
 
-    /// Closes the database, flushing all pending writes.
-    ///
-    /// For persistent databases, this ensures everything is safely on disk.
-    /// Called automatically when the database is dropped, but you can call
-    /// it explicitly if you need to guarantee durability at a specific point.
-    ///
-    /// Once `close()` of a persistent database starts, these fail with
-    /// [`TransactionError::DatabaseClosed`](grafeo_common::utils::error::TransactionError::DatabaseClosed):
-    ///
-    /// - commits, and statements that write, in every query language (SPARQL
-    ///   updates included), schema statements and graph commands
-    ///   (`CREATE GRAPH`, `DROP GRAPH`);
-    /// - the direct writes: the node, edge, property and label calls (on the
-    ///   database, a session or a graph handle), [`create_graph`](Self::create_graph),
-    ///   [`drop_graph`](Self::drop_graph), the property, vector and text index
-    ///   calls, the bulk imports, `batch_insert_rdf` and `restore_snapshot`;
-    /// - what persists: `wal_checkpoint`, `save`, `backup_full`,
-    ///   `backup_incremental`, `async_write_snapshot`, `compact` and
-    ///   `recompact` (the file is released: another handle may have written
-    ///   it since).
-    ///
-    /// `close()` waits for one already in progress, which completes and is
-    /// written: a commit, a statement, a schema statement or graph command, an
-    /// RDF update, a direct write, a direct graph or index call (a vector or
-    /// text index is built first and waited for only once it installs), a
-    /// bulk import or `batch_insert_rdf` (its input is read first, and waited
-    /// for only once it changes the store), `restore_snapshot`, and a
-    /// checkpoint, save or backup. Reads, `to_memory`, `export_snapshot` and
-    /// projections (`CREATE PROJECTION`, which change only a session) still
-    /// work. An in-memory database keeps taking writes.
-    ///
-    /// A transaction still open when `close()` runs is left out of the file:
-    /// the final checkpoint, like every checkpoint, writes the committed
-    /// state (what the transaction deleted is kept, the values and labels it
-    /// changed are written as they were committed, nothing it created is
-    /// written, and when it changed the default graph, the vector and text
-    /// indexes are left out and the next open builds them from the data). Its
-    /// commit then fails with `DatabaseClosed`; it can only roll back.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the WAL can't be flushed (check disk space/permissions).
-    /// After a commit that did not complete (see
-    /// [`TransactionManager`]), it
-    /// writes no checkpoint, keeps the WAL, releases the database, and
-    /// returns that commit's error. The next open shows the database without
-    /// the failed commit when it failed before its WAL records were written;
-    /// after them, the WAL holds the whole commit, and the next open replays
-    /// it whole.
-    pub fn close(&self) -> Result<()> {
+    pub(crate) fn close(&self) -> Result<()> {
         let mut is_open = self.is_open.write();
         if !*is_open {
             return Ok(());
         }
 
-        // A closed handle still reads its spilled columns, but spills no
-        // more: once the lock is released, `<file>.spill/cache/` belongs to
-        // the next read-write open (#594).
+        // The cached plans keep their statements' literals (#712).
+        self.clear_plan_cache();
+
+        // A closing handle spills no more: once the lock is released,
+        // `<file>.spill/cache/` belongs to the next read-write open (#594).
         #[cfg(all(feature = "vector-index", feature = "wal"))]
         if let Some(ref cache) = self.vector_cache {
             cache.close_for_writes();
@@ -3174,6 +2724,11 @@ impl GrafeoDB {
         Ok(())
     }
 
+    /// Whether [`close`](Self::close) ran to its end, on an error path too.
+    pub(crate) fn has_closed(&self) -> bool {
+        !*self.is_open.read()
+    }
+
     /// Holds `close()` off while a checkpoint, backup or save runs (it waits
     /// for the returned guard), and fails once the database is closed.
     ///
@@ -3207,8 +2762,7 @@ impl GrafeoDB {
     ///
     /// # Errors
     ///
-    /// The database-closed error after `close()` of a persistent database
-    /// (read-only or not), the read-only error on a read-only database, and
+    /// The database-closed error after `close()`, the read-only error on a read-only database, and
     /// the incomplete-commit error after a commit that did not complete.
     fn check_import_allowed(&self) -> Result<()> {
         // A read-only `close()` sets no closed state for `check_open`: the
@@ -3236,8 +2790,7 @@ impl GrafeoDB {
     ///
     /// Nothing would persist the change on a read-only database or after
     /// `close()`, so it fails with the read-only error on a read-only
-    /// database and with the database-closed error after `close()` of a
-    /// persistent one (read-only or not), as `restore_snapshot` does.
+    /// database and with the database-closed error after `close()`, as `restore_snapshot` does.
     /// Otherwise it waits for a commit in progress, then fails once a
     /// `close()` has started, and after a commit that did not complete (the
     /// change would be stamped at an epoch that is never published, and no
@@ -3291,10 +2844,9 @@ impl GrafeoDB {
         changes
     }
 
-    /// Returns the typed WAL if available.
     #[cfg(feature = "wal")]
     #[must_use]
-    pub fn wal(&self) -> Option<&Arc<grafeo_storage::wal::Wal>> {
+    pub(crate) fn wal(&self) -> Option<&Arc<grafeo_storage::wal::Wal>> {
         self.wal.as_ref()
     }
 
@@ -3307,7 +2859,7 @@ impl GrafeoDB {
     ///
     /// # Errors
     ///
-    /// The database-closed error after `close()` of a persistent database,
+    /// The database-closed error after `close()`,
     /// and the incomplete-commit error after a commit that did not complete.
     pub(crate) fn hold_for_standalone(
         &self,
@@ -3449,39 +3001,12 @@ impl GrafeoDB {
         }
     }
 
-    /// Reloads spilled consumers back into RAM up to a target memory fraction.
-    ///
-    /// Phase 9a: closes the spill / reload loop. After memory pressure drops
-    /// (e.g. a workload finishes, or a checkpoint freed mutation overlay
-    /// state), call this to bring spilled section data back into RAM for
-    /// faster subsequent reads.
-    ///
-    /// Walks consumers currently reporting `StorageTier::OnDisk`, in priority
-    /// order (highest first), reloading each as long as projected memory
-    /// usage stays below `target_fraction * memory_limit`.
-    ///
-    /// Returns the number of consumers successfully reloaded.
-    ///
-    /// `target_fraction` is clamped to `[0.0, 1.0]`. A typical value is `0.7`
-    /// (matching the default `soft_limit_fraction`).
-    pub fn reload_eligible(&self, target_fraction: f64) -> usize {
+    pub(crate) fn reload_eligible(&self, target_fraction: f64) -> usize {
         self.buffer_manager.reload_eligible(target_fraction)
     }
 
-    /// Returns the current [`StorageTier`] of every registered section consumer.
-    ///
-    /// The map keys are the [`SectionType`]s parsed from each consumer's name
-    /// (consumers whose names don't follow the `"section:<TypeName>"` convention
-    /// are skipped). Tier classification is best-effort: a consumer reporting
-    /// zero `memory_usage()` and `can_spill() == true` is reported as `OnDisk`,
-    /// otherwise `InMemory` (or `Uninitialized` if both are zero).
-    ///
-    /// Useful for tests, observability, and binding-side introspection.
-    ///
-    /// [`StorageTier`]: grafeo_common::memory::buffer::StorageTier
-    /// [`SectionType`]: grafeo_common::storage::SectionType
     #[must_use]
-    pub fn storage_tiers(
+    pub(crate) fn storage_tiers(
         &self,
     ) -> hashbrown::HashMap<
         grafeo_common::storage::SectionType,
@@ -3625,65 +3150,22 @@ impl GrafeoDB {
         }
     }
 
-    /// What the checkpoint thread did since the database opened: the times
-    /// it woke and the checkpoints it ran. For tests only.
     #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
     #[must_use]
-    pub fn checkpoint_thread_counts(&self) -> crate::admin::CheckpointThreadCounts {
+    pub(crate) fn checkpoint_thread_counts(&self) -> crate::admin::CheckpointThreadCounts {
         self.checkpoint_counts.snapshot()
     }
 
-    /// Holds the checkpoint thread after its next checkpoint, before it arms
-    /// the WAL mark that wakes it again, until the returned hold is dropped:
-    /// no commit wakes it meanwhile. For tests only.
     #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
-    pub fn hold_checkpoint_rearm(&self) -> crate::admin::CheckpointRearmHold {
+    pub(crate) fn hold_checkpoint_rearm(&self) -> crate::admin::CheckpointRearmHold {
         self.checkpoint_rearm_gate.hold();
         crate::admin::CheckpointRearmHold {
             gate: Arc::clone(&self.checkpoint_rearm_gate),
         }
     }
 
-    /// Changes the configuration the database file stores (#551): the
-    /// settings `changes` sets with its builders replace the stored ones,
-    /// and the database checkpoints at once, so the next open applies them
-    /// (`GrafeoDB::open` and `Config::read_only` apply what the file stores
-    /// to every setting they do not set themselves). This database keeps the
-    /// configuration it opened with.
-    ///
-    /// What a file stores: the graph model and the backward edges (both
-    /// fixed at creation), schema constraints, the WAL and its durability
-    /// mode, the memory limit, the section tier overrides, and the spill
-    /// path when it lies in the database's directory.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # fn main() -> grafeo_common::utils::error::Result<()> {
-    /// use grafeo_engine::config::DurabilityMode;
-    /// use grafeo_engine::{Config, GrafeoDB};
-    ///
-    /// let db = GrafeoDB::open("berlin.grafeo")?;
-    /// db.set_stored_config(
-    ///     &Config::in_memory()
-    ///         .with_memory_limit(88 * 1024 * 1024)
-    ///         .with_wal_durability(DurabilityMode::Sync),
-    /// )?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// An unsupported-query error for an in-memory or read-only database,
-    /// [`Error::InvalidValue`] when `changes` sets the graph model or the
-    /// backward edges to another value than the database was created with,
-    /// or pins a section that cannot be moved to disk to
-    /// [`TierOverride::ForceDisk`](grafeo_common::storage::TierOverride::ForceDisk),
-    /// the database-closed error after `close()`, and the errors of the
-    /// checkpoint.
     #[cfg(feature = "grafeo-file")]
-    pub fn set_stored_config(&self, changes: &Config) -> Result<()> {
+    pub(crate) fn set_stored_config(&self, changes: &Config) -> Result<()> {
         let _open = self.hold_open()?;
         let unsupported =
             |what: &str| Error::from(grafeo_common::utils::error::QueryError::unsupported(what));
@@ -3732,28 +3214,11 @@ impl GrafeoDB {
     // Backup API
     // =========================================================================
 
-    /// Creates a full backup of the database in the given directory.
-    ///
-    /// Writes a `.grafeo` image of the database at the epoch E it starts at,
-    /// from the snapshot a checkpoint takes, and adds it to the backup
-    /// manifest. Commits wait only while the snapshot is taken and the
-    /// catalog and RDF data are copied, and go on while the graphs are
-    /// written; the image holds exactly the commits up to E. The database's
-    /// own file is not checkpointed. Backups on this database wait for one
-    /// another, also across destinations. Another database or process using
-    /// the destination makes the call fail with a busy error.
-    /// Subsequent incremental backups hold the
-    /// commits after E. A read-only database writes what it sees, the
-    /// commits it replayed from the WAL included.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database has no file manager or I/O fails,
-    /// and the database-closed error after `close()`; the unsupported error
-    /// on a database on a backend of its own
-    /// ([`with_store`](Self::with_store)), whose data the backend keeps.
     #[cfg(all(feature = "wal", feature = "grafeo-file"))]
-    pub fn backup_full(&self, backup_dir: &std::path::Path) -> Result<backup::BackupSegment> {
+    pub(crate) fn backup_full(
+        &self,
+        backup_dir: &std::path::Path,
+    ) -> Result<backup::BackupSegment> {
         let _open = self.hold_open()?;
         let _backup = self.hold_backup();
         self.lpg_store()?;
@@ -3776,33 +3241,8 @@ impl GrafeoDB {
         })
     }
 
-    /// Creates an incremental backup containing WAL records since the last backup.
-    ///
-    /// Requires a prior full backup in the backup directory. Backups on
-    /// this database wait for one another; a destination in use by another
-    /// database or process fails with a busy error. With nothing new since
-    /// the last backup it writes nothing and returns the chain's newest
-    /// segment (0.7.0 returns `None` instead).
-    ///
-    /// # Errors
-    ///
-    /// Returns an invalid-input error when the backup directory holds no full
-    /// backup yet; `GRAFEO-S005`
-    /// ([`ErrorCode::BackupChainBroken`](grafeo_common::utils::error::ErrorCode::BackupChainBroken))
-    /// when the chain cannot continue, which a new full backup fixes, its
-    /// message naming the cause: the database has no backup cursor (none was
-    /// written, or [`release_backup_cursor`](Self::release_backup_cursor)
-    /// released it), the cursor is of the WAL format before 0.6.0, the chain
-    /// ends before the cursor, the WAL from the cursor on passed the
-    /// [retention limit](crate::Config::with_wal_retention_limit) and was
-    /// removed, the segment where the last backup ended was removed from
-    /// outside, or the WAL has a gap; the database-closed error after
-    /// `close()`; the
-    /// unsupported error on a database on a backend of its own
-    /// ([`with_store`](Self::with_store)), which has no full backup to
-    /// follow.
     #[cfg(all(feature = "wal", feature = "grafeo-file"))]
-    pub fn backup_incremental(
+    pub(crate) fn backup_incremental(
         &self,
         backup_dir: &std::path::Path,
     ) -> Result<backup::BackupSegment> {
@@ -3830,45 +3270,23 @@ impl GrafeoDB {
         })
     }
 
-    /// Returns the backup manifest for a backup directory, if one exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the manifest file exists but cannot be parsed.
     #[cfg(all(feature = "wal", feature = "grafeo-file"))]
-    pub fn read_backup_manifest(
+    pub(crate) fn read_backup_manifest(
         backup_dir: &std::path::Path,
     ) -> Result<Option<backup::BackupManifest>> {
         backup::read_manifest(backup_dir)
     }
 
-    /// Returns the current backup cursor (last backed-up position), if any.
     #[cfg(all(feature = "wal", feature = "grafeo-file"))]
     #[must_use]
-    pub fn backup_cursor(&self) -> Option<backup::BackupCursor> {
+    pub(crate) fn backup_cursor(&self) -> Option<backup::BackupCursor> {
         self.wal
             .as_ref()
             .and_then(|wal| backup::read_backup_cursor(wal.dir()).ok().flatten())
     }
 
-    /// Releases the backup cursor: the next backup must be a full one.
-    ///
-    /// After a full backup, every checkpoint keeps the WAL from where the
-    /// last backup ended, so the next incremental backup can copy it (up to
-    /// the [retention limit](crate::Config::with_wal_retention_limit)).
-    /// When you stop taking incremental backups, release the cursor, and
-    /// checkpoints keep only the WAL a reopen needs. An incremental backup
-    /// after the release fails with `GRAFEO-S005`
-    /// ([`ErrorCode::BackupChainBroken`](grafeo_common::utils::error::ErrorCode::BackupChainBroken)),
-    /// and a full backup starts a new chain. Returns whether there was a
-    /// cursor to release.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the cursor cannot be removed, and the
-    /// database-closed error after `close()`.
     #[cfg(all(feature = "wal", feature = "grafeo-file"))]
-    pub fn release_backup_cursor(&self) -> Result<bool> {
+    pub(crate) fn release_backup_cursor(&self) -> Result<bool> {
         let _open = self.hold_open()?;
         let _backup = self.hold_backup();
         match self.wal.as_ref() {
@@ -3877,27 +3295,8 @@ impl GrafeoDB {
         }
     }
 
-    /// Restores a database from a backup chain to a specific epoch.
-    ///
-    /// Copies the full backup to `output_path`, then replays incremental
-    /// WAL segments up to `target_epoch`. The restored database can be
-    /// opened with [`GrafeoDB::open`]. An epoch past the end of the chain
-    /// restores the latest state the chain holds.
-    ///
-    /// The backups of an encrypted database are encrypted: a restore that
-    /// needs only the full backup copies its encrypted file (open it with its
-    /// key), and one that replays incremental segments needs the key, see
-    /// `restore_to_epoch_with` (feature `encryption`).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `output_path` or its `<output_path>.wal` sidecar
-    /// already exists (restores never overwrite a database), if the backup
-    /// chain does not cover the target epoch, segment checksums fail, or I/O
-    /// fails; also, before anything is written, if the backup is encrypted
-    /// and segments are to be replayed.
     #[cfg(all(feature = "wal", feature = "grafeo-file"))]
-    pub fn restore_to_epoch(
+    pub(crate) fn restore_to_epoch(
         backup_dir: &std::path::Path,
         target_epoch: grafeo_common::types::EpochId,
         output_path: &std::path::Path,
@@ -3910,23 +3309,8 @@ impl GrafeoDB {
         )
     }
 
-    /// Restores an encrypted database from a backup chain to a specific
-    /// epoch, as [`restore_to_epoch`](Self::restore_to_epoch) does, with the
-    /// key chain the database was encrypted with.
-    ///
-    /// The key is checked against the full backup before anything is
-    /// written. The incremental segments are decrypted with the WAL key of
-    /// the backup's database, and the WAL the restore writes next to the
-    /// restored file is encrypted with that same key: open the restored
-    /// database with the same `encryption`.
-    ///
-    /// # Errors
-    ///
-    /// The errors of [`restore_to_epoch`](Self::restore_to_epoch); also, before
-    /// anything is written, if the backup was encrypted with another key or is
-    /// not encrypted.
     #[cfg(all(feature = "wal", feature = "grafeo-file", feature = "encryption"))]
-    pub fn restore_to_epoch_with(
+    pub(crate) fn restore_to_epoch_with(
         backup_dir: &std::path::Path,
         target_epoch: grafeo_common::types::EpochId,
         output_path: &std::path::Path,
@@ -3950,10 +3334,9 @@ impl GrafeoDB {
         flush::flush(fm, &self.checkpoint_sources()?)
     }
 
-    /// Returns the file manager if using single-file format.
     #[cfg(feature = "grafeo-file")]
     #[must_use]
-    pub fn file_manager(&self) -> Option<&Arc<GrafeoFileManager>> {
+    pub(crate) fn file_manager(&self) -> Option<&Arc<GrafeoFileManager>> {
         self.file_manager.as_ref()
     }
 }
@@ -4115,7 +3498,7 @@ fn not_a_database(path: &std::path::Path) -> Error {
     ))
 }
 
-impl Drop for GrafeoDB {
+impl Drop for Open {
     fn drop(&mut self) {
         if let Err(e) = self.close() {
             grafeo_error!("Error closing database: {}", e);
@@ -4212,7 +3595,15 @@ pub struct QueryResult {
     /// Column names from the RETURN clause.
     pub columns: Vec<String>,
     /// Column types - useful for distinguishing NodeId/EdgeId from plain integers.
+    ///
+    /// The types of the first rows: a result whose later rows were built
+    /// with other types (the branches of a `UNION` returning nodes in one and
+    /// edges in the other) reports each row's with [`cell_type`](Self::cell_type).
     pub column_types: Vec<grafeo_common::types::LogicalType>,
+    /// The rows from `.0` on have the column types `.1`, up to the next run;
+    /// the rows before the first run have `column_types`. Empty when every
+    /// row has `column_types`.
+    pub(crate) type_runs: Vec<(usize, Vec<grafeo_common::types::LogicalType>)>,
     /// The actual result rows.
     ///
     /// Use [`rows()`](Self::rows) for borrowed access or
@@ -4259,6 +3650,68 @@ pub struct QueryResult {
     pub warnings: Vec<QueryWarning>,
 }
 
+/// The type each cell of a result was built with, kept apart from its rows
+/// (see [`QueryResult::cell_types`]).
+///
+/// # Stability: Experimental
+///
+/// New in 0.6.4, as [`QueryResult::cell_type`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CellTypes {
+    first: Vec<grafeo_common::types::LogicalType>,
+    runs: Vec<(usize, Vec<grafeo_common::types::LogicalType>)>,
+}
+
+impl CellTypes {
+    /// The type of the value in `row` and `column`, as
+    /// [`QueryResult::cell_type`] says it.
+    #[must_use]
+    pub fn get(&self, row: usize, column: usize) -> &grafeo_common::types::LogicalType {
+        type_at(&self.first, &self.runs, row, column)
+    }
+
+    /// The column types of the rows before the first run.
+    #[must_use]
+    pub fn columns(&self) -> &[grafeo_common::types::LogicalType] {
+        &self.first
+    }
+
+    /// The runs: from the row `.0` on, the columns have the types `.1`, up
+    /// to the next run.
+    #[must_use]
+    pub fn runs(&self) -> &[(usize, Vec<grafeo_common::types::LogicalType>)] {
+        &self.runs
+    }
+}
+
+/// The type of the cell in `row` and `column` of rows whose types are
+/// `first`, then the runs `runs` (each from its first row on); `Any` outside
+/// them.
+fn type_at<'a>(
+    first: &'a [grafeo_common::types::LogicalType],
+    runs: &'a [(usize, Vec<grafeo_common::types::LogicalType>)],
+    row: usize,
+    column: usize,
+) -> &'a grafeo_common::types::LogicalType {
+    static ANY: grafeo_common::types::LogicalType = grafeo_common::types::LogicalType::Any;
+    let types = match runs.partition_point(|(start, _)| *start <= row) {
+        0 => first,
+        run => &runs[run - 1].1,
+    };
+    types.get(column).unwrap_or(&ANY)
+}
+
+/// The type a result reports for a column of type `column`: the shape of its
+/// records for a record column, the column's type otherwise.
+pub(crate) fn record_shape(
+    column: &grafeo_common::types::LogicalType,
+) -> grafeo_common::types::LogicalType {
+    match column {
+        grafeo_common::types::LogicalType::Records(shape) => (**shape).clone(),
+        other => other.clone(),
+    }
+}
+
 impl QueryResult {
     /// Checks that no column name repeats (#371). Bindings read rows by column
     /// name, so a repeated name would silently drop values. Used by every
@@ -4302,6 +3755,7 @@ impl QueryResult {
         Self {
             columns: Vec::new(),
             column_types: Vec::new(),
+            type_runs: Vec::new(),
             rows: Vec::new(),
             execution_time_ms: None,
             rows_scanned: None,
@@ -4321,6 +3775,7 @@ impl QueryResult {
         Self {
             columns: Vec::new(),
             column_types: Vec::new(),
+            type_runs: Vec::new(),
             rows: Vec::new(),
             execution_time_ms: None,
             rows_scanned: None,
@@ -4345,6 +3800,7 @@ impl QueryResult {
         Ok(Self {
             columns,
             column_types: vec![grafeo_common::types::LogicalType::Any; len],
+            type_runs: Vec::new(),
             rows: Vec::new(),
             execution_time_ms: None,
             rows_scanned: None,
@@ -4371,6 +3827,7 @@ impl QueryResult {
         Ok(Self {
             columns,
             column_types,
+            type_runs: Vec::new(),
             rows: Vec::new(),
             execution_time_ms: None,
             rows_scanned: None,
@@ -4398,6 +3855,7 @@ impl QueryResult {
         Ok(Self {
             columns,
             column_types: vec![grafeo_common::types::LogicalType::Any; len],
+            type_runs: Vec::new(),
             rows,
             execution_time_ms: None,
             rows_scanned: None,
@@ -4408,6 +3866,63 @@ impl QueryResult {
             kind: ResultKind::Rows,
             warnings: Vec::new(),
         })
+    }
+
+    /// The type the value in `row` and `column` was built with, `Any` outside
+    /// the result. It says where the value's nodes and edges are: a node or
+    /// edge record (a map) is a node or edge exactly where its type says
+    /// `Node` or `Edge`, also inside a list (`List`, `Tuple`), a map
+    /// (`Struct`, `Map`) or a path (`Path`). A map whose type does not say
+    /// so is a map, whatever its keys (`{_id: 1, _labels: []}`).
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.4, until node and edge values have types of their own: it
+    /// may change or be removed in any release, with a CHANGELOG entry. See
+    /// <https://grafeo.dev/stability/>.
+    #[must_use]
+    pub fn cell_type(&self, row: usize, column: usize) -> &grafeo_common::types::LogicalType {
+        type_at(&self.column_types, &self.type_runs, row, column)
+    }
+
+    /// The cell types of this result, for a reader that takes its rows apart
+    /// ([`into_rows`](Self::into_rows)) and reads the nodes and edges later.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// As [`cell_type`](Self::cell_type).
+    #[must_use]
+    pub fn cell_types(&self) -> CellTypes {
+        CellTypes {
+            first: self.column_types.clone(),
+            runs: self.type_runs.clone(),
+        }
+    }
+
+    /// Notes the column types of the rows pushed from now on, a chunk's:
+    /// record columns report the shape of their records. The first types
+    /// noted are `column_types`; later ones that differ start a run.
+    pub(crate) fn note_types(&mut self, types: &[grafeo_common::types::LogicalType]) {
+        let types: Vec<_> = types.iter().map(record_shape).collect();
+        if self.rows.is_empty() && self.type_runs.is_empty() {
+            self.column_types = types;
+            return;
+        }
+        // A run that has no rows yet is replaced.
+        if self
+            .type_runs
+            .last()
+            .is_some_and(|(first, _)| *first == self.rows.len())
+        {
+            self.type_runs.pop();
+        }
+        let current = self
+            .type_runs
+            .last()
+            .map_or(&self.column_types, |(_, types)| types);
+        if *current != types {
+            self.type_runs.push((self.rows.len(), types));
+        }
     }
 
     /// Appends a row to this result.
@@ -4630,6 +4145,1140 @@ impl FromValue for bool {
     }
 }
 
+// The database's public methods: each reaches the open state for its call (#712).
+impl GrafeoDB {
+    /// Creates an in-memory database, fast to create, gone when dropped.
+    ///
+    /// Use this for tests, experiments, or when you don't need persistence.
+    /// For data that survives restarts, use [`open()`](Self::open) instead.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal arena allocator cannot be initialized (out of memory).
+    /// Use [`with_config()`](Self::with_config) for a fallible alternative.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use grafeo_engine::GrafeoDB;
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let session = db.session();
+    /// session.execute("INSERT (:Person {name: 'Alix'})")?;
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
+    /// ```
+    #[must_use]
+    pub fn new_in_memory() -> Self {
+        Self::from_open(Open::new_in_memory())
+    }
+
+    /// What the open found that the caller should know, without failing:
+    /// a graph type's rules that no longer reach elements, a memory limit
+    /// taken of a fallback figure, a database over its memory limit. Each
+    /// was logged at the open too.
+    #[must_use]
+    pub fn open_warnings(&self) -> &[crate::admin::OpenWarning] {
+        &self.open_warnings
+    }
+
+    /// Opens a database at the given path, creating it if it doesn't exist.
+    ///
+    /// If you've used this path before, Grafeo recovers your data from the
+    /// write-ahead log automatically. First open on a new path creates an
+    /// empty database: a single file, whatever the path's extension, with its
+    /// write-ahead log in the sidecar directory `<path>.wal/` while it is open.
+    ///
+    /// A build without the `wal` feature (the `grafeo` crate's default
+    /// features include it since 0.6.4, as do its `storage` group and `lpg`
+    /// profile) keeps no write-ahead log: commits stay in memory until a checkpoint
+    /// writes them to the file (`close()`, dropping the database, or
+    /// [`wal_checkpoint`](Self::wal_checkpoint)), and a process that exits
+    /// without one loses the commits since the last.
+    ///
+    /// A database written by 0.5.x is migrated to the 0.6 file format first:
+    /// a `.grafeo` file, or a WAL directory (a directory holding `wal/`),
+    /// which becomes a single file at the same path. The old files are kept,
+    /// byte for byte: the file (or the whole directory) as `<path>.pre-0.6`,
+    /// a file's sidecar WAL as `<path>.pre-0.6.wal`, a checkpoint image
+    /// 0.5.44 left pending as `<path>.pre-0.6.checkpoint` and the spill
+    /// directory as `<path>.pre-0.6.spill` (embeddings spilled before the
+    /// database was closed are read into the 0.6 file). The migration
+    /// refuses to start while one of these names is taken (it never replaces
+    /// a kept copy), and an open waits up to five seconds for a migration
+    /// another process is running before it fails. A kept copy itself (a
+    /// 0.5.x database whose name ends in `.pre-0.6`) is never migrated: its
+    /// read-write open fails, and a read-only open reads it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path isn't writable or recovery fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use grafeo_engine::GrafeoDB;
+    ///
+    /// let db = GrafeoDB::open("./my_social_network")?;
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
+    /// ```
+    #[cfg(feature = "grafeo-file")]
+    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        Open::open_at(path).map(Self::from_open)
+    }
+
+    /// Opens an existing database in read-only mode: it does not allow
+    /// mutations, and writes nothing to the file.
+    ///
+    /// A file written by 0.6 or later is held under a shared file lock until
+    /// the database is closed, so multiple processes can read the same
+    /// `.grafeo` file concurrently. The database loads the last checkpoint
+    /// and replays the sidecar WAL `<path>.wal/` into memory, where a writer
+    /// that exited without `close()` left its last commits. Nothing is
+    /// written: the WAL stays for the next read-write open. A build without
+    /// the `wal` feature cannot replay it, and refuses a file whose sidecar
+    /// WAL holds files.
+    ///
+    /// A database written by 0.5.x is different: it is read once into
+    /// memory, a file with its sidecar WAL replayed, a WAL directory by
+    /// replaying its WAL, and no lock is held once it is loaded. It is not
+    /// migrated, and nothing in it changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database doesn't exist or can't be read, and,
+    /// in a build without the `wal` feature, if its sidecar WAL holds commits
+    /// to replay (a non-empty log file; for a 0.5.x file, any file); also
+    /// if the database holds data this build cannot read (by 0.5.x too): RDF
+    /// triples without `triple-store`, vector or text indexes without
+    /// `vector-index` or `text-index`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use grafeo_engine::GrafeoDB;
+    ///
+    /// let db = GrafeoDB::open_read_only("./my_graph.grafeo")?;
+    /// let session = db.session();
+    /// let result = session.execute("MATCH (n) RETURN n LIMIT 10")?;
+    /// // Mutations will return an error:
+    /// // session.execute("INSERT (:Person)") => Err(ReadOnly)
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
+    /// ```
+    #[cfg(feature = "grafeo-file")]
+    pub fn open_read_only(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        Open::open_read_only(path).map(Self::from_open)
+    }
+
+    /// Creates a database with custom configuration.
+    ///
+    /// Use this when you need fine-grained control over memory limits,
+    /// thread counts, or persistence settings. For most cases,
+    /// [`new_in_memory()`](Self::new_in_memory) or [`open()`](Self::open)
+    /// are simpler.
+    ///
+    /// With `Config::encryption` (feature `encryption`), a new database is
+    /// created encrypted, and an existing one opens only with the key chain
+    /// it was created with.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database can't be created or recovery fails,
+    /// if the deprecated `StorageFormat::WalDirectory` is given for a path
+    /// where nothing exists (WAL directories are no longer created), or if
+    /// the path holds neither a database file nor a 0.5.x WAL directory; with
+    /// encryption, also if an encrypted database is opened without its key or
+    /// with another one, or an unencrypted one is opened with a key; in a
+    /// build without the `wal` feature, also if the sidecar WAL of the
+    /// database file holds commits only a build with `wal` can replay (a
+    /// non-empty log file; for a 0.5.x file, any file); and if the database
+    /// holds data this build cannot read, which it would open without and
+    /// its next checkpoint drop (by 0.5.x too): RDF triples (in the file or
+    /// its WAL) without `triple-store`, vector or text indexes without
+    /// `vector-index` or `text-index`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use grafeo_engine::{GrafeoDB, Config};
+    ///
+    /// // In-memory with a 512MB limit
+    /// let config = Config::in_memory()
+    ///     .with_memory_limit(512 * 1024 * 1024);
+    ///
+    /// let db = GrafeoDB::with_config(config)?;
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
+    /// ```
+    pub fn with_config(config: Config) -> Result<Self> {
+        Open::with_config(config).map(Self::from_open)
+    }
+
+    /// Creates a database on a backend of one's own: a [`GraphBackend`],
+    /// the store contract's write side over its read side
+    /// ([`GraphStore`]).
+    ///
+    /// Queries in every language, the optimizer and the planner read the
+    /// backend, and every write applies in a transaction the backend opens
+    /// ([`GraphBackend::begin`]) and the engine commits or rolls back through
+    /// it, also a rollback to a savepoint and the rollback of a failed
+    /// statement. The engine reserves the ids of what a write creates. The
+    /// built-in store's features are not there: named graphs (and schemas,
+    /// whose default graph is one), property, vector and text indexes, and the
+    /// `.grafeo` file: such a statement or call is an unsupported error. A
+    /// schema statement applies its types and constraints.
+    ///
+    /// With a path (`Config::persistent(path)`) and the WAL on, the database
+    /// logs every commit to its own write-ahead log, `<path>.wal`, which this
+    /// process holds while it is open, and writes no database file. An open
+    /// replays the log: the catalog, and the commits after the backend's
+    /// [`durable_epoch`](GraphBackend::durable_epoch). A checkpoint
+    /// ([`wal_checkpoint`](Self::wal_checkpoint), and `close()`) asks the
+    /// backend to [`flush`](GraphBackend::flush) up to the committed epoch;
+    /// once the backend reports it durable, the log starts again with the
+    /// catalog and drops the older commits. A backend that keeps nothing
+    /// across a restart reports [`EpochId::INITIAL`](grafeo_common::types::EpochId::INITIAL):
+    /// its log keeps every commit and replays them all at every open. Change
+    /// data capture hears its commits as it hears the built-in store's.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::sync::Arc;
+    /// use grafeo_core::graph::GraphBackend;
+    /// use grafeo_engine::{Config, GrafeoDB};
+    ///
+    /// fn example(store: Arc<dyn GraphBackend>) -> grafeo_common::utils::error::Result<()> {
+    ///     let db = GrafeoDB::with_store(store, Config::in_memory())?;
+    ///     db.execute("INSERT (:Person {name: 'Alix'})")?;
+    ///     let result = db.execute("MATCH (n) RETURN count(n)")?;
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if config validation fails.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// Implementing [`GraphBackend`] is experimental through 0.6.x.
+    pub fn with_store(store: Arc<dyn GraphBackend>, config: Config) -> Result<Self> {
+        Open::with_store(store, config).map(Self::from_open)
+    }
+
+    /// Creates a database backed by a read-only [`GraphStore`].
+    ///
+    /// The database is set to read-only mode. Write queries (CREATE, SET,
+    /// DELETE) will return `TransactionError::ReadOnly`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::sync::Arc;
+    /// use grafeo_engine::{GrafeoDB, Config};
+    /// use grafeo_core::graph::GraphStore;
+    ///
+    /// fn example(store: Arc<dyn GraphStore>) -> grafeo_common::utils::error::Result<()> {
+    ///     let db = GrafeoDB::with_read_store(store, Config::in_memory())?;
+    ///     let result = db.execute("MATCH (n) RETURN count(n)")?;
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if config validation fails.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// Implementing [`GraphStore`] is experimental through 0.6.x.
+    ///
+    /// [`GraphStore`]: grafeo_core::graph::GraphStore
+    pub fn with_read_store(store: Arc<dyn GraphStore>, config: Config) -> Result<Self> {
+        Open::with_read_store(store, config).map(Self::from_open)
+    }
+
+    /// Compacts the database: writes a checkpoint of a persistent database
+    /// (as [`wal_checkpoint()`](Self::wal_checkpoint) does), drops the old
+    /// versions no open transaction can see any more, in every graph (as
+    /// [`gc()`](Self::gc) does), then compresses the property values every
+    /// graph holds decoded in memory, in a persistent database and in memory
+    /// alike, and reports what it did. An in-memory or read-only database
+    /// writes no checkpoint.
+    ///
+    /// Compression encodes each row group's property columns the way a
+    /// database file holds them, kept in memory and read without decoding;
+    /// a column goes back to its decoded form when it is written, until the
+    /// next `compact()`. A column whose old values an open transaction may
+    /// still read stays decoded, as do text and mixed-type columns (they
+    /// cannot be read without decoding them whole). Every read returns what
+    /// it returned before, at every view.
+    ///
+    /// The database keeps its one store throughout: writes after `compact()`
+    /// go through the same path, and to the WAL, as before it, and open
+    /// transactions keep their snapshots and their changes.
+    ///
+    /// It also empties the shared plan cache, whose plans keep the literals
+    /// of their statements' text, so a value written or matched by a literal
+    /// and deleted since leaves memory with it (#712); a session's own
+    /// prepared plans go when the session does.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`wal_checkpoint()`](Self::wal_checkpoint): a failed
+    /// checkpoint, a commit that did not complete, and the database-closed
+    /// error after `close()`. No version is dropped
+    /// and nothing is compressed when the checkpoint fails. A value the
+    /// encoder cannot hold fails the compression; the row groups compressed
+    /// before it stay so.
+    pub fn compact(&mut self) -> Result<crate::admin::CompactReport> {
+        self.live()?.compact()
+    }
+
+    /// Compacts the database: the same as [`compact()`](Self::compact).
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`compact()`](Self::compact).
+    #[deprecated(since = "0.6.0", note = "use `compact()`, which this calls")]
+    pub fn recompact(&mut self) -> Result<crate::admin::CompactReport> {
+        self.live()?.compact()
+    }
+
+    /// Opens a new session for running queries. After `close()` it returns a session whose every
+    /// call fails with `GRAFEO-T007`.
+    ///
+    /// Sessions are cheap to create: spin up as many as you need. Each
+    /// gets its own transaction context, so concurrent sessions won't
+    /// block each other on reads.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the database was configured with an external graph store and
+    /// the internal arena allocator cannot be initialized (out of memory).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use grafeo_engine::GrafeoDB;
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let session = db.session();
+    ///
+    /// // Run queries through the session
+    /// let result = session.execute("MATCH (n) RETURN count(n)")?;
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
+    /// ```
+    #[must_use]
+    pub fn session(&self) -> Session {
+        self.live_if()
+            .map_or_else(Session::closed, |open| open.session())
+    }
+
+    /// Creates a session scoped to the given identity. After `close()` it returns a session whose
+    /// every call fails with `GRAFEO-T007`.
+    ///
+    /// The identity determines what operations the session is allowed to
+    /// perform. A [`Role::ReadOnly`](crate::auth::Role::ReadOnly) identity
+    /// creates a read-only session; a [`Role::ReadWrite`](crate::auth::Role::ReadWrite)
+    /// identity allows data mutations but not schema DDL; a
+    /// [`Role::Admin`](crate::auth::Role::Admin) identity has full access.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use grafeo_engine::{GrafeoDB, auth::{Identity, Role}};
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let identity = Identity::new("app-service", [Role::ReadWrite]);
+    /// let session = db.session_with_identity(identity);
+    /// ```
+    #[must_use]
+    pub fn session_with_identity(&self, identity: crate::auth::Identity) -> Session {
+        self.live_if()
+            .map_or_else(Session::closed, |open| open.session_with_identity(identity))
+    }
+
+    /// Creates a session scoped to a single role. After `close()` it returns a session whose every
+    /// call fails with `GRAFEO-T007`.
+    ///
+    /// Convenience shorthand for
+    /// `session_with_identity(Identity::new("anonymous", [role]))`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use grafeo_engine::{GrafeoDB, auth::Role};
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let reader = db.session_with_role(Role::ReadOnly);
+    /// ```
+    #[must_use]
+    pub fn session_with_role(&self, role: crate::auth::Role) -> Session {
+        self.live_if()
+            .map_or_else(Session::closed, |open| open.session_with_role(role))
+    }
+
+    /// Creates a session with an explicit CDC override. After `close()` it returns a session whose
+    /// every call fails with `GRAFEO-T007`.
+    ///
+    /// When `cdc_enabled` is `true`, mutations in this session are tracked
+    /// regardless of the database default. When `false`, mutations are not
+    /// tracked regardless of the database default.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use grafeo_engine::GrafeoDB;
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    ///
+    /// // Opt in to CDC for just this session
+    /// let tracked = db.session_with_cdc(true);
+    /// tracked.execute("INSERT (:Person {name: 'Alix'})")?;
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
+    /// ```
+    #[cfg(feature = "cdc")]
+    #[must_use]
+    pub fn session_with_cdc(&self, cdc_enabled: bool) -> Session {
+        self.live_if()
+            .map_or_else(Session::closed, |open| open.session_with_cdc(cdc_enabled))
+    }
+
+    /// Creates a read-only session regardless of the database's access mode. After `close()` it
+    /// returns a session whose every call fails with `GRAFEO-T007`.
+    ///
+    /// Mutations executed through this session will fail with
+    /// `TransactionError::ReadOnly`. Useful for replication replicas where
+    /// the database itself must remain writable (for applying CDC changes)
+    /// but client-facing queries must be read-only.
+    ///
+    /// **Deprecated**: Use `session_with_role(Role::ReadOnly)` instead.
+    #[deprecated(
+        since = "0.5.36",
+        note = "use session_with_role(Role::ReadOnly) instead"
+    )]
+    #[must_use]
+    pub fn session_read_only(&self) -> Session {
+        self.live_if()
+            .map_or_else(Session::closed, |open| open.session_read_only())
+    }
+
+    /// Returns the current graph name, if any. After `close()` it returns `None`; it returns a
+    /// `Result` from 0.7.0.
+    ///
+    /// This is the persistent graph context used by one-shot `execute()` calls.
+    /// It is updated whenever `execute()` encounters `USE GRAPH`, `SESSION SET GRAPH`,
+    /// or `SESSION RESET`.
+    #[must_use]
+    pub fn current_graph(&self) -> Option<String> {
+        self.live_if()
+            .map_or_else(Default::default, |open| open.current_graph())
+    }
+
+    /// Sets the current graph context for subsequent one-shot `execute()` calls.
+    ///
+    /// This is equivalent to running `USE GRAPH <name>` but without creating a session.
+    /// Pass `None` to reset to the default graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the named graph does not exist.
+    pub fn set_current_graph(&self, name: Option<&str>) -> Result<()> {
+        self.live()?.set_current_graph(name)
+    }
+
+    /// Returns the current schema name, if any. After `close()` it returns `None`; it returns a
+    /// `Result` from 0.7.0.
+    ///
+    /// This is the persistent schema context used by one-shot `execute()` calls.
+    /// It is updated whenever `execute()` encounters `SESSION SET SCHEMA` or `SESSION RESET`.
+    #[must_use]
+    pub fn current_schema(&self) -> Option<String> {
+        self.live_if()
+            .map_or_else(Default::default, |open| open.current_schema())
+    }
+
+    /// Sets the current schema context for subsequent one-shot `execute()` calls.
+    ///
+    /// This is equivalent to running `SESSION SET SCHEMA <name>` but without creating
+    /// a session. Pass `None` to clear the schema context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the named schema does not exist.
+    pub fn set_current_schema(&self, name: Option<&str>) -> Result<()> {
+        self.live()?.set_current_schema(name)
+    }
+
+    /// Returns `true` if this database was opened in read-only mode.
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
+        // How it was opened: it answers after `close()` too.
+        self.read_only
+    }
+
+    /// Returns the configuration.
+    #[must_use]
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// The deadline of a statement that starts now under the database's query timeout
+    /// ([`Config::query_timeout`]), as a query reckons it; `None` without a timeout. A binding's
+    /// algorithm call runs under it, so it stops as `execute` past its timeout does. After
+    /// `close()` it returns `None`; it returns a `Result` from 0.7.0.
+    #[must_use]
+    pub fn query_deadline(&self) -> Option<grafeo_common::clock::Instant> {
+        self.live_if()
+            .map_or_else(Default::default, |open| open.query_deadline())
+    }
+
+    /// Returns the graph data model of this database.
+    #[must_use]
+    pub fn graph_model(&self) -> crate::config::GraphModel {
+        // From the configuration it was opened with: it answers after `close()` too.
+        self.config.graph_model()
+    }
+
+    /// Returns the configured memory limit in bytes, if any.
+    #[must_use]
+    pub fn memory_limit(&self) -> Option<usize> {
+        // From the configuration it was opened with: it answers after `close()` too.
+        self.config.memory_limit()
+    }
+
+    /// Returns a point-in-time snapshot of all metrics. After `close()` it returns a snapshot of
+    /// zero counts; it returns a `Result` from 0.7.0.
+    ///
+    /// If the `metrics` feature is disabled or the registry is not
+    /// initialized, returns a default (all-zero) snapshot.
+    #[cfg(feature = "metrics")]
+    #[must_use]
+    pub fn metrics(&self) -> crate::metrics::MetricsSnapshot {
+        self.live_if()
+            .map_or_else(Default::default, |open| open.metrics())
+    }
+
+    /// Returns all metrics in Prometheus text exposition format. After `close()` it returns an
+    /// empty string; it returns a `Result` from 0.7.0.
+    ///
+    /// The output is ready to serve from an HTTP `/metrics` endpoint.
+    #[cfg(feature = "metrics")]
+    #[must_use]
+    pub fn metrics_prometheus(&self) -> String {
+        self.live_if()
+            .map_or_else(Default::default, |open| open.metrics_prometheus())
+    }
+
+    /// Resets all metrics counters and histograms to zero. After `close()` it does nothing; it
+    /// returns a `Result` from 0.7.0.
+    #[cfg(feature = "metrics")]
+    pub fn reset_metrics(&self) {
+        if let Some(open) = self.live_if() {
+            open.reset_metrics();
+        }
+    }
+
+    /// Returns the underlying (default) row-group store, for admin work
+    /// (index management, schema introspection, MVCC internals) and its own
+    /// writes, which bypass the WAL, transactions and change capture.
+    ///
+    /// To read the graph, take a [`snapshot`](Self::snapshot): it reads one
+    /// pinned state of the selected graph through [`GraphStore`].
+    ///
+    /// # Stability: Experimental
+    ///
+    /// The row-group store's own methods may change in any release.
+    ///
+    /// # Errors
+    ///
+    /// The unsupported error on a database on a store of its own
+    /// ([`with_store`](Self::with_store), [`with_read_store`](Self::with_read_store)).
+    ///
+    /// # Deprecated
+    ///
+    /// Its writes skip the WAL, transactions and change capture, so a crash
+    /// or a rollback loses them unnoticed. Write through a session or the
+    /// direct API and read through [`snapshot`](Self::snapshot). Code that
+    /// denies deprecated items no longer builds with it:
+    ///
+    /// ```compile_fail
+    /// #![deny(deprecated)]
+    /// let _store = grafeo_engine::GrafeoDB::new_in_memory().store();
+    /// ```
+    #[deprecated(
+        since = "0.6.1",
+        note = "its writes skip the WAL and transactions: write through a session or the direct API (`batch_create_nodes`, `batch_create_edges`, the `import_*` calls for bulk loads) and read through `snapshot()` instead; removed in 0.7.0"
+    )]
+    pub fn store(&self) -> Result<Arc<RowGroupStore>> {
+        self.live()?.store()
+    }
+
+    /// Creates a named graph. Returns `true` if created, `false` if it already exists.
+    ///
+    /// The graph exists at once, outside any transaction (also while one is
+    /// open, whose rollback keeps it), and is logged as a change of its own:
+    /// commits are held off meanwhile, so a checkpoint or `close()` sees all
+    /// of it or none of it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if arena allocation fails, or if the database uses an
+    /// external store ([`with_store`](Self::with_store),
+    /// [`with_read_store`](Self::with_read_store)), which has no named graphs;
+    /// the database-closed error after `close()`,
+    /// and the incomplete-commit error after a commit that did not complete.
+    pub fn create_graph(&self, name: &str) -> Result<bool> {
+        self.live()?.create_graph(name)
+    }
+
+    /// Drops a named graph. Returns `true` if dropped, `false` if it did not
+    /// exist (also on an external store, which has no named graphs).
+    ///
+    /// If the dropped graph was the active graph context, the context is reset
+    /// to the default graph. As [`create_graph`](Self::create_graph), it holds
+    /// commits off while it runs, and it also waits for the writes of open
+    /// transactions in progress: a graph an open transaction has changes in
+    /// is not dropped (the transaction would commit into a graph that no
+    /// longer exists), and a write that resolved the graph before the drop
+    /// fails after it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a write conflict while an open transaction has changes in the
+    /// graph (drop it once that transaction commits or rolls back); the
+    /// database-closed error after `close()`, and
+    /// the incomplete-commit error after a commit that did not complete.
+    pub fn drop_graph(&self, name: &str) -> Result<bool> {
+        self.live()?.drop_graph(name)
+    }
+
+    /// Returns all named graph names, sorted, so every run gives the same
+    /// order (none on an external store). After `close()` it returns an empty list; it returns a
+    /// `Result` from 0.7.0.
+    #[must_use]
+    pub fn list_graphs(&self) -> Vec<String> {
+        self.live_if()
+            .map_or_else(Default::default, |open| open.list_graphs())
+    }
+
+    /// Creates a named graph projection (virtual subgraph).
+    ///
+    /// The projection filters the graph selected now (see
+    /// [`set_current_graph`](Self::set_current_graph); the default graph when
+    /// none is selected) to the nodes with the specified labels and the edges
+    /// with the specified types, and keeps reading that graph whatever is
+    /// selected later. Returns `true` if created, `false` if a projection with
+    /// that name already exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the selected graph no longer exists.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use grafeo_engine::GrafeoDB;
+    /// use grafeo_core::graph::ProjectionSpec;
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let spec = ProjectionSpec::new()
+    ///     .with_node_labels(["Person", "City"])
+    ///     .with_edge_types(["LIVES_IN"]);
+    /// assert!(db.create_projection("social", spec)?);
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
+    /// ```
+    pub fn create_projection(
+        &self,
+        name: impl Into<String>,
+        spec: grafeo_core::graph::ProjectionSpec,
+    ) -> Result<bool> {
+        self.live()?.create_projection(name, spec)
+    }
+
+    /// Drops a named graph projection. Returns `true` if it existed. After `close()` it returns
+    /// `false`; it returns a `Result` from 0.7.0.
+    pub fn drop_projection(&self, name: &str) -> bool {
+        self.live_if()
+            .map_or_else(Default::default, |open| open.drop_projection(name))
+    }
+
+    /// Returns the names of all graph projections. After `close()` it returns an empty list; it
+    /// returns a `Result` from 0.7.0.
+    #[must_use]
+    pub fn list_projections(&self) -> Vec<String> {
+        self.live_if()
+            .map_or_else(Default::default, |open| open.list_projections())
+    }
+
+    /// A [`Snapshot`](crate::Snapshot) of the named projection, as a committed reader at the
+    /// current epoch sees it, pinned while it lives; `None` when there is no
+    /// projection of that name. Holding it keeps the graph alive past `close()`, and the spill
+    /// files it reads stay until it drops. After `close()` it returns `None`; it returns a `Result`
+    /// from 0.7.0.
+    #[must_use]
+    pub fn projection(&self, name: &str) -> Option<crate::Snapshot> {
+        self.live_if()
+            .map_or_else(Default::default, |open| open.projection(name))
+    }
+
+    /// A [`Snapshot`](crate::Snapshot) of the graph
+    /// [`set_current_graph`](Self::set_current_graph) and
+    /// [`set_current_schema`](Self::set_current_schema) select (the default
+    /// graph when they select none), as a committed reader at the current
+    /// epoch sees it: the graph the direct API and graph algorithms read.
+    /// Every read through it sees that one state while it lives. Holding it keeps the graph alive
+    /// past `close()`, and the spill files it reads stay until it drops.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the selected graph no longer exists.
+    pub fn snapshot(&self) -> Result<crate::Snapshot> {
+        self.live()?.snapshot()
+    }
+
+    /// Garbage collects old MVCC versions that are no longer visible. After `close()` it does
+    /// nothing; it returns a `Result` from 0.7.0.
+    ///
+    /// Determines the minimum epoch required by active transactions and prunes
+    /// the versions older than that threshold, in the default graph and every
+    /// named graph. Also cleans up completed transaction metadata in the
+    /// transaction manager, and prunes the CDC event log according to its
+    /// retention policy.
+    pub fn gc(&self) {
+        if let Some(open) = self.live_if() {
+            open.gc();
+        }
+    }
+
+    /// Returns the buffer manager for memory-aware operations.
+    ///
+    /// Since 0.6.4 it returns an owned handle, and after `close()` an empty one: holding it keeps
+    /// that part of the database alive past `close()`.
+    #[must_use]
+    #[deprecated(
+        since = "0.6.4",
+        note = "hold the database, not its buffer manager: `memory_usage()` reports what it holds; removed in 0.7.0"
+    )]
+    pub fn buffer_manager(&self) -> Arc<BufferManager> {
+        self.live_if()
+            .map_or_else(BufferManager::with_defaults, |open| {
+                Arc::clone(open.buffer_manager())
+            })
+    }
+
+    /// Returns the query cache.
+    ///
+    /// Since 0.6.4 it returns an owned handle, and after `close()` an empty one: holding it keeps
+    /// that part of the database alive past `close()`.
+    #[must_use]
+    #[deprecated(
+        since = "0.6.4",
+        note = "hold the database, not its plan cache: `clear_plan_cache()` and `memory_usage()` reach it; removed in 0.7.0"
+    )]
+    pub fn query_cache(&self) -> Arc<QueryCache> {
+        self.live_if().map_or_else(
+            || Arc::new(QueryCache::default()),
+            |open| Arc::clone(open.query_cache()),
+        )
+    }
+
+    /// Holds the plan cache's puts until the returned guard drops: a
+    /// statement that planned waits before it stores its plan (feature
+    /// `testing-plan-cache`, for tests of a change racing a statement's plan). After `close()` it
+    /// returns a hold that holds nothing; it returns a `Result` from 0.7.0.
+    #[cfg(feature = "testing-plan-cache")]
+    #[must_use]
+    pub fn hold_plan_puts(&self) -> crate::query::cache::PlanPutHold {
+        self.live_if().map_or_else(
+            || crate::query::cache::QueryCache::default().hold_puts(),
+            |open| open.hold_plan_puts(),
+        )
+    }
+
+    /// Clears all cached query plans. After `close()` it does nothing; it returns a `Result` from
+    /// 0.7.0.
+    ///
+    /// This is called automatically after DDL operations, but can also be
+    /// invoked manually after external schema changes (e.g., WAL replay,
+    /// import) or when you want to force re-optimization of all queries.
+    pub fn clear_plan_cache(&self) {
+        if let Some(open) = self.live_if() {
+            open.clear_plan_cache();
+        }
+    }
+
+    /// Closes the database: persists it and releases everything it holds (#712).
+    ///
+    /// From the moment `close()` starts, every call on the database, and on the sessions,
+    /// transactions, streams, graph handles and views it handed out, fails with
+    /// [`TransactionError::DatabaseClosed`](grafeo_common::utils::error::TransactionError::DatabaseClosed)
+    /// (`GRAFEO-T007`), reads included and on an in-memory database too. The methods that
+    /// return no `Result` answer an empty value instead (`0`, an empty list, `None`); they
+    /// return a `Result` from 0.7.0. Calling `close()` again does nothing.
+    ///
+    /// The exception: a [`Snapshot`](crate::Snapshot) taken before (from
+    /// [`snapshot`](Self::snapshot), [`projection`](Self::projection),
+    /// [`GraphHandle::snapshot`](crate::GraphHandle::snapshot) or
+    /// [`AsOfView::snapshot`](crate::AsOfView::snapshot), and the store
+    /// [`Snapshot::shared`](crate::Snapshot::shared) hands out) and the iterators of
+    /// [`iter_nodes`](Self::iter_nodes) and [`iter_edges`](Self::iter_edges) read on: holding one
+    /// keeps the graph alive past `close()`, and the spill files it reads stay until it drops.
+    /// They fail with `GRAFEO-T007` from 0.7.0.
+    ///
+    /// `close()` waits for the statements and calls already in flight, which complete and are
+    /// in the final checkpoint. A transaction still open is rolled back and left out of the
+    /// file (the checkpoint writes the committed state; when it changed the default graph, the
+    /// vector and text indexes are left out and the next open builds them from the data), and
+    /// its commit then fails.
+    ///
+    /// Dropping the database without `close()` persists it the same way, releases the file
+    /// and, on a persistent database, refuses writes; a session, stream or view still held
+    /// reads on until it is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the WAL can't be flushed (check disk space/permissions).
+    /// After a commit that did not complete (see
+    /// [`TransactionManager`]), it
+    /// writes no checkpoint, keeps the WAL, releases the database, and
+    /// returns that commit's error. The next open shows the database without
+    /// the failed commit when it failed before its WAL records were written;
+    /// after them, the WAL holds the whole commit, and the next open replays
+    /// it whole. That close, and one through a backend of the database's own
+    /// whose checkpoint fails, is complete: every later call fails with
+    /// `GRAFEO-T007`.
+    ///
+    /// A close that fails before it released the database (the WAL sync or
+    /// the final checkpoint) leaves the data as it was: reads answer, while
+    /// commits, writes and schema changes of a persistent database fail with
+    /// `GRAFEO-T007`, and a later `close()` or the drop persists. The
+    /// sessions, streams and views it had handed out stay revoked, their open
+    /// transactions rolled back, and fail with `GRAFEO-T007`: open new ones.
+    pub fn close(&self) -> Result<()> {
+        // Taken first: a statement or session that starts from here on fails with `T007`, and a
+        // second `close()` finds nothing to do. The open state then waits for the statements in
+        // flight, persists, and goes when the last of them lets go of it (#712).
+        let Some(open) = self.state.write().take() else {
+            return Ok(());
+        };
+        // A close that fails before it released the database, or unwinds from a panic (in the
+        // revoke too), puts the open state back: reads answer, writes stay refused, and a later
+        // `close()` (or the drop) persists. The sessions, streams and views it had handed out
+        // stay revoked, their transactions rolled back.
+        let mut taken = Taken {
+            state: &self.state,
+            open: Some(open),
+        };
+        let closed = taken.open.as_ref().map_or(Ok(()), |open| {
+            // Each slot's write lock waits for the statement in flight on it.
+            open.slots.revoke();
+            open.close()
+        });
+        // A close that finished on an error path (a commit that did not complete, a backend's
+        // checkpoint) released the database: it is complete, and its error is returned.
+        if closed.is_ok() || taken.open.as_ref().is_some_and(|open| open.has_closed()) {
+            // Goes once the statements still holding it end.
+            drop(taken.open.take());
+        }
+        closed
+    }
+
+    /// Returns the typed WAL if available.
+    ///
+    /// Since 0.6.4 it returns an owned handle, and after `close()` an empty one: holding it keeps
+    /// that part of the database alive past `close()`.
+    #[cfg(feature = "wal")]
+    #[must_use]
+    #[deprecated(
+        since = "0.6.4",
+        note = "hold the database, not its WAL: `wal_status()` and `wal_checkpoint()` reach it; removed in 0.7.0"
+    )]
+    pub fn wal(&self) -> Option<Arc<grafeo_storage::wal::Wal>> {
+        self.live_if().and_then(|open| open.wal().cloned())
+    }
+
+    /// Reloads spilled consumers back into RAM up to a target memory fraction. After `close()` it
+    /// returns 0; it returns a `Result` from 0.7.0.
+    ///
+    /// Phase 9a: closes the spill / reload loop. After memory pressure drops
+    /// (e.g. a workload finishes, or a checkpoint freed mutation overlay
+    /// state), call this to bring spilled section data back into RAM for
+    /// faster subsequent reads.
+    ///
+    /// Walks consumers currently reporting `StorageTier::OnDisk`, in priority
+    /// order (highest first), reloading each as long as projected memory
+    /// usage stays below `target_fraction * memory_limit`.
+    ///
+    /// Returns the number of consumers successfully reloaded.
+    ///
+    /// `target_fraction` is clamped to `[0.0, 1.0]`. A typical value is `0.7`
+    /// (matching the default `soft_limit_fraction`).
+    pub fn reload_eligible(&self, target_fraction: f64) -> usize {
+        self.live_if().map_or_else(Default::default, |open| {
+            open.reload_eligible(target_fraction)
+        })
+    }
+
+    /// Returns the current [`StorageTier`] of every registered section consumer. After `close()` it
+    /// returns an empty map; it returns a `Result` from 0.7.0.
+    ///
+    /// The map keys are the [`SectionType`]s parsed from each consumer's name
+    /// (consumers whose names don't follow the `"section:<TypeName>"` convention
+    /// are skipped). Tier classification is best-effort: a consumer reporting
+    /// zero `memory_usage()` and `can_spill() == true` is reported as `OnDisk`,
+    /// otherwise `InMemory` (or `Uninitialized` if both are zero).
+    ///
+    /// Useful for tests, observability, and binding-side introspection.
+    ///
+    /// [`StorageTier`]: grafeo_common::memory::buffer::StorageTier
+    /// [`SectionType`]: grafeo_common::storage::SectionType
+    #[must_use]
+    pub fn storage_tiers(
+        &self,
+    ) -> hashbrown::HashMap<
+        grafeo_common::storage::SectionType,
+        grafeo_common::memory::buffer::StorageTier,
+    > {
+        self.live_if()
+            .map_or_else(Default::default, |open| open.storage_tiers())
+    }
+
+    /// What the checkpoint thread did since the database opened: the times
+    /// it woke and the checkpoints it ran. For tests only. After `close()` it returns zero counts;
+    /// it returns a `Result` from 0.7.0.
+    #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
+    #[must_use]
+    pub fn checkpoint_thread_counts(&self) -> crate::admin::CheckpointThreadCounts {
+        self.live_if()
+            .map_or_else(Default::default, |open| open.checkpoint_thread_counts())
+    }
+
+    /// Holds the checkpoint thread after its next checkpoint, before it arms
+    /// the WAL mark that wakes it again, until the returned hold is dropped:
+    /// no commit wakes it meanwhile. For tests only. After `close()` it returns a hold that holds
+    /// nothing; it returns a `Result` from 0.7.0.
+    #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
+    pub fn hold_checkpoint_rearm(&self) -> crate::admin::CheckpointRearmHold {
+        self.live_if().map_or_else(
+            || crate::admin::CheckpointRearmHold {
+                gate: Arc::default(),
+            },
+            |open| open.hold_checkpoint_rearm(),
+        )
+    }
+
+    /// Changes the configuration the database file stores (#551): the
+    /// settings `changes` sets with its builders replace the stored ones,
+    /// and the database checkpoints at once, so the next open applies them
+    /// (`GrafeoDB::open` and `Config::read_only` apply what the file stores
+    /// to every setting they do not set themselves). This database keeps the
+    /// configuration it opened with.
+    ///
+    /// What a file stores: the graph model and the backward edges (both
+    /// fixed at creation), schema constraints, the WAL and its durability
+    /// mode, the memory limit, the section tier overrides, and the spill
+    /// path when it lies in the database's directory.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn main() -> grafeo_common::utils::error::Result<()> {
+    /// use grafeo_engine::config::DurabilityMode;
+    /// use grafeo_engine::{Config, GrafeoDB};
+    ///
+    /// let db = GrafeoDB::open("berlin.grafeo")?;
+    /// db.set_stored_config(
+    ///     &Config::in_memory()
+    ///         .with_memory_limit(88 * 1024 * 1024)
+    ///         .with_wal_durability(DurabilityMode::Sync),
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// An unsupported-query error for an in-memory or read-only database,
+    /// [`Error::InvalidValue`] when `changes` sets the graph model or the
+    /// backward edges to another value than the database was created with,
+    /// or pins a section that cannot be moved to disk to
+    /// [`TierOverride::ForceDisk`](grafeo_common::storage::TierOverride::ForceDisk),
+    /// the database-closed error after `close()`, and the errors of the
+    /// checkpoint.
+    #[cfg(feature = "grafeo-file")]
+    pub fn set_stored_config(&self, changes: &Config) -> Result<()> {
+        self.live()?.set_stored_config(changes)
+    }
+
+    /// Creates a full backup of the database in the given directory.
+    ///
+    /// Writes a `.grafeo` image of the database at the epoch E it starts at,
+    /// from the snapshot a checkpoint takes, and adds it to the backup
+    /// manifest. Commits wait only while the snapshot is taken and the
+    /// catalog and RDF data are copied, and go on while the graphs are
+    /// written; the image holds exactly the commits up to E. The database's
+    /// own file is not checkpointed. Backups on this database wait for one
+    /// another, also across destinations. Another database or process using
+    /// the destination makes the call fail with a busy error.
+    /// Subsequent incremental backups hold the
+    /// commits after E. A read-only database writes what it sees, the
+    /// commits it replayed from the WAL included.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database has no file manager or I/O fails,
+    /// and the database-closed error after `close()`; the unsupported error
+    /// on a database on a backend of its own
+    /// ([`with_store`](Self::with_store)), whose data the backend keeps.
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+    pub fn backup_full(&self, backup_dir: &std::path::Path) -> Result<backup::BackupSegment> {
+        self.live()?.backup_full(backup_dir)
+    }
+
+    /// Creates an incremental backup containing WAL records since the last backup.
+    ///
+    /// Requires a prior full backup in the backup directory. Backups on
+    /// this database wait for one another; a destination in use by another
+    /// database or process fails with a busy error. With nothing new since
+    /// the last backup it writes nothing and returns the chain's newest
+    /// segment (0.7.0 returns `None` instead).
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-input error when the backup directory holds no full
+    /// backup yet; `GRAFEO-S005`
+    /// ([`ErrorCode::BackupChainBroken`](grafeo_common::utils::error::ErrorCode::BackupChainBroken))
+    /// when the chain cannot continue, which a new full backup fixes, its
+    /// message naming the cause: the database has no backup cursor (none was
+    /// written, or [`release_backup_cursor`](Self::release_backup_cursor)
+    /// released it), the cursor is of the WAL format before 0.6.0, the chain
+    /// ends before the cursor, the WAL from the cursor on passed the
+    /// [retention limit](crate::Config::with_wal_retention_limit) and was
+    /// removed, the segment where the last backup ended was removed from
+    /// outside, or the WAL has a gap; the database-closed error after
+    /// `close()`; the
+    /// unsupported error on a database on a backend of its own
+    /// ([`with_store`](Self::with_store)), which has no full backup to
+    /// follow.
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+    pub fn backup_incremental(
+        &self,
+        backup_dir: &std::path::Path,
+    ) -> Result<backup::BackupSegment> {
+        self.live()?.backup_incremental(backup_dir)
+    }
+
+    /// Returns the backup manifest for a backup directory, if one exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the manifest file exists but cannot be parsed.
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+    pub fn read_backup_manifest(
+        backup_dir: &std::path::Path,
+    ) -> Result<Option<backup::BackupManifest>> {
+        Open::read_backup_manifest(backup_dir)
+    }
+
+    /// Returns the current backup cursor (last backed-up position), if any. After `close()` it
+    /// returns `None`; it returns a `Result` from 0.7.0.
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+    #[must_use]
+    pub fn backup_cursor(&self) -> Option<backup::BackupCursor> {
+        self.live_if()
+            .map_or_else(Default::default, |open| open.backup_cursor())
+    }
+
+    /// Releases the backup cursor: the next backup must be a full one.
+    ///
+    /// After a full backup, every checkpoint keeps the WAL from where the
+    /// last backup ended, so the next incremental backup can copy it (up to
+    /// the [retention limit](crate::Config::with_wal_retention_limit)).
+    /// When you stop taking incremental backups, release the cursor, and
+    /// checkpoints keep only the WAL a reopen needs. An incremental backup
+    /// after the release fails with `GRAFEO-S005`
+    /// ([`ErrorCode::BackupChainBroken`](grafeo_common::utils::error::ErrorCode::BackupChainBroken)),
+    /// and a full backup starts a new chain. Returns whether there was a
+    /// cursor to release.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cursor cannot be removed, and the
+    /// database-closed error after `close()`.
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+    pub fn release_backup_cursor(&self) -> Result<bool> {
+        self.live()?.release_backup_cursor()
+    }
+
+    /// Restores a database from a backup chain to a specific epoch.
+    ///
+    /// Copies the full backup to `output_path`, then replays incremental
+    /// WAL segments up to `target_epoch`. The restored database can be
+    /// opened with [`GrafeoDB::open`]. An epoch past the end of the chain
+    /// restores the latest state the chain holds.
+    ///
+    /// The backups of an encrypted database are encrypted: a restore that
+    /// needs only the full backup copies its encrypted file (open it with its
+    /// key), and one that replays incremental segments needs the key, see
+    /// `restore_to_epoch_with` (feature `encryption`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `output_path` or its `<output_path>.wal` sidecar
+    /// already exists (restores never overwrite a database), if the backup
+    /// chain does not cover the target epoch, segment checksums fail, or I/O
+    /// fails; also, before anything is written, if the backup is encrypted
+    /// and segments are to be replayed.
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+    pub fn restore_to_epoch(
+        backup_dir: &std::path::Path,
+        target_epoch: grafeo_common::types::EpochId,
+        output_path: &std::path::Path,
+    ) -> Result<()> {
+        Open::restore_to_epoch(backup_dir, target_epoch, output_path)
+    }
+
+    /// Restores an encrypted database from a backup chain to a specific
+    /// epoch, as [`restore_to_epoch`](Self::restore_to_epoch) does, with the
+    /// key chain the database was encrypted with.
+    ///
+    /// The key is checked against the full backup before anything is
+    /// written. The incremental segments are decrypted with the WAL key of
+    /// the backup's database, and the WAL the restore writes next to the
+    /// restored file is encrypted with that same key: open the restored
+    /// database with the same `encryption`.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`restore_to_epoch`](Self::restore_to_epoch); also, before
+    /// anything is written, if the backup was encrypted with another key or is
+    /// not encrypted.
+    #[cfg(all(feature = "wal", feature = "grafeo-file", feature = "encryption"))]
+    pub fn restore_to_epoch_with(
+        backup_dir: &std::path::Path,
+        target_epoch: grafeo_common::types::EpochId,
+        output_path: &std::path::Path,
+        encryption: &crate::config::EncryptionConfig,
+    ) -> Result<()> {
+        Open::restore_to_epoch_with(backup_dir, target_epoch, output_path, encryption)
+    }
+
+    /// Returns the file manager if using single-file format.
+    ///
+    /// Since 0.6.4 it returns an owned handle, and after `close()` an empty one: holding it keeps
+    /// that part of the database alive past `close()`.
+    #[cfg(feature = "grafeo-file")]
+    #[must_use]
+    #[deprecated(
+        since = "0.6.4",
+        note = "hold the database, not its file: `checkpoint_status()` and `wal_checkpoint()` reach it; removed in 0.7.0"
+    )]
+    pub fn file_manager(&self) -> Option<Arc<GrafeoFileManager>> {
+        self.live_if().and_then(|open| open.file_manager().cloned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4654,7 +5303,7 @@ mod tests {
         #[cfg(feature = "triple-store")]
         let rdf_store = Arc::new(RdfStore::new());
         let mut loaded = sections::LoadedSections::default();
-        GrafeoDB::load_legacy_file(
+        Open::load_legacy_file(
             &path,
             &store,
             &catalog,
@@ -4694,6 +5343,8 @@ mod tests {
         // test fail under load).
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while db
+            .live()
+            .unwrap()
             .wal_flusher
             .lock()
             .as_ref()
@@ -4706,7 +5357,13 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
-        let mut flusher = db.wal_flusher.lock().take().expect("a flusher runs");
+        let mut flusher = db
+            .live()
+            .unwrap()
+            .wal_flusher
+            .lock()
+            .take()
+            .expect("a flusher runs");
         let stats = flusher.shutdown().unwrap();
         assert!(stats.flush_count > 0, "{stats:?}");
         db.close().unwrap();
@@ -4763,7 +5420,13 @@ mod tests {
                 .execute(&format!("MATCH (c:City) SET c.name = '{name}'"))
                 .unwrap();
         }
-        let named = db.lpg_store().unwrap().graph("trips").unwrap();
+        let named = db
+            .live()
+            .unwrap()
+            .lpg_store()
+            .unwrap()
+            .graph("trips")
+            .unwrap();
         let held = named.memory().total_bytes();
         reader.rollback().unwrap();
 
@@ -4819,12 +5482,73 @@ mod tests {
         )
         .unwrap();
         db.compact().unwrap();
-        assert!(db.checkpoint_timer.lock().is_none());
+        assert!(db.live().unwrap().checkpoint_timer.lock().is_none());
+    }
+
+    /// A value spilled to disk before `close()` is not read after it: the read fails with `T007`.
+    /// Vector columns are what a row group spills. (Moved from the integration tests, where
+    /// the buffer manager's accessor is deprecated, #712.)
+    #[cfg(all(feature = "vector-index", feature = "spill", feature = "mmap"))]
+    #[test]
+    fn a_spilled_value_is_not_read_after_close() {
+        use grafeo_common::types::Value;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = GrafeoDB::with_config(
+            Config::persistent(dir.path().join("spilled.grafeo"))
+                .with_history_retention(crate::config::HistoryRetention::Forever),
+        )
+        .unwrap();
+        db.execute("INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'})")
+            .unwrap();
+        let ids: Vec<_> = (0..3u8)
+            .map(|item| {
+                db.create_node_with_props(
+                    &["Item"],
+                    [(
+                        "embedding",
+                        Value::Vector(vec![f32::from(item), 19.0, 88.0].into()),
+                    )],
+                )
+                .unwrap()
+            })
+            .collect();
+        db.create_vector_index("Item", "embedding", None, None, None, None, None)
+            .unwrap();
+        db.live().unwrap().buffer_manager().spill_all();
+        assert!(
+            db.memory_usage().spill.vector_column_bytes > 0,
+            "the positive control: a column is spilled"
+        );
+
+        db.close().unwrap();
+
+        for (what, result) in [
+            (
+                "a spilled value's point read",
+                db.get_node(ids[1]).map(drop),
+            ),
+            (
+                "a spilled value's scan",
+                db.execute("MATCH (i:Item) RETURN i.embedding").map(drop),
+            ),
+        ] {
+            let error = result.expect_err(what);
+            assert!(
+                matches!(
+                    error,
+                    Error::Transaction(
+                        grafeo_common::utils::error::TransactionError::DatabaseClosed
+                    )
+                ),
+                "{what}: {error:?}"
+            );
+        }
     }
 
     /// `compact()` after `close()` fails and starts no checkpoint timer: its
     /// checkpoints would write a file the database no longer holds.
-    #[cfg(feature = "wal")]
+    #[cfg(all(feature = "wal", feature = "grafeo-file", feature = "gql"))]
     #[test]
     fn compacting_a_closed_database_starts_no_checkpoint_timer() {
         let dir = tempfile::tempdir().unwrap();
@@ -4833,8 +5557,9 @@ mod tests {
                 .with_checkpoint_interval(std::time::Duration::from_secs(60)),
         )
         .unwrap();
+        let open = db.live_arc().unwrap();
         assert!(
-            db.checkpoint_timer.lock().is_some(),
+            open.checkpoint_timer.lock().is_some(),
             "an open database runs its timer"
         );
         db.close().unwrap();
@@ -4847,7 +5572,10 @@ mod tests {
             ),
             "{error:?}"
         );
-        assert!(db.checkpoint_timer.lock().is_none(), "no timer was started");
+        assert!(
+            open.checkpoint_timer.lock().is_none(),
+            "no timer was started"
+        );
     }
 
     #[test]
@@ -4935,7 +5663,12 @@ mod tests {
         db.delete_node(node).unwrap();
 
         // The WAL holds a group of each direct call, with its GroupBegin.
-        let wal = db.wal().expect("a persistent database has a WAL");
+        let wal = db
+            .live()
+            .unwrap()
+            .wal()
+            .cloned()
+            .expect("a persistent database has a WAL");
         assert!(wal.records_written() >= 4, "{}", wal.records_written());
 
         db.close().unwrap();
@@ -5600,6 +6333,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated, reason = "the accessor's own test, until 0.7.0 removes it")]
     fn test_database_buffer_manager() {
         let db = GrafeoDB::new_in_memory();
         let _bm = db.buffer_manager();
@@ -5607,6 +6341,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(deprecated, reason = "the accessor's own test, until 0.7.0 removes it")]
     fn test_database_query_cache() {
         let db = GrafeoDB::new_in_memory();
         let _qc = db.query_cache();

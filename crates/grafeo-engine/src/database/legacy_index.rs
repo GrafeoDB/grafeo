@@ -198,7 +198,7 @@ fn vector_index_kind<G: grafeo_core::graph::GraphStore + ?Sized>(
         return Ok(None);
     };
     let metric = super::index::vector_index_metric(None)?;
-    let built = super::GrafeoDB::build_vector_index(
+    let built = super::Open::build_vector_index(
         dimensions,
         metric,
         None,

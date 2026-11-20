@@ -5,16 +5,14 @@
 //! time, and a naive `datetime` is refused: its instant depends on a zone it
 //! does not name.
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDateTime, PyDelta, PyDict, PyInt, PyString};
 
 use grafeo_common::types::{EdgeId, EpochId, NodeId, Timestamp};
-use grafeo_engine::database::GrafeoDB;
 use grafeo_engine::{AsOfView, HistoryRetention, TimePoint};
 
 use crate::graph::{PyEdge, PyNode};
@@ -129,16 +127,16 @@ pub(crate) fn history_retention(retention: &Bound<'_, PyAny>) -> PyResult<Histor
 #[pyclass(name = "AsOfView", module = "grafeo")]
 pub struct PyAsOfView {
     /// Keeps the database open while the view lives.
-    _db: Arc<RwLock<GrafeoDB>>,
+    db: crate::database::SharedDb,
     view: Mutex<Option<AsOfView>>,
     epoch: u64,
 }
 
 impl PyAsOfView {
-    pub(crate) fn new(db: Arc<RwLock<GrafeoDB>>, view: AsOfView) -> Self {
+    pub(crate) fn new(db: crate::database::SharedDb, view: AsOfView) -> Self {
         let epoch = view.epoch().as_u64();
         Self {
-            _db: db,
+            db,
             view: Mutex::new(Some(view)),
             epoch,
         }
@@ -146,6 +144,7 @@ impl PyAsOfView {
 
     /// Runs `read` on the open view.
     fn with_view<T>(&self, read: impl FnOnce(&AsOfView) -> PyResult<T>) -> PyResult<T> {
+        self.db.check()?;
         let view = self.view.lock();
         let view = view.as_ref().ok_or_else(|| {
             PyValueError::new_err("the AsOfView is closed: open another with GrafeoDB.as_of")
@@ -158,8 +157,9 @@ impl PyAsOfView {
 impl PyAsOfView {
     /// The epoch the view reads at.
     #[getter]
-    fn epoch(&self) -> u64 {
-        self.epoch
+    fn epoch(&self) -> PyResult<u64> {
+        self.db.check()?;
+        Ok(self.epoch)
     }
 
     /// Runs a GQL query as the database was at the view's epoch; a query

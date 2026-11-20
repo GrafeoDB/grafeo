@@ -14,7 +14,7 @@
 //! ```
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 /// A copy of fixture `name` in `dir`: an open may checkpoint, which would change the fixture.
 fn copy_of(name: &str, dir: &Path) -> PathBuf {
@@ -27,8 +27,8 @@ fn copy_of(name: &str, dir: &Path) -> PathBuf {
 }
 
 fn grafeo(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_grafeo"))
-        .arg("--no-color")
+    let temp = tempfile::tempdir().unwrap();
+    crate::grafeo_command(temp.path())
         .args(args)
         .output()
         .expect("run grafeo")

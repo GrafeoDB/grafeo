@@ -1,0 +1,282 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/unwind/Unwind1.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Unwind1"
+  title: "Unwind1"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Unwinding a list
+  - name: s1_unwinding_a_list
+    query: |
+      UNWIND [1, 2, 3] AS x
+      RETURN x
+    expect:
+      values: |
+        | x |
+        | 1 |
+        | 2 |
+        | 3 |
+      side_effects: {}
+
+  # [2] Unwinding a range
+  - name: s2_unwinding_a_range
+    query: |
+      UNWIND range(1, 3) AS x
+      RETURN x
+    expect:
+      values: |
+        | x |
+        | 1 |
+        | 2 |
+        | 3 |
+      side_effects: {}
+
+  # [3] Unwinding a concatenation of lists
+  - name: s3_unwinding_a_concatenation_of_lists
+    query: |
+      WITH [1, 2, 3] AS first, [4, 5, 6] AS second
+      UNWIND (first + second) AS x
+      RETURN x
+    expect:
+      values: |
+        | x |
+        | 1 |
+        | 2 |
+        | 3 |
+        | 4 |
+        | 5 |
+        | 6 |
+      side_effects: {}
+
+  # [4] Unwinding a collected unwound expression
+  - name: s4_unwinding_a_collected_unwound_expression
+    query: |
+      UNWIND RANGE(1, 2) AS row
+      WITH collect(row) AS rows
+      UNWIND rows AS x
+      RETURN x
+    expect:
+      values: |
+        | x |
+        | 1 |
+        | 2 |
+      side_effects: {}
+
+  # [5] Unwinding a collected expression
+  - name: s5_unwinding_a_collected_expression
+    setup:
+      - |
+        CREATE ({id: 1}), ({id: 2})
+    query: |
+      MATCH (row)
+      WITH collect(row) AS rows
+      UNWIND rows AS node
+      RETURN node.id
+    expect:
+      values: |
+        | node.id |
+        | 1 |
+        | 2 |
+      side_effects: {}
+
+  # [6] Creating nodes from an unwound parameter list
+  - name: s6_creating_nodes_from_an_unwound_parameter_list
+    xfail:
+      spec: "openCypher TCK 2024.3 Unwind1: [6] Creating nodes from an unwound parameter list"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        CREATE (:Year {year: 2016})
+    params:
+      events: [{"year": 2016, "id": 1}, {"year": 2016, "id": 2}]
+    query: |
+      UNWIND $events AS event
+      MATCH (y:Year {year: event.year})
+      MERGE (e:Event {id: event.id})
+      MERGE (y)<-[:IN]-(e)
+      RETURN e.id AS x
+      ORDER BY x
+    expect:
+      ordered: true
+      values: |
+        | x |
+        | 1 |
+        | 2 |
+      side_effects:
+        +nodes: 2
+        +relationships: 2
+        +labels: 1
+        +properties: 2
+
+  # [7] Double unwinding a list of lists
+  - name: s7_double_unwinding_a_list_of_lists
+    query: |
+      WITH [[1, 2, 3], [4, 5, 6]] AS lol
+      UNWIND lol AS x
+      UNWIND x AS y
+      RETURN y
+    expect:
+      values: |
+        | y |
+        | 1 |
+        | 2 |
+        | 3 |
+        | 4 |
+        | 5 |
+        | 6 |
+      side_effects: {}
+
+  # [8] Unwinding the empty list
+  - name: s8_unwinding_the_empty_list
+    query: |
+      UNWIND [] AS empty
+      RETURN empty
+    expect:
+      values: |
+        | empty |
+      side_effects: {}
+
+  # [9] Unwinding null
+  - name: s9_unwinding_null
+    query: |
+      UNWIND null AS nil
+      RETURN nil
+    expect:
+      values: |
+        | nil |
+      side_effects: {}
+
+  # [10] Unwinding list with duplicates
+  - name: s10_unwinding_list_with_duplicates
+    query: |
+      UNWIND [1, 1, 2, 2, 3, 3, 4, 4, 5, 5] AS duplicate
+      RETURN duplicate
+    expect:
+      values: |
+        | duplicate |
+        | 1 |
+        | 1 |
+        | 2 |
+        | 2 |
+        | 3 |
+        | 3 |
+        | 4 |
+        | 4 |
+        | 5 |
+        | 5 |
+      side_effects: {}
+
+  # [11] Unwind does not prune context
+  - name: s11_unwind_does_not_prune_context
+    query: |
+      WITH [1, 2, 3] AS list
+      UNWIND list AS x
+      RETURN *
+    expect:
+      values: |
+        | list | x |
+        | [1, 2, 3] | 1 |
+        | [1, 2, 3] | 2 |
+        | [1, 2, 3] | 3 |
+      side_effects: {}
+
+  # [12] Unwind does not remove variables from scope
+  - name: s12_unwind_does_not_remove_variables_from_scope
+    setup:
+      - |
+        CREATE (s:S),
+          (n),
+          (e:E),
+          (s)-[:X]->(e),
+          (s)-[:Y]->(e),
+          (n)-[:Y]->(e)
+    query: |
+      MATCH (a:S)-[:X]->(b1)
+      WITH a, collect(b1) AS bees
+      UNWIND bees AS b2
+      MATCH (a)-[:Y]->(b2)
+      RETURN a, b2
+    expect:
+      values: |
+        | a | b2 |
+        | (:S) | (:E) |
+      side_effects: {}
+
+  # [13] Multiple unwinds after each other
+  - name: s13_multiple_unwinds_after_each_other
+    xfail:
+      spec: "openCypher TCK 2024.3 Unwind1: [13] Multiple unwinds after each other"
+      issue: fix in 0.6.5
+    query: |
+      WITH [1, 2] AS xs, [3, 4] AS ys, [5, 6] AS zs
+      UNWIND xs AS x
+      UNWIND ys AS y
+      UNWIND zs AS z
+      RETURN *
+    expect:
+      values: |
+        | x | xs | y | ys | z | zs |
+        | 1 | [1, 2] | 3 | [3, 4] | 5 | [5, 6] |
+        | 1 | [1, 2] | 3 | [3, 4] | 6 | [5, 6] |
+        | 1 | [1, 2] | 4 | [3, 4] | 5 | [5, 6] |
+        | 1 | [1, 2] | 4 | [3, 4] | 6 | [5, 6] |
+        | 2 | [1, 2] | 3 | [3, 4] | 5 | [5, 6] |
+        | 2 | [1, 2] | 3 | [3, 4] | 6 | [5, 6] |
+        | 2 | [1, 2] | 4 | [3, 4] | 5 | [5, 6] |
+        | 2 | [1, 2] | 4 | [3, 4] | 6 | [5, 6] |
+      side_effects: {}
+
+  # [14] Unwind with merge
+  - name: s14_unwind_with_merge
+    params:
+      props: [{"login": "login1", "name": "name1"}, {"login": "login2", "name": "name2"}]
+    query: |
+      UNWIND $props AS prop
+      MERGE (p:Person {login: prop.login})
+      SET p.name = prop.name
+      RETURN p.name, p.login
+    expect:
+      values: |
+        | p.name | p.login |
+        | 'name1' | 'login1' |
+        | 'name2' | 'login2' |
+      side_effects:
+        +nodes: 2
+        +labels: 1
+        +properties: 4

@@ -6,15 +6,12 @@
 //! (distances with paths, flows with edge assignments).
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
-use parking_lot::RwLock;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use grafeo_common::types::{NodeId, ReadView};
 use grafeo_core::graph::GraphStore;
-use grafeo_engine::database::GrafeoDB;
 
 use crate::error::PyGrafeoError;
 use crate::gil::without_gil;
@@ -39,12 +36,12 @@ use crate::gil::without_gil;
 /// ```
 #[pyclass(name = "SolvORAdapter")]
 pub struct PySolvORAdapter {
-    db: Arc<RwLock<GrafeoDB>>,
+    db: crate::database::SharedDb,
 }
 
 impl PySolvORAdapter {
     /// Creates a new solvOR adapter for the given database.
-    pub fn new(db: Arc<RwLock<GrafeoDB>>) -> Self {
+    pub(crate) fn new(db: crate::database::SharedDb) -> Self {
         Self { db }
     }
 
@@ -57,7 +54,7 @@ impl PySolvORAdapter {
         compute: impl FnOnce(&dyn GraphStore, ReadView) -> Result<T, E> + Send,
     ) -> PyResult<T> {
         without_gil(py, || {
-            let db = self.db.read();
+            let db = self.db.read()?;
             let snapshot = db.snapshot()?;
             compute(snapshot.store(), snapshot.view()).map_err(Into::into)
         })
@@ -529,7 +526,7 @@ impl PySolvORAdapter {
     }
 
     fn __repr__(&self) -> PyResult<String> {
-        let db = self.db.read();
+        let db = self.db.read()?;
         let snapshot = db.snapshot().map_err(PyGrafeoError::from)?;
         Ok(format!(
             "SolvORAdapter(nodes={}, edges={})",

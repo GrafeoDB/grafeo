@@ -169,6 +169,21 @@ final class GrafeoBindings {
       Pointer<Utf8> Function(Pointer<Void>),
       Pointer<Utf8> Function(Pointer<Void>)>('grafeo_result_json');
 
+  /// The column names of a result as a JSON array, also without rows.
+  late final grafeoResultColumnsJson = library.lookupFunction<
+      Pointer<Utf8> Function(Pointer<Void>),
+      Pointer<Utf8> Function(Pointer<Void>)>('grafeo_result_columns_json');
+
+  /// The nodes of a result as JSON, each once.
+  late final grafeoResultNodesJson = library.lookupFunction<
+      Pointer<Utf8> Function(Pointer<Void>),
+      Pointer<Utf8> Function(Pointer<Void>)>('grafeo_result_nodes_json');
+
+  /// The edges of a result as JSON, each once.
+  late final grafeoResultEdgesJson = library.lookupFunction<
+      Pointer<Utf8> Function(Pointer<Void>),
+      Pointer<Utf8> Function(Pointer<Void>)>('grafeo_result_edges_json');
+
   /// Get the number of rows in a result.
   late final grafeoResultRowCount = library.lookupFunction<
       IntPtr Function(Pointer<Void>),
@@ -1200,6 +1215,20 @@ final class GrafeoBindings {
       Int32 Function(Pointer<Void>, Uint64),
       int Function(
           Pointer<Void>, int)>('grafeo_options_set_path_search_budget');
+
+  /// Sets the snapshot retention limit in bytes; below 1 MiB the open fails.
+  /// Returns GrafeoStatus.
+  late final grafeoOptionsSetSnapshotRetentionLimit = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64),
+      int Function(
+          Pointer<Void>, int)>('grafeo_options_set_snapshot_retention_limit');
+
+  /// Sets the history retention limit in bytes; zero fails the open. Returns
+  /// GrafeoStatus.
+  late final grafeoOptionsSetHistoryRetentionLimit = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64),
+      int Function(
+          Pointer<Void>, int)>('grafeo_options_set_history_retention_limit');
 
   /// Sets the spill limit in bytes; zero means nothing spills. Returns
   /// GrafeoStatus.

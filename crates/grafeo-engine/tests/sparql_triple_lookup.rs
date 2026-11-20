@@ -144,7 +144,7 @@ fn agree(
 
 /// The profile text of `query` on the committed store.
 fn profile(db: &GrafeoDB, query: &str) -> String {
-    let processor = QueryProcessor::with_rdf(db.store().unwrap(), Arc::clone(db.rdf_store()));
+    let processor = QueryProcessor::with_rdf(db.store().unwrap(), Arc::clone(&db.rdf_store()));
     let result = processor
         .process(
             &format!("EXPLAIN ANALYZE {PREFIX} {query}"),

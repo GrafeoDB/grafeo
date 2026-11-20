@@ -83,7 +83,7 @@ fn read_0_5(path: &Path) -> Result<Database> {
     let database = Database::new();
     let mut loaded = LoadedSections::default();
     if detect(path)? == OnDisk::WalDirectory {
-        GrafeoDB::load_legacy_directory(
+        crate::database::Open::load_legacy_directory(
             path,
             &database.root,
             &database.catalog,
@@ -93,7 +93,7 @@ fn read_0_5(path: &Path) -> Result<Database> {
             false,
         )?;
     } else {
-        GrafeoDB::load_legacy_file(
+        crate::database::Open::load_legacy_file(
             path,
             &database.root,
             &database.catalog,
@@ -215,7 +215,7 @@ fn seen(store: &dyn GraphStore) -> (BTreeMap<u64, NodeView>, BTreeMap<u64, EdgeV
 /// every graph's rows and indexes, the catalog's definitions, the RDF
 /// triples, and the epoch the database continues at.
 fn assert_same_database(db: &GrafeoDB, database: &Database, what: &str) {
-    let store = db.lpg_store().unwrap();
+    let store = db.live().unwrap().lpg_store().unwrap();
     assert_eq!(
         committed_of(&*database.root),
         seen(&*store),
@@ -249,19 +249,19 @@ fn assert_same_database(db: &GrafeoDB, database: &Database, what: &str) {
     }
     assert_eq!(
         definitions(&database.catalog),
-        definitions(&db.catalog),
+        definitions(&db.live().unwrap().catalog),
         "{what}: the catalog"
     );
     #[cfg(feature = "triple-store")]
     assert_eq!(
         database.rdf_store.len(),
-        db.rdf_store.len(),
+        db.live().unwrap().rdf_store.len(),
         "{what}: the RDF triples"
     );
     // Both give a replayed commit an epoch of its own.
     assert_eq!(
         database.transaction_manager.current_epoch(),
-        db.transaction_manager.current_epoch(),
+        db.live().unwrap().transaction_manager.current_epoch(),
         "{what}: the epoch"
     );
 }
@@ -394,7 +394,7 @@ fn embeddings_a_0_5_build_spilled_fold_into_row_groups() {
     let db = GrafeoDB::open_read_only(&path).unwrap();
     assert_eq!(
         committed_of(&*database.root),
-        committed_of(&*db.lpg_store().unwrap()),
+        committed_of(&*db.live().unwrap().lpg_store().unwrap()),
         "the embeddings as the engine folds them"
     );
     let key = PropertyKey::new("embedding");
@@ -471,17 +471,24 @@ fn a_snapshot_export_during_open_writes_round_trips() {
 
     let db = GrafeoDB::import_snapshot(&data).unwrap();
     assert_eq!(
-        committed_of(&*db.lpg_store().unwrap()),
+        committed_of(&*db.live().unwrap().lpg_store().unwrap()),
         committed[0],
         "the database"
     );
     assert_eq!(
-        committed_of(&*db.lpg_store().unwrap().graph("trips").unwrap()),
+        committed_of(
+            &*db.live()
+                .unwrap()
+                .lpg_store()
+                .unwrap()
+                .graph("trips")
+                .unwrap()
+        ),
         committed[1],
         "the database, trips"
     );
     assert_eq!(
-        indexes_of(&*db.lpg_store().unwrap()),
+        indexes_of(&*db.live().unwrap().lpg_store().unwrap()),
         indexes_of(&*imported.root),
         "the indexes"
     );

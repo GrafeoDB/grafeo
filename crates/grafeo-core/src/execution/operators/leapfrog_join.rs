@@ -65,6 +65,19 @@ pub struct LeapfrogJoinOperator {
 
     /// Whether iteration is exhausted.
     exhausted: bool,
+
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](crate::execution::memory::capture)): its inputs, their
+    /// tries and its results. It cannot spill: past the query memory limit or
+    /// the memory limit it fails with `GRAFEO-S001`.
+    memory: crate::execution::memory::OperatorMemory,
+}
+
+/// What a trie holds per row it indexes, at most: a node of its own for each
+/// join key (shared prefixes count again, so this is an upper bound) and the
+/// row's id.
+fn trie_row_bytes(keys: usize) -> usize {
+    keys.saturating_mul(crate::index::trie::TRIE_ENTRY_BYTES) + std::mem::size_of::<EdgeId>()
 }
 
 impl LeapfrogJoinOperator {
@@ -95,6 +108,7 @@ impl LeapfrogJoinOperator {
             result_position: 0,
             expansion_indices: Vec::new(),
             exhausted: false,
+            memory: crate::execution::memory::capture(),
         }
     }
 
@@ -127,18 +141,23 @@ impl LeapfrogJoinOperator {
             while let Some(chunk) = input.next()? {
                 crate::execution::deadline::check()?;
                 types.add(&chunk);
+                self.memory
+                    .add_with(|| crate::execution::memory::chunk_bytes(&chunk))?;
                 chunks.push(chunk);
             }
             self.materialized_inputs.push(chunks);
             self.input_types.push(types);
         }
 
-        // Phase 2: Build TrieIndex for each input
+        // Phase 2: Build TrieIndex for each input, counted a chunk at a time
         for (input_idx, chunks) in self.materialized_inputs.iter().enumerate() {
             let mut trie = TrieIndex::new();
             let key_indices = &self.join_key_indices[input_idx];
+            let row_bytes = trie_row_bytes(key_indices.len());
 
             for (chunk_idx, chunk) in chunks.iter().enumerate() {
+                self.memory
+                    .add(chunk.row_count().saturating_mul(row_bytes))?;
                 for row in 0..chunk.row_count() {
                     // Extract join key values and convert to path
                     if let Some(path) = self.extract_join_keys(chunk, row, key_indices) {
@@ -234,6 +253,16 @@ impl LeapfrogJoinOperator {
 
             // Only add result if all inputs have matching rows
             if row_ids_per_input.iter().all(|ids| !ids.is_empty()) {
+                self.memory.add_with(|| {
+                    std::mem::size_of::<JoinResult>()
+                        + row_ids_per_input
+                            .iter()
+                            .map(|ids| {
+                                std::mem::size_of::<Vec<RowId>>()
+                                    + ids.len() * std::mem::size_of::<RowId>()
+                            })
+                            .sum::<usize>()
+                })?;
                 self.results.push(JoinResult {
                     row_ids: row_ids_per_input,
                 });
@@ -391,6 +420,7 @@ impl Operator for LeapfrogJoinOperator {
         self.tries.clear();
         self.materialized = false;
         self.results.clear();
+        self.memory.clear();
         self.result_position = 0;
         self.expansion_indices.clear();
         self.exhausted = false;

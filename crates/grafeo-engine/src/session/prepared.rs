@@ -8,7 +8,7 @@ use grafeo_common::types::Value;
 use grafeo_common::utils::error::Result;
 use grafeo_core::graph::GraphStore;
 
-use super::Session;
+use super::SessionInner;
 use crate::query::cache::{CacheKey, CachedPlan, Stage};
 use crate::query::plan::LogicalPlan;
 
@@ -32,7 +32,7 @@ impl std::ops::Deref for RunPlan {
     }
 }
 
-impl Session {
+impl SessionInner {
     /// The plan cache's key for `query` in `language` in this session: its
     /// current schema and graph and its planner rules, which the plan is made
     /// for.
@@ -169,9 +169,14 @@ mod tests {
 
         plain.execute(query).unwrap();
 
-        let cached = |session: &super::Session| {
-            let key = session.plan_cache_key(query, QueryLanguage::Gql);
+        let cached = |session: &crate::session::Session| {
+            let key = session
+                .inner()
+                .unwrap()
+                .plan_cache_key(query, QueryLanguage::Gql);
             session
+                .inner()
+                .unwrap()
                 .plan_cache()
                 .get(&key, crate::query::cache::Stage::Optimized)
                 .is_some()

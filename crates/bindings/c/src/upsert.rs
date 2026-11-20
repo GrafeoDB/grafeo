@@ -158,11 +158,7 @@ pub extern "C" fn grafeo_upsert_nodes(
         Err(status) => return status,
     };
     let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-    match db
-        .inner
-        .read()
-        .upsert_nodes(&label_refs, &key, rows, replace)
-    {
+    match or_fail!(db.inner.read()).upsert_nodes(&label_refs, &key, rows, replace) {
         Ok(summary) => write_summary(&summary, out_json),
         Err(e) => set_error(&e),
     }
@@ -199,7 +195,7 @@ pub extern "C" fn grafeo_upsert_edges(
             Ok(parsed) => parsed,
             Err(status) => return status,
         };
-    match db.inner.read().upsert_edges(edge_type, rows, &options) {
+    match or_fail!(db.inner.read()).upsert_edges(edge_type, rows, &options) {
         Ok(summary) => write_summary(&summary, out_json),
         Err(e) => set_error(&e),
     }

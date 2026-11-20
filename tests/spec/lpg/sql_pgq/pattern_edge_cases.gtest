@@ -300,7 +300,7 @@ tests:
   - name: unbounded_upper_range
     query: |
       SELECT * FROM GRAPH_TABLE (
-        MATCH (src:Person)-[p:KNOWS*1..]->(dst:Person)
+        MATCH TRAIL (src:Person)-[p:KNOWS*1..]->(dst:Person)
         COLUMNS (src.name AS source, dst.name AS target)
       )
     expect:

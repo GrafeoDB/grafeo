@@ -1,0 +1,120 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/with-skip-limit/WithSkipLimit2.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.WithSkipLimit2"
+  title: "WithSkipLimit2 - Limit"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] ORDER BY and LIMIT can be used
+  - name: s1_order_by_and_limit_can_be_used
+    setup:
+      - |
+        CREATE (a:A), (), (), (),
+               (a)-[:REL]->()
+    query: |
+      MATCH (a:A)
+      WITH a
+      ORDER BY a.name
+      LIMIT 1
+      MATCH (a)-->(b)
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A) |
+      side_effects: {}
+
+  # [2] Handle dependencies across WITH with LIMIT
+  - name: s2_handle_dependencies_across_with_with_limit
+    setup:
+      - |
+        CREATE (a:End {num: 42, id: 0}),
+               (:End {num: 3}),
+               (:Begin {num: a.id})
+    query: |
+      MATCH (a:Begin)
+      WITH a.num AS property
+        LIMIT 1
+      MATCH (b)
+      WHERE b.id = property
+      RETURN b
+    expect:
+      values: |
+        | b |
+        | (:End {num: 42, id: 0}) |
+      side_effects: {}
+
+  # [3] Connected components succeeding WITH with LIMIT
+  - name: s3_connected_components_succeeding_with_with_limit
+    xfail:
+      spec: "openCypher TCK 2024.3 WithSkipLimit2: [3] Connected components succeeding WITH with LIMIT"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        CREATE (:A)-[:REL]->(:X)
+        CREATE (:B)
+    query: |
+      MATCH (n:A)
+      WITH n
+      LIMIT 1
+      MATCH (m:B), (n)-->(x:X)
+      RETURN *
+    expect:
+      values: |
+        | m | n | x |
+        | (:B) | (:A) | (:X) |
+      side_effects: {}
+
+  # [4] Ordering and limiting on aggregate
+  - name: s4_ordering_and_limiting_on_aggregate
+    setup:
+      - |
+        CREATE ()-[:T1 {num: 3}]->(x:X),
+               ()-[:T2 {num: 2}]->(x),
+               ()-[:T3 {num: 1}]->(:Y)
+    query: |
+      MATCH ()-[r1]->(x)
+      WITH x, sum(r1.num) AS c
+        ORDER BY c LIMIT 1
+      RETURN x, c
+    expect:
+      values: |
+        | x | c |
+        | (:Y) | 1 |
+      side_effects: {}

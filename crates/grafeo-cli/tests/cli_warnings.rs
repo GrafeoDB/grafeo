@@ -7,12 +7,12 @@
 //! cargo test -p grafeo-cli --all-features --test main cli_warnings::
 //! ```
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 /// Runs the `grafeo` binary with `args`, after checking that it succeeded.
 fn grafeo(args: &[&str]) -> Output {
-    let output = Command::new(env!("CARGO_BIN_EXE_grafeo"))
-        .arg("--no-color")
+    let temp = tempfile::tempdir().unwrap();
+    let output = crate::grafeo_command(temp.path())
         .args(args)
         .output()
         .expect("run grafeo");
@@ -131,8 +131,9 @@ fn quiet_keeps_the_warning() {
 /// The output formats `--format` takes, from the CLI's own refusal of an unknown one, so a new
 /// format is checked without a row here.
 fn formats() -> Vec<String> {
-    let out = Command::new(env!("CARGO_BIN_EXE_grafeo"))
-        .args(["--no-color", "--format", "no-such-format", "version"])
+    let temp = tempfile::tempdir().unwrap();
+    let out = crate::grafeo_command(temp.path())
+        .args(["--format", "no-such-format", "version"])
         .output()
         .expect("run grafeo");
     let text = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -182,4 +183,51 @@ fn every_format_keeps_its_rows_and_writes_the_warning_on_standard_error() {
         assert_eq!(warnings(&warned), 1, "{format}: {}", stderr(&warned));
         assert_eq!(warnings(&plain), 0, "{format}: {}", stderr(&plain));
     }
+}
+
+/// Sets the modification time of `dir` two minutes back: the sweep counts a directory without an
+/// owner lock only from a minute old (one younger may be another open's, mid-creation).
+fn two_minutes_old(dir: &std::path::Path) {
+    let when = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+    #[cfg(windows)]
+    let handle = {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_WRITE_ATTRIBUTES, and FILE_FLAG_BACKUP_SEMANTICS to open a directory.
+        std::fs::OpenOptions::new()
+            .access_mode(0x100)
+            .custom_flags(0x0200_0000)
+            .open(dir)
+    };
+    #[cfg(not(windows))]
+    let handle = std::fs::File::open(dir);
+    handle.unwrap().set_modified(when).unwrap();
+}
+
+/// An engine warning goes to standard error, never into the rows: the note a read-only open's
+/// sweep makes about a spill directory without an owner lock (a read-only open of 0.6.3 or
+/// earlier left it) in the temp directory, with `--format json`.
+#[test]
+fn an_engine_warning_goes_to_standard_error() {
+    let (_dir, path) = database();
+    let temp = tempfile::tempdir().unwrap();
+    let old = temp.path().join("grafeo-vienna-123-0123456789abcdef.spill");
+    std::fs::create_dir(&old).unwrap();
+    std::fs::write(old.join("columns_1_0_0.bin"), b"vincent").unwrap();
+    two_minutes_old(&old);
+    let output = crate::grafeo_command(temp.path())
+        .args(["--format", "json", "query", &path, "RETURN 1 AS v"])
+        .output()
+        .expect("run grafeo");
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("without an owner lock"),
+        "the warning on standard error: {}",
+        stderr(&output)
+    );
+    let rows = String::from_utf8_lossy(&output.stdout);
+    assert!(!rows.contains("owner lock"), "the rows alone: {rows}");
+    assert!(
+        matches!(serde_json::from_str(&rows), Ok(serde_json::Value::Array(_))),
+        "JSON rows: {rows}"
+    );
 }

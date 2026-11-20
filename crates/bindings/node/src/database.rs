@@ -72,9 +72,70 @@ fn validate_epoch(epoch: f64) -> Result<grafeo_common::types::EpochId> {
 }
 
 /// Your connection to a Grafeo database.
+/// The database every object of this binding shares: the database itself, and the
+/// sessions, transactions, streams, graph handles and views it hands out.
+///
+/// The only ways to reach it check that it is open, so no call answers from a closed
+/// database: each fails with `GRAFEO-T007` after `close()`, a getter as much as a query.
+/// Only [`close`](Self::close) reaches a closed one, as a no-op.
+pub(crate) struct SharedDb(Arc<RwLock<GrafeoDB>>);
+
+impl SharedDb {
+    pub(crate) fn new(db: GrafeoDB) -> Self {
+        Self(Arc::new(RwLock::new(db)))
+    }
+
+    /// The open database; `GRAFEO-T007` once closed.
+    pub(crate) fn read(
+        &self,
+    ) -> std::result::Result<parking_lot::RwLockReadGuard<'_, GrafeoDB>, NodeGrafeoError> {
+        let db = self.0.read();
+        if db.is_closed() {
+            return Err(closed_error());
+        }
+        Ok(db)
+    }
+
+    /// The open database, alone (no statement runs beside it); `GRAFEO-T007` once closed.
+    pub(crate) fn write(
+        &self,
+    ) -> std::result::Result<parking_lot::RwLockWriteGuard<'_, GrafeoDB>, NodeGrafeoError> {
+        let db = self.0.write();
+        if db.is_closed() {
+            return Err(closed_error());
+        }
+        Ok(db)
+    }
+
+    /// `GRAFEO-T007` once closed, for a call that reaches the database only later.
+    pub(crate) fn check(&self) -> std::result::Result<(), NodeGrafeoError> {
+        self.read().map(drop)
+    }
+
+    /// Another handle on the same database, for an object it hands out or a task it
+    /// starts; `GRAFEO-T007` once closed.
+    pub(crate) fn share(&self) -> std::result::Result<Self, NodeGrafeoError> {
+        self.check()?;
+        Ok(Self(Arc::clone(&self.0)))
+    }
+
+    /// Closes the database: persists it and releases what it holds; a no-op once closed.
+    pub(crate) fn close(&self) -> std::result::Result<(), NodeGrafeoError> {
+        Ok(self.0.read().close()?)
+    }
+}
+
+/// The error of a call on a closed database (`GRAFEO-T007`).
+pub(crate) fn closed_error() -> NodeGrafeoError {
+    grafeo_common::utils::error::Error::Transaction(
+        grafeo_common::utils::error::TransactionError::DatabaseClosed,
+    )
+    .into()
+}
+
 #[napi(js_name = "GrafeoDB")]
 pub struct JsGrafeoDB {
-    inner: Arc<RwLock<GrafeoDB>>,
+    inner: SharedDb,
 }
 
 /// Options for `getNodeEdges`.
@@ -219,6 +280,18 @@ pub struct CreateOptions {
     /// most 256 MiB, and never more than `memoryLimit`. A search over it
     /// throws `GRAFEO-S001`. For this open only.
     pub path_search_budget: Option<i64>,
+    /// How many bytes of replaced data an open transaction's snapshot may
+    /// keep: what the commits since it began replaced that it can still read. By
+    /// default a quarter of `memoryLimit`, at least 1 MiB; below 1 MiB the open
+    /// throws. Past it the transaction's next call throws the retryable
+    /// `GRAFEO-T012` and rolls it back. For this open only.
+    pub snapshot_retention_limit: Option<i64>,
+    /// How many bytes of replaced data the history window may keep: once the
+    /// commits since its start replaced more, the start moves forward,
+    /// whichever of time or bytes comes first, and a read before it is
+    /// refused. No limit by default; zero throws at the open. Not stored with
+    /// the database: pass it at every open.
+    pub history_retention_limit: Option<i64>,
     /// How many bytes may spill to disk (0: nothing spills), half the spill
     /// volume's free space by default. An in-memory database spills
     /// nothing. For this open only.
@@ -249,6 +322,13 @@ fn memory_settings(mut config: Config, options: &CreateOptions) -> Result<Config
     }
     if let Some(bytes) = options.path_search_budget {
         config = config.with_path_search_budget(positive(bytes, "pathSearchBudget")?);
+    }
+    if let Some(bytes) = options.snapshot_retention_limit {
+        config =
+            config.with_snapshot_retention_limit(size_option(bytes, "snapshotRetentionLimit")?);
+    }
+    if let Some(bytes) = options.history_retention_limit {
+        config = config.with_history_retention_limit(size_option(bytes, "historyRetentionLimit")?);
     }
     if options.unlimited_spill.unwrap_or(false) {
         config = config.with_unlimited_spill();
@@ -387,7 +467,7 @@ impl JsGrafeoDB {
         }
         let db = GrafeoDB::with_config(config).map_err(NodeGrafeoError::from)?;
         Ok(Self {
-            inner: Arc::new(RwLock::new(db)),
+            inner: SharedDb::new(db),
         })
     }
 
@@ -397,7 +477,7 @@ impl JsGrafeoDB {
         let config = Config::persistent(path);
         let db = GrafeoDB::with_config(config).map_err(NodeGrafeoError::from)?;
         Ok(Self {
-            inner: Arc::new(RwLock::new(db)),
+            inner: SharedDb::new(db),
         })
     }
 
@@ -412,7 +492,7 @@ impl JsGrafeoDB {
         let config = Config::read_only(path);
         let db = GrafeoDB::with_config(config).map_err(NodeGrafeoError::from)?;
         Ok(Self {
-            inner: Arc::new(RwLock::new(db)),
+            inner: SharedDb::new(db),
         })
     }
 
@@ -424,9 +504,9 @@ impl JsGrafeoDB {
         params: Option<types::Params>,
     ) -> Result<QueryResult> {
         let params = params.map(types::Params::into_map).transpose()?;
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         let result = tokio::task::spawn_blocking(move || {
-            let db = db.read();
+            let db = db.read()?;
             execute_language_query(&db, &query, language, params)
         })
         .await
@@ -437,8 +517,10 @@ impl JsGrafeoDB {
 
     /// The epoch of the last commit, as a `bigint`: a point for `asOf`.
     #[napi(js_name = "currentEpoch")]
-    pub fn current_epoch(&self) -> BigInt {
-        crate::time_travel::epoch_bigint(self.inner.read().current_epoch())
+    pub fn current_epoch(&self) -> Result<BigInt> {
+        Ok(crate::time_travel::epoch_bigint(
+            self.inner.read()?.current_epoch(),
+        ))
     }
 
     /// A read-only view of the database as it was at `point`: a `bigint`
@@ -457,11 +539,11 @@ impl JsGrafeoDB {
         let point = crate::time_travel::time_point(env, point)?;
         let view = self
             .inner
-            .read()
+            .read()?
             .as_of(point)
             .map_err(NodeGrafeoError::from)?;
         Ok(crate::time_travel::JsAsOfView::new(
-            Arc::clone(&self.inner),
+            self.inner.share()?,
             view,
         ))
     }
@@ -482,7 +564,7 @@ impl JsGrafeoDB {
     ) -> Result<AsyncTask<crate::time_travel::ExecuteAsOf>> {
         let point = crate::time_travel::time_point(env, point)?;
         Ok(AsyncTask::new(crate::time_travel::ExecuteAsOf {
-            db: Arc::clone(&self.inner),
+            db: self.inner.share()?,
             query,
             point,
             params,
@@ -498,7 +580,7 @@ impl JsGrafeoDB {
         let point = crate::time_travel::time_point(env, point)?;
         let epoch = self
             .inner
-            .read()
+            .read()?
             .epoch_as_of(point)
             .map_err(NodeGrafeoError::from)?;
         Ok(crate::time_travel::epoch_bigint(epoch))
@@ -527,10 +609,10 @@ impl JsGrafeoDB {
     /// yet supported.
     #[napi(js_name = "executeStream")]
     pub async fn execute_stream(&self, query: String) -> Result<crate::stream::JsResultStream> {
-        let db_arc = Arc::clone(&self.inner);
-        let keepalive = Arc::clone(&self.inner);
+        let db_arc = self.inner.share()?;
+        let keepalive = self.inner.share()?;
         let stream = tokio::task::spawn_blocking(move || {
-            let db = db_arc.read();
+            let db = db_arc.read()?;
             db.execute_streaming(&query).map_err(NodeGrafeoError::from)
         })
         .await
@@ -546,7 +628,7 @@ impl JsGrafeoDB {
         labels: Vec<String>,
         properties: Option<Object<'_>>,
     ) -> Result<JsNode> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
 
         let id = if let Some(props_obj) = properties {
@@ -569,7 +651,7 @@ impl JsGrafeoDB {
         edge_type: String,
         properties: Option<Object<'_>>,
     ) -> Result<JsEdge> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let src = validate_node_id(source_id)?;
         let dst = validate_node_id(target_id)?;
 
@@ -588,7 +670,7 @@ impl JsGrafeoDB {
     #[napi(js_name = "getNode")]
     pub fn get_node(&self, id: f64) -> Result<Option<JsNode>> {
         let node_id = validate_node_id(id)?;
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let node = db.get_node(node_id).map_err(NodeGrafeoError::from)?;
         Ok(node.map(|node| {
             let labels: Vec<String> = node.labels.iter().map(|s| s.to_string()).collect();
@@ -610,7 +692,7 @@ impl JsGrafeoDB {
         let node_id = validate_node_id(id)?;
         let (direction, edge_types) = node_edges_options(options)?;
         let edge_types: Vec<&str> = edge_types.iter().map(String::as_str).collect();
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(edge_pairs(
             db.get_node_edges(node_id, direction, &edge_types)
                 .map_err(NodeGrafeoError::from)?,
@@ -621,7 +703,7 @@ impl JsGrafeoDB {
     #[napi(js_name = "getEdge")]
     pub fn get_edge(&self, id: f64) -> Result<Option<JsEdge>> {
         let edge_id = validate_edge_id(id)?;
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let edge = db.get_edge(edge_id).map_err(NodeGrafeoError::from)?;
         Ok(edge.map(|edge| {
             let properties = edge.properties.into_iter().collect();
@@ -639,7 +721,7 @@ impl JsGrafeoDB {
     #[napi(js_name = "deleteNode")]
     pub fn delete_node(&self, id: f64) -> Result<bool> {
         let node_id = validate_node_id(id)?;
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(db.delete_node(node_id).map_err(NodeGrafeoError::from)?)
     }
 
@@ -648,7 +730,7 @@ impl JsGrafeoDB {
     #[napi(js_name = "detachDeleteNode")]
     pub fn detach_delete_node(&self, id: f64) -> Result<bool> {
         let node_id = validate_node_id(id)?;
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(db
             .detach_delete_node(node_id)
             .map_err(NodeGrafeoError::from)?)
@@ -658,7 +740,7 @@ impl JsGrafeoDB {
     #[napi(js_name = "deleteEdge")]
     pub fn delete_edge(&self, id: f64) -> Result<bool> {
         let edge_id = validate_edge_id(id)?;
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(db.delete_edge(edge_id).map_err(NodeGrafeoError::from)?)
     }
 
@@ -672,7 +754,7 @@ impl JsGrafeoDB {
         value: Unknown<'_>,
     ) -> Result<()> {
         let node_id = validate_node_id(id)?;
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let val = types::js_to_named_value(env, value, "property", &key)?;
         db.set_node_property(node_id, &key, val)
             .map_err(NodeGrafeoError::from)?;
@@ -689,7 +771,7 @@ impl JsGrafeoDB {
         value: Unknown<'_>,
     ) -> Result<()> {
         let edge_id = validate_edge_id(id)?;
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let val = types::js_to_named_value(env, value, "property", &key)?;
         db.set_edge_property(edge_id, &key, val)
             .map_err(NodeGrafeoError::from)?;
@@ -701,7 +783,7 @@ impl JsGrafeoDB {
     pub fn node_count(&self) -> Result<u32> {
         let count = self
             .inner
-            .read()
+            .read()?
             .node_count()
             .map_err(NodeGrafeoError::from)?;
         // reason: WASM targets use 32-bit usize; on 64-bit, graphs with >4B nodes are unrealistic
@@ -715,7 +797,7 @@ impl JsGrafeoDB {
     pub fn edge_count(&self) -> Result<u32> {
         let count = self
             .inner
-            .read()
+            .read()?
             .edge_count()
             .map_err(NodeGrafeoError::from)?;
         // reason: WASM targets use 32-bit usize; on 64-bit, graphs with >4B edges are unrealistic
@@ -730,7 +812,7 @@ impl JsGrafeoDB {
     /// snapshot isolation is the strongest level until queries record their reads).
     #[napi(js_name = "beginTransaction")]
     pub fn begin_transaction(&self, isolation_level: Option<String>) -> Result<Transaction> {
-        Transaction::new(self.inner.clone(), isolation_level.as_deref())
+        Transaction::new(self.inner.share()?, isolation_level.as_deref())
     }
 
     /// Open a session whose limits bind every statement run through it: its
@@ -745,7 +827,7 @@ impl JsGrafeoDB {
     /// session runs as `db.execute` does. An unknown option is an error.
     #[napi(ts_args_type = "options?: { readOnly?: boolean; externalAccess?: boolean }")]
     pub fn session(&self, options: Option<Object<'_>>) -> Result<crate::session::JsSession> {
-        crate::session::JsSession::open(Arc::clone(&self.inner), options.as_ref())
+        crate::session::JsSession::open(self.inner.share()?, options.as_ref())
     }
 
     /// Create a vector similarity index on a node property.
@@ -761,9 +843,9 @@ impl JsGrafeoDB {
         ef_construction: Option<u32>,
         quantization: Option<String>,
     ) -> Result<()> {
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
-            let db = db.read();
+            let db = db.read()?;
             db.create_vector_index(
                 &label,
                 &property,
@@ -790,9 +872,9 @@ impl JsGrafeoDB {
         property: String,
         vectors: Vec<Vec<f64>>,
     ) -> Result<Vec<f64>> {
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
-            let db = db.read();
+            let db = db.read()?;
             let vecs_f32: Vec<Vec<f32>> = vectors
                 .into_iter()
                 .map(|v| v.into_iter().map(|x| x as f32).collect())
@@ -813,7 +895,7 @@ impl JsGrafeoDB {
     #[napi(js_name = "removeNodeProperty")]
     pub fn remove_node_property(&self, id: f64, key: String) -> Result<bool> {
         let node_id = validate_node_id(id)?;
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(db
             .remove_node_property(node_id, &key)
             .map_err(NodeGrafeoError::from)?)
@@ -823,7 +905,7 @@ impl JsGrafeoDB {
     #[napi(js_name = "removeEdgeProperty")]
     pub fn remove_edge_property(&self, id: f64, key: String) -> Result<bool> {
         let edge_id = validate_edge_id(id)?;
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(db
             .remove_edge_property(edge_id, &key)
             .map_err(NodeGrafeoError::from)?)
@@ -833,7 +915,7 @@ impl JsGrafeoDB {
     #[napi(js_name = "addNodeLabel")]
     pub fn add_node_label(&self, id: f64, label: String) -> Result<bool> {
         let node_id = validate_node_id(id)?;
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(db
             .add_node_label(node_id, &label)
             .map_err(NodeGrafeoError::from)?)
@@ -843,7 +925,7 @@ impl JsGrafeoDB {
     #[napi(js_name = "removeNodeLabel")]
     pub fn remove_node_label(&self, id: f64, label: String) -> Result<bool> {
         let node_id = validate_node_id(id)?;
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(db
             .remove_node_label(node_id, &label)
             .map_err(NodeGrafeoError::from)?)
@@ -853,7 +935,7 @@ impl JsGrafeoDB {
     #[napi(js_name = "getNodeLabels")]
     pub fn get_node_labels(&self, id: f64) -> Result<Option<Vec<String>>> {
         let node_id = validate_node_id(id)?;
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         Ok(db.get_node_labels(node_id).map_err(NodeGrafeoError::from)?)
     }
 
@@ -868,7 +950,7 @@ impl JsGrafeoDB {
     /// storage engine and may change in any release.
     #[napi(js_name = "memoryUsage", ts_return_type = "MemoryUsage")]
     pub fn memory_usage(&self) -> Result<serde_json::Value> {
-        let usage = self.inner.read().memory_usage();
+        let usage = self.inner.read()?.memory_usage();
         let value =
             serde_json::to_value(&usage).map_err(|e| NodeGrafeoError::Database(e.to_string()))?;
         Ok(camel_case_keys(value))
@@ -880,10 +962,10 @@ impl JsGrafeoDB {
     /// `MEMORY_DETECTION_FALLBACK` and `GRAPH_TYPE_NOT_BOUND`. Empty for a
     /// clean open.
     #[napi(js_name = "openWarnings", ts_return_type = "Array<OpenWarning>")]
-    pub fn open_warnings(&self) -> serde_json::Value {
+    pub fn open_warnings(&self) -> Result<serde_json::Value> {
         let warnings = self
             .inner
-            .read()
+            .read()?
             .open_warnings()
             .iter()
             .map(|warning| {
@@ -900,13 +982,13 @@ impl JsGrafeoDB {
                 })
             })
             .collect();
-        serde_json::Value::Array(warnings)
+        Ok(serde_json::Value::Array(warnings))
     }
 
     /// Returns high-level database information as a JSON object.
     #[napi]
     pub fn info(&self) -> Result<serde_json::Value> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let info = db.info().map_err(NodeGrafeoError::from)?;
         serde_json::to_value(&info).map_err(|e| NodeGrafeoError::Database(e.to_string()).into())
     }
@@ -916,15 +998,16 @@ impl JsGrafeoDB {
     /// and properties, each edge type with the labels it connects.
     #[napi]
     pub fn schema(&self) -> Result<serde_json::Value> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         let schema = db.schema().map_err(NodeGrafeoError::from)?;
         serde_json::to_value(&schema).map_err(|e| NodeGrafeoError::Database(e.to_string()).into())
     }
 
     /// Returns the Grafeo engine version string.
     #[napi]
-    pub fn version(&self) -> String {
-        env!("CARGO_PKG_VERSION").to_string()
+    pub fn version(&self) -> Result<String> {
+        self.inner.check()?;
+        Ok(env!("CARGO_PKG_VERSION").to_string())
     }
 
     /// Clear all cached query plans.
@@ -932,8 +1015,9 @@ impl JsGrafeoDB {
     /// Forces re-parsing and re-optimization on next execution.
     /// Called automatically after DDL operations, but can be invoked manually.
     #[napi(js_name = "clearPlanCache")]
-    pub fn clear_plan_cache(&self) {
-        self.inner.read().clear_plan_cache();
+    pub fn clear_plan_cache(&self) -> Result<()> {
+        self.inner.read()?.clear_plan_cache();
+        Ok(())
     }
 
     /// Sets when the database checkpoints by itself: every
@@ -954,7 +1038,7 @@ impl JsGrafeoDB {
         if let Some(bytes) = triggers.wal_bytes {
             set = set.with_wal_bytes(whole_count(bytes, "walBytes")?);
         }
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         db.set_checkpoint_triggers(set)
             .map_err(NodeGrafeoError::from)
             .map_err(napi::Error::from)
@@ -963,10 +1047,10 @@ impl JsGrafeoDB {
     /// How the automatic checkpoints fare: the triggers, the last checkpoint,
     /// and the automatic ones that failed since the last that succeeded.
     #[napi(js_name = "checkpointStatus")]
-    pub fn checkpoint_status(&self) -> CheckpointStatus {
-        let status = self.inner.read().checkpoint_status();
+    pub fn checkpoint_status(&self) -> Result<CheckpointStatus> {
+        let status = self.inner.read()?.checkpoint_status();
         let number = js_number;
-        CheckpointStatus {
+        Ok(CheckpointStatus {
             interval_ms: status
                 .triggers
                 .interval
@@ -977,7 +1061,7 @@ impl JsGrafeoDB {
             last_error: status.last_error,
             last_failure: status.last_failure.map(number),
             stopped: status.stopped,
-        }
+        })
     }
 
     /// Forces a WAL checkpoint.
@@ -985,7 +1069,7 @@ impl JsGrafeoDB {
     /// Flushes all pending WAL records to the main storage.
     #[napi(js_name = "walCheckpoint")]
     pub fn wal_checkpoint(&self) -> Result<()> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         db.wal_checkpoint()
             .map_err(NodeGrafeoError::from)
             .map_err(napi::Error::from)
@@ -994,11 +1078,7 @@ impl JsGrafeoDB {
     /// Close the database.
     #[napi]
     pub fn close(&self) -> Result<()> {
-        self.inner
-            .read()
-            .close()
-            .map_err(NodeGrafeoError::from)
-            .map_err(napi::Error::from)
+        Ok(self.inner.close()?)
     }
 
     // ── Schema context ───────────────────────────────────────────────────
@@ -1010,7 +1090,7 @@ impl JsGrafeoDB {
     #[napi(js_name = "setSchema")]
     pub fn set_schema(&self, name: String) -> napi::Result<()> {
         self.inner
-            .read()
+            .read()?
             .set_current_schema(Some(&name))
             .map_err(|e| napi::Error::from(NodeGrafeoError::from(e)))
     }
@@ -1019,14 +1099,15 @@ impl JsGrafeoDB {
     ///
     /// Subsequent `execute()` calls will use the default (no-schema) namespace.
     #[napi(js_name = "resetSchema")]
-    pub fn reset_schema(&self) {
-        let _ = self.inner.read().set_current_schema(None);
+    pub fn reset_schema(&self) -> Result<()> {
+        let _ = self.inner.read()?.set_current_schema(None);
+        Ok(())
     }
 
     /// Returns the current schema name, or `null` if no schema is set.
     #[napi(js_name = "currentSchema")]
-    pub fn current_schema(&self) -> Option<String> {
-        self.inner.read().current_schema()
+    pub fn current_schema(&self) -> Result<Option<String>> {
+        Ok(self.inner.read()?.current_schema())
     }
 
     // ── Graph projections ───────────────────────────────────────────────
@@ -1056,21 +1137,21 @@ impl JsGrafeoDB {
         }
         Ok(self
             .inner
-            .read()
+            .read()?
             .create_projection(name, spec)
             .map_err(NodeGrafeoError::from)?)
     }
 
     /// Drops a named graph projection. Returns `true` if it existed.
     #[napi(js_name = "dropProjection")]
-    pub fn drop_projection(&self, name: String) -> bool {
-        self.inner.read().drop_projection(&name)
+    pub fn drop_projection(&self, name: String) -> Result<bool> {
+        Ok(self.inner.read()?.drop_projection(&name))
     }
 
     /// Returns the names of all graph projections.
     #[napi(js_name = "listProjections")]
-    pub fn list_projections(&self) -> Vec<String> {
-        self.inner.read().list_projections()
+    pub fn list_projections(&self) -> Result<Vec<String>> {
+        Ok(self.inner.read()?.list_projections())
     }
 }
 
@@ -1104,9 +1185,9 @@ impl JsGrafeoDB {
         >,
     ) -> Result<Vec<Vec<f64>>> {
         let filter_map = convert_json_filters(filters)?;
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
-            let db = db.read();
+            let db = db.read()?;
             let query_f32: Vec<f32> = query.iter().map(|&v| v as f32).collect();
             let results = db
                 .vector_search(
@@ -1133,9 +1214,9 @@ impl JsGrafeoDB {
     /// Returns true if the index existed and was removed.
     #[napi(js_name = "dropVectorIndex")]
     pub async fn drop_vector_index(&self, label: String, property: String) -> Result<bool> {
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
-            let db = db.read();
+            let db = db.read()?;
             db.drop_vector_index(&label, &property)
                 .map_err(NodeGrafeoError::from)
                 .map_err(napi::Error::from)
@@ -1153,9 +1234,9 @@ impl JsGrafeoDB {
     /// the index after many deletions.
     #[napi(js_name = "rebuildVectorIndex")]
     pub async fn rebuild_vector_index(&self, label: String, property: String) -> Result<()> {
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
-            let db = db.read();
+            let db = db.read()?;
             db.rebuild_vector_index(&label, &property)
                 .map_err(NodeGrafeoError::from)
                 .map_err(napi::Error::from)
@@ -1180,9 +1261,9 @@ impl JsGrafeoDB {
         >,
     ) -> Result<Vec<Vec<Vec<f64>>>> {
         let filter_map = convert_json_filters(filters)?;
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
-            let db = db.read();
+            let db = db.read()?;
             let queries_f32: Vec<Vec<f32>> = queries
                 .into_iter()
                 .map(|v| v.into_iter().map(|x| x as f32).collect())
@@ -1236,9 +1317,9 @@ impl JsGrafeoDB {
         >,
     ) -> Result<Vec<Vec<f64>>> {
         let filter_map = convert_json_filters(filters)?;
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
-            let db = db.read();
+            let db = db.read()?;
             let query_f32: Vec<f32> = query.iter().map(|&v| v as f32).collect();
             let results = db
                 .mmr_search(
@@ -1278,7 +1359,7 @@ impl JsGrafeoDB {
     /// Needs the `storage` feature (in the default and `full` builds).
     #[napi]
     pub fn save(&self, path: String) -> Result<()> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         db.save(path)
             .map_err(NodeGrafeoError::from)
             .map_err(napi::Error::from)
@@ -1289,7 +1370,7 @@ impl JsGrafeoDB {
     /// Needs the `storage` feature (in the default and `full` builds).
     #[napi]
     pub fn backup_full(&self, backup_dir: String) -> Result<()> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         db.backup_full(std::path::Path::new(&backup_dir))
             .map(|_| ())
             .map_err(NodeGrafeoError::from)
@@ -1301,7 +1382,7 @@ impl JsGrafeoDB {
     /// Needs the `storage` feature (in the default and `full` builds).
     #[napi]
     pub fn backup_incremental(&self, backup_dir: String) -> Result<()> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         db.backup_incremental(std::path::Path::new(&backup_dir))
             .map(|_| ())
             .map_err(NodeGrafeoError::from)
@@ -1315,7 +1396,7 @@ impl JsGrafeoDB {
     /// Needs the `storage` feature (in the default and `full` builds).
     #[napi]
     pub fn release_backup_cursor(&self) -> Result<bool> {
-        let db = self.inner.read();
+        let db = self.inner.read()?;
         db.release_backup_cursor()
             .map_err(NodeGrafeoError::from)
             .map_err(napi::Error::from)
@@ -1368,9 +1449,9 @@ impl JsGrafeoDB {
         }
         .map_err(NodeGrafeoError::from)
         .map_err(napi::Error::from)?;
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
-            let db = db.read();
+            let db = db.read()?;
             db.create_text_index_with(&label, &property, options)
                 .map_err(NodeGrafeoError::from)
                 .map_err(napi::Error::from)
@@ -1382,9 +1463,9 @@ impl JsGrafeoDB {
     /// Drop a text index for the given label and property.
     #[napi(js_name = "dropTextIndex")]
     pub async fn drop_text_index(&self, label: String, property: String) -> Result<bool> {
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
-            let db = db.read();
+            let db = db.read()?;
             db.drop_text_index(&label, &property)
                 .map_err(NodeGrafeoError::from)
                 .map_err(napi::Error::from)
@@ -1399,9 +1480,9 @@ impl JsGrafeoDB {
     /// after importing data through non-standard paths.
     #[napi(js_name = "rebuildTextIndex")]
     pub async fn rebuild_text_index(&self, label: String, property: String) -> Result<()> {
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
-            let db = db.read();
+            let db = db.read()?;
             db.rebuild_text_index(&label, &property)
                 .map_err(NodeGrafeoError::from)
                 .map_err(napi::Error::from)
@@ -1431,9 +1512,9 @@ impl JsGrafeoDB {
         >,
     ) -> Result<Vec<Vec<f64>>> {
         let filter_map = convert_json_filters(filters)?;
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
-            let db = db.read();
+            let db = db.read()?;
             let results = db
                 .text_search(&label, &property, &query, k as usize, filter_map.as_ref())
                 .map_err(NodeGrafeoError::from)
@@ -1485,7 +1566,7 @@ impl JsGrafeoDB {
         >,
     ) -> Result<Vec<Vec<f64>>> {
         let filter_map = convert_json_filters(filters)?;
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
             let fusion_method = match fusion.as_deref() {
                 Some("weighted") => {
@@ -1498,7 +1579,7 @@ impl JsGrafeoDB {
             let query_vec_f32: Option<Vec<f32>> =
                 query_vector.map(|v| v.iter().map(|&x| x as f32).collect());
 
-            let db = db.read();
+            let db = db.read()?;
             let results = db
                 .hybrid_search(
                     &label,
@@ -1534,7 +1615,7 @@ impl JsGrafeoDB {
     /// the checkpoint fails, or after `close()`.
     #[napi]
     pub fn compact(&self) -> Result<serde_json::Value> {
-        let mut db = self.inner.write();
+        let mut db = self.inner.write()?;
         let report = db
             .compact()
             .map_err(NodeGrafeoError::from)
@@ -1549,29 +1630,31 @@ impl JsGrafeoDB {
 impl JsGrafeoDB {
     /// Enable CDC for all future sessions.
     #[napi(js_name = "enableCdc")]
-    pub fn enable_cdc(&self) {
-        self.inner.read().set_cdc_enabled(true);
+    pub fn enable_cdc(&self) -> Result<()> {
+        self.inner.read()?.set_cdc_enabled(true);
+        Ok(())
     }
 
     /// Disable CDC for all future sessions.
     #[napi(js_name = "disableCdc")]
-    pub fn disable_cdc(&self) {
-        self.inner.read().set_cdc_enabled(false);
+    pub fn disable_cdc(&self) -> Result<()> {
+        self.inner.read()?.set_cdc_enabled(false);
+        Ok(())
     }
 
     /// Returns whether CDC is currently enabled for new sessions.
     #[napi(js_name = "isCdcEnabled", getter)]
-    pub fn is_cdc_enabled(&self) -> bool {
-        self.inner.read().is_cdc_enabled()
+    pub fn is_cdc_enabled(&self) -> Result<bool> {
+        Ok(self.inner.read()?.is_cdc_enabled())
     }
 
     /// Returns the full change history for a node.
     #[napi(js_name = "nodeHistory", ts_return_type = "Promise<Array<any>>")]
     pub async fn node_history(&self, node_id: f64) -> Result<Vec<crate::types::JsonWithTerms>> {
         let id = validate_node_id(node_id)?;
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
-            let db = db.read();
+            let db = db.read()?;
             let events = db
                 .history(id)
                 .map_err(NodeGrafeoError::from)
@@ -1586,9 +1669,9 @@ impl JsGrafeoDB {
     #[napi(js_name = "edgeHistory", ts_return_type = "Promise<Array<any>>")]
     pub async fn edge_history(&self, edge_id: f64) -> Result<Vec<crate::types::JsonWithTerms>> {
         let id = validate_edge_id(edge_id)?;
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
-            let db = db.read();
+            let db = db.read()?;
             let events = db
                 .history(id)
                 .map_err(NodeGrafeoError::from)
@@ -1608,9 +1691,9 @@ impl JsGrafeoDB {
     ) -> Result<Vec<crate::types::JsonWithTerms>> {
         let id = validate_node_id(node_id)?;
         let epoch = validate_epoch(since_epoch)?;
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
-            let db = db.read();
+            let db = db.read()?;
             let events = db
                 .history_since(id, epoch)
                 .map_err(NodeGrafeoError::from)
@@ -1630,9 +1713,9 @@ impl JsGrafeoDB {
     ) -> Result<Vec<crate::types::JsonWithTerms>> {
         let start = validate_epoch(start_epoch)?;
         let end = validate_epoch(end_epoch)?;
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
-            let db = db.read();
+            let db = db.read()?;
             let events = db
                 .changes_between(start, end)
                 .map_err(NodeGrafeoError::from)
@@ -1661,7 +1744,7 @@ impl JsGrafeoDB {
         tokenizer_path: String,
         batch_size: Option<u32>,
     ) -> Result<()> {
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
             let mut model = grafeo_engine::embedding::OnnxEmbeddingModel::from_files(
                 &name,
@@ -1673,7 +1756,7 @@ impl JsGrafeoDB {
             if let Some(bs) = batch_size {
                 model = model.with_batch_size(bs as usize);
             }
-            let db = db.read();
+            let db = db.read()?;
             db.register_embedding_model(&name, std::sync::Arc::new(model));
             Ok(())
         })
@@ -1690,9 +1773,9 @@ impl JsGrafeoDB {
         model_name: String,
         texts: Vec<String>,
     ) -> Result<Vec<Vec<f64>>> {
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
-            let db = db.read();
+            let db = db.read()?;
             let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
             let results = db
                 .embed_text(&model_name, &text_refs)
@@ -1726,9 +1809,9 @@ impl JsGrafeoDB {
         k: u32,
         ef: Option<u32>,
     ) -> Result<Vec<Vec<f64>>> {
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
-            let db = db.read();
+            let db = db.read()?;
             let results = db
                 .vector_search_text(
                     &label,
@@ -1836,9 +1919,9 @@ impl JsGrafeoDB {
         #[napi(ts_arg_type = "any | undefined | null")] params: Option<types::Params>,
     ) -> Result<QueryResult> {
         let params = params.map(types::Params::into_map).transpose()?;
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         let result = tokio::task::spawn_blocking(move || {
-            let db = db.read();
+            let db = db.read()?;
             execute_language_query(&db, &query, &language, params)
         })
         .await
@@ -1896,10 +1979,10 @@ impl JsGrafeoDB {
         label: Option<String>,
         format: grafeo_engine::import::ImportFormat,
     ) -> Result<i64> {
-        let db = self.inner.clone();
+        let db = self.inner.share()?;
         tokio::task::spawn_blocking(move || {
             let label = label.unwrap_or_else(|| "Row".to_string());
-            let db = db.read();
+            let db = db.read()?;
             let created = grafeo_engine::import::import_nodes(
                 &db.session(),
                 std::path::Path::new(&path),
@@ -2020,6 +2103,7 @@ pub(crate) fn js_result(mut result: EngineQueryResult) -> QueryResult {
     let profile = result.profile.take();
     let kind = result.kind;
     let warnings = grafeo_bindings_common::warning::of_result(&result);
+    let cell_types = result.cell_types();
     QueryResult::with_metrics(
         columns,
         result.into_rows(),
@@ -2032,6 +2116,7 @@ pub(crate) fn js_result(mut result: EngineQueryResult) -> QueryResult {
     .with_profile(profile)
     .with_kind(kind)
     .with_warnings(warnings)
+    .with_cell_types(cell_types)
 }
 
 /// A node of the engine as a JavaScript node.

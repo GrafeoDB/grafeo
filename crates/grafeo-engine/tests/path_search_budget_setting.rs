@@ -133,13 +133,20 @@ fn a_refused_path_search_leaves_its_transaction_usable() {
         "MATCH (a:City {name: 'Rotterdam'}), (b:City {name: 'Amsterdam'}) INSERT (a)-[:ROAD]->(b)",
     )
     .unwrap();
+    // Twelve more roads each way between Amsterdam and Utrecht: the trails over them multiply
+    // with each edge, so a trail search passes 1 KiB at once.
+    db.execute(
+        "MATCH (a:City {name: 'Amsterdam'}), (u:City {name: 'Utrecht'}) \
+         FOR i IN range(1, 12) INSERT (a)-[:ROAD]->(u), (u)-[:ROAD]->(a)",
+    )
+    .unwrap();
 
     let mut session = db.session();
     session.begin_transaction().unwrap();
     session.execute("INSERT (:City {name: 'Leiden'})").unwrap();
     let error = session
-        .execute("MATCH (a:City)-[:ROAD*]->(b) RETURN count(b)")
-        .expect_err("an unbounded walk around a cycle passes 1 KiB");
+        .execute("MATCH TRAIL (a:City)-[:ROAD]->{1,}(b) RETURN count(b)")
+        .expect_err("the trails over the parallel roads pass 1 KiB");
     assert_eq!(error.error_code(), ErrorCode::StorageFull, "{error}");
     assert!(!error.error_code().is_retryable(), "{error}");
     session.execute("INSERT (:City {name: 'Delft'})").unwrap();

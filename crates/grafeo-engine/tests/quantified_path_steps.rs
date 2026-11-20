@@ -468,7 +468,7 @@ fn an_unbounded_multi_edge_pattern_is_refused() {
     let db = graph();
     for quantifier in ["{1,}", "+", "*"] {
         let query = format!(
-            "MATCH (s:P {{name: 'Alix'}})((a)-[:R]->(m)-[:R]->(b)){quantifier}(t) RETURN t.name"
+            "MATCH TRAIL (s:P {{name: 'Alix'}})((a)-[:R]->(m)-[:R]->(b)){quantifier}(t) RETURN t.name"
         );
         let error = db
             .execute(&query)

@@ -64,7 +64,7 @@ pub enum ErrorCode {
     TransactionSerialization,
     /// Deadlock detected.
     TransactionDeadlock,
-    /// The database is closed: it takes no more writes.
+    /// The database is closed: it takes no more calls.
     DatabaseClosed,
     /// A commit did not complete: nothing commits, checkpoints or saves until
     /// the database is reopened.
@@ -78,6 +78,10 @@ pub enum ErrorCode {
     /// The write-ahead log takes no more writes until the database is
     /// reopened.
     LogUnavailable,
+    /// The transaction's snapshot expired: commits since it began replaced
+    /// more data it could still read than the snapshot retention limit
+    /// allows (retry possible: a new transaction reads a new snapshot).
+    SnapshotExpired,
 
     // Storage errors (S)
     /// Memory or disk limit reached.
@@ -141,6 +145,7 @@ impl ErrorCode {
             Self::LogWriteFailed => "GRAFEO-T009",
             Self::CommitOutcomeUnknown => "GRAFEO-T010",
             Self::LogUnavailable => "GRAFEO-T011",
+            Self::SnapshotExpired => "GRAFEO-T012",
 
             Self::StorageFull => "GRAFEO-S001",
             Self::StorageCorrupted => "GRAFEO-S002",
@@ -170,6 +175,7 @@ impl ErrorCode {
                 | Self::TransactionTimeout
                 | Self::TransactionDeadlock
                 | Self::LogWriteFailed
+                | Self::SnapshotExpired
                 | Self::QueryTimeout
         )
     }
@@ -524,8 +530,8 @@ pub enum TransactionError {
     /// transaction goes on.
     ActiveTransaction(String),
 
-    /// The database is closed: `close()` of a persistent database started,
-    /// so it takes no more writes. Open it again to write.
+    /// The database is closed: `close()` started, so it takes no more calls,
+    /// reads included. Open it again.
     DatabaseClosed,
 
     /// An earlier commit did not complete (it panicked between its commit
@@ -550,6 +556,17 @@ pub enum TransactionError {
     /// earlier write or sync of it failed. Nothing of this commit was
     /// written, and nothing commits until the database is reopened.
     LogUnavailable(String),
+
+    /// The transaction's snapshot expired: the commits since it began replaced `kept` bytes of
+    /// data it could still read, past the snapshot retention limit (`limit` bytes), so the
+    /// database stopped holding them for it. Roll it back and run it again: a new transaction
+    /// reads a new snapshot.
+    SnapshotExpired {
+        /// The bytes the commits since the snapshot replaced when it expired.
+        kept: u64,
+        /// The snapshot retention limit, in bytes.
+        limit: u64,
+    },
 }
 
 impl TransactionError {
@@ -572,6 +589,7 @@ impl TransactionError {
             Self::LogWriteFailed(_) => ErrorCode::LogWriteFailed,
             Self::CommitOutcomeUnknown(_) => ErrorCode::CommitOutcomeUnknown,
             Self::LogUnavailable(_) => ErrorCode::LogUnavailable,
+            Self::SnapshotExpired { .. } => ErrorCode::SnapshotExpired,
         }
     }
 }
@@ -592,10 +610,7 @@ impl fmt::Display for TransactionError {
             TransactionError::ActiveTransaction(msg) => {
                 write!(f, "Invalid in an active transaction: {msg}")
             }
-            TransactionError::DatabaseClosed => write!(
-                f,
-                "the database is closed, so it takes no more writes: open it again to write"
-            ),
+            TransactionError::DatabaseClosed => write!(f, "the database is closed: open it again"),
             TransactionError::IncompleteCommit => write!(
                 f,
                 "an earlier commit did not complete, so no transaction can commit and nothing \
@@ -617,6 +632,12 @@ impl fmt::Display for TransactionError {
                 f,
                 "the write-ahead log takes no more writes, so nothing was written and nothing \
                  commits until the database is reopened: {reason}"
+            ),
+            TransactionError::SnapshotExpired { kept, limit } => write!(
+                f,
+                "the transaction's snapshot expired: commits since it began replaced {kept} \
+                 bytes it could still read, past the snapshot retention limit of {limit} bytes; \
+                 roll it back and run it again"
             ),
         }
     }
@@ -1207,7 +1228,7 @@ mod tests {
         assert!(!err.error_code().is_retryable());
         assert_eq!(
             err.to_string(),
-            "GRAFEO-T007: the database is closed, so it takes no more writes: open it again to write"
+            "GRAFEO-T007: the database is closed: open it again"
         );
     }
 

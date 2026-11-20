@@ -39,7 +39,73 @@ fn no_vector_index(label: &str, property: &str) -> Error {
     ))
 }
 
-impl super::GrafeoDB {
+/// The nodes of `label` in `store` that `filters` allows, as `view` sees
+/// them: `None` when there are no filters (every node), else the nodes that
+/// meet every filter (possibly none).
+///
+/// A filter is a value to equal, or a map of `$`-prefixed operators (`$gt`,
+/// `$gte`, `$lt`, `$lte`, `$ne`, `$in`, `$nin`, `$contains`). A node without
+/// the property meets a filter only when its every operator is `$ne` or
+/// `$nin`. Every filter is checked before any is applied.
+///
+/// # Errors
+///
+/// A null or malformed filter (`Error::InvalidValue`, naming the key; see
+/// [`filter_problem`](grafeo_core::graph::property_filter::filter_problem)),
+/// or a failed read.
+#[cfg(any(feature = "vector-index", feature = "text-index"))]
+pub(crate) fn filter_allowlist(
+    store: &RowGroupStore,
+    label: &str,
+    filters: Option<&std::collections::HashMap<String, Value>>,
+    view: ReadView,
+) -> Result<Option<std::collections::HashSet<NodeId>>> {
+    use grafeo_core::graph::property_filter::{
+        filter_problem, is_operator_map, keeps_missing, matches_filter,
+    };
+
+    let Some(filters) = filters.filter(|f| !f.is_empty()) else {
+        return Ok(None);
+    };
+    if let Some(problem) = filters
+        .iter()
+        .find_map(|(key, filter_value)| filter_problem(key, filter_value))
+    {
+        return Err(Error::InvalidValue(problem));
+    }
+
+    let mut allowlist: std::collections::HashSet<NodeId> =
+        store.nodes_by_label(label, view)?.into_iter().collect();
+    for (key, filter_value) in filters {
+        if is_operator_map(filter_value) {
+            // Operators: checked on the nodes still allowed.
+            let mut kept = std::collections::HashSet::with_capacity(allowlist.len());
+            for node_id in allowlist {
+                let keep = match store.node_property(node_id, key, view)? {
+                    Some(value) if !value.is_null() => matches_filter(&value, filter_value),
+                    _ => keeps_missing(filter_value),
+                };
+                if keep {
+                    kept.insert(node_id);
+                }
+            }
+            allowlist = kept;
+        } else {
+            // Equality: an indexed lookup when there is an index.
+            let matching: std::collections::HashSet<NodeId> = store
+                .find_nodes_by_property(key, filter_value, view)?
+                .into_iter()
+                .collect();
+            allowlist = allowlist.intersection(&matching).copied().collect();
+        }
+        if allowlist.is_empty() {
+            break;
+        }
+    }
+    Ok(Some(allowlist))
+}
+
+impl super::Open {
     /// The view a search reads at, and the pin that keeps it while the
     /// search runs: the published epoch, as for every read outside a
     /// transaction.
@@ -49,93 +115,8 @@ impl super::GrafeoDB {
         (pin, ReadView::committed(self.read_epoch()))
     }
 
-    /// Computes a node allowlist from property filters, as `view` sees the
-    /// nodes of `label` in `store`.
-    ///
-    /// Supports equality filters (scalar values) and operator filters (Map values
-    /// with `$`-prefixed keys like `$gt`, `$lt`, `$in`, `$contains`).
-    ///
-    /// Returns `None` if filters is `None` or empty (meaning no filtering),
-    /// or `Some(set)` with the intersection (possibly empty).
-    #[cfg(any(feature = "vector-index", feature = "text-index"))]
-    fn compute_filter_allowlist(
-        store: &RowGroupStore,
-        label: &str,
-        filters: Option<&std::collections::HashMap<String, Value>>,
-        view: ReadView,
-    ) -> Result<Option<std::collections::HashSet<NodeId>>> {
-        let Some(filters) = filters.filter(|f| !f.is_empty()) else {
-            return Ok(None);
-        };
-
-        // Start with all nodes for this label
-        let mut allowlist: std::collections::HashSet<NodeId> =
-            store.nodes_by_label(label, view)?.into_iter().collect();
-
-        for (key, filter_value) in filters {
-            // Check if this is an operator filter (Map with $-prefixed keys)
-            let is_operator_filter = matches!(filter_value, Value::Map(ops) if ops.keys().any(|k| k.as_str().starts_with('$')));
-
-            if is_operator_filter {
-                // Operator filter: scan only the current allowlist (not all nodes).
-                // This is much faster when a prior filter has already narrowed the set.
-                let mut kept = std::collections::HashSet::with_capacity(allowlist.len());
-                for node_id in allowlist {
-                    if store.node_property(node_id, key, view)?.is_some_and(|v| {
-                        grafeo_core::graph::property_filter::matches_filter(&v, filter_value)
-                    }) {
-                        kept.insert(node_id);
-                    }
-                }
-                allowlist = kept;
-            } else {
-                // Equality filter: use indexed lookup when available
-                let matching: std::collections::HashSet<NodeId> = store
-                    .find_nodes_by_property(key, filter_value, view)?
-                    .into_iter()
-                    .collect();
-                allowlist = allowlist.intersection(&matching).copied().collect();
-            }
-
-            // Short-circuit: empty intersection means no results possible
-            if allowlist.is_empty() {
-                return Ok(Some(allowlist));
-            }
-        }
-
-        Ok(Some(allowlist))
-    }
-
-    /// Searches for the k nearest neighbors of a query vector.
-    ///
-    /// Uses the HNSW index created by [`create_vector_index`](Self::create_vector_index).
-    ///
-    /// # Arguments
-    ///
-    /// * `label` - Node label that was indexed
-    /// * `property` - Property that was indexed
-    /// * `query` - Query vector (slice of floats)
-    /// * `k` - Number of nearest neighbors to return
-    /// * `ef` - Search beam width (higher = better recall, slower). Uses index default if `None`.
-    /// * `filters` - Optional property equality filters. Only nodes matching all
-    ///   `(key, value)` pairs will appear in results.
-    ///
-    /// # Returns
-    ///
-    /// Vector of `(NodeId, distance)` pairs sorted by distance ascending
-    /// (lower distance = more similar). The distance scale depends on the
-    /// metric configured at index creation: cosine \[0, 2\], euclidean
-    /// \[0, inf), dot product (negated, so lower = higher similarity),
-    /// manhattan \[0, inf).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if no vector index exists for the given label and
-    /// property, and an invalid-value error if the query vector has another
-    /// number of values than the index's dimensions, or a NaN or an infinite
-    /// value (see [`check_query_vector`]).
     #[cfg(feature = "vector-index")]
-    pub fn vector_search(
+    pub(crate) fn vector_search(
         &self,
         label: &str,
         property: &str,
@@ -151,7 +132,7 @@ impl super::GrafeoDB {
         check_query_vector(query, config.dimensions, label, property)?;
 
         let (_pin, view) = self.search_view();
-        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view)?;
+        let allowlist = filter_allowlist(&store, label, filters, view)?;
         let search = IndexSearch {
             k,
             ef,
@@ -162,27 +143,8 @@ impl super::GrafeoDB {
             .ok_or_else(|| no_vector_index(label, property))
     }
 
-    /// Searches for nearest neighbors for multiple query vectors in parallel.
-    ///
-    /// Uses rayon parallel iteration under the hood for multi-core throughput.
-    ///
-    /// # Arguments
-    ///
-    /// * `label` - Node label that was indexed
-    /// * `property` - Property that was indexed
-    /// * `queries` - Batch of query vectors
-    /// * `k` - Number of nearest neighbors per query
-    /// * `ef` - Search beam width (uses index default if `None`)
-    /// * `filters` - Optional property equality filters
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if no vector index exists for the given label and
-    /// property, and an invalid-value error if any query vector is one the
-    /// index cannot measure (see [`vector_search`](Self::vector_search)): no
-    /// query of the batch runs then.
     #[cfg(feature = "vector-index")]
-    pub fn batch_vector_search(
+    pub(crate) fn batch_vector_search(
         &self,
         label: &str,
         property: &str,
@@ -200,7 +162,7 @@ impl super::GrafeoDB {
         }
 
         let (_pin, view) = self.search_view();
-        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view)?;
+        let allowlist = filter_allowlist(&store, label, filters, view)?;
         let search = IndexSearch {
             k,
             ef,
@@ -211,37 +173,9 @@ impl super::GrafeoDB {
             .ok_or_else(|| no_vector_index(label, property))
     }
 
-    /// Searches for diverse nearest neighbors using Maximal Marginal Relevance (MMR).
-    ///
-    /// MMR balances relevance (similarity to query) with diversity (dissimilarity
-    /// among selected results). This is the algorithm used by LangChain's
-    /// `mmr_traversal_search()` for RAG applications.
-    ///
-    /// # Arguments
-    ///
-    /// * `label` - Node label that was indexed
-    /// * `property` - Property that was indexed
-    /// * `query` - Query vector
-    /// * `k` - Number of diverse results to return
-    /// * `fetch_k` - Number of initial candidates from HNSW (default: `4 * k`)
-    /// * `lambda` - Relevance vs. diversity in \[0, 1\] (default: 0.5).
-    ///   1.0 = pure relevance, 0.0 = pure diversity.
-    /// * `ef` - HNSW search beam width (uses index default if `None`)
-    /// * `filters` - Optional property equality filters
-    ///
-    /// # Returns
-    ///
-    /// `(NodeId, distance)` pairs in MMR selection order. The f32 is the original
-    /// distance from the query, matching [`vector_search`](Self::vector_search).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if no vector index exists for the given label and
-    /// property, and an invalid-value error if the query vector is one the
-    /// index cannot measure (see [`vector_search`](Self::vector_search)).
     #[cfg(feature = "vector-index")]
     #[allow(clippy::too_many_arguments)]
-    pub fn mmr_search(
+    pub(crate) fn mmr_search(
         &self,
         label: &str,
         property: &str,
@@ -265,7 +199,7 @@ impl super::GrafeoDB {
 
         // Step 1: Fetch candidates from HNSW (with optional filter)
         let (_pin, view) = self.search_view();
-        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view)?;
+        let allowlist = filter_allowlist(&store, label, filters, view)?;
         let search = IndexSearch {
             k: fetch_k,
             ef,
@@ -301,26 +235,8 @@ impl super::GrafeoDB {
         Ok(mmr_select(query, &candidate_refs, k, lambda, config.metric))
     }
 
-    /// Searches a text index using BM25 scoring.
-    ///
-    /// Returns up to `k` results as `(NodeId, score)` pairs sorted by
-    /// descending relevance score (higher = more relevant), equal scores
-    /// by ascending node id, so a cut at `k` inside a tie keeps its lowest
-    /// ids and identical calls return the same list. BM25 scores
-    /// are unbounded positive floats whose magnitude depends on corpus
-    /// statistics, so compare them only within a single query's results.
-    ///
-    /// `filters` takes property filters as
-    /// [`vector_search`](Self::vector_search) does: equality filters and
-    /// operator filters (`$gt`, `$in`, ...). Only the nodes of `label` that
-    /// match all of them are searched, so up to `k` matching nodes come
-    /// back; their scores are those of the whole index.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if no text index exists for this label+property.
     #[cfg(feature = "text-index")]
-    pub fn text_search(
+    pub(crate) fn text_search(
         &self,
         label: &str,
         property: &str,
@@ -330,7 +246,7 @@ impl super::GrafeoDB {
     ) -> Result<Vec<(NodeId, f64)>> {
         let store = self.current_lpg_store()?;
         let (_pin, view) = self.search_view();
-        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view)?;
+        let allowlist = filter_allowlist(&store, label, filters, view)?;
         let search = IndexSearch {
             k,
             ef: None,
@@ -345,34 +261,12 @@ impl super::GrafeoDB {
             })
     }
 
-    /// Performs hybrid search combining text (BM25) and vector similarity,
-    /// with the vector half at the index's default beam width.
-    ///
-    /// The same search as [`hybrid_search_with`](Self::hybrid_search_with),
-    /// which also takes the vector half's beam width (`ef`), with the
-    /// optional arguments as [`HybridSearchOptions`](super::HybridSearchOptions).
-    ///
-    /// # Arguments
-    ///
-    /// * `label` - Node label to search within
-    /// * `text_property` - Property indexed for text search
-    /// * `vector_property` - Property indexed for vector search
-    /// * `query_text` - Text query for BM25 search
-    /// * `query_vector` - Vector query for similarity search (optional)
-    /// * `k` - Number of results to return
-    /// * `fusion` - Score fusion method (default: RRF with k=60)
-    /// * `filters` - Optional property filters (see
-    ///   [`HybridSearchOptions::filters`](super::HybridSearchOptions::filters))
-    ///
-    /// # Errors
-    ///
-    /// As [`hybrid_search_with`](Self::hybrid_search_with).
     #[cfg(feature = "hybrid-search")]
     #[allow(
         clippy::too_many_arguments,
         reason = "a stable signature; hybrid_search_with takes its options as one type"
     )]
-    pub fn hybrid_search(
+    pub(crate) fn hybrid_search(
         &self,
         label: &str,
         text_property: &str,
@@ -399,45 +293,8 @@ impl super::GrafeoDB {
         )
     }
 
-    /// Performs hybrid search combining text (BM25) and vector similarity.
-    ///
-    /// Runs both text search and vector search, then fuses results using
-    /// the specified method (default: Reciprocal Rank Fusion). If either
-    /// index is missing, that source is silently omitted from fusion.
-    /// Returns empty results only when both indexes are absent.
-    ///
-    /// # Arguments
-    ///
-    /// * `label` - Node label to search within
-    /// * `text_property` - Property indexed for text search
-    /// * `vector_property` - Property indexed for vector search
-    /// * `query_text` - Text query for BM25 search
-    /// * `k` - Number of results to return
-    /// * `options` - The query vector, the vector half's beam width, the
-    ///   fusion method and the filters (see [`HybridSearchOptions`](super::HybridSearchOptions))
-    ///
-    /// # Returns
-    ///
-    /// `(NodeId, score)` pairs sorted by fused score **descending**
-    /// (higher = more relevant), equal scores by ascending node id, so
-    /// identical calls return the same list. These are fusion scores, **not**
-    /// distances. With RRF, scores are `sum(1 / (k + rank))` across
-    /// sources. With weighted fusion, scores are min-max normalized
-    /// and combined with explicit weights.
-    ///
-    /// **Important:** Do not treat these scores the same as
-    /// [`vector_search`](Self::vector_search) distances. For temporal
-    /// decay or boosting, multiply fusion scores (higher = better)
-    /// rather than dividing (which is appropriate for distances where
-    /// lower = better).
-    ///
-    /// # Errors
-    ///
-    /// Returns an invalid-value error if the vector index exists and the
-    /// query vector is one it cannot measure (see
-    /// [`vector_search`](Self::vector_search)).
     #[cfg(feature = "hybrid-search")]
-    pub fn hybrid_search_with(
+    pub(crate) fn hybrid_search_with(
         &self,
         label: &str,
         text_property: &str,
@@ -475,7 +332,7 @@ impl super::GrafeoDB {
         // Both searches keep only the nodes that match the filters, before
         // fusion: filtering the fused results would return fewer than k.
         let (_pin, view) = self.search_view();
-        let allowlist = Self::compute_filter_allowlist(&store, label, options.filters, view)?;
+        let allowlist = filter_allowlist(&store, label, options.filters, view)?;
         if allowlist.as_ref().is_some_and(|allowed| allowed.is_empty()) {
             return Ok(Vec::new());
         }
@@ -528,5 +385,287 @@ impl super::GrafeoDB {
         }
 
         Ok(fuse_results(&sources, &fusion_method, k))
+    }
+}
+
+// The database's public methods: each reaches the open state for its call (#712).
+impl super::GrafeoDB {
+    /// Searches for the k nearest neighbors of a query vector.
+    ///
+    /// Uses the HNSW index created by [`create_vector_index`](Self::create_vector_index).
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - Node label that was indexed
+    /// * `property` - Property that was indexed
+    /// * `query` - Query vector (slice of floats)
+    /// * `k` - Number of nearest neighbors to return
+    /// * `ef` - Search beam width (higher = better recall, slower). Uses index default if `None`.
+    /// * `filters` - Optional property filters, all of which a node must meet.
+    ///   A value is an equality; a map of `$gt`, `$gte`, `$lt`, `$lte`, `$ne`,
+    ///   `$in`, `$nin` or `$contains` compares. A node without the property
+    ///   meets a filter only when its every operator is `$ne` or `$nin`. The
+    ///   filters apply before the top `k`, so up to `k` matching nodes come back.
+    ///
+    /// # Returns
+    ///
+    /// Vector of `(NodeId, distance)` pairs sorted by distance ascending
+    /// (lower distance = more similar). The distance scale depends on the
+    /// metric configured at index creation: cosine \[0, 2\], euclidean
+    /// \[0, inf), dot product (negated, so lower = higher similarity),
+    /// manhattan \[0, inf).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no vector index exists for the given label and
+    /// property, and an invalid-value error if the query vector has another
+    /// number of values than the index's dimensions, or a NaN or an infinite
+    /// value (see [`check_query_vector`]). A filter that is null (no value
+    /// equals null: `$ne` keeps the nodes without the property) or malformed
+    /// (an unknown operator, `$in` or `$nin` without a list, `$contains`
+    /// without a string) is an invalid-value error naming its key, before the
+    /// search runs.
+    #[cfg(feature = "vector-index")]
+    pub fn vector_search(
+        &self,
+        label: &str,
+        property: &str,
+        query: &[f32],
+        k: usize,
+        ef: Option<usize>,
+        filters: Option<&std::collections::HashMap<String, Value>>,
+    ) -> Result<Vec<(grafeo_common::types::NodeId, f32)>> {
+        self.live()?
+            .vector_search(label, property, query, k, ef, filters)
+    }
+
+    /// Searches for nearest neighbors for multiple query vectors in parallel.
+    ///
+    /// Uses rayon parallel iteration under the hood for multi-core throughput.
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - Node label that was indexed
+    /// * `property` - Property that was indexed
+    /// * `queries` - Batch of query vectors
+    /// * `k` - Number of nearest neighbors per query
+    /// * `ef` - Search beam width (uses index default if `None`)
+    /// * `filters` - Optional property filters, as [`vector_search`](Self::vector_search) takes them
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no vector index exists for the given label and
+    /// property, and an invalid-value error if any query vector is one the
+    /// index cannot measure (see [`vector_search`](Self::vector_search)): no
+    /// query of the batch runs then.
+    /// A filter that is null or malformed is an invalid-value error naming
+    /// its key, before the search runs (see the filter rules at
+    /// [`vector_search`](Self::vector_search)).
+    #[cfg(feature = "vector-index")]
+    pub fn batch_vector_search(
+        &self,
+        label: &str,
+        property: &str,
+        queries: &[Vec<f32>],
+        k: usize,
+        ef: Option<usize>,
+        filters: Option<&std::collections::HashMap<String, Value>>,
+    ) -> Result<Vec<Vec<(grafeo_common::types::NodeId, f32)>>> {
+        self.live()?
+            .batch_vector_search(label, property, queries, k, ef, filters)
+    }
+
+    /// Searches for diverse nearest neighbors using Maximal Marginal Relevance (MMR).
+    ///
+    /// MMR balances relevance (similarity to query) with diversity (dissimilarity
+    /// among selected results). This is the algorithm used by LangChain's
+    /// `mmr_traversal_search()` for RAG applications.
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - Node label that was indexed
+    /// * `property` - Property that was indexed
+    /// * `query` - Query vector
+    /// * `k` - Number of diverse results to return
+    /// * `fetch_k` - Number of initial candidates from HNSW (default: `4 * k`)
+    /// * `lambda` - Relevance vs. diversity in \[0, 1\] (default: 0.5).
+    ///   1.0 = pure relevance, 0.0 = pure diversity.
+    /// * `ef` - HNSW search beam width (uses index default if `None`)
+    /// * `filters` - Optional property filters, as [`vector_search`](Self::vector_search) takes them
+    ///
+    /// # Returns
+    ///
+    /// `(NodeId, distance)` pairs in MMR selection order. The f32 is the original
+    /// distance from the query, matching [`vector_search`](Self::vector_search).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no vector index exists for the given label and
+    /// property, and an invalid-value error if the query vector is one the
+    /// index cannot measure (see [`vector_search`](Self::vector_search)).
+    /// A filter that is null or malformed is an invalid-value error naming
+    /// its key, before the search runs (see the filter rules at
+    /// [`vector_search`](Self::vector_search)).
+    #[cfg(feature = "vector-index")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "forwards the open state's method, whose signature the 0.6 facade keeps"
+    )]
+    pub fn mmr_search(
+        &self,
+        label: &str,
+        property: &str,
+        query: &[f32],
+        k: usize,
+        fetch_k: Option<usize>,
+        lambda: Option<f32>,
+        ef: Option<usize>,
+        filters: Option<&std::collections::HashMap<String, Value>>,
+    ) -> Result<Vec<(grafeo_common::types::NodeId, f32)>> {
+        self.live()?
+            .mmr_search(label, property, query, k, fetch_k, lambda, ef, filters)
+    }
+
+    /// Searches a text index using BM25 scoring.
+    ///
+    /// Returns up to `k` results as `(NodeId, score)` pairs sorted by
+    /// descending relevance score (higher = more relevant), equal scores
+    /// by ascending node id, so a cut at `k` inside a tie keeps its lowest
+    /// ids and identical calls return the same list. BM25 scores
+    /// are unbounded positive floats whose magnitude depends on corpus
+    /// statistics, so compare them only within a single query's results.
+    ///
+    /// `filters` takes property filters as
+    /// [`vector_search`](Self::vector_search) does: equality filters and
+    /// operator filters (`$gt`, `$in`, ...). Only the nodes of `label` that
+    /// match all of them are searched, so up to `k` matching nodes come
+    /// back; their scores are those of the whole index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no text index exists for this label+property.
+    /// A filter that is null or malformed is an invalid-value error naming
+    /// its key, before the search runs (see the filter rules at
+    /// [`vector_search`](Self::vector_search)).
+    #[cfg(feature = "text-index")]
+    pub fn text_search(
+        &self,
+        label: &str,
+        property: &str,
+        query: &str,
+        k: usize,
+        filters: Option<&std::collections::HashMap<String, Value>>,
+    ) -> Result<Vec<(NodeId, f64)>> {
+        self.live()?.text_search(label, property, query, k, filters)
+    }
+
+    /// Performs hybrid search combining text (BM25) and vector similarity,
+    /// with the vector half at the index's default beam width.
+    ///
+    /// The same search as [`hybrid_search_with`](Self::hybrid_search_with),
+    /// which also takes the vector half's beam width (`ef`), with the
+    /// optional arguments as [`HybridSearchOptions`](super::HybridSearchOptions).
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - Node label to search within
+    /// * `text_property` - Property indexed for text search
+    /// * `vector_property` - Property indexed for vector search
+    /// * `query_text` - Text query for BM25 search
+    /// * `query_vector` - Vector query for similarity search (optional)
+    /// * `k` - Number of results to return
+    /// * `fusion` - Score fusion method (default: RRF with k=60)
+    /// * `filters` - Optional property filters (see
+    ///   [`HybridSearchOptions::filters`](super::HybridSearchOptions::filters))
+    ///
+    /// # Errors
+    ///
+    /// As [`hybrid_search_with`](Self::hybrid_search_with).
+    #[cfg(feature = "hybrid-search")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a stable signature; hybrid_search_with takes its options as one type"
+    )]
+    pub fn hybrid_search(
+        &self,
+        label: &str,
+        text_property: &str,
+        vector_property: &str,
+        query_text: &str,
+        query_vector: Option<&[f32]>,
+        k: usize,
+        fusion: Option<grafeo_core::index::text::FusionMethod>,
+        filters: Option<&std::collections::HashMap<String, Value>>,
+    ) -> Result<Vec<(NodeId, f64)>> {
+        self.live()?.hybrid_search(
+            label,
+            text_property,
+            vector_property,
+            query_text,
+            query_vector,
+            k,
+            fusion,
+            filters,
+        )
+    }
+
+    /// Performs hybrid search combining text (BM25) and vector similarity.
+    ///
+    /// Runs both text search and vector search, then fuses results using
+    /// the specified method (default: Reciprocal Rank Fusion). If either
+    /// index is missing, that source is silently omitted from fusion.
+    /// Returns empty results only when both indexes are absent.
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - Node label to search within
+    /// * `text_property` - Property indexed for text search
+    /// * `vector_property` - Property indexed for vector search
+    /// * `query_text` - Text query for BM25 search
+    /// * `k` - Number of results to return
+    /// * `options` - The query vector, the vector half's beam width, the
+    ///   fusion method and the filters (see [`HybridSearchOptions`](super::HybridSearchOptions))
+    ///
+    /// # Returns
+    ///
+    /// `(NodeId, score)` pairs sorted by fused score **descending**
+    /// (higher = more relevant), equal scores by ascending node id, so
+    /// identical calls return the same list. These are fusion scores, **not**
+    /// distances. With RRF, scores are `sum(1 / (k + rank))` across
+    /// sources. With weighted fusion, scores are min-max normalized
+    /// and combined with explicit weights.
+    ///
+    /// **Important:** Do not treat these scores the same as
+    /// [`vector_search`](Self::vector_search) distances. For temporal
+    /// decay or boosting, multiply fusion scores (higher = better)
+    /// rather than dividing (which is appropriate for distances where
+    /// lower = better).
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-value error if the vector index exists and the
+    /// query vector is one it cannot measure (see
+    /// [`vector_search`](Self::vector_search)).
+    /// A filter that is null or malformed is an invalid-value error naming
+    /// its key, before the search runs (see the filter rules at
+    /// [`vector_search`](Self::vector_search)).
+    #[cfg(feature = "hybrid-search")]
+    pub fn hybrid_search_with(
+        &self,
+        label: &str,
+        text_property: &str,
+        vector_property: &str,
+        query_text: &str,
+        k: usize,
+        options: &super::HybridSearchOptions<'_>,
+    ) -> Result<Vec<(NodeId, f64)>> {
+        self.live()?.hybrid_search_with(
+            label,
+            text_property,
+            vector_property,
+            query_text,
+            k,
+            options,
+        )
     }
 }

@@ -51,7 +51,7 @@ Month-only dates load as the first of the month, with a `<field>_precision` prop
 import turtle from '@grafeo-db/datasets/silicon-valley/turtle';
 ```
 
-The namespace is `https://grafeo.dev/datasets/silicon-valley/`. The Turtle carries no vectors. Dates are `xsd:date`, so SPARQL range filters work on them; a month-only date is the first of the month, with `sv:<field>Precision "month"` on the same subject (for example `sv:fromPrecision`).
+The namespace is `https://docs.grafeo.dev/datasets/silicon-valley/`. The Turtle carries no vectors. Dates are `xsd:date`, so SPARQL range filters work on them; a month-only date is the first of the month, with `sv:<field>Precision "month"` on the same subject (for example `sv:fromPrecision`).
 
 ### Vectors
 

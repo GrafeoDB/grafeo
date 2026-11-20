@@ -42,6 +42,10 @@ func endedError(message string) error {
 // BeginTransaction starts a new transaction with default isolation (snapshot).
 func (db *Database) BeginTransaction() (*Transaction, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 *Transaction
+		return zero0, err
+	}
 	runtime.LockOSThread()
 	h := C.grafeo_begin_transaction(db.handle)
 	if h == nil {
@@ -58,6 +62,10 @@ func (db *Database) BeginTransaction() (*Transaction, error) {
 // BeginTransactionWith starts a transaction with a specific isolation level.
 func (db *Database) BeginTransactionWith(level IsolationLevel) (*Transaction, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 *Transaction
+		return zero0, err
+	}
 	runtime.LockOSThread()
 	h := C.grafeo_begin_transaction_with_isolation(db.handle, C.GrafeoIsolationLevel(level))
 	if h == nil {
@@ -145,6 +153,8 @@ func (tx *Transaction) ExecuteLanguage(language, query, paramsJSON string) (*Que
 // Commit commits the transaction. A commit that fails (a write conflict,
 // GQLSTATUS 40000) ends the transaction all the same. Either way the C
 // transaction is freed: a later call gives the error the C layer gives.
+// After the database closed, the commit fails with GRAFEO-T007 and the C
+// transaction is kept, so every later call fails with GRAFEO-T007 too.
 func (tx *Transaction) Commit() error {
 	defer runtime.KeepAlive(tx)
 	switch tx.ended {
@@ -158,9 +168,13 @@ func (tx *Transaction) Commit() error {
 	runtime.LockOSThread()
 	err := statusToError(C.grafeo_commit(tx.handle))
 	runtime.UnlockOSThread()
-	if err == nil {
+	switch {
+	case err == nil:
 		tx.end(transactionCommitted)
-	} else {
+	case isClosed(err):
+		// The C layer answers every later call with GRAFEO-T007; ending
+		// the transaction here would answer them as an ended one.
+	default:
 		// The C layer ends the transaction on any failed commit of an
 		// open one.
 		tx.end(transactionCommitFailed)
@@ -170,7 +184,8 @@ func (tx *Transaction) Commit() error {
 
 // Rollback aborts the transaction. After a Commit that failed it does
 // nothing and returns nil: a commit that fails ends the transaction, so a
-// deferred or error-path Rollback does not hide the commit's error.
+// deferred or error-path Rollback does not hide the commit's error. After the
+// database closed it fails with GRAFEO-T007, as every call does.
 func (tx *Transaction) Rollback() error {
 	defer runtime.KeepAlive(tx)
 	switch tx.ended {

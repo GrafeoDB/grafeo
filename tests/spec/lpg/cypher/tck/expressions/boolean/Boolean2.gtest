@@ -1,0 +1,477 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/boolean/Boolean2.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Boolean2"
+  title: "Boolean2 - OR logical operations"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Disjunction of two truth values
+  - name: s1_disjunction_of_two_truth_values
+    query: |
+      RETURN true OR true AS tt,
+             true OR false AS tf,
+             true OR null AS tn,
+             false OR true AS ft,
+             false OR false AS ff,
+             false OR null AS fn,
+             null OR true AS nt,
+             null OR false AS nf,
+             null OR null AS nn
+    expect:
+      values: |
+        | tt | tf | tn | ft | ff | fn | nt | nf | nn |
+        | true | true | true | true | false | null | true | null | null |
+      side_effects: {}
+
+  # [2] Disjunction of three truth values
+  - name: s2_disjunction_of_three_truth_values
+    query: |
+      RETURN true OR true OR true AS ttt,
+             true OR true OR false AS ttf,
+             true OR true OR null AS ttn,
+             true OR false OR true AS tft,
+             true OR false OR false AS tff,
+             true OR false OR null AS tfn,
+             true OR null OR true AS tnt,
+             true OR null OR false AS tnf,
+             true OR null OR null AS tnn,
+             false OR true OR true AS ftt,
+             false OR true OR false AS ftf,
+             false OR true OR null AS ftn,
+             false OR false OR true AS fft,
+             false OR false OR false AS fff,
+             false OR false OR null AS ffn,
+             false OR null OR true AS fnt,
+             false OR null OR false AS fnf,
+             false OR null OR null AS fnn,
+             null OR true OR true AS ntt,
+             null OR true OR false AS ntf,
+             null OR true OR null AS ntn,
+             null OR false OR true AS nft,
+             null OR false OR false AS nff,
+             null OR false OR null AS nfn,
+             null OR null OR true AS nnt,
+             null OR null OR false AS nnf,
+             null OR null OR null AS nnn
+    expect:
+      values: |
+        | ttt | ttf | ttn | tft | tff | tfn | tnt | tnf | tnn | ftt | ftf | ftn | fft | fff | ffn | fnt | fnf | fnn | ntt | ntf | ntn | nft | nff | nfn | nnt | nnf | nnn |
+        | true | true | true | true | true | true | true | true | true | true | true | true | true | false | null | true | null | null | true | true | true | true | null | null | true | null | null |
+      side_effects: {}
+
+  # [3] Disjunction of many truth values
+  - name: s3_disjunction_of_many_truth_values
+    query: |
+      RETURN true OR true OR true OR true OR true OR true OR true OR true OR true OR true OR true AS t,
+             true OR true OR true OR false OR true OR true OR true OR true OR true OR true OR true AS tsf,
+             true OR true OR true OR null OR true OR true OR true OR true OR true OR true OR true AS tsn,
+             false OR false OR false OR false OR false OR false OR false OR false OR false OR false OR false AS f,
+             false OR false OR false OR false OR true OR false OR false OR false OR false OR false OR false AS fst,
+             false OR false OR false OR false OR false OR false OR null OR false OR false OR false OR false AS fsn,
+             null OR null OR null OR null OR null OR null OR null OR null OR null OR null OR null AS n,
+             null OR null OR null OR null OR true OR null OR null OR null OR null OR null OR null AS nst,
+             null OR null OR null OR null OR false OR null OR null OR null OR null OR null OR null AS nsf,
+             true OR false OR false OR false OR true OR false OR false OR true OR true OR true OR false AS m1,
+             true OR true OR false OR false OR true OR false OR false OR true OR true OR true OR false AS m2,
+             true OR true OR false OR false OR true OR null OR false OR true OR true OR null OR false AS m3
+    expect:
+      values: |
+        | t | tsf | tsn | f | fst | fsn | n | nst | nsf | m1 | m2 | m3 |
+        | true | true | true | false | true | null | null | true | null | true | true | true |
+      side_effects: {}
+
+  # [4] Disjunction is commutative on non-null
+  - name: s4_disjunction_is_commutative_on_non_null
+    query: |
+      UNWIND [true, false] AS a
+      UNWIND [true, false] AS b
+      RETURN a, b, (a OR b) = (b OR a) AS result
+    expect:
+      values: |
+        | a | b | result |
+        | true | true | true |
+        | true | false | true |
+        | false | true | true |
+        | false | false | true |
+      side_effects: {}
+
+  # [5] Disjunction is commutative on null
+  - name: s5_disjunction_is_commutative_on_null
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH a, b WHERE a IS NULL OR b IS NULL
+      RETURN a, b, (a OR b) IS NULL = (b OR a) IS NULL AS result
+    expect:
+      values: |
+        | a | b | result |
+        | true | null | true |
+        | false | null | true |
+        | null | true | true |
+        | null | false | true |
+        | null | null | true |
+      side_effects: {}
+
+  # [6] Disjunction is associative on non-null
+  - name: s6_disjunction_is_associative_on_non_null
+    query: |
+      UNWIND [true, false] AS a
+      UNWIND [true, false] AS b
+      UNWIND [true, false] AS c
+      RETURN a, b, c, (a OR (b OR c)) = ((a OR b) OR c) AS result
+    expect:
+      values: |
+        | a | b | c | result |
+        | true | true | true | true |
+        | true | true | false | true |
+        | true | false | true | true |
+        | true | false | false | true |
+        | false | true | true | true |
+        | false | true | false | true |
+        | false | false | true | true |
+        | false | false | false | true |
+      side_effects: {}
+
+  # [7] Disjunction is associative on null
+  - name: s7_disjunction_is_associative_on_null
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH a, b, c WHERE a IS NULL OR b IS NULL OR c IS NULL
+      RETURN a, b, c, (a OR (b OR c)) IS NULL = ((a OR b) OR c) IS NULL AS result
+    expect:
+      values: |
+        | a | b | c | result |
+        | true | true | null | true |
+        | true | false | null | true |
+        | true | null | true | true |
+        | true | null | false | true |
+        | true | null | null | true |
+        | false | true | null | true |
+        | false | false | null | true |
+        | false | null | true | true |
+        | false | null | false | true |
+        | false | null | null | true |
+        | null | true | true | true |
+        | null | true | false | true |
+        | null | true | null | true |
+        | null | false | true | true |
+        | null | false | false | true |
+        | null | false | null | true |
+        | null | null | true | true |
+        | null | null | false | true |
+        | null | null | null | true |
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #1
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #1"
+      issue: fix in 0.6.5
+    query: |
+      RETURN 123 OR true
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #2
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #2"
+      issue: fix in 0.6.5
+    query: |
+      RETURN 123.4 OR false
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #3
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #3"
+      issue: fix in 0.6.5
+    query: |
+      RETURN 123.4 OR null
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #4
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #4"
+      issue: fix in 0.6.5
+    query: |
+      RETURN 'foo' OR true
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #5
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #5"
+      issue: fix in 0.6.5
+    query: |
+      RETURN [] OR false
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #6
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #6"
+      issue: fix in 0.6.5
+    query: |
+      RETURN [true] OR false
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #7
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_7
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #7"
+      issue: fix in 0.6.5
+    query: |
+      RETURN [null] OR null
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #8
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_8
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #8"
+      issue: fix in 0.6.5
+    query: |
+      RETURN {} OR true
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #9
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_9
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #9"
+      issue: fix in 0.6.5
+    query: |
+      RETURN {x: []} OR true
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #10
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_10
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #10"
+      issue: fix in 0.6.5
+    query: |
+      RETURN false OR 123
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #11
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_11
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #11"
+      issue: fix in 0.6.5
+    query: |
+      RETURN true OR 123.4
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #12
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_12
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #12"
+      issue: fix in 0.6.5
+    query: |
+      RETURN false OR 'foo'
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #13
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_13
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #13"
+      issue: fix in 0.6.5
+    query: |
+      RETURN null OR 'foo'
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #14
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_14
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #14"
+      issue: fix in 0.6.5
+    query: |
+      RETURN true OR []
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #15
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_15
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #15"
+      issue: fix in 0.6.5
+    query: |
+      RETURN true OR [false]
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #16
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_16
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #16"
+      issue: fix in 0.6.5
+    query: |
+      RETURN null OR [null]
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #17
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_17
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #17"
+      issue: fix in 0.6.5
+    query: |
+      RETURN false OR {}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #18
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_18
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #18"
+      issue: fix in 0.6.5
+    query: |
+      RETURN false OR {x: []}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #19
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_19
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #19"
+      issue: fix in 0.6.5
+    query: |
+      RETURN 123 OR 'foo'
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #20
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_20
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #20"
+      issue: fix in 0.6.5
+    query: |
+      RETURN 123.4 OR 123.4
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #21
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_21
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #21"
+      issue: fix in 0.6.5
+    query: |
+      RETURN 'foo' OR {x: []}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #22
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_22
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #22"
+      issue: fix in 0.6.5
+    query: |
+      RETURN [true] OR [true]
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on disjunction of at least one non-booleans #23
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_disjunction_of_at_least_one_non_booleans_23
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean2: [8] Fail on disjunction of at least one non-booleans #23"
+      issue: fix in 0.6.5
+    query: |
+      RETURN {x: []} OR [123]
+    expect:
+      gql_status: "42"
+      side_effects: {}

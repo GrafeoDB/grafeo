@@ -131,7 +131,7 @@ fn cached(db: &GrafeoDB) -> Option<Arc<grafeo_core::statistics::RdfStatistics>> 
 
 /// The plan of `query`, without running it.
 fn explain(db: &GrafeoDB, query: &str) -> String {
-    let processor = QueryProcessor::with_rdf(db.store().unwrap(), Arc::clone(db.rdf_store()));
+    let processor = QueryProcessor::with_rdf(db.store().unwrap(), Arc::clone(&db.rdf_store()));
     let result = processor
         .process(
             &format!("EXPLAIN {PREFIX} {query}"),

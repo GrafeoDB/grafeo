@@ -212,7 +212,7 @@ impl Database {
             return Err(transaction_open("batchCreateNodesWithProps"));
         }
         let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-        let ids = js(self.db().batch_create_nodes_with_labels(&labels, rows))?;
+        let ids = js(self.db()?.batch_create_nodes_with_labels(&labels, rows))?;
         ids_to_js(ids.into_iter().map(|id| id.as_u64()))
     }
 
@@ -234,7 +234,7 @@ impl Database {
         if self.tx.borrow().is_some() {
             return Err(transaction_open("batchCreateEdges"));
         }
-        let ids = js(self.db().batch_create_edges(edges))?;
+        let ids = js(self.db()?.batch_create_edges(edges))?;
         ids_to_js(ids.into_iter().map(|id| id.as_u64()))
     }
 
@@ -268,7 +268,7 @@ impl Database {
         let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
         let summary = match self.tx.borrow().as_ref() {
             Some(session) => js(session.upsert_nodes(&labels, &key, rows, replace))?,
-            None => js(self.db().upsert_nodes(&labels, &key, rows, replace))?,
+            None => js(self.db()?.upsert_nodes(&labels, &key, rows, replace))?,
         };
         Ok(summary_to_js(&summary))
     }
@@ -300,7 +300,7 @@ impl Database {
         let options = edge_options(options)?;
         let summary = match self.tx.borrow().as_ref() {
             Some(session) => js(session.upsert_edges(edge_type, rows, &options))?,
-            None => js(self.db().upsert_edges(edge_type, rows, &options))?,
+            None => js(self.db()?.upsert_edges(edge_type, rows, &options))?,
         };
         Ok(summary_to_js(&summary))
     }

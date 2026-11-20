@@ -114,7 +114,7 @@ pub(crate) fn replay<S: RootStore>(
             .map_err(|error| failed(error.to_string()))?;
         targets.store.sync_epoch(begin.epoch);
         if let Some(manager) = targets.history {
-            manager.record_commit_time(begin.epoch, begin.timestamp_ms);
+            manager.record_commit_time(begin.epoch, begin.timestamp_ms, 0);
         }
         groups += 1;
     }
@@ -340,7 +340,7 @@ pub(crate) fn replay_into_backend(
         }
         last_epoch = last_epoch.max(begin.epoch);
         if let Some(manager) = history {
-            manager.record_commit_time(begin.epoch, begin.timestamp_ms);
+            manager.record_commit_time(begin.epoch, begin.timestamp_ms, 0);
         }
     }
     let end = scan.finish().map_err(Error::from)?;

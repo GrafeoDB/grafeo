@@ -1,0 +1,72 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/with/With2.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.With2"
+  title: "With2 - Forward single expression"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Forwarding a property to express a join
+  - name: s1_forwarding_a_property_to_express_a_join
+    setup:
+      - |
+        CREATE (a:End {num: 42, id: 0}),
+               (:End {num: 3}),
+               (:Begin {num: a.id})
+    query: |
+      MATCH (a:Begin)
+      WITH a.num AS property
+      MATCH (b)
+      WHERE b.id = property
+      RETURN b
+    expect:
+      values: |
+        | b |
+        | (:End {num: 42, id: 0}) |
+      side_effects: {}
+
+  # [2] Forwarding a nested map literal
+  - name: s2_forwarding_a_nested_map_literal
+    query: |
+      WITH {name: {name2: 'baz'}} AS nestedMap
+      RETURN nestedMap.name.name2
+    expect:
+      values: |
+        | nestedMap.name.name2 |
+        | 'baz' |
+      side_effects: {}

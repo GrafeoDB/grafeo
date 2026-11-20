@@ -2,8 +2,8 @@
 
 import rdflib
 
-SV = "https://grafeo.dev/datasets/silicon-valley/vocab#"
-SVR = "https://grafeo.dev/datasets/silicon-valley/id/"
+SV = "https://docs.grafeo.dev/datasets/silicon-valley/vocab#"
+SVR = "https://docs.grafeo.dev/datasets/silicon-valley/id#"
 SCHEMA = "https://schema.org/"
 
 PREFIXES = f"""

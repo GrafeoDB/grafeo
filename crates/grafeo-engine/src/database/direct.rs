@@ -61,7 +61,7 @@ use grafeo_core::graph::lpg::{Edge, Node};
 use grafeo_core::graph::rowgroup::RowGroupStore;
 use grafeo_core::graph::{Direction, GraphStore};
 
-use super::GrafeoDB;
+use super::Open;
 use crate::catalog::CatalogConstraintValidator;
 use crate::session::graph_storage_key;
 use crate::transaction::{CommitsHeld, TransactionChanges, TransactionManager};
@@ -235,7 +235,7 @@ pub(crate) enum DirectTarget<'a> {
     },
 }
 
-/// An edge to create with [`GrafeoDB::batch_create_edges`]: its endpoints,
+/// An edge to create with [`GrafeoDB::batch_create_edges`](super::GrafeoDB::batch_create_edges): its endpoints,
 /// type and properties.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BatchEdge {
@@ -278,11 +278,11 @@ impl BatchEdge {
 /// The direct API on one graph, shared by [`GrafeoDB`] (its current graph)
 /// and [`GraphHandle`](super::GraphHandle) (the handle's graph).
 pub(crate) struct DirectCalls<'a> {
-    db: &'a GrafeoDB,
+    db: &'a Open,
     target: DirectTarget<'a>,
 }
 
-impl GrafeoDB {
+impl Open {
     /// The direct API on `target`.
     pub(crate) fn direct<'a>(&'a self, target: DirectTarget<'a>) -> DirectCalls<'a> {
         DirectCalls { db: self, target }
@@ -351,7 +351,7 @@ impl GrafeoDB {
     /// while no transaction is open commits at once; otherwise the call is a
     /// private transaction; on a read-only or external store, an implicit
     /// transaction of a session.
-    fn write_direct<T>(
+    fn write_direct<T: 'static>(
         &self,
         target: DirectTarget<'_>,
         batch: bool,
@@ -366,8 +366,8 @@ impl GrafeoDB {
             return self.write_private(&store, graph.as_deref(), write);
         }
         let session = match target {
-            DirectTarget::Current => self.session(),
-            DirectTarget::Named { schema, name } => self.graph_in(schema, name)?.session()?,
+            DirectTarget::Current => self.session_unlisted(),
+            DirectTarget::Named { schema, name } => self.graph_session(schema, name)?,
         };
         session.write(write)
     }
@@ -419,7 +419,13 @@ impl GrafeoDB {
         grafeo_common::testing::commit_hook::run_during_held_change();
 
         let recorder = self.immediate_recorder();
-        recorder.start(epoch, graph, self.reads_committed_rows())?;
+        // The before-images also measure what the call replaces, when a reader or the history
+        // keeps it (see `finish_immediate`).
+        recorder.start(
+            epoch,
+            graph,
+            self.reads_committed_rows() || self.transaction_manager.counts_replaced(),
+        )?;
         let writer = self.direct_writer(
             store,
             graph,
@@ -508,12 +514,16 @@ impl GrafeoDB {
         if self.cdc_active() {
             self.cdc_log.record_commit(&changes, epoch);
         }
+        // What it replaced, in the ledger before its epoch is published, as a commit's is.
+        let replaced = changes.superseded_bytes() as u64;
+        self.transaction_manager.add_replaced(replaced);
         // A build without the log and change data capture keeps no entries.
         #[cfg(not(any(feature = "wal", feature = "cdc")))]
         drop(changes);
         self.transaction_manager.sync_epoch(epoch);
         if let Some(at) = at {
-            self.transaction_manager.record_commit_time(epoch, at);
+            self.transaction_manager
+                .record_commit_time(epoch, at, replaced);
         }
         drop(commits);
         self.prune_versions(&root, store);
@@ -855,7 +865,7 @@ impl GrafeoDB {
 }
 
 impl DirectCalls<'_> {
-    fn write<T>(
+    fn write<T: 'static>(
         &self,
         write: impl FnOnce(&GraphWriter) -> std::result::Result<T, OperatorError>,
     ) -> Result<T> {
@@ -866,7 +876,7 @@ impl DirectCalls<'_> {
     /// none, so always a private transaction, which can undo the writes
     /// before a failing one. A call of one write commits at once (see
     /// [`write`](Self::write)): it either applies or does not.
-    fn write_batch<T>(
+    fn write_batch<T: 'static>(
         &self,
         write: impl FnOnce(&GraphWriter) -> std::result::Result<T, OperatorError>,
     ) -> Result<T> {
@@ -1190,6 +1200,7 @@ pub(crate) fn missing_graph(name: &str) -> Error {
     feature = "gql"
 ))]
 mod tests {
+    use crate::GrafeoDB;
     use grafeo_common::types::EpochId;
 
     use super::*;
@@ -1200,10 +1211,12 @@ mod tests {
     fn panicking_call(db: &GrafeoDB, batch: bool, label: &str) -> NodeId {
         let created = parking_lot::Mutex::new(None);
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            db.write_direct::<()>(DirectTarget::Current, batch, |writer| {
-                *created.lock() = Some(writer.create_node(&[label.to_string()], Vec::new())?);
-                panic!("the call fails halfway");
-            })
+            db.live()
+                .unwrap()
+                .write_direct::<()>(DirectTarget::Current, batch, |writer| {
+                    *created.lock() = Some(writer.create_node(&[label.to_string()], Vec::new())?);
+                    panic!("the call fails halfway");
+                })
         }));
         assert!(outcome.is_err(), "the panic comes through");
         created.into_inner().unwrap()

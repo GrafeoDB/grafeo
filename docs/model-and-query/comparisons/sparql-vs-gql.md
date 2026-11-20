@@ -154,7 +154,7 @@ This guide compares SPARQL (W3C standard for RDF) with GQL (ISO standard for pro
 === "GQL"
 
     ```sql
-    MATCH (person:Person)-[:PARENT*1..]->(ancestor:Person)
+    MATCH TRAIL (person:Person)-[:PARENT*1..]->(ancestor:Person)
     RETURN ancestor
     ```
 

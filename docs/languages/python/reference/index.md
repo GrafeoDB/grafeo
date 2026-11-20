@@ -40,6 +40,51 @@ A float stays a `float`. NaN, the infinities and a `Decimal` of more than 38
 digits are refused with a `TypeError`. `to_pandas()` and `to_polars()` keep
 the `Decimal` objects.
 
+## Dates, Times and Durations
+
+A temporal value comes back as Python's own type when that type holds it
+exactly, and as a Grafeo type when it does not. Passed back as a parameter,
+either is the same value again.
+
+| Value | Python's type | Grafeo type, when Python's would lose data |
+| --- | --- | --- |
+| date | `datetime.date` | `grafeo.Date`, outside years 1 to 9999 |
+| time | `datetime.time`, aware with its UTC offset | `grafeo.Time`, with nanoseconds |
+| local datetime | naive `datetime`, read as UTC | `grafeo.Timestamp`, outside years 1 to 9999 |
+| zoned datetime | aware `datetime` with its UTC offset | `grafeo.ZonedDateTime`, outside years 1 to 9999 |
+| duration | `timedelta` | `grafeo.Duration`, with months, nanoseconds, or a time part of a day or more or of the other sign than the days (`P1DT-1H`, which a `timedelta` turns into 23 hours) |
+
+As a parameter, a naive `datetime` is a local datetime read as UTC (the
+machine's zone is not stored: the instant is exact), an aware one a zoned
+datetime that keeps the offset its `tzinfo` gives, and a `timedelta` a
+duration of days and a time part with one sign (`timedelta(hours=-1)` is
+`PT-1H`). An offset that is not whole minutes (Europe/Amsterdam before 1937,
++00:19:32) raises `GrafeoError` with GQLSTATUS 22009: a time zone
+displacement is hours and minutes. A time stored with such an offset by an
+earlier release still comes back, but passed back it raises the same error.
+Before 0.6.4 an aware `datetime` was stored as a local datetime of its UTC
+instant, and came back naive.
+
+The Grafeo types (experimental, new in 0.6.4) give the engine's text with
+`str()`, compare with `==` and hash. `grafeo.Time` has `hour`, `minute`,
+`second`, `nanosecond` and `offset_seconds`; `grafeo.Duration` has `months`,
+`days` and `nanos`; `grafeo.Date` has `year`, `month` and `day`. Each takes
+the engine's text (`grafeo.Time("12:31:14.645876123")`; `grafeo.Timestamp`
+takes microseconds since the Unix epoch), and `to_native()` gives Python's
+type, cut to microseconds, or raises `ValueError` where Python's type cannot
+hold the value (`OverflowError` for a duration past 999,999,999 days, as
+`timedelta` raises).
+
+```python
+db.execute("RETURN localtime('12:31:14.645876123') AS t")[0]["t"]  # grafeo.Time('12:31:14.645876123')
+db.execute("RETURN duration('P1DT2H') AS d")[0]["d"]            # datetime.timedelta(days=1, seconds=7200)
+db.execute("RETURN duration('P1Y2M') AS d")[0]["d"]             # grafeo.Duration('P1Y2M')
+```
+
+A dataframe (`to_arrow()`, `to_pandas()`, `to_polars()`, `nodes_df()`) holds
+a duration as `{"months": ..., "days": ..., "nanos": ...}`, with or without
+pyarrow.
+
 ## RDF Terms
 
 A SPARQL result holds each IRI, blank node and literal as the exact term:

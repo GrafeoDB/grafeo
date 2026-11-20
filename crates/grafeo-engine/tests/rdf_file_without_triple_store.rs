@@ -113,7 +113,7 @@ fn triples(db: &GrafeoDB) -> (Vec<[String; 3]>, Vec<[String; 3]>) {
         .rdf_store()
         .graph_latest("http://example.org/trips")
         .map_or_default(|graph| stored(&graph));
-    (stored(db.rdf_store()), trips)
+    (stored(&db.rdf_store()), trips)
 }
 
 /// What the fixture's RDF graphs hold: Alix knows Gus in the default graph,
@@ -247,13 +247,17 @@ fn write_0_5_snapshot_file(path: &Path, snapshot: &[u8]) {
 fn the_hand_encoded_snapshot_holds_a_triple() {
     let expected = vec![triple("alix", "knows", "gus")];
     let imported = GrafeoDB::import_snapshot(&snapshot_with_a_triple()).unwrap();
-    assert_eq!(stored(imported.rdf_store()), expected, "imported");
+    assert_eq!(stored(&imported.rdf_store()), expected, "imported");
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("triples.grafeo");
     write_0_5_snapshot_file(&path, &snapshot_with_a_triple());
     let db = GrafeoDB::open_read_only(&path).unwrap();
-    assert_eq!(stored(db.rdf_store()), expected, "read from the 0.5.x file");
+    assert_eq!(
+        stored(&db.rdf_store()),
+        expected,
+        "read from the 0.5.x file"
+    );
 }
 
 /// An open of a database file, as a build without `triple-store` has it.

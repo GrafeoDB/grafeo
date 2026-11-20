@@ -1,0 +1,264 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/aggregation/Aggregation6.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Aggregation6"
+  title: "Aggregation6 - Percentiles"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] `percentileDisc()` #1
+  - name: s1_percentiledisc_1
+    setup:
+      - |
+        CREATE ({price: 10.0}),
+               ({price: 20.0}),
+               ({price: 30.0})
+    params:
+      percentile: 0.0
+    query: |
+      MATCH (n)
+      RETURN percentileDisc(n.price, $percentile) AS p
+    expect:
+      values: |
+        | p |
+        | 10.0 |
+      side_effects: {}
+
+  # [1] `percentileDisc()` #2
+  - name: s1_percentiledisc_2
+    setup:
+      - |
+        CREATE ({price: 10.0}),
+               ({price: 20.0}),
+               ({price: 30.0})
+    params:
+      percentile: 0.5
+    query: |
+      MATCH (n)
+      RETURN percentileDisc(n.price, $percentile) AS p
+    expect:
+      values: |
+        | p |
+        | 20.0 |
+      side_effects: {}
+
+  # [1] `percentileDisc()` #3
+  - name: s1_percentiledisc_3
+    setup:
+      - |
+        CREATE ({price: 10.0}),
+               ({price: 20.0}),
+               ({price: 30.0})
+    params:
+      percentile: 1.0
+    query: |
+      MATCH (n)
+      RETURN percentileDisc(n.price, $percentile) AS p
+    expect:
+      values: |
+        | p |
+        | 30.0 |
+      side_effects: {}
+
+  # [2] `percentileCont()` #1
+  - name: s2_percentilecont_1
+    setup:
+      - |
+        CREATE ({price: 10.0}),
+               ({price: 20.0}),
+               ({price: 30.0})
+    params:
+      percentile: 0.0
+    query: |
+      MATCH (n)
+      RETURN percentileCont(n.price, $percentile) AS p
+    expect:
+      values: |
+        | p |
+        | 10.0 |
+      side_effects: {}
+
+  # [2] `percentileCont()` #2
+  - name: s2_percentilecont_2
+    setup:
+      - |
+        CREATE ({price: 10.0}),
+               ({price: 20.0}),
+               ({price: 30.0})
+    params:
+      percentile: 0.5
+    query: |
+      MATCH (n)
+      RETURN percentileCont(n.price, $percentile) AS p
+    expect:
+      values: |
+        | p |
+        | 20.0 |
+      side_effects: {}
+
+  # [2] `percentileCont()` #3
+  - name: s2_percentilecont_3
+    setup:
+      - |
+        CREATE ({price: 10.0}),
+               ({price: 20.0}),
+               ({price: 30.0})
+    params:
+      percentile: 1.0
+    query: |
+      MATCH (n)
+      RETURN percentileCont(n.price, $percentile) AS p
+    expect:
+      values: |
+        | p |
+        | 30.0 |
+      side_effects: {}
+
+  # [3] `percentileCont()` failing on bad arguments #1
+  # TCK: ArgumentError at runtime: NumberOutOfRange
+  - name: s3_percentilecont_failing_on_bad_arguments_1
+    setup:
+      - |
+        CREATE ({price: 10.0})
+    params:
+      param: 1000
+    query: |
+      MATCH (n)
+      RETURN percentileCont(n.price, $param)
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [3] `percentileCont()` failing on bad arguments #2
+  # TCK: ArgumentError at runtime: NumberOutOfRange
+  - name: s3_percentilecont_failing_on_bad_arguments_2
+    setup:
+      - |
+        CREATE ({price: 10.0})
+    params:
+      param: -1
+    query: |
+      MATCH (n)
+      RETURN percentileCont(n.price, $param)
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [3] `percentileCont()` failing on bad arguments #3
+  # TCK: ArgumentError at runtime: NumberOutOfRange
+  - name: s3_percentilecont_failing_on_bad_arguments_3
+    setup:
+      - |
+        CREATE ({price: 10.0})
+    params:
+      param: 1.1
+    query: |
+      MATCH (n)
+      RETURN percentileCont(n.price, $param)
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [4] `percentileDisc()` failing on bad arguments #1
+  # TCK: ArgumentError at runtime: NumberOutOfRange
+  - name: s4_percentiledisc_failing_on_bad_arguments_1
+    setup:
+      - |
+        CREATE ({price: 10.0})
+    params:
+      param: 1000
+    query: |
+      MATCH (n)
+      RETURN percentileDisc(n.price, $param)
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [4] `percentileDisc()` failing on bad arguments #2
+  # TCK: ArgumentError at runtime: NumberOutOfRange
+  - name: s4_percentiledisc_failing_on_bad_arguments_2
+    setup:
+      - |
+        CREATE ({price: 10.0})
+    params:
+      param: -1
+    query: |
+      MATCH (n)
+      RETURN percentileDisc(n.price, $param)
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [4] `percentileDisc()` failing on bad arguments #3
+  # TCK: ArgumentError at runtime: NumberOutOfRange
+  - name: s4_percentiledisc_failing_on_bad_arguments_3
+    setup:
+      - |
+        CREATE ({price: 10.0})
+    params:
+      param: 1.1
+    query: |
+      MATCH (n)
+      RETURN percentileDisc(n.price, $param)
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [5] `percentileDisc()` failing in more involved query
+  # TCK: ArgumentError at runtime: NumberOutOfRange
+  - name: s5_percentiledisc_failing_in_more_involved_query
+    xfail:
+      spec: "openCypher TCK 2024.3 Aggregation6: [5] `percentileDisc()` failing in more involved query"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        UNWIND range(0, 10) AS i
+        CREATE (s:S)
+        WITH s, i
+        UNWIND range(0, i) AS j
+        CREATE (s)-[:REL]->()
+    query: |
+      MATCH (n:S)
+      WITH n, size([(n)-->() | 1]) AS deg
+      WHERE deg > 2
+      WITH deg
+      LIMIT 100
+      RETURN percentileDisc(0.90, deg), deg
+    expect:
+      gql_status: "22"
+      side_effects: {}

@@ -1,0 +1,301 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/call/Call5.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Call5"
+  title: "Call5 - Results projection"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Explicit procedure result projection
+  - name: s1_explicit_procedure_result_projection
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out STRING) AS { UNWIND [{p0: null, p1: 'nix'}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS out }"
+    query: |
+      CALL test.my.proc(null) YIELD out
+      RETURN out
+    expect:
+      ordered: true
+      values: |
+        | out |
+        | 'nix' |
+      side_effects: {}
+
+  # [2] Explicit procedure result projection with RETURN *
+  - name: s2_explicit_procedure_result_projection_with_return
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (out STRING) AS { UNWIND [{p0: null, p1: 'nix'}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS out }"
+    query: |
+      CALL test.my.proc(null) YIELD out
+      RETURN *
+    expect:
+      ordered: true
+      values: |
+        | out |
+        | 'nix' |
+      side_effects: {}
+
+  # [3] The order of yield items is irrelevant #1
+  - name: s3_the_order_of_yield_items_is_irrelevant_1
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
+    query: |
+      CALL test.my.proc(null) YIELD a, b
+      RETURN a, b
+    expect:
+      ordered: true
+      values: |
+        | a | b |
+        | 1 | 2 |
+      side_effects: {}
+
+  # [3] The order of yield items is irrelevant #2
+  - name: s3_the_order_of_yield_items_is_irrelevant_2
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
+    query: |
+      CALL test.my.proc(null) YIELD b, a
+      RETURN a, b
+    expect:
+      ordered: true
+      values: |
+        | a | b |
+        | 1 | 2 |
+      side_effects: {}
+
+  # [4] Rename outputs to unbound variable names #1
+  - name: s4_rename_outputs_to_unbound_variable_names_1
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
+    query: |
+      CALL test.my.proc(null) YIELD a AS c, b AS d
+      RETURN c, d
+    expect:
+      ordered: true
+      values: |
+        | c | d |
+        | 1 | 2 |
+      side_effects: {}
+
+  # [4] Rename outputs to unbound variable names #2
+  - name: s4_rename_outputs_to_unbound_variable_names_2
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
+    query: |
+      CALL test.my.proc(null) YIELD a AS b, b AS d
+      RETURN b, d
+    expect:
+      ordered: true
+      values: |
+        | b | d |
+        | 1 | 2 |
+      side_effects: {}
+
+  # [4] Rename outputs to unbound variable names #3
+  - name: s4_rename_outputs_to_unbound_variable_names_3
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
+    query: |
+      CALL test.my.proc(null) YIELD a AS c, b AS a
+      RETURN c, a
+    expect:
+      ordered: true
+      values: |
+        | c | a |
+        | 1 | 2 |
+      side_effects: {}
+
+  # [4] Rename outputs to unbound variable names #4
+  - name: s4_rename_outputs_to_unbound_variable_names_4
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
+    query: |
+      CALL test.my.proc(null) YIELD a AS b, b AS a
+      RETURN b, a
+    expect:
+      ordered: true
+      values: |
+        | b | a |
+        | 1 | 2 |
+      side_effects: {}
+
+  # [4] Rename outputs to unbound variable names #5
+  - name: s4_rename_outputs_to_unbound_variable_names_5
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
+    query: |
+      CALL test.my.proc(null) YIELD a AS c, b AS b
+      RETURN c, b
+    expect:
+      ordered: true
+      values: |
+        | c | b |
+        | 1 | 2 |
+      side_effects: {}
+
+  # [4] Rename outputs to unbound variable names #6
+  - name: s4_rename_outputs_to_unbound_variable_names_6
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
+    query: |
+      CALL test.my.proc(null) YIELD a AS c, b
+      RETURN c, b
+    expect:
+      ordered: true
+      values: |
+        | c | b |
+        | 1 | 2 |
+      side_effects: {}
+
+  # [4] Rename outputs to unbound variable names #7
+  - name: s4_rename_outputs_to_unbound_variable_names_7
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
+    query: |
+      CALL test.my.proc(null) YIELD a AS a, b AS d
+      RETURN a, d
+    expect:
+      ordered: true
+      values: |
+        | a | d |
+        | 1 | 2 |
+      side_effects: {}
+
+  # [4] Rename outputs to unbound variable names #8
+  - name: s4_rename_outputs_to_unbound_variable_names_8
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
+    query: |
+      CALL test.my.proc(null) YIELD a, b AS d
+      RETURN a, d
+    expect:
+      ordered: true
+      values: |
+        | a | d |
+        | 1 | 2 |
+      side_effects: {}
+
+  # [4] Rename outputs to unbound variable names #9
+  - name: s4_rename_outputs_to_unbound_variable_names_9
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
+    query: |
+      CALL test.my.proc(null) YIELD a AS a, b AS b
+      RETURN a, b
+    expect:
+      ordered: true
+      values: |
+        | a | b |
+        | 1 | 2 |
+      side_effects: {}
+
+  # [4] Rename outputs to unbound variable names #10
+  - name: s4_rename_outputs_to_unbound_variable_names_10
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
+    query: |
+      CALL test.my.proc(null) YIELD a AS a, b
+      RETURN a, b
+    expect:
+      ordered: true
+      values: |
+        | a | b |
+        | 1 | 2 |
+      side_effects: {}
+
+  # [4] Rename outputs to unbound variable names #11
+  - name: s4_rename_outputs_to_unbound_variable_names_11
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
+    query: |
+      CALL test.my.proc(null) YIELD a, b AS b
+      RETURN a, b
+    expect:
+      ordered: true
+      values: |
+        | a | b |
+        | 1 | 2 |
+      side_effects: {}
+
+  # [5] Fail on renaming to an already bound variable name
+  # TCK: SyntaxError at compile time: VariableAlreadyBound
+  - name: s5_fail_on_renaming_to_an_already_bound_variable_name
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
+    query: |
+      CALL test.my.proc(null) YIELD a, b AS a
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [6] Fail on renaming all outputs to the same variable name
+  # TCK: SyntaxError at compile time: VariableAlreadyBound
+  - name: s6_fail_on_renaming_all_outputs_to_the_same_variable_name
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(in INT64) RETURNS (a INT64, b INT64) AS { UNWIND [{p0: null, p1: 1, p2: 2}] AS r FILTER (r.p0 = $in OR (r.p0 IS NULL AND $in IS NULL)) RETURN r.p1 AS a, r.p2 AS b }"
+    query: |
+      CALL test.my.proc(null) YIELD a AS c, b AS c
+      RETURN c
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [7] Fail on in-query call to procedure with YIELD *
+  # TCK: SyntaxError at compile time: UnexpectedSyntax
+  - name: s7_fail_on_in_query_call_to_procedure_with_yield
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(name STRING, id INT64) RETURNS (city STRING, country_code INT64) AS { UNWIND [{p0: 'Andres', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Tobias', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Mats', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Stefan', p1: 1, p2: 'Berlin', p3: 49}, {p0: 'Stefan', p1: 2, p2: 'München', p3: 49}, {p0: 'Petra', p1: 1, p2: 'London', p3: 44}] AS r FILTER (r.p0 = $name OR (r.p0 IS NULL AND $name IS NULL)) AND (r.p1 = $id OR (r.p1 IS NULL AND $id IS NULL)) RETURN r.p2 AS city, r.p3 AS country_code }"
+    query: |
+      CALL test.my.proc('Stefan', 1) YIELD *
+      RETURN city, country_code
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Allow standalone call to procedure with YIELD *
+  - name: s8_allow_standalone_call_to_procedure_with_yield
+    setup_gql:
+      - "CREATE PROCEDURE `test.my.proc`(name STRING, id INT64) RETURNS (city STRING, country_code INT64) AS { UNWIND [{p0: 'Andres', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Tobias', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Mats', p1: 1, p2: 'Malmö', p3: 46}, {p0: 'Stefan', p1: 1, p2: 'Berlin', p3: 49}, {p0: 'Stefan', p1: 2, p2: 'München', p3: 49}, {p0: 'Petra', p1: 1, p2: 'London', p3: 44}] AS r FILTER (r.p0 = $name OR (r.p0 IS NULL AND $name IS NULL)) AND (r.p1 = $id OR (r.p1 IS NULL AND $id IS NULL)) RETURN r.p2 AS city, r.p3 AS country_code }"
+    query: |
+      CALL test.my.proc('Stefan', 1) YIELD *
+    expect:
+      ordered: true
+      values: |
+        | city | country_code |
+        | 'Berlin' | 49 |
+      side_effects: {}

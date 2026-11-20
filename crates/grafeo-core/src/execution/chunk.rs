@@ -416,7 +416,9 @@ impl DataChunk {
         let mut result_columns = Vec::with_capacity(self.columns.len());
 
         for col in &self.columns {
-            let mut new_col = ValueVector::new();
+            // The column keeps its type: node and edge IDs stay nodes and
+            // edges, and records stay records.
+            let mut new_col = ValueVector::with_capacity(col.data_type().clone(), selected.len());
             for &idx in &selected {
                 if let Some(val) = col.get(idx) {
                     new_col.push(val);
@@ -678,6 +680,26 @@ mod tests {
         edges.advance_row();
         types.add(&edges.finish());
         assert_eq!(types.types(), [LogicalType::Any]);
+    }
+
+    /// The rows a selection keeps keep their column types: node IDs stay
+    /// nodes and records stay records (a push `LIMIT`, filter and `DISTINCT`
+    /// cut chunks this way).
+    #[test]
+    fn a_filtered_chunk_keeps_its_column_types() {
+        let records = LogicalType::Records(Box::new(LogicalType::Node));
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Node, records.clone()]);
+        for id in [1, 2, 3] {
+            builder
+                .column_mut(0)
+                .unwrap()
+                .push_node_id(grafeo_common::types::NodeId::new(id));
+            builder.column_mut(1).unwrap().push_value(Value::Int64(0));
+            builder.advance_row();
+        }
+        let filtered = builder.finish().filter(&SelectionVector::new_all(2));
+        assert_eq!(filtered.column_types(), [LogicalType::Node, records]);
+        assert_eq!(filtered.len(), 2);
     }
 
     /// A copied column keeps its input type; a declared node or edge only

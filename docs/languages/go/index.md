@@ -82,10 +82,10 @@ again as the type it came as.
 
 | Go | GQL type | Notes |
 |----|----------|-------|
-| `time.Time` in UTC or `time.Local` | `TIMESTAMP` (`LOCAL DATETIME`) | To the microsecond; comes back in UTC |
-| `time.Time` in any other location | `ZONED DATETIME` | Keeps its offset (whole minutes); comes back in a fixed zone of that offset |
+| `time.Time` in UTC or `time.Local` | `TIMESTAMP` (`LOCAL DATETIME`) | To the microsecond; comes back in UTC. The machine's zone is not stored: the instant is exact |
+| `time.Time` in any other location | `ZONED DATETIME` | Keeps its offset; comes back in a fixed zone of that offset. An offset that is not whole minutes (Europe/Amsterdam before 1937, +00:19:32) fails with GQLSTATUS 22009 |
 | `grafeo.Date` | `DATE` | `Year`, `Month`, `Day`; `DateOf(t)`, `ParseDate("2024-01-15")`, `In(loc)` |
-| `grafeo.Time` | `TIME` | A time of day to the nanosecond, with an offset or without one: `NewLocalTime`, `NewZonedTime`, `TimeOf(t)`, `ParseTime("12:30:00+02:00")`; `Hour()`, `Minute()`, `Second()`, `Nanosecond()`, `Offset()` |
+| `grafeo.Time` | `TIME` | A time of day to the nanosecond, with an offset or without one: `NewLocalTime`, `NewZonedTime`, `TimeOf(t)`, `ParseTime("12:30:00+02:00")`; `Hour()`, `Minute()`, `Second()`, `Nanosecond()`, `Offset()`. `TimeOf` of a `time.Time` whose offset is not whole minutes gives the clock reading at the offset's whole minutes, the same instant (it returns no error); `NewZonedTime` refuses such an offset |
 | `grafeo.Duration`, `time.Duration` | `DURATION` | `Months`, `Days` and `Nanos`, kept apart (`P1M` is not `P30D`, `P1D` is not `PT24H`); a `time.Duration` is one of nanoseconds; `TimeDuration()` gives one back when there are no months or days |
 
 ```go

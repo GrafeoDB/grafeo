@@ -13,6 +13,12 @@ permissions:
   contents: read
   id-token: write
 
+# A newer push to a pull request's branch cancels its older run, so one push
+# keeps one benchmark run busy. Runs on main and manual runs are each their own.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('codspeed-pr-{0}-{1}', github.event.pull_request.head.repo.full_name, github.head_ref) || format('codspeed-{0}', github.run_id) }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   # The write-path bench at a tenth of its sizes: simulation counts

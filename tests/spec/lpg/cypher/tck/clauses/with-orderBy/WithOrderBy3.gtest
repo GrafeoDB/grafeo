@@ -1,0 +1,1844 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/with-orderBy/WithOrderBy3.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.WithOrderBy3"
+  title: "WithOrderBy3 - Order by multiple expressions"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Sort by two expressions, both in ascending order #1
+  - name: s1_sort_by_two_expressions_both_in_ascending_order_1
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool, a.num
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {num: -30, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+        | (:E {num: 7054, bool: false}) |
+        | (:D {num: -41, bool: true}) |
+      side_effects: {}
+
+  # [1] Sort by two expressions, both in ascending order #2
+  - name: s1_sort_by_two_expressions_both_in_ascending_order_2
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool, a.num ASC
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {num: -30, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+        | (:E {num: 7054, bool: false}) |
+        | (:D {num: -41, bool: true}) |
+      side_effects: {}
+
+  # [1] Sort by two expressions, both in ascending order #3
+  - name: s1_sort_by_two_expressions_both_in_ascending_order_3
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool, a.num ASCENDING
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {num: -30, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+        | (:E {num: 7054, bool: false}) |
+        | (:D {num: -41, bool: true}) |
+      side_effects: {}
+
+  # [1] Sort by two expressions, both in ascending order #4
+  - name: s1_sort_by_two_expressions_both_in_ascending_order_4
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool ASC, a.num
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {num: -30, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+        | (:E {num: 7054, bool: false}) |
+        | (:D {num: -41, bool: true}) |
+      side_effects: {}
+
+  # [1] Sort by two expressions, both in ascending order #5
+  - name: s1_sort_by_two_expressions_both_in_ascending_order_5
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool ASC, a.num ASC
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {num: -30, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+        | (:E {num: 7054, bool: false}) |
+        | (:D {num: -41, bool: true}) |
+      side_effects: {}
+
+  # [1] Sort by two expressions, both in ascending order #6
+  - name: s1_sort_by_two_expressions_both_in_ascending_order_6
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool ASC, a.num ASCENDING
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {num: -30, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+        | (:E {num: 7054, bool: false}) |
+        | (:D {num: -41, bool: true}) |
+      side_effects: {}
+
+  # [1] Sort by two expressions, both in ascending order #7
+  - name: s1_sort_by_two_expressions_both_in_ascending_order_7
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool ASCENDING, a.num
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {num: -30, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+        | (:E {num: 7054, bool: false}) |
+        | (:D {num: -41, bool: true}) |
+      side_effects: {}
+
+  # [1] Sort by two expressions, both in ascending order #8
+  - name: s1_sort_by_two_expressions_both_in_ascending_order_8
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool ASCENDING, a.num ASC
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {num: -30, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+        | (:E {num: 7054, bool: false}) |
+        | (:D {num: -41, bool: true}) |
+      side_effects: {}
+
+  # [1] Sort by two expressions, both in ascending order #9
+  - name: s1_sort_by_two_expressions_both_in_ascending_order_9
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool ASCENDING, a.num ASCENDING
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {num: -30, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+        | (:E {num: 7054, bool: false}) |
+        | (:D {num: -41, bool: true}) |
+      side_effects: {}
+
+  # [2] Sort by two expressions, first in ascending order, second in descending order #1
+  - name: s2_sort_by_two_expressions_first_in_ascending_order_second_in_descending_order_1
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool, a.num DESC
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {num: -30, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+        | (:E {num: 7054, bool: false}) |
+        | (:A {num: 9, bool: true}) |
+      side_effects: {}
+
+  # [2] Sort by two expressions, first in ascending order, second in descending order #2
+  - name: s2_sort_by_two_expressions_first_in_ascending_order_second_in_descending_order_2
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool, a.num DESCENDING
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {num: -30, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+        | (:E {num: 7054, bool: false}) |
+        | (:A {num: 9, bool: true}) |
+      side_effects: {}
+
+  # [2] Sort by two expressions, first in ascending order, second in descending order #3
+  - name: s2_sort_by_two_expressions_first_in_ascending_order_second_in_descending_order_3
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool ASC, a.num DESC
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {num: -30, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+        | (:E {num: 7054, bool: false}) |
+        | (:A {num: 9, bool: true}) |
+      side_effects: {}
+
+  # [2] Sort by two expressions, first in ascending order, second in descending order #4
+  - name: s2_sort_by_two_expressions_first_in_ascending_order_second_in_descending_order_4
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool ASC, a.num DESCENDING
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {num: -30, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+        | (:E {num: 7054, bool: false}) |
+        | (:A {num: 9, bool: true}) |
+      side_effects: {}
+
+  # [2] Sort by two expressions, first in ascending order, second in descending order #5
+  - name: s2_sort_by_two_expressions_first_in_ascending_order_second_in_descending_order_5
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool ASCENDING, a.num DESC
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {num: -30, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+        | (:E {num: 7054, bool: false}) |
+        | (:A {num: 9, bool: true}) |
+      side_effects: {}
+
+  # [2] Sort by two expressions, first in ascending order, second in descending order #6
+  - name: s2_sort_by_two_expressions_first_in_ascending_order_second_in_descending_order_6
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool ASCENDING, a.num DESCENDING
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {num: -30, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+        | (:E {num: 7054, bool: false}) |
+        | (:A {num: 9, bool: true}) |
+      side_effects: {}
+
+  # [3] Sort by two expressions, first in descending order, second in ascending order #1
+  - name: s3_sort_by_two_expressions_first_in_descending_order_second_in_ascending_order_1
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool DESC, a.num
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:D {num: -41, bool: true}) |
+        | (:A {num: 9, bool: true}) |
+        | (:C {num: -30, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+      side_effects: {}
+
+  # [3] Sort by two expressions, first in descending order, second in ascending order #2
+  - name: s3_sort_by_two_expressions_first_in_descending_order_second_in_ascending_order_2
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool DESC, a.num ASC
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:D {num: -41, bool: true}) |
+        | (:A {num: 9, bool: true}) |
+        | (:C {num: -30, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+      side_effects: {}
+
+  # [3] Sort by two expressions, first in descending order, second in ascending order #3
+  - name: s3_sort_by_two_expressions_first_in_descending_order_second_in_ascending_order_3
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool DESC, a.num ASCENDING
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:D {num: -41, bool: true}) |
+        | (:A {num: 9, bool: true}) |
+        | (:C {num: -30, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+      side_effects: {}
+
+  # [3] Sort by two expressions, first in descending order, second in ascending order #4
+  - name: s3_sort_by_two_expressions_first_in_descending_order_second_in_ascending_order_4
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool DESCENDING, a.num
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:D {num: -41, bool: true}) |
+        | (:A {num: 9, bool: true}) |
+        | (:C {num: -30, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+      side_effects: {}
+
+  # [3] Sort by two expressions, first in descending order, second in ascending order #5
+  - name: s3_sort_by_two_expressions_first_in_descending_order_second_in_ascending_order_5
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool DESCENDING, a.num ASC
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:D {num: -41, bool: true}) |
+        | (:A {num: 9, bool: true}) |
+        | (:C {num: -30, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+      side_effects: {}
+
+  # [3] Sort by two expressions, first in descending order, second in ascending order #6
+  - name: s3_sort_by_two_expressions_first_in_descending_order_second_in_ascending_order_6
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool DESCENDING, a.num ASCENDING
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:D {num: -41, bool: true}) |
+        | (:A {num: 9, bool: true}) |
+        | (:C {num: -30, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+      side_effects: {}
+
+  # [4] Sort by two expressions, both in descending order #1
+  - name: s4_sort_by_two_expressions_both_in_descending_order_1
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool DESC, a.num DESC
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A {num: 9, bool: true}) |
+        | (:D {num: -41, bool: true}) |
+        | (:E {num: 7054, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+      side_effects: {}
+
+  # [4] Sort by two expressions, both in descending order #2
+  - name: s4_sort_by_two_expressions_both_in_descending_order_2
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool DESC, a.num DESCENDING
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A {num: 9, bool: true}) |
+        | (:D {num: -41, bool: true}) |
+        | (:E {num: 7054, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+      side_effects: {}
+
+  # [4] Sort by two expressions, both in descending order #3
+  - name: s4_sort_by_two_expressions_both_in_descending_order_3
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool DESCENDING, a.num DESC
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A {num: 9, bool: true}) |
+        | (:D {num: -41, bool: true}) |
+        | (:E {num: 7054, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+      side_effects: {}
+
+  # [4] Sort by two expressions, both in descending order #4
+  - name: s4_sort_by_two_expressions_both_in_descending_order_4
+    setup:
+      - |
+        CREATE (:A {num: 9, bool: true}),
+               (:B {num: 5, bool: false}),
+               (:C {num: -30, bool: false}),
+               (:D {num: -41, bool: true}),
+               (:E {num: 7054, bool: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.bool DESCENDING, a.num DESCENDING
+        LIMIT 4
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A {num: 9, bool: true}) |
+        | (:D {num: -41, bool: true}) |
+        | (:E {num: 7054, bool: false}) |
+        | (:B {num: 5, bool: false}) |
+      side_effects: {}
+
+  # [5] An expression without explicit sort direction is sorted in ascending order #1
+  - name: s5_an_expression_without_explicit_sort_direction_is_sorted_in_ascending_order_1
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.num % 2 ASC, a.num, a.text ASC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 2, text: 'a'}) |
+      side_effects: {}
+
+  # [5] An expression without explicit sort direction is sorted in ascending order #2
+  - name: s5_an_expression_without_explicit_sort_direction_is_sorted_in_ascending_order_2
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.num % 2 ASC, a.num, a.text DESC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 2, text: 'b'}) |
+      side_effects: {}
+
+  # [5] An expression without explicit sort direction is sorted in ascending order #3
+  - name: s5_an_expression_without_explicit_sort_direction_is_sorted_in_ascending_order_3
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.num % 2 DESC, a.num, a.text DESC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 1, text: 'b'}) |
+      side_effects: {}
+
+  # [5] An expression without explicit sort direction is sorted in ascending order #4
+  - name: s5_an_expression_without_explicit_sort_direction_is_sorted_in_ascending_order_4
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.num % 2 DESC, a.num, a.text ASC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 1, text: 'a'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #1
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_1
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY 4 + ((a.num * 2) % 2) ASC, a.num ASC, a.text ASC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 1, text: 'a'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #2
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_2
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY 4 + ((a.num * 2) % 2) DESC, a.num ASC, a.text ASC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 1, text: 'a'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #3
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_3
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.num ASC, 4 + ((a.num * 2) % 2) ASC, a.text ASC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 1, text: 'a'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #4
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_4
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.num ASC, 4 + ((a.num * 2) % 2) DESC, a.text ASC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 1, text: 'a'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #5
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_5
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.num ASC, a.text ASC, 4 + ((a.num * 2) % 2) ASC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 1, text: 'a'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #6
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_6
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.num ASC, a.text ASC, 4 + ((a.num * 2) % 2) DESC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 1, text: 'a'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #7
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_7
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY 4 + ((a.num * 2) % 2) ASC, a.num ASC, a.text DESC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 1, text: 'b'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #8
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_8
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY 4 + ((a.num * 2) % 2) DESC, a.num ASC, a.text DESC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 1, text: 'b'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #9
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_9
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.num ASC, 4 + ((a.num * 2) % 2) ASC, a.text DESC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 1, text: 'b'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #10
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_10
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.num ASC, 4 + ((a.num * 2) % 2) DESC, a.text DESC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 1, text: 'b'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #11
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_11
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.num ASC, a.text DESC, 4 + ((a.num * 2) % 2) ASC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 1, text: 'b'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #12
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_12
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.num ASC, a.text DESC, 4 + ((a.num * 2) % 2) DESC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 1, text: 'b'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #13
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_13
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY 4 + ((a.num * 2) % 2) ASC, a.num DESC, a.text DESC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 4, text: 'b'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #14
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_14
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY 4 + ((a.num * 2) % 2) DESC, a.num DESC, a.text DESC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 4, text: 'b'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #15
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_15
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.num DESC, 4 + ((a.num * 2) % 2) ASC, a.text DESC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 4, text: 'b'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #16
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_16
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.num DESC, 4 + ((a.num * 2) % 2) DESC, a.text DESC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 4, text: 'b'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #17
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_17
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.num DESC, a.text DESC, 4 + ((a.num * 2) % 2) ASC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 4, text: 'b'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #18
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_18
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.num DESC, a.text DESC, 4 + ((a.num * 2) % 2) DESC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 4, text: 'b'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #19
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_19
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY 4 + ((a.num * 2) % 2) ASC, a.num DESC, a.text ASC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 4, text: 'a'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #20
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_20
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY 4 + ((a.num * 2) % 2) DESC, a.num DESC, a.text ASC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 4, text: 'a'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #21
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_21
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.num DESC, 4 + ((a.num * 2) % 2) ASC, a.text ASC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 4, text: 'a'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #22
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_22
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.num DESC, 4 + ((a.num * 2) % 2) DESC, a.text ASC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 4, text: 'a'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #23
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_23
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.num DESC, a.text ASC, 4 + ((a.num * 2) % 2) ASC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 4, text: 'a'}) |
+      side_effects: {}
+
+  # [6] An constant expression does not influence the order determined by other expression before and after the constant expression #24
+  - name: s6_an_constant_expression_does_not_influence_the_order_determined_by_other_expression_before_and_after_the_constant_expression_24
+    setup:
+      - |
+        CREATE ({num: 3, text: 'a'}),
+               ({num: 3, text: 'b'}),
+               ({num: 1, text: 'a'}),
+               ({num: 1, text: 'b'}),
+               ({num: 2, text: 'a'}),
+               ({num: 2, text: 'b'}),
+               ({num: 4, text: 'a'}),
+               ({num: 4, text: 'b'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.num DESC, a.text ASC, 4 + ((a.num * 2) % 2) DESC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({num: 4, text: 'a'}) |
+      side_effects: {}
+
+  # [7] The order direction cannot be overwritten #1
+  - name: s7_the_order_direction_cannot_be_overwritten_1
+    query: |
+      UNWIND [1, 2, 3] AS a
+      WITH a
+        ORDER BY a ASC, a DESC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | 1 |
+      side_effects: {}
+
+  # [7] The order direction cannot be overwritten #2
+  - name: s7_the_order_direction_cannot_be_overwritten_2
+    query: |
+      UNWIND [1, 2, 3] AS a
+      WITH a
+        ORDER BY a + 2 ASC, a + 2 DESC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | 1 |
+      side_effects: {}
+
+  # [7] The order direction cannot be overwritten #3
+  - name: s7_the_order_direction_cannot_be_overwritten_3
+    query: |
+      UNWIND [1, 2, 3] AS a
+      WITH a
+        ORDER BY a * a ASC, a * a DESC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | 1 |
+      side_effects: {}
+
+  # [7] The order direction cannot be overwritten #4
+  - name: s7_the_order_direction_cannot_be_overwritten_4
+    query: |
+      UNWIND [1, 2, 3] AS a
+      WITH a
+        ORDER BY a ASC, -1 * a ASC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | 1 |
+      side_effects: {}
+
+  # [7] The order direction cannot be overwritten #5
+  - name: s7_the_order_direction_cannot_be_overwritten_5
+    query: |
+      UNWIND [1, 2, 3] AS a
+      WITH a
+        ORDER BY -1 * a DESC, a ASC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | 1 |
+      side_effects: {}
+
+  # [7] The order direction cannot be overwritten #6
+  - name: s7_the_order_direction_cannot_be_overwritten_6
+    query: |
+      UNWIND [1, 2, 3] AS a
+      WITH a
+        ORDER BY a DESC, a ASC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | 3 |
+      side_effects: {}
+
+  # [7] The order direction cannot be overwritten #7
+  - name: s7_the_order_direction_cannot_be_overwritten_7
+    query: |
+      UNWIND [1, 2, 3] AS a
+      WITH a
+        ORDER BY a + 2 DESC, a + 2 ASC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | 3 |
+      side_effects: {}
+
+  # [7] The order direction cannot be overwritten #8
+  - name: s7_the_order_direction_cannot_be_overwritten_8
+    query: |
+      UNWIND [1, 2, 3] AS a
+      WITH a
+        ORDER BY a * a DESC, a * a ASC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | 3 |
+      side_effects: {}
+
+  # [7] The order direction cannot be overwritten #9
+  - name: s7_the_order_direction_cannot_be_overwritten_9
+    query: |
+      UNWIND [1, 2, 3] AS a
+      WITH a
+        ORDER BY a DESC, -1 * a DESC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | 3 |
+      side_effects: {}
+
+  # [7] The order direction cannot be overwritten #10
+  - name: s7_the_order_direction_cannot_be_overwritten_10
+    query: |
+      UNWIND [1, 2, 3] AS a
+      WITH a
+        ORDER BY -1 * a ASC, a DESC
+        LIMIT 1
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | 3 |
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: out of scope #1
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_out_of_scope_1
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY a, c
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: out of scope #2
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_out_of_scope_2
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY a, c ASC
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: out of scope #3
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_out_of_scope_3
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY a, c DESC
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: out of scope #4
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_out_of_scope_4
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY a, c, d
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: out of scope #5
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_out_of_scope_5
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY a, c ASC, d
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: out of scope #6
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_out_of_scope_6
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY a, c DESC, d
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: out of scope #7
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_out_of_scope_7
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY c, a, d
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: out of scope #8
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_out_of_scope_8
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY c ASC, a, d
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: out of scope #9
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_out_of_scope_9
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY c DESC, a, d
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: out of scope #10
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_out_of_scope_10
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY c, d, a
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: out of scope #11
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_out_of_scope_11
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY b, c, d, a
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: out of scope #12
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_out_of_scope_12
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY c, b, c, d, a
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: out of scope #13
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_out_of_scope_13
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY c, d, b, b, d, c, a
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: never defined #14
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_never_defined_14
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY a, e
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: never defined #15
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_never_defined_15
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY a, e ASC
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: never defined #16
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_never_defined_16
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY a, e DESC
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: never defined #17
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_never_defined_17
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY a, e, f
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: never defined #18
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_never_defined_18
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY a, e ASC, f
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: never defined #19
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_never_defined_19
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY a, e DESC, f
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: never defined #20
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_never_defined_20
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY e, a, f
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: never defined #21
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_never_defined_21
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY e ASC, a, f
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: never defined #22
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_never_defined_22
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY e DESC, a, f
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: never defined #23
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_never_defined_23
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY e, f, a
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: never defined #24
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_never_defined_24
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY b, e, f, a
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: never defined #25
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_never_defined_25
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY e, b, e, f, a
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: never defined #26
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_never_defined_26
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY e, f, b, b, f, e, a
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: mixed #27
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_mixed_27
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY a, c, e
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: mixed #28
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_mixed_28
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY a, c, e, b
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: mixed #29
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_mixed_29
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY b, c, a, f, a
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on sorting by any number of undefined variables in any position #Example: mixed #30
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s8_fail_on_sorting_by_any_number_of_undefined_variables_in_any_position_example_mixed_30
+    query: |
+      WITH 1 AS a, 'b' AS b, 3 AS c, true AS d
+      WITH a, b
+      WITH a
+        ORDER BY d, f, b, b, f, c, a
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}

@@ -10,14 +10,12 @@ use grafeo_common::types::Value;
 use grafeo_core::graph::rdf::shacl::{ShaclError, SparqlExecutor, ValidationReport};
 use grafeo_core::graph::rdf::{RdfStore, Term};
 
-use crate::session::Session;
-
 /// SPARQL executor backed by a `Session`.
 ///
 /// Implements the `SparqlExecutor` trait from grafeo-core, allowing
 /// SHACL-SPARQL constraints to be evaluated via the engine's SPARQL pipeline.
 pub struct SessionSparqlExecutor<'a> {
-    session: &'a Session,
+    session: &'a crate::session::SessionInner,
     /// When set, wraps queries in `GRAPH <name> { ... }` to scope execution
     /// to a named data graph (used by `validate_shacl_graph`).
     graph_name: Option<String>,
@@ -25,7 +23,7 @@ pub struct SessionSparqlExecutor<'a> {
 
 impl<'a> SessionSparqlExecutor<'a> {
     /// Creates a new executor wrapping the given session (default graph scope).
-    pub fn new(session: &'a Session) -> Self {
+    pub(crate) fn new(session: &'a crate::session::SessionInner) -> Self {
         Self {
             session,
             graph_name: None,
@@ -33,7 +31,10 @@ impl<'a> SessionSparqlExecutor<'a> {
     }
 
     /// Creates an executor scoped to a named graph.
-    pub fn with_graph(session: &'a Session, graph_name: String) -> Self {
+    pub(crate) fn with_graph(
+        session: &'a crate::session::SessionInner,
+        graph_name: String,
+    ) -> Self {
         Self {
             session,
             graph_name: Some(graph_name),
@@ -184,8 +185,8 @@ fn value_to_term(value: &Value) -> Option<Term> {
 ///
 /// Returns an error if shape parsing fails, the shapes graph doesn't exist,
 /// or a SPARQL constraint fails.
-pub fn validate_shacl(
-    session: &Session,
+pub(crate) fn validate_shacl(
+    session: &crate::session::SessionInner,
     rdf_store: &Arc<RdfStore>,
     shapes_graph_name: &str,
 ) -> grafeo_common::utils::error::Result<ValidationReport> {

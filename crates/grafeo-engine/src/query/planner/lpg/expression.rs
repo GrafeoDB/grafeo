@@ -348,15 +348,14 @@ impl super::Planner {
                     expression: Box::new(body),
                 })
             }
+            // The Cypher translator rewrites the ones in projections, aggregates
+            // and `WHERE`; one left here sits in a position it does not reach.
             LogicalExpression::PatternComprehension { .. } => {
-                // Pattern comprehensions should be rewritten by the Cypher translator
-                // into Apply + Aggregate(Collect) + ParameterScan before reaching the
-                // planner. If we get here, the rewrite was skipped.
-                Err(Error::Internal(
-                    "PatternComprehension reached the planner without being rewritten; \
-                     this is a bug in the Cypher translator"
-                        .to_string(),
-                ))
+                Err(Error::from(QueryError::unsupported(
+                    "a pattern comprehension is not supported here yet: it runs in RETURN, \
+                     WITH, an aggregate and WHERE, not yet in ORDER BY, SET, UNWIND, a \
+                     property map or the body of a list comprehension, list predicate or reduce",
+                )))
             }
         }
     }

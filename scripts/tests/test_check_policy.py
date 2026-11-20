@@ -2396,3 +2396,31 @@ def test_t14_the_repository_passes() -> None:
         )
     )
     assert findings == [], findings
+
+
+T9_PASSES_IN = """meta:
+  language: cypher
+
+tests:
+  - name: a_lift_with_its_spec_and_issue
+    xfail:
+      spec: "openCypher TCK 2024.3 Return1: [1]"
+      issue: fix in 0.6.4
+      passes_in: [node, wasm]
+    query: RETURN 1.0 AS f
+  - name: a_lift_without_its_issue
+    xfail:
+      spec: "openCypher TCK 2024.3 Return1: [2]"
+      passes_in: [node, wasm]
+    query: RETURN 1 AS i
+"""
+
+
+def test_t9_a_gtest_xfail_with_passes_in_still_names_its_spec_and_issue(
+    tmp_path: Path,
+) -> None:
+    gtest = "tests/spec/lpg/cypher/passes_in.gtest"
+    files = {"CHANGELOG.md": T9_CHANGELOG, gtest: T9_PASSES_IN}
+    assert t9_found(tmp_path, files) == [
+        (gtest, t9_line(T9_PASSES_IN, "name: a_lift_without_its_issue", "xfail:"))
+    ]

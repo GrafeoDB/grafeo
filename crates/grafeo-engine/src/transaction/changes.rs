@@ -189,6 +189,13 @@ struct Bound {
 const SPARE_ENTRIES: usize = 4_096;
 
 impl TransactionChanges {
+    /// The bytes of committed state the transaction's changes replace (see
+    /// [`ChangeSet::superseded_bytes`]): what its commit adds to the ledger
+    /// the snapshot retention limit reads.
+    pub(crate) fn superseded_bytes(&self) -> usize {
+        self.state.lock().set.superseded_bytes()
+    }
+
     /// The changes of transaction `id`, which reads at `snapshot`: none yet.
     pub(crate) fn new(id: TransactionId, snapshot: EpochId) -> Self {
         let set = ChangeSet::new();
@@ -774,12 +781,16 @@ impl TransactionChanges {
     ///
     /// When the set refuses an entry it held before (a broken invariant):
     /// the commit must not complete.
+    ///
+    /// Returns the bytes the overlay entry it published keeps for readers at an older
+    /// snapshot (0 when it published none): what the commit adds to the snapshot retention
+    /// ledger for RDF.
     #[cfg(feature = "triple-store")]
     pub(crate) fn apply_rdf(
         &self,
         store: &grafeo_core::graph::rdf::RdfStore,
         mode: grafeo_core::graph::rdf::ApplyMode,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         use grafeo_core::graph::rdf::{CommitChange, Triple};
 
         let mut state = self.state.lock();
@@ -789,7 +800,7 @@ impl TransactionChanges {
             store.adopt_grant(grant);
         }
         if !state.triples.applies() {
-            return Ok(());
+            return Ok(0);
         }
         // Each triple entry's position with its change's, and the commit's
         // changes in their order; the graph key is made once per run of one
@@ -834,7 +845,7 @@ impl TransactionChanges {
             .filter_map(|(at, change)| (!applied.changed[change]).then_some(at))
             .collect();
         if unchanged.is_empty() {
-            return Ok(());
+            return Ok(applied.kept);
         }
         // Take the entries out and put back those that changed the store.
         let start = state.start;
@@ -855,7 +866,7 @@ impl TransactionChanges {
                 Change::RdfGraph { graph, op } => state.set.push_rdf_graph(graph, op)?,
             }
         }
-        Ok(())
+        Ok(applied.kept)
     }
 
     /// The storage keys of the labeled property graphs the transaction

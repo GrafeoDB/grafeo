@@ -1,0 +1,477 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/boolean/Boolean1.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Boolean1"
+  title: "Boolean1 - And logical operations"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Conjunction of two truth values
+  - name: s1_conjunction_of_two_truth_values
+    query: |
+      RETURN true AND true AS tt,
+             true AND false AS tf,
+             true AND null AS tn,
+             false AND true AS ft,
+             false AND false AS ff,
+             false AND null AS fn,
+             null AND true AS nt,
+             null AND false AS nf,
+             null AND null AS nn
+    expect:
+      values: |
+        | tt | tf | tn | ft | ff | fn | nt | nf | nn |
+        | true | false | null | false | false | false | null | false | null |
+      side_effects: {}
+
+  # [2] Conjunction of three truth values
+  - name: s2_conjunction_of_three_truth_values
+    query: |
+      RETURN true AND true AND true AS ttt,
+             true AND true AND false AS ttf,
+             true AND true AND null AS ttn,
+             true AND false AND true AS tft,
+             true AND false AND false AS tff,
+             true AND false AND null AS tfn,
+             true AND null AND true AS tnt,
+             true AND null AND false AS tnf,
+             true AND null AND null AS tnn,
+             false AND true AND true AS ftt,
+             false AND true AND false AS ftf,
+             false AND true AND null AS ftn,
+             false AND false AND true AS fft,
+             false AND false AND false AS fff,
+             false AND false AND null AS ffn,
+             false AND null AND true AS fnt,
+             false AND null AND false AS fnf,
+             false AND null AND null AS fnn,
+             null AND true AND true AS ntt,
+             null AND true AND false AS ntf,
+             null AND true AND null AS ntn,
+             null AND false AND true AS nft,
+             null AND false AND false AS nff,
+             null AND false AND null AS nfn,
+             null AND null AND true AS nnt,
+             null AND null AND false AS nnf,
+             null AND null AND null AS nnn
+    expect:
+      values: |
+        | ttt | ttf | ttn | tft | tff | tfn | tnt | tnf | tnn | ftt | ftf | ftn | fft | fff | ffn | fnt | fnf | fnn | ntt | ntf | ntn | nft | nff | nfn | nnt | nnf | nnn |
+        | true | false | null | false | false | false | null | false | null | false | false | false | false | false | false | false | false | false | null | false | null | false | false | false | null | false | null |
+      side_effects: {}
+
+  # [3] Conjunction of many truth values
+  - name: s3_conjunction_of_many_truth_values
+    query: |
+      RETURN true AND true AND true AND true AND true AND true AND true AND true AND true AND true AND true AS t,
+             true AND true AND true AND false AND true AND true AND true AND true AND true AND true AND true AS tsf,
+             true AND true AND true AND null AND true AND true AND true AND true AND true AND true AND true AS tsn,
+             false AND false AND false AND false AND false AND false AND false AND false AND false AND false AND false AS f,
+             false AND false AND false AND false AND true AND false AND false AND false AND false AND false AND false AS fst,
+             false AND false AND false AND false AND false AND false AND null AND false AND false AND false AND false AS fsn,
+             null AND null AND null AND null AND null AND null AND null AND null AND null AND null AND null AS n,
+             null AND null AND null AND null AND true AND null AND null AND null AND null AND null AND null AS nst,
+             null AND null AND null AND null AND false AND null AND null AND null AND null AND null AND null AS nsf,
+             true AND false AND false AND false AND true AND false AND false AND true AND true AND true AND false AS m1,
+             true AND true AND false AND false AND true AND false AND false AND true AND true AND true AND false AS m2,
+             true AND true AND false AND false AND true AND null AND false AND true AND true AND null AND false AS m3
+    expect:
+      values: |
+        | t | tsf | tsn | f | fst | fsn | n | nst | nsf | m1 | m2 | m3 |
+        | true | false | null | false | false | false | null | null | false | false | false | false |
+      side_effects: {}
+
+  # [4] Conjunction is commutative on non-null
+  - name: s4_conjunction_is_commutative_on_non_null
+    query: |
+      UNWIND [true, false] AS a
+      UNWIND [true, false] AS b
+      RETURN a, b, (a AND b) = (b AND a) AS result
+    expect:
+      values: |
+        | a | b | result |
+        | true | true | true |
+        | true | false | true |
+        | false | true | true |
+        | false | false | true |
+      side_effects: {}
+
+  # [5] Conjunction is commutative on null
+  - name: s5_conjunction_is_commutative_on_null
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      WITH a, b WHERE a IS NULL OR b IS NULL
+      RETURN a, b, (a AND b) IS NULL = (b AND a) IS NULL AS result
+    expect:
+      values: |
+        | a | b | result |
+        | true | null | true |
+        | false | null | true |
+        | null | true | true |
+        | null | false | true |
+        | null | null | true |
+      side_effects: {}
+
+  # [6] Conjunction is associative on non-null
+  - name: s6_conjunction_is_associative_on_non_null
+    query: |
+      UNWIND [true, false] AS a
+      UNWIND [true, false] AS b
+      UNWIND [true, false] AS c
+      RETURN a, b, c, (a AND (b AND c)) = ((a AND b) AND c) AS result
+    expect:
+      values: |
+        | a | b | c | result |
+        | true | true | true | true |
+        | true | true | false | true |
+        | true | false | true | true |
+        | true | false | false | true |
+        | false | true | true | true |
+        | false | true | false | true |
+        | false | false | true | true |
+        | false | false | false | true |
+      side_effects: {}
+
+  # [7] Conjunction is associative on null
+  - name: s7_conjunction_is_associative_on_null
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH a, b, c WHERE a IS NULL OR b IS NULL OR c IS NULL
+      RETURN a, b, c, (a AND (b AND c)) IS NULL = ((a AND b) AND c) IS NULL AS result
+    expect:
+      values: |
+        | a | b | c | result |
+        | true | true | null | true |
+        | true | false | null | true |
+        | true | null | true | true |
+        | true | null | false | true |
+        | true | null | null | true |
+        | false | true | null | true |
+        | false | false | null | true |
+        | false | null | true | true |
+        | false | null | false | true |
+        | false | null | null | true |
+        | null | true | true | true |
+        | null | true | false | true |
+        | null | true | null | true |
+        | null | false | true | true |
+        | null | false | false | true |
+        | null | false | null | true |
+        | null | null | true | true |
+        | null | null | false | true |
+        | null | null | null | true |
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #1
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #1"
+      issue: fix in 0.6.5
+    query: |
+      RETURN 123 AND true
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #2
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #2"
+      issue: fix in 0.6.5
+    query: |
+      RETURN 123.4 AND false
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #3
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #3"
+      issue: fix in 0.6.5
+    query: |
+      RETURN 123.4 AND null
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #4
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #4"
+      issue: fix in 0.6.5
+    query: |
+      RETURN 'foo' AND true
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #5
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #5"
+      issue: fix in 0.6.5
+    query: |
+      RETURN [] AND false
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #6
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #6"
+      issue: fix in 0.6.5
+    query: |
+      RETURN [true] AND false
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #7
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_7
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #7"
+      issue: fix in 0.6.5
+    query: |
+      RETURN [null] AND null
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #8
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_8
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #8"
+      issue: fix in 0.6.5
+    query: |
+      RETURN {} AND true
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #9
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_9
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #9"
+      issue: fix in 0.6.5
+    query: |
+      RETURN {x: []} AND true
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #10
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_10
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #10"
+      issue: fix in 0.6.5
+    query: |
+      RETURN false AND 123
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #11
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_11
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #11"
+      issue: fix in 0.6.5
+    query: |
+      RETURN true AND 123.4
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #12
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_12
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #12"
+      issue: fix in 0.6.5
+    query: |
+      RETURN false AND 'foo'
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #13
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_13
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #13"
+      issue: fix in 0.6.5
+    query: |
+      RETURN null AND 'foo'
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #14
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_14
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #14"
+      issue: fix in 0.6.5
+    query: |
+      RETURN true AND []
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #15
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_15
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #15"
+      issue: fix in 0.6.5
+    query: |
+      RETURN true AND [false]
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #16
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_16
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #16"
+      issue: fix in 0.6.5
+    query: |
+      RETURN null AND [null]
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #17
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_17
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #17"
+      issue: fix in 0.6.5
+    query: |
+      RETURN false AND {}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #18
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_18
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #18"
+      issue: fix in 0.6.5
+    query: |
+      RETURN false AND {x: []}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #19
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_19
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #19"
+      issue: fix in 0.6.5
+    query: |
+      RETURN 123 AND 'foo'
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #20
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_20
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #20"
+      issue: fix in 0.6.5
+    query: |
+      RETURN 123.4 AND 123.4
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #21
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_21
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #21"
+      issue: fix in 0.6.5
+    query: |
+      RETURN 'foo' AND {x: []}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #22
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_22
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #22"
+      issue: fix in 0.6.5
+    query: |
+      RETURN [true] AND [true]
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [8] Fail on conjunction of at least one non-booleans #23
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_fail_on_conjunction_of_at_least_one_non_booleans_23
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean1: [8] Fail on conjunction of at least one non-booleans #23"
+      issue: fix in 0.6.5
+    query: |
+      RETURN {x: []} AND [123]
+    expect:
+      gql_status: "42"
+      side_effects: {}

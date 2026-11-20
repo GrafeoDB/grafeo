@@ -6,9 +6,7 @@
 //! into Grafeo for faster querying.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 
-use parking_lot::RwLock;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
@@ -40,13 +38,13 @@ fn node_ids(store: &dyn GraphStore, view: ReadView) -> PyResult<Vec<NodeId>> {
 /// ```
 #[pyclass(name = "NetworkXAdapter")]
 pub struct PyNetworkXAdapter {
-    db: Arc<RwLock<GrafeoDB>>,
+    db: crate::database::SharedDb,
     directed: bool,
 }
 
 impl PyNetworkXAdapter {
     /// Creates a new NetworkX adapter for the given database.
-    pub fn new(db: Arc<RwLock<GrafeoDB>>, directed: bool) -> Self {
+    pub(crate) fn new(db: crate::database::SharedDb, directed: bool) -> Self {
         Self { db, directed }
     }
 
@@ -59,7 +57,7 @@ impl PyNetworkXAdapter {
         compute: impl FnOnce(&dyn GraphStore, ReadView) -> grafeo_common::utils::error::Result<T> + Send,
     ) -> PyResult<T> {
         without_gil(py, || {
-            let db = self.db.read();
+            let db = self.db.read()?;
             let snapshot = db.snapshot()?;
             compute(snapshot.store(), snapshot.view()).map_err(PyGrafeoError::from)
         })
@@ -71,7 +69,7 @@ impl PyNetworkXAdapter {
     /// Get number of nodes.
     #[getter]
     fn number_of_nodes(&self) -> PyResult<usize> {
-        let db = self.db.read();
+        let db = self.db.read()?;
         let snapshot = raised(db.snapshot())?;
         raised(snapshot.node_count(snapshot.view()))
     }
@@ -79,7 +77,7 @@ impl PyNetworkXAdapter {
     /// Get number of edges.
     #[getter]
     fn number_of_edges(&self) -> PyResult<usize> {
-        let db = self.db.read();
+        let db = self.db.read()?;
         let snapshot = raised(db.snapshot())?;
         raised(snapshot.edge_count(snapshot.view()))
     }
@@ -92,7 +90,7 @@ impl PyNetworkXAdapter {
 
     /// Get list of all node IDs.
     fn nodes(&self) -> PyResult<Vec<u64>> {
-        let db = self.db.read();
+        let db = self.db.read()?;
         let snapshot = raised(db.snapshot())?;
         let store = snapshot.store();
         Ok(node_ids(store, snapshot.view())?
@@ -103,7 +101,7 @@ impl PyNetworkXAdapter {
 
     /// Get list of all edges as (source, target) tuples.
     fn edges(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let db = self.db.read();
+        let db = self.db.read()?;
         let snapshot = raised(db.snapshot())?;
         let store = snapshot.store();
         let view = snapshot.view();
@@ -121,7 +119,7 @@ impl PyNetworkXAdapter {
 
     /// Get neighbors of a node.
     fn neighbors(&self, node_id: u64) -> PyResult<Vec<u64>> {
-        let db = self.db.read();
+        let db = self.db.read()?;
         let snapshot = raised(db.snapshot())?;
         let store = snapshot.store();
         let neighbors: Vec<u64> =
@@ -134,7 +132,7 @@ impl PyNetworkXAdapter {
 
     /// Get in-degree of a node.
     fn in_degree(&self, node_id: u64) -> PyResult<usize> {
-        let db = self.db.read();
+        let db = self.db.read()?;
         let snapshot = raised(db.snapshot())?;
         let store = snapshot.store();
         raised(store.degree(NodeId::new(node_id), Direction::Incoming, snapshot.view()))
@@ -142,7 +140,7 @@ impl PyNetworkXAdapter {
 
     /// Get out-degree of a node.
     fn out_degree(&self, node_id: u64) -> PyResult<usize> {
-        let db = self.db.read();
+        let db = self.db.read()?;
         let snapshot = raised(db.snapshot())?;
         let store = snapshot.store();
         raised(store.degree(NodeId::new(node_id), Direction::Outgoing, snapshot.view()))
@@ -160,7 +158,7 @@ impl PyNetworkXAdapter {
 
     /// Check if an edge exists.
     fn has_edge(&self, source: u64, target: u64) -> PyResult<bool> {
-        let db = self.db.read();
+        let db = self.db.read()?;
         let snapshot = raised(db.snapshot())?;
         let store = snapshot.store();
         Ok(
@@ -172,7 +170,7 @@ impl PyNetworkXAdapter {
 
     /// Check if a node exists.
     fn has_node(&self, node_id: u64) -> PyResult<bool> {
-        let db = self.db.read();
+        let db = self.db.read()?;
         Ok(raised(db.get_node(NodeId::new(node_id)))?.is_some())
     }
 
@@ -193,7 +191,7 @@ impl PyNetworkXAdapter {
             nx.call_method0("Graph")?
         };
 
-        let db = self.db.read();
+        let db = self.db.read()?;
         let snapshot = raised(db.snapshot())?;
         let store = snapshot.store();
         let view = snapshot.view();
@@ -280,7 +278,7 @@ impl PyNetworkXAdapter {
         // Create new in-memory database
         let db = GrafeoDB::with_config(Config::in_memory())
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-        let db = Arc::new(RwLock::new(db));
+        let db = crate::database::SharedDb::new(db);
 
         // Check if directed
         let is_directed: bool = g.call_method0("is_directed")?.extract()?;
@@ -306,7 +304,7 @@ impl PyNetworkXAdapter {
             // Build a stable string key for our internal HashMap.
             let hash_key: String = py_id_obj.repr()?.extract()?;
 
-            let db_guard = db.read();
+            let db_guard = db.read()?;
 
             // Try to get labels from node data
             let labels: Vec<String> = if let Ok(labels_attr) = node_data.get_item("labels") {
@@ -374,7 +372,7 @@ impl PyNetworkXAdapter {
                 nx_key_to_grafeo.get(&src_key),
                 nx_key_to_grafeo.get(&dst_key),
             ) {
-                let db_guard = db.read();
+                let db_guard = db.read()?;
 
                 // Get edge type
                 let edge_type: String = if let Ok(t) = edge_data.get_item("type") {
@@ -581,7 +579,7 @@ impl PyNetworkXAdapter {
     /// Matches NetworkX's `G.adj` / `G[node]` access pattern.
     #[getter]
     fn adj(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let db = self.db.read();
+        let db = self.db.read()?;
         let snapshot = raised(db.snapshot())?;
         let store = snapshot.store();
         let view = snapshot.view();
@@ -627,7 +625,7 @@ impl PyNetworkXAdapter {
             nx.call_method0("Graph")?
         };
 
-        let db = self.db.read();
+        let db = self.db.read()?;
         let snapshot = raised(db.snapshot())?;
         let store = snapshot.store();
         let view = snapshot.view();

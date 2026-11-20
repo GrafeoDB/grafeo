@@ -2042,7 +2042,7 @@ mod tests {
             section.store.add_vector_index(
                 "Doc",
                 "emb",
-                Arc::new(crate::GrafeoDB::build_vector_index(
+                Arc::new(crate::database::Open::build_vector_index(
                     3,
                     DistanceMetric::Cosine,
                     Some(19),
@@ -2054,7 +2054,7 @@ mod tests {
             model.add_vector_index(
                 "Page",
                 "emb",
-                Arc::new(crate::GrafeoDB::build_vector_index(
+                Arc::new(crate::database::Open::build_vector_index(
                     16,
                     DistanceMetric::Euclidean,
                     None,
@@ -2370,7 +2370,7 @@ mod tests {
         )
         .unwrap();
         let section = CatalogSection::new(
-            Arc::clone(&db.catalog),
+            Arc::clone(&db.live().unwrap().catalog),
             Arc::new(RowGroupStore::new()),
             || 0,
         );

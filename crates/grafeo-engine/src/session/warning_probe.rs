@@ -8,6 +8,7 @@ use std::sync::Arc;
 use grafeo_common::utils::warning::{Warning, WarningSink};
 
 use super::Session;
+use super::SessionInner;
 use crate::query::plan::LogicalPlan;
 
 /// Where the warning probe raises its notice.
@@ -21,10 +22,8 @@ pub enum ProbeStage {
     Run,
 }
 
-impl Session {
-    /// Sets the warning probe of this session (`None` clears it); other sessions are not
-    /// affected.
-    pub fn set_warning_probe(&self, stage: Option<ProbeStage>) {
+impl SessionInner {
+    pub(crate) fn set_warning_probe(&self, stage: Option<ProbeStage>) {
         *self.warning_probe.lock() = stage;
     }
 
@@ -41,6 +40,17 @@ impl Session {
     pub(super) fn probe_run(&self, sink: &Arc<WarningSink>) {
         if *self.warning_probe.lock() == Some(ProbeStage::Run) {
             sink.raise(Warning::Probe);
+        }
+    }
+}
+
+// The session's public methods: each reaches the session's slot for its call (#712).
+impl Session {
+    /// Sets the warning probe of this session (`None` clears it); other sessions are not
+    /// affected. After `close()` it does nothing; it returns a `Result` from 0.7.0.
+    pub fn set_warning_probe(&self, stage: Option<ProbeStage>) {
+        if let Ok(inner) = self.inner() {
+            inner.set_warning_probe(stage);
         }
     }
 }

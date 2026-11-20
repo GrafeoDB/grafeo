@@ -92,12 +92,14 @@ export type RdfTerm = NamedNode | BlankNode | Literal
 
 /**
  * A value in a result row: `null`, a boolean, a number (a `bigint` past
- * 2^53), a string, a `Date` (a timestamp), a `Buffer` (bytes), a
- * `Float32Array` (a vector), an RDF term, a list or an object (a map, or a
- * tagged value: `{ $decimal: '1.50' }`, `{ $date: '2024-01-15' }`,
- * `{ $time: '12:30:00+02:00' }`, `{ $duration: 'P1DT2H' }` or
- * `{ $zoned_datetime: '2024-01-15T12:30:00+02:00' }`, which a parameter takes
- * back as the same type).
+ * 2^53), a string, a `Date` (a timestamp in whole milliseconds), a `Buffer`
+ * (bytes), a `Float32Array` (a vector), an RDF term, a list or an object (a
+ * map, or a tagged value: `{ $decimal: '1.50' }`, `{ $date: '2024-01-15' }`,
+ * `{ $time: '12:30:00+02:00' }`, `{ $duration: 'P1DT2H' }`,
+ * `{ $zoned_datetime: '2024-01-15T12:30:00+02:00' }` or
+ * `{ $timestamp_us: 1705321800000001 }` (a timestamp with microseconds, which
+ * a `Date` cannot hold; a `bigint` before 1685 and after 2255), which a
+ * parameter takes back as the same type).
  */
 export type GrafeoValue =
   | null
@@ -683,6 +685,18 @@ export declare class QueryResult {
   /** Get column names. */
   get columns(): Array<string>
   /**
+   * The type the value in `row` and `column` was built with: `"node"`,
+   * `"edge"` or `"path"`; `{list: t}`, `{tuple: [t, ...]}`,
+   * `{struct: {key: t}}` or `{map: t}` for what an array or an object
+   * holds; `"any"`; or the name of another type (`"int64"`). An object is
+   * a node or an edge exactly where its type says so: `{_id: 1,
+   * _labels: []}` returned as a map is a map.
+   *
+   * Experimental, new in 0.6.4: it may change or be removed in any
+   * release.
+   */
+  cellType(row: number, column: number): any
+  /**
    * The warnings the statement raised, ordered by code: a deprecated form
    * it wrote or ran, or a notice; empty when there were none.
    *
@@ -980,6 +994,22 @@ export interface CreateOptions {
    * throws `GRAFEO-S001`. For this open only.
    */
   pathSearchBudget?: number
+  /**
+   * How many bytes of replaced data an open transaction's snapshot may
+   * keep: what the commits since it began replaced that it can still read. By
+   * default a quarter of `memoryLimit`, at least 1 MiB; below 1 MiB the open
+   * throws. Past it the transaction's next call throws the retryable
+   * `GRAFEO-T012` and rolls it back. For this open only.
+   */
+  snapshotRetentionLimit?: number
+  /**
+   * How many bytes of replaced data the history window may keep: once the
+   * commits since its start replaced more, the start moves forward,
+   * whichever of time or bytes comes first, and a read before it is
+   * refused. No limit by default; zero throws at the open. Not stored with
+   * the database: pass it at every open.
+   */
+  historyRetentionLimit?: number
   /**
    * How many bytes may spill to disk (0: nothing spills), half the spill
    * volume's free space by default. An in-memory database spills

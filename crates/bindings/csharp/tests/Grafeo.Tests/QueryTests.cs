@@ -17,6 +17,15 @@ public sealed class QueryTests : IDisposable
         Assert.Equal(1L, result.Rows[0]["x"]);
     }
 
+    /// <summary>A result without rows still names its columns, in their order.</summary>
+    [Fact]
+    public void AnEmptyResultHasItsColumns()
+    {
+        var result = _db.Execute("MATCH (n:Nobody) RETURN n.name AS name, 1 AS one");
+        Assert.Empty(result.Rows);
+        Assert.Equal(["name", "one"], result.Columns);
+    }
+
     [Fact]
     public void CreatesAndRetrievesNode()
     {

@@ -64,7 +64,7 @@ tests:
       - "MATCH (a:Node {name: 'A'}), (b:Node {name: 'B'}) INSERT (a)-[:LINK]->(b)"
       - "MATCH (b:Node {name: 'B'}), (c:Node {name: 'C'}) INSERT (b)-[:LINK]->(c)"
       - "MATCH (c:Node {name: 'C'}), (d:Node {name: 'D'}) INSERT (c)-[:LINK]->(d)"
-    query: "MATCH (a:Node {name: 'A'})-[:LINK]->{2,}(b:Node) RETURN b.name AS name ORDER BY name"
+    query: "MATCH TRAIL (a:Node {name: 'A'})-[:LINK]->{2,}(b:Node) RETURN b.name AS name ORDER BY name"
     expect:
       ordered: true
       rows:
@@ -181,7 +181,7 @@ tests:
       - "INSERT (:Node {name: 'C'})"
       - "MATCH (a:Node {name: 'A'}), (b:Node {name: 'B'}) INSERT (a)-[:LINK]->(b)"
       - "MATCH (b:Node {name: 'B'}), (c:Node {name: 'C'}) INSERT (b)-[:LINK]->(c)"
-    query: "MATCH (a:Node {name: 'A'})-[:LINK]->*(b:Node) RETURN b.name AS name ORDER BY name"
+    query: "MATCH TRAIL (a:Node {name: 'A'})-[:LINK]->*(b:Node) RETURN b.name AS name ORDER BY name"
     expect:
       ordered: true
       rows:
@@ -199,7 +199,7 @@ tests:
       - "MATCH (a:Node {name: 'A'}), (b:Node {name: 'B'}) INSERT (a)-[:LINK]->(b)"
       - "MATCH (b:Node {name: 'B'}), (c:Node {name: 'C'}) INSERT (b)-[:LINK]->(c)"
       - "MATCH (c:Node {name: 'C'}), (d:Node {name: 'D'}) INSERT (c)-[:LINK]->(d)"
-    query: "MATCH (a:Node {name: 'A'})-[:LINK]->+(b:Node) RETURN b.name AS name ORDER BY name"
+    query: "MATCH TRAIL (a:Node {name: 'A'})-[:LINK]->+(b:Node) RETURN b.name AS name ORDER BY name"
     expect:
       ordered: true
       rows:
@@ -211,7 +211,7 @@ tests:
   - name: iso_16_11_plus_requires_at_least_one
     setup:
       - "INSERT (:Node {name: 'A'})"
-    query: "MATCH (a:Node {name: 'A'})-[:LINK]->+(b:Node) RETURN b.name"
+    query: "MATCH TRAIL (a:Node {name: 'A'})-[:LINK]->+(b:Node) RETURN b.name"
     expect:
       empty: true
 

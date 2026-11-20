@@ -1,0 +1,198 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/typeConversion/TypeConversion3.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.TypeConversion3"
+  title: "TypeConversion3 - To Float"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] `toFloat()` on mixed number types
+  - name: s1_tofloat_on_mixed_number_types
+    query: |
+      WITH [3.4, 3] AS numbers
+      RETURN [n IN numbers | toFloat(n)] AS float_numbers
+    expect:
+      values: |
+        | float_numbers |
+        | [3.4, 3.0] |
+      side_effects: {}
+
+  # [2] `toFloat()` returning null on non-numerical string
+  - name: s2_tofloat_returning_null_on_non_numerical_string
+    query: |
+      WITH 'foo' AS foo_string, '' AS empty_string
+      RETURN toFloat(foo_string) AS foo, toFloat(empty_string) AS empty
+    expect:
+      values: |
+        | foo | empty |
+        | null | null |
+      side_effects: {}
+
+  # [3] `toFloat()` handling Any type
+  - name: s3_tofloat_handling_any_type
+    query: |
+      WITH [3.4, 3, '5'] AS numbers
+      RETURN [n IN numbers | toFloat(n)] AS float_numbers
+    expect:
+      values: |
+        | float_numbers |
+        | [3.4, 3.0, 5.0] |
+      side_effects: {}
+
+  # [4] `toFloat()` on a list of strings
+  - name: s4_tofloat_on_a_list_of_strings
+    query: |
+      WITH ['1', '2', 'foo'] AS numbers
+      RETURN [n IN numbers | toFloat(n)] AS float_numbers
+    expect:
+      values: |
+        | float_numbers |
+        | [1.0, 2.0, null] |
+      side_effects: {}
+
+  # [5] `toFloat()` on node property
+  - name: s5_tofloat_on_node_property
+    setup:
+      - |
+        CREATE (:Movie {rating: 4})
+    query: |
+      MATCH (m:Movie { rating: 4 })
+      WITH *
+      MATCH (n)
+      RETURN toFloat(n.rating) AS float
+    expect:
+      values: |
+        | float |
+        | 4.0 |
+      side_effects: {}
+
+  # [6] Fail `toFloat()` on invalid types #Example: boolean #1
+  # TCK: TypeError at runtime: InvalidArgumentValue
+  - name: s6_fail_tofloat_on_invalid_types_example_boolean_1
+    xfail:
+      spec: "openCypher TCK 2024.3 TypeConversion3: [6] Fail `toFloat()` on invalid types #Example: boolean #1"
+      issue: fix in 0.7.0
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH p = (n)-[r:T]->()
+      RETURN [x IN [1.0, true] | toFloat(x) ] AS list
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [6] Fail `toFloat()` on invalid types #Example: list #2
+  # TCK: TypeError at runtime: InvalidArgumentValue
+  - name: s6_fail_tofloat_on_invalid_types_example_list_2
+    xfail:
+      spec: "openCypher TCK 2024.3 TypeConversion3: [6] Fail `toFloat()` on invalid types #Example: list #2"
+      issue: fix in 0.7.0
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH p = (n)-[r:T]->()
+      RETURN [x IN [1.0, []] | toFloat(x) ] AS list
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [6] Fail `toFloat()` on invalid types #Example: map #3
+  # TCK: TypeError at runtime: InvalidArgumentValue
+  - name: s6_fail_tofloat_on_invalid_types_example_map_3
+    xfail:
+      spec: "openCypher TCK 2024.3 TypeConversion3: [6] Fail `toFloat()` on invalid types #Example: map #3"
+      issue: fix in 0.7.0
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH p = (n)-[r:T]->()
+      RETURN [x IN [1.0, {}] | toFloat(x) ] AS list
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [6] Fail `toFloat()` on invalid types #Example: node #4
+  # TCK: TypeError at runtime: InvalidArgumentValue
+  - name: s6_fail_tofloat_on_invalid_types_example_node_4
+    xfail:
+      spec: "openCypher TCK 2024.3 TypeConversion3: [6] Fail `toFloat()` on invalid types #Example: node #4"
+      issue: fix in 0.7.0
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH p = (n)-[r:T]->()
+      RETURN [x IN [1.0, n] | toFloat(x) ] AS list
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [6] Fail `toFloat()` on invalid types #Example: relationship #5
+  # TCK: TypeError at runtime: InvalidArgumentValue
+  - name: s6_fail_tofloat_on_invalid_types_example_relationship_5
+    xfail:
+      spec: "openCypher TCK 2024.3 TypeConversion3: [6] Fail `toFloat()` on invalid types #Example: relationship #5"
+      issue: fix in 0.7.0
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH p = (n)-[r:T]->()
+      RETURN [x IN [1.0, r] | toFloat(x) ] AS list
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [6] Fail `toFloat()` on invalid types #Example: path #6
+  # TCK: TypeError at runtime: InvalidArgumentValue
+  - name: s6_fail_tofloat_on_invalid_types_example_path_6
+    xfail:
+      spec: "openCypher TCK 2024.3 TypeConversion3: [6] Fail `toFloat()` on invalid types #Example: path #6"
+      issue: fix in 0.7.0
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH p = (n)-[r:T]->()
+      RETURN [x IN [1.0, p] | toFloat(x) ] AS list
+    expect:
+      gql_status: "22"
+      side_effects: {}

@@ -5,7 +5,8 @@ Runs the runner once per probe directory, with GRAFEO_SPEC_ROOT naming it, and
 once on a copy of the runner_error probe placed outside spec-probes, and checks
 how each run ends:
 
-- assertion: passes, and its summary line says `skipped=0 xfailed=2`;
+- assertion: passes, and its summary line says `skipped=0 xfailed=3` (an
+  unsupported statement is an expected failure, not a skip);
 - xpass: fails, and the output says XPASS with the case's spec and issue;
 - runner_error: fails with the runner's ordinary error, counting no xfail;
 - parse_skip_and_xfail, parse_xfail_without_issue: fail, naming the case;
@@ -116,9 +117,9 @@ def judge(probe: str, runner: str, code: int, output: str) -> list[str]:
     if probe == "assertion":
         if code != 0:
             problems.append(f"exit status {code}, expected 0")
-        if counted != [(0, 2)]:
+        if counted != [(0, 3)]:
             problems.append(
-                f"summary {counted}, expected one line: skipped=0 xfailed=2"
+                f"summary {counted}, expected one line: skipped=0 xfailed=3"
             )
         return problems
     if code == 0:

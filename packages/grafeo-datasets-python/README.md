@@ -48,7 +48,7 @@ A node has `key`, `label`, `name`, `description` and `props`. An edge has `type`
 
 `gql()` and `cypher()` return the whole script as text, one statement per line. Month-only dates load as the first of the month, with a `<field>_precision` property set to `'month'`.
 
-`turtle()` uses the namespace `https://grafeo.dev/datasets/silicon-valley/` and carries no vectors. Dates are `xsd:date`, so SPARQL range filters work on them; a month-only date is the first of the month, with `sv:<field>Precision "month"` on the same subject (for example `sv:fromPrecision`).
+`turtle()` uses the namespace `https://docs.grafeo.dev/datasets/silicon-valley/` and carries no vectors. Dates are `xsd:date`, so SPARQL range filters work on them; a month-only date is the first of the month, with `sv:<field>Precision "month"` on the same subject (for example `sv:fromPrecision`).
 
 ### Vectors
 

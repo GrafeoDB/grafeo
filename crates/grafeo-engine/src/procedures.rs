@@ -414,6 +414,26 @@ fn k_limit(params: &Parameters) -> Result<usize> {
     params.required_count("k")
 }
 
+/// The nodes a search procedure's `filters` map allows, at `view` (see
+/// [`filter_allowlist`](crate::database::filter_allowlist)); `None` without
+/// filters.
+#[cfg(any(feature = "vector-index", feature = "text-index"))]
+fn search_allowlist(
+    lpg: &RowGroupStore,
+    label: &str,
+    params: &Prepared,
+    view: grafeo_common::types::ReadView,
+) -> Result<Option<std::collections::HashSet<grafeo_common::types::NodeId>>> {
+    let Some(filters) = params.get_map("filters") else {
+        return Ok(None);
+    };
+    let filters: std::collections::HashMap<String, Value> = filters
+        .iter()
+        .map(|(key, value)| (key.as_str().to_owned(), value.clone()))
+        .collect();
+    crate::database::filter_allowlist(lpg, label, Some(&filters), view)
+}
+
 /// Converts a NodeId into a `Value::Int64`.
 /// Using `cast_signed` keeps the bit pattern; ids above `i64::MAX` would
 /// become negative, but the ID space is bounded well below that in practice.
@@ -422,7 +442,7 @@ fn node_id_to_value(node_id: grafeo_common::types::NodeId) -> Value {
     Value::Int64(node_id.as_u64().cast_signed())
 }
 
-/// `grafeo.search.vector(label, property, query, k)`:
+/// `grafeo.search.vector(label, property, query, k, filters)`:
 /// k-nearest-neighbors via the HNSW index.
 #[cfg(feature = "vector-index")]
 struct SearchVectorProcedure {
@@ -466,6 +486,15 @@ impl SearchVectorProcedure {
                     default: Some("10".into()),
                     domain: Domain::NonNegative,
                     description: "Number of nearest neighbors to return".into(),
+                },
+                ParameterDef {
+                    name: "filters".into(),
+                    param_type: ParameterType::Map,
+                    required: false,
+                    default: None,
+                    domain: Domain::OfType,
+                    description: "Property filters a node must meet, applied before the top k (as the search API's `filters`)"
+                        .into(),
                 },
             ],
         }
@@ -513,10 +542,11 @@ impl Procedure for SearchVectorProcedure {
         let config = GraphStore::vector_index_config(lpg, label, property).ok_or_else(missing)?;
         grafeo_core::index::vector::check_query_vector(&query, config.dimensions, label, property)?;
 
+        let allowed = search_allowlist(lpg, label, params, ctx.view())?;
         let search = grafeo_core::graph::rowgroup::IndexSearch {
             k,
             ef: None,
-            allowed: None,
+            allowed: allowed.as_ref(),
         };
         let results = lpg
             .vector_index_search_at(label, property, &query, search, ctx.view())?
@@ -533,7 +563,7 @@ impl Procedure for SearchVectorProcedure {
     }
 }
 
-/// `grafeo.search.mmr(label, property, query, k, fetch_k, lambda)`:
+/// `grafeo.search.mmr(label, property, query, k, fetch_k, lambda, filters)`:
 /// Maximal-Marginal-Relevance re-ranking of HNSW candidates for diverse top-k.
 #[cfg(feature = "vector-index")]
 struct SearchMmrProcedure {
@@ -594,6 +624,15 @@ impl SearchMmrProcedure {
                     domain: Domain::Unit,
                     description: "Relevance vs diversity in [0, 1]".into(),
                 },
+                ParameterDef {
+                    name: "filters".into(),
+                    param_type: ParameterType::Map,
+                    required: false,
+                    default: None,
+                    domain: Domain::OfType,
+                    description: "Property filters a node must meet, applied before the top k (as the search API's `filters`)"
+                        .into(),
+                },
             ],
         }
     }
@@ -651,10 +690,11 @@ impl Procedure for SearchMmrProcedure {
         grafeo_core::index::vector::check_query_vector(&query, config.dimensions, label, property)?;
 
         let view = ctx.view();
+        let allowed = search_allowlist(lpg, label, params, view)?;
         let search = grafeo_core::graph::rowgroup::IndexSearch {
             k: fetch_k,
             ef: None,
-            allowed: None,
+            allowed: allowed.as_ref(),
         };
         let initial = lpg
             .vector_index_search_at(label, property, &query, search, view)?
@@ -689,7 +729,7 @@ impl Procedure for SearchMmrProcedure {
     }
 }
 
-/// `grafeo.search.text(label, property, query, k)`:
+/// `grafeo.search.text(label, property, query, k, filters)`:
 /// BM25 full-text search over the inverted index.
 #[cfg(feature = "text-index")]
 struct SearchTextProcedure {
@@ -733,6 +773,15 @@ impl SearchTextProcedure {
                     default: Some("10".into()),
                     domain: Domain::NonNegative,
                     description: "Number of top results to return".into(),
+                },
+                ParameterDef {
+                    name: "filters".into(),
+                    param_type: ParameterType::Map,
+                    required: false,
+                    default: None,
+                    domain: Domain::OfType,
+                    description: "Property filters a node must meet, applied before the top k (as the search API's `filters`)"
+                        .into(),
                 },
             ],
         }
@@ -778,10 +827,11 @@ impl Procedure for SearchTextProcedure {
         let query = params.required_string("query")?;
         let k = k_limit(params)?;
 
+        let allowed = search_allowlist(lpg, label, params, ctx.view())?;
         let search = grafeo_core::graph::rowgroup::IndexSearch {
             k,
             ef: None,
-            allowed: None,
+            allowed: allowed.as_ref(),
         };
         let results = lpg
             .text_index_search_at(label, property, query, search, ctx.view())?

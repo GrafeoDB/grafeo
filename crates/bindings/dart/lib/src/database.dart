@@ -26,7 +26,8 @@ import 'value.dart';
 /// [GrafeoDB.openWithOptions]. A null setting is the default: 75% of the
 /// memory the process may use for [memoryLimit], [memoryLimit] for
 /// [queryMemoryLimit], a quarter of [memoryLimit] (at most 256 MiB) for
-/// [pathSearchBudget], half the spill volume's free space for [spillLimit]. A
+/// [pathSearchBudget], a quarter of [memoryLimit] (at least 1 MiB) for
+/// [snapshotRetentionLimit], half the spill volume's free space for [spillLimit]. A
 /// write past the memory limit throws `GRAFEO-S001`, and so does a path search
 /// over its budget. One object may open several databases.
 class GrafeoOptions {
@@ -43,6 +44,19 @@ class GrafeoOptions {
   /// counted yet). Never more than [memoryLimit]; zero fails at the open.
   final int? pathSearchBudget;
 
+  /// How many bytes of replaced data an open transaction's snapshot may keep:
+  /// what the commits since it began replaced that it can still read. Past it
+  /// the transaction's next call throws the retryable `GRAFEO-T012` and rolls
+  /// it back. Below 1 MiB fails at the open.
+  final int? snapshotRetentionLimit;
+
+  /// How many bytes of replaced data the history window may keep: once the
+  /// commits since its start replaced more, the start moves forward, whichever
+  /// of time or bytes comes first, and a read before it is refused. No limit
+  /// by default; zero fails at the open. Not stored with the database: pass it
+  /// at every open.
+  final int? historyRetentionLimit;
+
   /// How many bytes may spill to disk; zero means nothing spills.
   final int? spillLimit;
 
@@ -54,6 +68,8 @@ class GrafeoOptions {
     this.memoryLimit,
     this.queryMemoryLimit,
     this.pathSearchBudget,
+    this.snapshotRetentionLimit,
+    this.historyRetentionLimit,
     this.spillLimit,
     this.unlimitedSpill = false,
   });
@@ -85,6 +101,22 @@ class GrafeoOptions {
         throw ArgumentError.value(paths, 'pathSearchBudget', 'must not be negative');
       }
       check(bindings.grafeoOptionsSetPathSearchBudget(native, paths));
+    }
+    final snapshots = snapshotRetentionLimit;
+    if (snapshots != null) {
+      if (snapshots < 0) {
+        throw ArgumentError.value(
+            snapshots, 'snapshotRetentionLimit', 'must not be negative');
+      }
+      check(bindings.grafeoOptionsSetSnapshotRetentionLimit(native, snapshots));
+    }
+    final history = historyRetentionLimit;
+    if (history != null) {
+      if (history < 0) {
+        throw ArgumentError.value(
+            history, 'historyRetentionLimit', 'must not be negative');
+      }
+      check(bindings.grafeoOptionsSetHistoryRetentionLimit(native, history));
     }
     final spill = spillLimit;
     if (unlimitedSpill) {
@@ -233,7 +265,8 @@ class GrafeoDB implements Finalizable {
 
   /// Close the database, flushing all writes.
   ///
-  /// Safe to call multiple times. After close, all other methods throw.
+  /// Safe to call multiple times. After close, every other method, and every
+  /// method of what the database handed out, throws GRAFEO-T007.
   void close() {
     if (_closed) return;
     _closed = true;
@@ -261,9 +294,15 @@ class GrafeoDB implements Finalizable {
     return ptr.toDartString();
   }
 
+  /// Every call after [close] throws the GRAFEO-T007 error, as the native
+  /// layer reports a closed database to what the database handed out.
   void _checkOpen() {
     if (_closed) {
-      throw DatabaseException('Database is closed', GrafeoStatus.database);
+      throw const DatabaseException(
+        'GRAFEO-T007: the database is closed: open it again',
+        GrafeoStatus.database,
+        gqlStatus: '25000',
+      );
     }
   }
 

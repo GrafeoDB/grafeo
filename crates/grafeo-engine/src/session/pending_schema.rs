@@ -18,7 +18,7 @@ use grafeo_common::utils::error::{Error, Result, TransactionError};
 use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
-use super::Session;
+use super::SessionInner;
 use crate::catalog::{Catalog, CatalogConstraintValidator, RuleScope, check_data_against_rules};
 use crate::database::index::{IndexTarget, drop_names_left_without_index, store_has};
 use crate::database::standalone::{
@@ -59,7 +59,7 @@ impl PropertyIndexesOn {
     }
 }
 
-impl Session {
+impl SessionInner {
     /// The catalog this session's statements read: the open transaction's own view, when
     /// it ran a schema statement.
     pub(super) fn effective_catalog(&self) -> Arc<Catalog> {

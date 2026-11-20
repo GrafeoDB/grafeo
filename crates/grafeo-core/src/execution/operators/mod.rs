@@ -92,7 +92,7 @@ pub use factorized_filter::{
     FactorizedPredicate, OrPredicate, PropertyPredicate,
 };
 pub use filter::{
-    BinaryFilterOp, ExpressionPredicate, FilterExpression, FilterOperator, LazyValue,
+    BinaryFilterOp, ChosenPart, ExpressionPredicate, FilterExpression, FilterOperator, LazyValue,
     ListPredicateKind, Predicate, SessionContext, StatementClock, UnaryFilterOp,
 };
 pub use functions::{

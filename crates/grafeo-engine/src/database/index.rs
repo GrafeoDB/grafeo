@@ -528,7 +528,7 @@ fn vector_index_at(
 
     let metric = vector_index_metric(metric)?;
     check_vector_index_dimensions(dimensions)?;
-    let quantization = super::GrafeoDB::parse_quantization(quantization)?;
+    let quantization = super::Open::parse_quantization(quantization)?;
 
     let nodes = graph.nodes_by_label(label, latest)?;
     let vector_of = |node_id| -> Result<Option<std::sync::Arc<[f32]>>> {
@@ -556,7 +556,7 @@ fn vector_index_at(
     };
 
     let index =
-        super::GrafeoDB::build_vector_index(dims, metric, m, ef_construction, quantization, count);
+        super::Open::build_vector_index(dims, metric, m, ef_construction, quantization, count);
     match &index {
         VectorIndexKind::Hnsw(_) => {
             let accessor =
@@ -833,7 +833,7 @@ pub(crate) fn drops_of_property_indexes(
     drops
 }
 
-impl super::GrafeoDB {
+impl super::Open {
     // =========================================================================
     // PROPERTY INDEX API
     // =========================================================================
@@ -852,34 +852,7 @@ impl super::GrafeoDB {
         })
     }
 
-    /// Creates an index on a node property of the current graph, for O(1)
-    /// lookups by value.
-    ///
-    /// After creating an index, calls to [`Self::find_nodes_by_property`] will be
-    /// O(1) instead of O(n) for this property. The index is automatically
-    /// maintained when properties are set or removed. Commits are held off
-    /// while it is built, as for `CREATE INDEX`.
-    ///
-    /// # Errors
-    ///
-    /// Returns the database-closed error after `close()` of a persistent
-    /// database, and the incomplete-commit error after a commit that did not
-    /// complete.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use grafeo_engine::GrafeoDB;
-    /// # use grafeo_common::types::Value;
-    /// # let db = GrafeoDB::new_in_memory();
-    /// // Create an index on the 'email' property
-    /// db.create_property_index("email")?;
-    ///
-    /// // Now lookups by email are O(1)
-    /// let nodes = db.find_nodes_by_property("email", &Value::from("alix@example.com"));
-    /// # Ok::<(), grafeo_common::utils::error::Error>(())
-    /// ```
-    pub fn create_property_index(&self, property: &str) -> Result<()> {
+    pub(crate) fn create_property_index(&self, property: &str) -> Result<()> {
         let held = self.hold_for_standalone(false)?;
         let graph = self.current_graph_key();
         if self.current_lpg_store()?.index_serves(&[], property) {
@@ -895,15 +868,7 @@ impl super::GrafeoDB {
         self.commit_standalone(change, &held)
     }
 
-    /// Drops every index on a node property of the current graph: the one on every label and
-    /// each one `CREATE INDEX` made on a label.
-    ///
-    /// Returns `true` if the index existed and was removed.
-    ///
-    /// # Errors
-    ///
-    /// As [`create_property_index`](Self::create_property_index).
-    pub fn drop_property_index(&self, property: &str) -> Result<bool> {
+    pub(crate) fn drop_property_index(&self, property: &str) -> Result<bool> {
         let held = self.hold_for_standalone(false)?;
         let graph = self.current_graph_key();
         let drops =
@@ -948,7 +913,7 @@ impl super::GrafeoDB {
     }
 
     /// Fails before an index is built when it could not be installed: after
-    /// `close()` of a persistent database, or after a commit that did not
+    /// `close()`, or after a commit that did not
     /// complete. The install checks again, holding commits off.
     #[cfg(any(feature = "vector-index", feature = "text-index"))]
     fn check_index_change(&self) -> Result<()> {
@@ -956,38 +921,14 @@ impl super::GrafeoDB {
         self.transaction_manager.check_open()
     }
 
-    /// Returns `true` if the property has an index in the current graph, on every label or on
-    /// one.
     #[must_use]
-    pub fn has_property_index(&self, property: &str) -> bool {
+    pub(crate) fn has_property_index(&self, property: &str) -> bool {
         // A backend of its own has no index.
         self.current_lpg_store()
             .is_ok_and(|store| store.has_property_index(property))
     }
 
-    /// Finds all nodes of the current graph that have a specific property value.
-    ///
-    /// If the property is indexed, this is O(1). Otherwise, it scans all nodes
-    /// which is O(n). Use [`Self::create_property_index`] for frequently queried properties.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use grafeo_engine::GrafeoDB;
-    /// # use grafeo_common::types::Value;
-    /// # let db = GrafeoDB::new_in_memory();
-    /// // Create index for fast lookups (optional but recommended)
-    /// db.create_property_index("city")?;
-    ///
-    /// // Find all nodes where city = "Amsterdam"
-    /// let in_amsterdam = db.find_nodes_by_property("city", &Value::from("Amsterdam"))?;
-    /// # Ok::<(), grafeo_common::utils::error::Error>(())
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// The error of a read the store cannot do (an external store's own).
-    pub fn find_nodes_by_property(
+    pub(crate) fn find_nodes_by_property(
         &self,
         property: &str,
         value: &grafeo_common::types::Value,
@@ -1003,43 +944,8 @@ impl super::GrafeoDB {
     // VECTOR INDEX API
     // =========================================================================
 
-    /// Creates a vector similarity index on a node property.
-    ///
-    /// This enables efficient approximate nearest-neighbor search on vector
-    /// properties: it builds an HNSW index over the nodes with `label` whose
-    /// `property` holds a vector of the expected dimensions.
-    ///
-    /// A list of numbers in the property is stored as a vector of 32-bit
-    /// floats once the index exists: the lists already there are converted
-    /// when it is created, and a list written later is stored as one. The
-    /// property then reads back as those floats (a decimal `0.0070` as
-    /// `0.007000000216...`).
-    ///
-    /// # Arguments
-    ///
-    /// * `label` - Node label to index (e.g., `"Doc"`)
-    /// * `property` - Property containing vector embeddings (e.g., `"embedding"`)
-    /// * `dimensions` - Expected vector dimensions (inferred from data if `None`)
-    /// * `metric` - Distance metric: `"cosine"` (default), `"euclidean"`, `"dot_product"`, `"manhattan"`
-    /// * `m` - HNSW links per node (default: 16). Higher = better recall, more memory.
-    /// * `ef_construction` - Construction beam width (default: 128). Higher = better index quality, slower build.
-    /// * `quantization` - Quantization mode: `None` (default), `"scalar"`, `"binary"`, or `"product"`.
-    ///   Quantized indexes use less memory at the cost of slightly lower recall.
-    ///
-    /// The index is built from the data without holding commits off, then
-    /// logged and installed (in place of an index on the same label and
-    /// property) holding them off; a database opened again after a crash
-    /// builds it again, with these parameters.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the metric is invalid, no vectors are found, or
-    /// dimensions don't match; the database-closed error after `close()` of a
-    /// persistent database, and the incomplete-commit error after a commit
-    /// that did not complete; an error in a build without the `vector-index`
-    /// feature.
     #[allow(clippy::too_many_arguments)]
-    pub fn create_vector_index(
+    pub(crate) fn create_vector_index(
         &self,
         label: &str,
         property: &str,
@@ -1214,21 +1120,8 @@ impl super::GrafeoDB {
         }
     }
 
-    /// Drops a vector index for the given label and property.
-    ///
-    /// Returns `true` if the index existed and was removed, `false` if no
-    /// index was found.
-    ///
-    /// After dropping, [`vector_search`](Self::vector_search) for this
-    /// label+property pair will return an error.
-    ///
-    /// # Errors
-    ///
-    /// Returns the database-closed error after `close()` of a persistent
-    /// database, and the incomplete-commit error after a commit that did not
-    /// complete.
     #[cfg(feature = "vector-index")]
-    pub fn drop_vector_index(&self, label: &str, property: &str) -> Result<bool> {
+    pub(crate) fn drop_vector_index(&self, label: &str, property: &str) -> Result<bool> {
         let held = self.hold_for_standalone(false)?;
         if self
             .current_lpg_store()?
@@ -1279,34 +1172,8 @@ impl super::GrafeoDB {
         }
     }
 
-    /// Drops and recreates a vector index, rescanning all matching nodes.
-    ///
-    /// In normal usage you do **not** need to call this. Vector indexes
-    /// auto-sync when nodes are created or updated via
-    /// [`set_node_property`](Self::set_node_property),
-    /// [`batch_create_nodes`](Self::batch_create_nodes), or
-    /// [`batch_create_nodes_with_props`](Self::batch_create_nodes_with_props).
-    ///
-    /// Use `rebuild_vector_index` only when:
-    /// - Data was loaded through non-standard paths (e.g., persistence
-    ///   restore or direct store manipulation) before the index existed.
-    /// - You want to compact the index after many deletions (HNSW does
-    ///   not reclaim deleted-node slots automatically).
-    /// - The index configuration needs to be refreshed after upgrading.
-    ///
-    /// When the index still exists, the previous configuration (dimensions,
-    /// metric, M, ef\_construction) is preserved. When it has already been
-    /// dropped, dimensions are inferred from existing data and default
-    /// parameters are used. The new index replaces the old one once it is
-    /// built; a rebuild that fails leaves the old one.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the rebuild fails (e.g., no matching vectors found
-    /// and no dimensions can be inferred), and the errors of
-    /// [`create_vector_index`](Self::create_vector_index).
     #[cfg(feature = "vector-index")]
-    pub fn rebuild_vector_index(&self, label: &str, property: &str) -> Result<()> {
+    pub(crate) fn rebuild_vector_index(&self, label: &str, property: &str) -> Result<()> {
         // Preserve config and quantization type from existing index if available
         let existing = self.current_lpg_store()?.get_vector_index(label, property);
 
@@ -1338,27 +1205,8 @@ impl super::GrafeoDB {
     // TEXT INDEX API
     // =========================================================================
 
-    /// Creates a BM25 text index on a node property for full-text search,
-    /// with the default options: BM25 with k1 1.2 and b 0.75, the `simple`
-    /// tokenizer and its English stop words (see
-    /// [`create_text_index_with`](Self::create_text_index_with)).
-    ///
-    /// Indexes all existing nodes with the given label and property.
-    /// The index stays in sync automatically as nodes are created, updated,
-    /// or deleted. Use [`rebuild_text_index`](Self::rebuild_text_index) only
-    /// if the index was created before existing data was loaded.
-    ///
-    /// The index is built from the data without holding commits off, then
-    /// logged and installed (in place of an index on the same label and
-    /// property) holding them off.
-    ///
-    /// # Errors
-    ///
-    /// Returns the database-closed error after `close()` of a persistent
-    /// database, and the incomplete-commit error after a commit that did not
-    /// complete.
     #[cfg(feature = "text-index")]
-    pub fn create_text_index(&self, label: &str, property: &str) -> Result<()> {
+    pub(crate) fn create_text_index(&self, label: &str, property: &str) -> Result<()> {
         self.create_text_index_with(
             label,
             property,
@@ -1366,37 +1214,8 @@ impl super::GrafeoDB {
         )
     }
 
-    /// Creates a BM25 text index on a node property with `options`: its
-    /// BM25 parameters (k1, b), its tokenizer and its stop words, as
-    /// [`create_text_index`](Self::create_text_index) does otherwise. The
-    /// database keeps the options with the index: a reopen, a crash
-    /// recovery and [`rebuild_text_index`](Self::rebuild_text_index) build
-    /// it with them.
-    ///
-    /// ```no_run
-    /// # use grafeo_engine::GrafeoDB;
-    /// use grafeo_engine::{TextIndexOptions, TokenizerKind};
-    ///
-    /// # let db = GrafeoDB::new_in_memory();
-    /// db.create_text_index_with(
-    ///     "Article",
-    ///     "body",
-    ///     TextIndexOptions::new()
-    ///         .with_k1(1.5)
-    ///         .with_b(0.3)
-    ///         .with_tokenizer(TokenizerKind::CjkBigram),
-    /// )?;
-    /// # Ok::<(), grafeo_common::utils::error::Error>(())
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// An invalid-value error (`GRAFEO-V001`) when k1 is not a finite number
-    /// of at least 0, b not a number from 0 to 1, or the stop words hold more
-    /// than [`MAX_STOP_WORD_BYTES`](grafeo_core::index::text::MAX_STOP_WORD_BYTES);
-    /// and the errors of [`create_text_index`](Self::create_text_index).
     #[cfg(feature = "text-index")]
-    pub fn create_text_index_with(
+    pub(crate) fn create_text_index_with(
         &self,
         label: &str,
         property: &str,
@@ -1417,11 +1236,9 @@ impl super::GrafeoDB {
         self.commit_standalone(change, &held)
     }
 
-    /// The options of the text index on `label` and `property` of the
-    /// current graph, or `None` when there is no such index.
     #[cfg(feature = "text-index")]
     #[must_use]
-    pub fn text_index_options(
+    pub(crate) fn text_index_options(
         &self,
         label: &str,
         property: &str,
@@ -1463,17 +1280,8 @@ impl super::GrafeoDB {
         Ok(())
     }
 
-    /// Drops a text index on a label+property pair.
-    ///
-    /// Returns `true` if the index existed and was removed.
-    ///
-    /// # Errors
-    ///
-    /// Returns the database-closed error after `close()` of a persistent
-    /// database, and the incomplete-commit error after a commit that did not
-    /// complete.
     #[cfg(feature = "text-index")]
-    pub fn drop_text_index(&self, label: &str, property: &str) -> Result<bool> {
+    pub(crate) fn drop_text_index(&self, label: &str, property: &str) -> Result<bool> {
         let held = self.hold_for_standalone(false)?;
         if self
             .current_lpg_store()?
@@ -1498,6 +1306,293 @@ impl super::GrafeoDB {
         Ok(true)
     }
 
+    #[cfg(feature = "text-index")]
+    pub(crate) fn rebuild_text_index(&self, label: &str, property: &str) -> Result<()> {
+        let options = self.text_index_options(label, property).unwrap_or_default();
+        self.create_text_index_with(label, property, options)
+    }
+}
+
+// The database's public methods: each reaches the open state for its call (#712).
+impl super::GrafeoDB {
+    /// Creates an index on a node property of the current graph, for O(1)
+    /// lookups by value.
+    ///
+    /// After creating an index, calls to [`Self::find_nodes_by_property`] will be
+    /// O(1) instead of O(n) for this property. The index is automatically
+    /// maintained when properties are set or removed. Commits are held off
+    /// while it is built, as for `CREATE INDEX`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database-closed error after `close()`, and the incomplete-commit error after a
+    /// commit that did not complete.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use grafeo_engine::GrafeoDB;
+    /// # use grafeo_common::types::Value;
+    /// # let db = GrafeoDB::new_in_memory();
+    /// // Create an index on the 'email' property
+    /// db.create_property_index("email")?;
+    ///
+    /// // Now lookups by email are O(1)
+    /// let nodes = db.find_nodes_by_property("email", &Value::from("alix@example.com"));
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
+    /// ```
+    pub fn create_property_index(&self, property: &str) -> Result<()> {
+        self.live()?.create_property_index(property)
+    }
+
+    /// Drops every index on a node property of the current graph: the one on every label and
+    /// each one `CREATE INDEX` made on a label.
+    ///
+    /// Returns `true` if the index existed and was removed.
+    ///
+    /// # Errors
+    ///
+    /// As [`create_property_index`](Self::create_property_index).
+    pub fn drop_property_index(&self, property: &str) -> Result<bool> {
+        self.live()?.drop_property_index(property)
+    }
+
+    /// Returns `true` if the property has an index in the current graph, on every label or on
+    /// one. After `close()` it returns `false`; it returns a `Result` from 0.7.0.
+    #[must_use]
+    pub fn has_property_index(&self, property: &str) -> bool {
+        self.live_if()
+            .map_or_else(Default::default, |open| open.has_property_index(property))
+    }
+
+    /// Finds all nodes of the current graph that have a specific property value.
+    ///
+    /// If the property is indexed, this is O(1). Otherwise, it scans all nodes
+    /// which is O(n). Use [`Self::create_property_index`] for frequently queried properties.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use grafeo_engine::GrafeoDB;
+    /// # use grafeo_common::types::Value;
+    /// # let db = GrafeoDB::new_in_memory();
+    /// // Create index for fast lookups (optional but recommended)
+    /// db.create_property_index("city")?;
+    ///
+    /// // Find all nodes where city = "Amsterdam"
+    /// let in_amsterdam = db.find_nodes_by_property("city", &Value::from("Amsterdam"))?;
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do (an external store's own).
+    pub fn find_nodes_by_property(
+        &self,
+        property: &str,
+        value: &grafeo_common::types::Value,
+    ) -> Result<Vec<grafeo_common::types::NodeId>> {
+        self.live()?.find_nodes_by_property(property, value)
+    }
+
+    /// Creates a vector similarity index on a node property.
+    ///
+    /// This enables efficient approximate nearest-neighbor search on vector
+    /// properties: it builds an HNSW index over the nodes with `label` whose
+    /// `property` holds a vector of the expected dimensions.
+    ///
+    /// A list of numbers in the property is stored as a vector of 32-bit
+    /// floats once the index exists: the lists already there are converted
+    /// when it is created, and a list written later is stored as one. The
+    /// property then reads back as those floats (a decimal `0.0070` as
+    /// `0.007000000216...`).
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - Node label to index (e.g., `"Doc"`)
+    /// * `property` - Property containing vector embeddings (e.g., `"embedding"`)
+    /// * `dimensions` - Expected vector dimensions (inferred from data if `None`)
+    /// * `metric` - Distance metric: `"cosine"` (default), `"euclidean"`, `"dot_product"`, `"manhattan"`
+    /// * `m` - HNSW links per node (default: 16). Higher = better recall, more memory.
+    /// * `ef_construction` - Construction beam width (default: 128). Higher = better index quality, slower build.
+    /// * `quantization` - Quantization mode: `None` (default), `"scalar"`, `"binary"`, or `"product"`.
+    ///   Quantized indexes use less memory at the cost of slightly lower recall.
+    ///
+    /// The index is built from the data without holding commits off, then
+    /// logged and installed (in place of an index on the same label and
+    /// property) holding them off; a database opened again after a crash
+    /// builds it again, with these parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the metric is invalid, no vectors are found, or
+    /// dimensions don't match; the database-closed error after `close()`, and the incomplete-commit
+    /// error after a commit that did not complete; an error in a build without the `vector-index`
+    /// feature.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "forwards the open state's method, whose signature the 0.6 facade keeps"
+    )]
+    pub fn create_vector_index(
+        &self,
+        label: &str,
+        property: &str,
+        dimensions: Option<usize>,
+        metric: Option<&str>,
+        m: Option<usize>,
+        ef_construction: Option<usize>,
+        quantization: Option<&str>,
+    ) -> Result<()> {
+        self.live()?.create_vector_index(
+            label,
+            property,
+            dimensions,
+            metric,
+            m,
+            ef_construction,
+            quantization,
+        )
+    }
+
+    /// Drops a vector index for the given label and property.
+    ///
+    /// Returns `true` if the index existed and was removed, `false` if no
+    /// index was found.
+    ///
+    /// After dropping, [`vector_search`](Self::vector_search) for this
+    /// label+property pair will return an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database-closed error after `close()`, and the incomplete-commit error after a
+    /// commit that did not complete.
+    #[cfg(feature = "vector-index")]
+    pub fn drop_vector_index(&self, label: &str, property: &str) -> Result<bool> {
+        self.live()?.drop_vector_index(label, property)
+    }
+
+    /// Drops and recreates a vector index, rescanning all matching nodes.
+    ///
+    /// In normal usage you do **not** need to call this. Vector indexes
+    /// auto-sync when nodes are created or updated via
+    /// [`set_node_property`](Self::set_node_property),
+    /// [`batch_create_nodes`](Self::batch_create_nodes), or
+    /// [`batch_create_nodes_with_props`](Self::batch_create_nodes_with_props).
+    ///
+    /// Use `rebuild_vector_index` only when:
+    /// - Data was loaded through non-standard paths (e.g., persistence
+    ///   restore or direct store manipulation) before the index existed.
+    /// - You want to compact the index after many deletions (HNSW does
+    ///   not reclaim deleted-node slots automatically).
+    /// - The index configuration needs to be refreshed after upgrading.
+    ///
+    /// When the index still exists, the previous configuration (dimensions,
+    /// metric, M, ef\_construction) is preserved. When it has already been
+    /// dropped, dimensions are inferred from existing data and default
+    /// parameters are used. The new index replaces the old one once it is
+    /// built; a rebuild that fails leaves the old one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the rebuild fails (e.g., no matching vectors found
+    /// and no dimensions can be inferred), and the errors of
+    /// [`create_vector_index`](Self::create_vector_index).
+    #[cfg(feature = "vector-index")]
+    pub fn rebuild_vector_index(&self, label: &str, property: &str) -> Result<()> {
+        self.live()?.rebuild_vector_index(label, property)
+    }
+
+    /// Creates a BM25 text index on a node property for full-text search,
+    /// with the default options: BM25 with k1 1.2 and b 0.75, the `simple`
+    /// tokenizer and its English stop words (see
+    /// [`create_text_index_with`](Self::create_text_index_with)).
+    ///
+    /// Indexes all existing nodes with the given label and property.
+    /// The index stays in sync automatically as nodes are created, updated,
+    /// or deleted. Use [`rebuild_text_index`](Self::rebuild_text_index) only
+    /// if the index was created before existing data was loaded.
+    ///
+    /// The index is built from the data without holding commits off, then
+    /// logged and installed (in place of an index on the same label and
+    /// property) holding them off.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database-closed error after `close()`, and the incomplete-commit error after a
+    /// commit that did not complete.
+    #[cfg(feature = "text-index")]
+    pub fn create_text_index(&self, label: &str, property: &str) -> Result<()> {
+        self.live()?.create_text_index(label, property)
+    }
+
+    /// Creates a BM25 text index on a node property with `options`: its
+    /// BM25 parameters (k1, b), its tokenizer and its stop words, as
+    /// [`create_text_index`](Self::create_text_index) does otherwise. The
+    /// database keeps the options with the index: a reopen, a crash
+    /// recovery and [`rebuild_text_index`](Self::rebuild_text_index) build
+    /// it with them.
+    ///
+    /// ```no_run
+    /// # use grafeo_engine::GrafeoDB;
+    /// use grafeo_engine::{TextIndexOptions, TokenizerKind};
+    ///
+    /// # let db = GrafeoDB::new_in_memory();
+    /// db.create_text_index_with(
+    ///     "Article",
+    ///     "body",
+    ///     TextIndexOptions::new()
+    ///         .with_k1(1.5)
+    ///         .with_b(0.3)
+    ///         .with_tokenizer(TokenizerKind::CjkBigram),
+    /// )?;
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// An invalid-value error (`GRAFEO-V001`) when k1 is not a finite number
+    /// of at least 0, b not a number from 0 to 1, or the stop words hold more
+    /// than [`MAX_STOP_WORD_BYTES`](grafeo_core::index::text::MAX_STOP_WORD_BYTES);
+    /// and the errors of [`create_text_index`](Self::create_text_index).
+    #[cfg(feature = "text-index")]
+    pub fn create_text_index_with(
+        &self,
+        label: &str,
+        property: &str,
+        options: grafeo_core::index::text::TextIndexOptions,
+    ) -> Result<()> {
+        self.live()?
+            .create_text_index_with(label, property, options)
+    }
+
+    /// The options of the text index on `label` and `property` of the
+    /// current graph, or `None` when there is no such index. After `close()` it returns `None`; it
+    /// returns a `Result` from 0.7.0.
+    #[cfg(feature = "text-index")]
+    #[must_use]
+    pub fn text_index_options(
+        &self,
+        label: &str,
+        property: &str,
+    ) -> Option<grafeo_core::index::text::TextIndexOptions> {
+        self.live_if().map_or_else(Default::default, |open| {
+            open.text_index_options(label, property)
+        })
+    }
+
+    /// Drops a text index on a label+property pair.
+    ///
+    /// Returns `true` if the index existed and was removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database-closed error after `close()`, and the incomplete-commit error after a
+    /// commit that did not complete.
+    #[cfg(feature = "text-index")]
+    pub fn drop_text_index(&self, label: &str, property: &str) -> Result<bool> {
+        self.live()?.drop_text_index(label, property)
+    }
+
     /// Rebuilds a text index by re-scanning all matching nodes: the new index
     /// replaces the old one once it is built, with the options of the old
     /// one (the default options when there is none).
@@ -1509,7 +1604,6 @@ impl super::GrafeoDB {
     /// The errors of [`create_text_index`](Self::create_text_index).
     #[cfg(feature = "text-index")]
     pub fn rebuild_text_index(&self, label: &str, property: &str) -> Result<()> {
-        let options = self.text_index_options(label, property).unwrap_or_default();
-        self.create_text_index_with(label, property, options)
+        self.live()?.rebuild_text_index(label, property)
     }
 }

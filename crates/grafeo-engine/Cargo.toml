@@ -192,6 +192,11 @@ path = "tests/functions_without_their_features.rs"
 name = "legacy_spill"
 path = "tests/legacy_spill.rs"
 
+# CI runs it without `spill` (the query memory limit in every build), where `main` does not build.
+[[test]]
+name = "memory_query_limit_operators"
+path = "tests/memory_query_limit_operators.rs"
+
 # Installs a global tracing subscriber, and CI runs it with encryption and crash injection on top of the shipped features.
 [[test]]
 name = "migration"
@@ -273,6 +278,11 @@ path = "tests/search_indexes_without_their_features.rs"
 name = "snapshot_without_its_features"
 path = "tests/snapshot_without_its_features.rs"
 
+# CI runs it without `spill` (the query memory limit in every build), where `main` does not build.
+[[test]]
+name = "sparql_order_under_limit"
+path = "tests/sparql_order_under_limit.rs"
+
 # CI runs it with encryption and crash injection on top of the shipped features; only these three need that build.
 [[test]]
 name = "spilled_embeddings"
@@ -282,3 +292,8 @@ path = "tests/spilled_embeddings.rs"
 [[test]]
 name = "writes_after_close"
 path = "tests/writes_after_close.rs"
+
+# A counting global allocator, which needs a process of its own.
+[[test]]
+name = "streamed_finalize_peak"
+path = "tests/streamed_finalize_peak.rs"

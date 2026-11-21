@@ -144,10 +144,12 @@
 //! 2. **Write**: new rows and deletes get the transaction's pending stamp.
 //!    Writes are recorded via `record_write` for conflict detection.
 //! 3. **Commit**: a successful commit fetches a new epoch via
-//!    `fetch_add(1)`, finalises every pending version to that epoch,
-//!    and records `(transaction_id -> commit_epoch)` for post-hoc
-//!    conflict checks from transactions whose `start_epoch` preceded
-//!    the commit.
+//!    `fetch_add(1)` and finalises every pending version to that epoch.
+//!    At its publish the transaction leaves the manager; while a
+//!    transaction that began before it is open, its claims stay in the
+//!    committed-claims index (the newest commit epoch per entity, key,
+//!    pattern and triple) for that transaction's commit check, one lookup
+//!    per claim, and leave when the oldest such transaction ends.
 //! 4. **GC**: after immediate calls and commits (every one: the row-group
 //!    store collects when a collect is due for it; see `database::collect`),
 //!    and

@@ -748,6 +748,21 @@ impl TransactionChanges {
             .map(|(graph, triple)| super::rdf::triple_conflict(graph, triple))
     }
 
+    /// The conflict of this transaction's RDF writes with those of the commits after `start`
+    /// that `committed` holds (see `CommittedTriples::conflict_with`), as the error a commit
+    /// fails with: one lookup per triple written.
+    #[cfg(feature = "triple-store")]
+    pub(crate) fn rdf_conflict_with_committed(
+        &self,
+        committed: &super::rdf::CommittedTriples,
+        start: u64,
+    ) -> Option<Error> {
+        let state = self.state.lock();
+        committed
+            .conflict_with(&state.triples, start)
+            .map(|(graph, triple)| super::rdf::triple_conflict(graph, triple))
+    }
+
     /// The heap bytes of the transaction's RDF writes, which its commit
     /// keeps while an older transaction is open: measured before the commit
     /// takes the manager's locks (it walks them).

@@ -221,6 +221,8 @@ mod legacy_vector_topology;
 mod limit_zero_after_a_write;
 mod list_concatenation;
 mod listed_standalone_types;
+mod long_reader;
+mod long_reader_rdf;
 mod lpg_graph_isolation;
 mod lpg_repeated_variables;
 mod memory_account;

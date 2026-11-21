@@ -506,6 +506,132 @@ fn graph_conflict<'a>(one: &'a GraphTriples, other: &'a GraphTriples) -> Option<
         .map(|(triple, _)| &**triple)
 }
 
+/// The newest commit epochs of a triple's writes in one graph (see [`CommittedTriples`]).
+#[derive(Debug, Clone, Copy, Default)]
+struct CommittedTriple {
+    /// The newest commit that wrote it (inserted or deleted it).
+    write: u64,
+    /// The newest commit that deleted it.
+    delete: u64,
+}
+
+/// The triple writes of the commits a still-committable transaction began before, per graph
+/// and triple, with the newest commit epoch of each kind: a transaction's commit looks up each
+/// triple it wrote once, whatever the number of commits since it began. Two writes of a triple
+/// conflict where either deletes it (see [`PendingTriples::conflict_with`]).
+#[derive(Debug, Default)]
+pub(crate) struct CommittedTriples {
+    default: FxHashMap<Arc<Triple>, CommittedTriple>,
+    named: FxHashMap<String, FxHashMap<Arc<Triple>, CommittedTriple>>,
+    /// The heap bytes of the maps, as last added to the count of kept RDF writes (see
+    /// [`recount`](Self::recount)).
+    counted: usize,
+}
+
+impl CommittedTriples {
+    /// Adds `writes`, a commit's at `epoch` (at or after every epoch added before).
+    pub(crate) fn add(&mut self, writes: &PendingTriples, epoch: u64) {
+        let add = |kept: &mut FxHashMap<Arc<Triple>, CommittedTriple>, graph: &GraphTriples| {
+            for (triple, &present) in graph {
+                let entry = kept.entry(Arc::clone(triple)).or_default();
+                entry.write = epoch;
+                if !present {
+                    entry.delete = epoch;
+                }
+            }
+        };
+        add(&mut self.default, &writes.default.triples);
+        for (name, graph) in &writes.named {
+            if !graph.triples.is_empty() {
+                add(self.named.entry_ref(name).or_default(), &graph.triples);
+            }
+        }
+    }
+
+    /// Drops what `writes`, a commit's added, unless a commit after `horizon` wrote it too.
+    pub(crate) fn remove(&mut self, writes: &PendingTriples, horizon: u64) {
+        let remove = |kept: &mut FxHashMap<Arc<Triple>, CommittedTriple>, graph: &GraphTriples| {
+            for triple in graph.keys() {
+                if kept.get(triple).is_some_and(|entry| entry.write <= horizon) {
+                    kept.remove(triple);
+                }
+            }
+        };
+        remove(&mut self.default, &writes.default.triples);
+        for (name, graph) in &writes.named {
+            if let Some(kept) = self.named.get_mut(name.as_str()) {
+                remove(kept, &graph.triples);
+                if kept.is_empty() {
+                    self.named.remove(name.as_str());
+                }
+            }
+        }
+    }
+
+    /// The first triple of `ours`, a transaction's writes, that a commit after `start` wrote
+    /// where one of the two deletes it, with its graph.
+    pub(crate) fn conflict_with<'a>(
+        &self,
+        ours: &'a PendingTriples,
+        start: u64,
+    ) -> Option<(Option<&'a str>, &'a Triple)> {
+        let conflict = |kept: &FxHashMap<Arc<Triple>, CommittedTriple>, graph: &'a GraphTriples| {
+            graph
+                .iter()
+                .find(|(triple, present)| {
+                    kept.get(*triple).is_some_and(|theirs| {
+                        if **present {
+                            theirs.delete > start
+                        } else {
+                            theirs.write > start
+                        }
+                    })
+                })
+                .map(|(triple, _)| &**triple)
+        };
+        if let Some(triple) = conflict(&self.default, &ours.default.triples) {
+            return Some((None, triple));
+        }
+        ours.named.iter().find_map(|(name, graph)| {
+            let kept = self.named.get(name.as_str())?;
+            conflict(kept, &graph.triples).map(|triple| (Some(name.as_str()), triple))
+        })
+    }
+
+    /// How many triples it holds, over every graph (tests).
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.default.len() + self.named.values().map(FxHashMap::len).sum::<usize>()
+    }
+
+    /// Drops every triple, and the maps' memory with them.
+    pub(crate) fn clear(&mut self) {
+        self.default = FxHashMap::default();
+        self.named = FxHashMap::default();
+    }
+
+    /// Moves `total`, the manager's count of the heap bytes of the RDF writes kept for
+    /// conflict checks (which the memory report reads), by what the maps' heap bytes changed
+    /// since the last count: after every change.
+    pub(crate) fn recount(&mut self, total: &std::sync::atomic::AtomicUsize) {
+        use std::sync::atomic::Ordering;
+
+        let bytes = self.default.allocation_size()
+            + self.named.allocation_size()
+            + self
+                .named
+                .iter()
+                .map(|(name, triples)| name.capacity() + triples.allocation_size())
+                .sum::<usize>();
+        if bytes >= self.counted {
+            total.fetch_add(bytes - self.counted, Ordering::Relaxed);
+        } else {
+            total.fetch_sub(self.counted - bytes, Ordering::Relaxed);
+        }
+        self.counted = bytes;
+    }
+}
+
 /// The error of a commit that loses to a transaction that committed after it
 /// began and wrote `triple` in `graph` (`None` for the default graph) where
 /// one of the two deletes it.
@@ -1131,5 +1257,43 @@ mod tests {
         let recomputed = PendingTriples::of(&set);
         assert_eq!(recomputed.graph_exists("paris"), Some(false));
         assert!(PendingTriples::of(&ChangeSet::new()).is_empty());
+    }
+
+    /// The committed triples drop a named graph's map with its last triple, when the trim
+    /// removes the commit that wrote it, and keep a triple a later commit wrote again; a
+    /// transaction's insert loses to a later commit's delete in a named graph.
+    #[test]
+    fn committed_triples_drop_a_named_graph_with_its_last_triple() {
+        let (amsterdam, berlin) = ("http://example.org/amsterdam", "http://example.org/berlin");
+        let mut first = PendingTriples::default();
+        first.note(Some(amsterdam), triple("alix"), false);
+        first.note(Some(berlin), triple("gus"), true);
+        let mut second = PendingTriples::default();
+        second.note(Some(berlin), triple("gus"), false);
+        let mut committed = CommittedTriples::default();
+        committed.add(&first, 1);
+        committed.add(&second, 2);
+        assert_eq!(committed.len(), 2);
+
+        let mut ours = PendingTriples::default();
+        ours.note(Some(berlin), triple("gus"), true);
+        assert!(
+            committed.conflict_with(&ours, 1).is_some(),
+            "deleted at 2, after a start at 1"
+        );
+        assert!(committed.conflict_with(&ours, 2).is_none());
+        let mut elsewhere = PendingTriples::default();
+        elsewhere.note(Some(amsterdam), triple("gus"), false);
+        assert!(committed.conflict_with(&elsewhere, 0).is_none());
+
+        committed.remove(&first, 1);
+        assert!(
+            !committed.named.contains_key(amsterdam),
+            "its last triple went with the trim"
+        );
+        assert_eq!(committed.len(), 1, "Berlin's, written again at 2");
+        committed.remove(&second, 2);
+        assert!(committed.named.is_empty());
+        assert_eq!(committed.len(), 0);
     }
 }

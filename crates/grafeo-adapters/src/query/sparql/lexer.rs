@@ -390,6 +390,13 @@ impl<'a> Lexer<'a> {
                     TokenKind::Colon
                 }
             }
+            // A sign directly before a number is part of it (grammar [148] to [154], tokens
+            // by longest match, section 19.8): `+1` is one integer, `+ 1` an operator and an
+            // integer.
+            '+' | '-' if self.signs_a_number() => {
+                self.advance();
+                self.scan_number()
+            }
             '+' => {
                 self.advance();
                 TokenKind::Plus
@@ -535,6 +542,17 @@ impl<'a> Lexer<'a> {
 
     fn current_char(&self) -> char {
         self.input[self.position..].chars().next().unwrap_or('\0')
+    }
+
+    /// Whether the sign at the current position starts a number: a digit follows it, or a `.`
+    /// and a digit.
+    fn signs_a_number(&self) -> bool {
+        let mut chars = self.input[self.position..].chars().skip(1);
+        match (chars.next(), chars.next()) {
+            (Some(digit), _) if digit.is_ascii_digit() => true,
+            (Some('.'), Some(digit)) => digit.is_ascii_digit(),
+            _ => false,
+        }
     }
 
     fn peek_char(&self) -> char {

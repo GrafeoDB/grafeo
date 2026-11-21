@@ -60,6 +60,7 @@ Performance and memory release, in progress: this section lists what has landed 
 
 ### Fixed
 
+- **SPARQL keeps the sign of a number written with one**: `+1`, `-0.5` and `+05` are numeric literals with the sign in their lexical form, as the SPARQL 1.1 grammar has it. A pattern or `VALUES` entry `+3.5` matches only that term, not `3.5`, as RDF term equality requires; `=` still compares the values.
 - **A query error's markers stay on its line**: the carets under the shown query line stop at the line's end, and rendering an error takes room in proportion to that line.
 - **An open transaction no longer slows every commit** ([#673](https://github.com/GrafeoDB/grafeo/issues/673)): with a reader or a long transaction open, a commit's conflict check looks up only its own claims instead of scanning every commit since that transaction began. With 20,000 commits behind an open reader, an update took 374,834 instructions and now takes 61,243, as many as with none behind.
 - **One long path search stops at the query timeout**: a shortest-path or selective path search looks at `Config::with_query_timeout` as it goes, where one search over a large graph ran on past the timeout until it ended.

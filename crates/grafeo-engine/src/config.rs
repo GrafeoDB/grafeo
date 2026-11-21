@@ -401,6 +401,10 @@ impl Default for DurabilityMode {
     }
 }
 
+/// The path expansions one statement may make by default (see
+/// [`Config::with_path_expansion_limit`]).
+pub use grafeo_core::execution::operators::DEFAULT_PATH_EXPANSION_LIMIT;
+
 /// Errors from [`Config::validate()`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -411,6 +415,12 @@ pub enum ConfigError {
     ZeroQueryMemoryLimit,
     /// [`Config::with_path_search_budget`] must be greater than zero.
     ZeroPathSearchBudget,
+    /// [`Config::with_path_expansion_limit`] must be greater than zero.
+    ZeroPathExpansionLimit,
+    /// [`Config::with_max_query_length`] must be greater than zero.
+    ZeroMaxQueryLength,
+    /// [`Config::with_max_identifier_length`] must be greater than zero.
+    ZeroMaxIdentifierLength,
     /// Thread count must be greater than zero.
     ZeroThreads,
     /// `DurabilityMode::Adaptive` needs an interval greater than zero.
@@ -489,6 +499,13 @@ impl fmt::Display for ConfigError {
             }
             Self::ZeroPathSearchBudget => {
                 write!(f, "path_search_budget must be greater than zero")
+            }
+            Self::ZeroPathExpansionLimit => {
+                write!(f, "path_expansion_limit must be greater than zero")
+            }
+            Self::ZeroMaxQueryLength => write!(f, "max_query_length must be greater than zero"),
+            Self::ZeroMaxIdentifierLength => {
+                write!(f, "max_identifier_length must be greater than zero")
             }
             Self::ZeroThreads => write!(f, "threads must be greater than zero"),
             Self::ZeroAdaptiveFlushInterval => write!(
@@ -950,6 +967,19 @@ pub struct Config {
     /// ([`with_path_search_budget`](Self::with_path_search_budget)): per open, never stored.
     path_search_budget: Option<usize>,
 
+    /// The path expansions one statement may make
+    /// ([`with_path_expansion_limit`](Self::with_path_expansion_limit)): per open, never stored.
+    path_expansion_limit: u64,
+
+    /// The most bytes a statement's text may have
+    /// ([`with_max_query_length`](Self::with_max_query_length)): per open, never stored.
+    max_query_length: usize,
+
+    /// The most bytes one name in a statement may have
+    /// ([`with_max_identifier_length`](Self::with_max_identifier_length)): per open, never
+    /// stored.
+    max_identifier_length: usize,
+
     /// The replaced bytes an open transaction's snapshot may keep, when set
     /// ([`with_snapshot_retention_limit`](Self::with_snapshot_retention_limit)): per open,
     /// never stored.
@@ -1106,6 +1136,9 @@ impl Default for Config {
             spill_limit: SpillLimit::Default,
             query_memory_limit: None,
             path_search_budget: None,
+            path_expansion_limit: DEFAULT_PATH_EXPANSION_LIMIT,
+            max_query_length: grafeo_adapters::query::limits::DEFAULT_MAX_QUERY_LENGTH,
+            max_identifier_length: grafeo_adapters::query::limits::DEFAULT_MAX_IDENTIFIER_LENGTH,
             snapshot_retention_limit: None,
             history_retention_limit: None,
             plan_cache_limit: PlanCacheLimit::Default,
@@ -1226,6 +1259,74 @@ impl Config {
             None => limit.map_or(DEFAULT_PATH_SEARCH_BUDGET, |limit| {
                 (limit / 4).clamp(1, DEFAULT_PATH_SEARCH_BUDGET)
             }),
+        }
+    }
+
+    /// Sets the path expansions one statement's variable-length and shortest-path searches may
+    /// make together: each edge they read to extend a path, and each node and edge they copy
+    /// out of a path into a row (a path variable, an edge list). A statement that would make
+    /// more fails with `GRAFEO-Q009` naming the path expansion limit, and changes nothing.
+    /// Reachability searches (`DISTINCT` targets) and RDF property paths are not counted.
+    /// Default 100 million ([`DEFAULT_PATH_EXPANSION_LIMIT`]). Per open, never stored; 0
+    /// fails [`validate`](Self::validate).
+    #[must_use]
+    pub fn with_path_expansion_limit(mut self, expansions: u64) -> Self {
+        self.path_expansion_limit = expansions;
+        self
+    }
+
+    /// The path expansions one statement may make
+    /// ([`with_path_expansion_limit`](Self::with_path_expansion_limit)).
+    #[must_use]
+    pub fn path_expansion_limit(&self) -> u64 {
+        self.path_expansion_limit
+    }
+
+    /// Sets the most bytes a statement's text may have: its UTF-8 bytes as given, comments
+    /// and whitespace included, the values passed as parameters not. A longer statement fails
+    /// before it is read with `GRAFEO-Q002` naming the query length limit; pass large values
+    /// as parameters instead. Default 16 MiB, the default most bytes of a property value, so
+    /// any value that can be stored fits as a literal. Per open, never stored; 0 fails
+    /// [`validate`](Self::validate).
+    #[must_use]
+    pub fn with_max_query_length(mut self, bytes: usize) -> Self {
+        self.max_query_length = bytes;
+        self
+    }
+
+    /// The most bytes a statement's text may have
+    /// ([`with_max_query_length`](Self::with_max_query_length)).
+    #[must_use]
+    pub fn max_query_length(&self) -> usize {
+        self.max_query_length
+    }
+
+    /// Sets the most bytes one name in a statement may have, as written between its
+    /// delimiters: an identifier, a delimited identifier or a parameter name, a SPARQL
+    /// variable, prefixed name or blank node label, a GraphQL name. String literals and IRIs
+    /// are not names. A statement with a longer name fails with `GRAFEO-Q002` naming the
+    /// identifier length limit and the name's place. Default 16 KiB. Per open, never stored;
+    /// 0 fails [`validate`](Self::validate).
+    #[must_use]
+    pub fn with_max_identifier_length(mut self, bytes: usize) -> Self {
+        self.max_identifier_length = bytes;
+        self
+    }
+
+    /// The most bytes one name in a statement may have
+    /// ([`with_max_identifier_length`](Self::with_max_identifier_length)).
+    #[must_use]
+    pub fn max_identifier_length(&self) -> usize {
+        self.max_identifier_length
+    }
+
+    /// The parse limits of the open: [`max_query_length`](Self::max_query_length) and
+    /// [`max_identifier_length`](Self::max_identifier_length).
+    #[cfg(query_language)]
+    pub(crate) fn parse_limits(&self) -> grafeo_adapters::query::limits::ParseLimits {
+        grafeo_adapters::query::limits::ParseLimits {
+            max_query_length: self.max_query_length,
+            max_identifier_length: self.max_identifier_length,
         }
     }
 
@@ -2127,6 +2228,15 @@ impl Config {
         if self.path_search_budget == Some(0) {
             return Err(ConfigError::ZeroPathSearchBudget);
         }
+        if self.path_expansion_limit == 0 {
+            return Err(ConfigError::ZeroPathExpansionLimit);
+        }
+        if self.max_query_length == 0 {
+            return Err(ConfigError::ZeroMaxQueryLength);
+        }
+        if self.max_identifier_length == 0 {
+            return Err(ConfigError::ZeroMaxIdentifierLength);
+        }
         if let Some(bytes) = self.snapshot_retention_limit
             && bytes < MIN_SNAPSHOT_RETENTION_LIMIT
         {
@@ -2869,6 +2979,9 @@ mod tests {
             .with_spill_limit(88 << 20)
             .with_query_memory_limit(19 << 20)
             .with_path_search_budget(3 << 20)
+            .with_path_expansion_limit(4_000)
+            .with_max_query_length(9 << 20)
+            .with_max_identifier_length(7 << 10)
             .with_snapshot_retention_limit(5 << 20)
             .with_history_retention_limit(6 << 20)
             .with_plan_cache_limit(8 << 20);
@@ -2930,6 +3043,9 @@ mod tests {
             spill_limit,
             query_memory_limit,
             path_search_budget,
+            path_expansion_limit,
+            max_query_length,
+            max_identifier_length,
             snapshot_retention_limit,
             history_retention_limit,
             plan_cache_limit,
@@ -2949,6 +3065,20 @@ mod tests {
             path_search_budget,
             Some(3 << 20),
             "with_path_search_budget sets the budget"
+        );
+        assert_eq!(
+            path_expansion_limit, 4_000,
+            "with_path_expansion_limit sets the limit"
+        );
+        assert_eq!(
+            max_query_length,
+            9 << 20,
+            "with_max_query_length sets the limit"
+        );
+        assert_eq!(
+            max_identifier_length,
+            7 << 10,
+            "with_max_identifier_length sets the limit"
         );
         assert_eq!(
             snapshot_retention_limit,

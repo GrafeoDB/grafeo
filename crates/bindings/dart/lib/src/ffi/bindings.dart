@@ -1216,6 +1216,24 @@ final class GrafeoBindings {
       int Function(
           Pointer<Void>, int)>('grafeo_options_set_path_search_budget');
 
+  /// Sets the path expansion limit, above zero. Returns GrafeoStatus.
+  late final grafeoOptionsSetPathExpansionLimit = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64),
+      int Function(
+          Pointer<Void>, int)>('grafeo_options_set_path_expansion_limit');
+
+  /// Sets the query length limit in bytes, above zero. Returns GrafeoStatus.
+  late final grafeoOptionsSetMaxQueryLength = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64),
+      int Function(Pointer<Void>, int)>('grafeo_options_set_max_query_length');
+
+  /// Sets the identifier length limit in bytes, above zero. Returns
+  /// GrafeoStatus.
+  late final grafeoOptionsSetMaxIdentifierLength = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64),
+      int Function(
+          Pointer<Void>, int)>('grafeo_options_set_max_identifier_length');
+
   /// Sets the snapshot retention limit in bytes; below 1 MiB the open fails.
   /// Returns GrafeoStatus.
   late final grafeoOptionsSetSnapshotRetentionLimit = library.lookupFunction<

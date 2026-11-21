@@ -2201,6 +2201,10 @@ impl Open {
             max_property_size: self.config.max_property_size(),
             #[cfg(query_language)]
             path_search_budget: self.config.path_search_budget(),
+            #[cfg(query_language)]
+            parse_limits: self.config.parse_limits(),
+            #[cfg(lpg_language)]
+            path_expansion_limit: self.config.path_expansion_limit(),
             #[cfg(any(lpg_language, rdf_language))]
             buffer_manager: Some(Arc::clone(&self.buffer_manager)),
             #[cfg(feature = "spill")]

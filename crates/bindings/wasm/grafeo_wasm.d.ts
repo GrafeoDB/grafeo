@@ -126,6 +126,24 @@ export interface DatabaseOptions {
    */
   pathSearchBudget?: number;
   /**
+   * How many path expansions one statement's variable-length and shortest-path searches may make
+   * together, a positive whole number: each edge they read to extend a path, and each node and
+   * edge they copy out of a path into a row. 100 million by default. A statement over it throws
+   * `GRAFEO-Q009`.
+   */
+  pathExpansionLimit?: number;
+  /**
+   * How many bytes a statement's text may have, a positive whole number; the values passed as
+   * parameters do not count. 16 MiB by default. A longer statement throws `GRAFEO-Q002`.
+   */
+  maxQueryLength?: number;
+  /**
+   * How many bytes one name in a statement may have, as written between its delimiters, a positive
+   * whole number (string literals and IRIs are not names). 16 KiB by default. A statement with a
+   * longer name throws `GRAFEO-Q002`.
+   */
+  maxIdentifierLength?: number;
+  /**
    * How many bytes of replaced data an open transaction's snapshot may keep, a whole number of at
    * least 1 MiB: what the commits since it began replaced that it can still read. A quarter of
    * `memoryLimit` by default. Past it the transaction's next call throws the retryable

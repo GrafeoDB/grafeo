@@ -280,6 +280,20 @@ pub struct CreateOptions {
     /// most 256 MiB, and never more than `memoryLimit`. A search over it
     /// throws `GRAFEO-S001`. For this open only.
     pub path_search_budget: Option<i64>,
+    /// How many path expansions one statement's variable-length and
+    /// shortest-path searches may make together: each edge they read to extend
+    /// a path, and each node and edge they copy out of a path into a row. 100
+    /// million by default; a statement over it throws `GRAFEO-Q009`. For this
+    /// open only.
+    pub path_expansion_limit: Option<i64>,
+    /// How many bytes a statement's text may have; the values passed as
+    /// parameters do not count. 16 MiB by default; a longer statement throws
+    /// `GRAFEO-Q002`. For this open only.
+    pub max_query_length: Option<i64>,
+    /// How many bytes one name in a statement may have, as written between its
+    /// delimiters (string literals and IRIs are not names). 16 KiB by default; a
+    /// statement with a longer name throws `GRAFEO-Q002`. For this open only.
+    pub max_identifier_length: Option<i64>,
     /// How many bytes of replaced data an open transaction's snapshot may
     /// keep: what the commits since it began replaced that it can still read. By
     /// default a quarter of `memoryLimit`, at least 1 MiB; below 1 MiB the open
@@ -322,6 +336,23 @@ fn memory_settings(mut config: Config, options: &CreateOptions) -> Result<Config
     }
     if let Some(bytes) = options.path_search_budget {
         config = config.with_path_search_budget(positive(bytes, "pathSearchBudget")?);
+    }
+    if let Some(expansions) = options.path_expansion_limit {
+        let limit = u64::try_from(expansions)
+            .ok()
+            .filter(|expansions| *expansions > 0)
+            .ok_or_else(|| {
+                NodeGrafeoError::InvalidArgument(format!(
+                    "pathExpansionLimit must be a positive number: {expansions}"
+                ))
+            })?;
+        config = config.with_path_expansion_limit(limit);
+    }
+    if let Some(bytes) = options.max_query_length {
+        config = config.with_max_query_length(positive(bytes, "maxQueryLength")?);
+    }
+    if let Some(bytes) = options.max_identifier_length {
+        config = config.with_max_identifier_length(positive(bytes, "maxIdentifierLength")?);
     }
     if let Some(bytes) = options.snapshot_retention_limit {
         config =

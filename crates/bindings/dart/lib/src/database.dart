@@ -22,14 +22,16 @@ import 'transaction.dart';
 import 'types.dart';
 import 'value.dart';
 
-/// The memory and spill settings a database opens with, for
+/// The memory, spill and query limit settings a database opens with, for
 /// [GrafeoDB.openWithOptions]. A null setting is the default: 75% of the
 /// memory the process may use for [memoryLimit], [memoryLimit] for
 /// [queryMemoryLimit], a quarter of [memoryLimit] (at most 256 MiB) for
-/// [pathSearchBudget], a quarter of [memoryLimit] (at least 1 MiB) for
-/// [snapshotRetentionLimit], half the spill volume's free space for [spillLimit]. A
-/// write past the memory limit throws `GRAFEO-S001`, and so does a path search
-/// over its budget. One object may open several databases.
+/// [pathSearchBudget], 100 million for [pathExpansionLimit], 16 MiB for
+/// [maxQueryLength], 16 KiB for [maxIdentifierLength], a quarter of
+/// [memoryLimit] (at least 1 MiB) for [snapshotRetentionLimit], half the spill
+/// volume's free space for [spillLimit]. A write past the memory limit throws
+/// `GRAFEO-S001`, and so does a path search over its budget. One object may
+/// open several databases.
 class GrafeoOptions {
   /// How many bytes the database may hold; zero fails at the open.
   final int? memoryLimit;
@@ -43,6 +45,24 @@ class GrafeoOptions {
   /// visits (the nodes an ANY SHORTEST or shortestPath search visits are not
   /// counted yet). Never more than [memoryLimit]; zero fails at the open.
   final int? pathSearchBudget;
+
+  /// How many path expansions one statement's variable-length and
+  /// shortest-path searches may make together: each edge they read to extend
+  /// a path, and each node and edge they copy out of a path into a row. 100
+  /// million by default; a statement over it throws `GRAFEO-Q009`. Zero fails
+  /// at the open.
+  final int? pathExpansionLimit;
+
+  /// How many bytes a statement's text may have; the values passed as
+  /// parameters do not count. 16 MiB by default; a longer statement throws
+  /// `GRAFEO-Q002`. Zero fails at the open.
+  final int? maxQueryLength;
+
+  /// How many bytes one name in a statement may have, as written between its
+  /// delimiters (string literals and IRIs are not names). 16 KiB by default; a
+  /// statement with a longer name throws `GRAFEO-Q002`. Zero fails at the
+  /// open.
+  final int? maxIdentifierLength;
 
   /// How many bytes of replaced data an open transaction's snapshot may keep:
   /// what the commits since it began replaced that it can still read. Past it
@@ -68,6 +88,9 @@ class GrafeoOptions {
     this.memoryLimit,
     this.queryMemoryLimit,
     this.pathSearchBudget,
+    this.pathExpansionLimit,
+    this.maxQueryLength,
+    this.maxIdentifierLength,
     this.snapshotRetentionLimit,
     this.historyRetentionLimit,
     this.spillLimit,
@@ -101,6 +124,31 @@ class GrafeoOptions {
         throw ArgumentError.value(paths, 'pathSearchBudget', 'must not be negative');
       }
       check(bindings.grafeoOptionsSetPathSearchBudget(native, paths));
+    }
+    final expansions = pathExpansionLimit;
+    if (expansions != null) {
+      if (expansions < 0) {
+        throw ArgumentError.value(
+            expansions, 'pathExpansionLimit', 'must not be negative');
+      }
+      check(bindings.grafeoOptionsSetPathExpansionLimit(native, expansions));
+    }
+    final queryLength = maxQueryLength;
+    if (queryLength != null) {
+      if (queryLength < 0) {
+        throw ArgumentError.value(
+            queryLength, 'maxQueryLength', 'must not be negative');
+      }
+      check(bindings.grafeoOptionsSetMaxQueryLength(native, queryLength));
+    }
+    final identifierLength = maxIdentifierLength;
+    if (identifierLength != null) {
+      if (identifierLength < 0) {
+        throw ArgumentError.value(
+            identifierLength, 'maxIdentifierLength', 'must not be negative');
+      }
+      check(bindings.grafeoOptionsSetMaxIdentifierLength(
+          native, identifierLength));
     }
     final snapshots = snapshotRetentionLimit;
     if (snapshots != null) {

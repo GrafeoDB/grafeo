@@ -35,12 +35,32 @@ pub use parser::Parser;
 
 use grafeo_common::utils::error::Result;
 
-/// Parses a GraphQL query string into a Document AST.
+use crate::query::limits::ParseLimits;
+
+/// Parses a GraphQL query string into a Document AST, under the default
+/// [`ParseLimits`].
 ///
 /// # Errors
 ///
-/// Returns a `QueryError` if the query is syntactically invalid.
+/// Returns a `QueryError` if the query is syntactically invalid or too long.
 pub fn parse(query: &str) -> Result<Document> {
+    parse_with(query, &ParseLimits::default())
+}
+
+/// Parses a GraphQL query string into a Document AST, refusing a statement or
+/// a name longer than `limits` allows.
+///
+/// # Errors
+///
+/// Returns a `QueryError` if the query is syntactically invalid, or longer
+/// than `limits` allows, or has a name longer than that (`GRAFEO-Q002`).
+pub fn parse_with(query: &str, limits: &ParseLimits) -> Result<Document> {
+    limits.check_query(query)?;
     let mut parser = Parser::new(query);
+    // The parser reads every token first, so a long name is found before a
+    // syntax error it may cause.
+    if let Some(error) = parser.names(limits.max_identifier_length).error(query) {
+        return Err(error);
+    }
     parser.parse()
 }

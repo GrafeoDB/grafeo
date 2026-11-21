@@ -2,6 +2,7 @@
 
 use super::expand::{EdgeWalk, stored_types, visible_edges_from};
 use super::filter::Predicate;
+use super::path_expansions::{Allowance, PathExpansions, path_expansion_error};
 use super::{Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
 use crate::graph::Direction;
@@ -149,6 +150,9 @@ pub struct VariableLengthExpandOperator {
     view: ReadView,
     /// Counts the edges the expansion reads.
     reads: Option<Arc<ReadCounter>>,
+    /// The path expansions the statement may still make (see
+    /// [`Self::with_path_expansions`]); `None` outside a statement, without a limit.
+    expansions: Option<Arc<PathExpansions>>,
     /// Materialized input rows.
     input_rows: Option<Vec<InputRow>>,
     /// The next input row to search from.
@@ -417,6 +421,7 @@ impl VariableLengthExpandOperator {
             chunk_capacity: 2048,
             view,
             reads: None,
+            expansions: None,
             input_rows: None,
             current_input_idx: 0,
             search: None,
@@ -570,6 +575,30 @@ impl VariableLengthExpandOperator {
         self
     }
 
+    /// Takes the path expansions the search makes from the statement's `expansions`: each
+    /// edge it reads to extend a path, and each node and edge id it copies into a row (a path
+    /// variable, an edge list). Past the statement's limit it fails with `GRAFEO-Q009`. A
+    /// reachability search takes none. Without it the search is not limited.
+    #[must_use]
+    pub fn with_path_expansions(mut self, expansions: Arc<PathExpansions>) -> Self {
+        self.expansions = Some(expansions);
+        self
+    }
+
+    /// Takes `n` expansions from `allowance`, or fails past the statement's limit.
+    #[inline]
+    fn take(&self, allowance: &mut Allowance, n: usize) -> Result<(), OperatorError> {
+        if allowance.take(n) {
+            Ok(())
+        } else {
+            Err(path_expansion_error(
+                "A variable-length pattern",
+                self.expansions.as_deref(),
+                VARIABLE_LENGTH_ADVICE,
+            ))
+        }
+    }
+
     /// Materializes all input rows.
     fn materialize_input(&mut self) -> Result<(), OperatorError> {
         let mut rows = Vec::new();
@@ -644,6 +673,7 @@ impl VariableLengthExpandOperator {
         &self,
         node_id: NodeId,
         condition_row: Option<&mut DataChunk>,
+        allowance: Option<&mut Allowance>,
     ) -> Result<Vec<(NodeId, EdgeId)>, OperatorError> {
         let mut edges = visible_edges_from(
             self.store.as_ref(),
@@ -655,6 +685,10 @@ impl VariableLengthExpandOperator {
                 reads: self.reads.as_deref(),
             },
         )?;
+        // Every edge read is an expansion, those the edge condition rejects too
+        if let Some(allowance) = allowance {
+            self.take(allowance, edges.len())?;
+        }
         if let (Some(condition), Some(row)) = (&self.edge_condition, condition_row) {
             let edge_column = row.column_count() - 1;
             let mut failure = None;
@@ -761,9 +795,14 @@ impl VariableLengthExpandOperator {
         &mut self,
         input_idx: usize,
         source: NodeId,
+        allowance: &mut Allowance,
     ) -> Result<RowSearch, OperatorError> {
         let follows_paths = self.follows_paths();
         if self.min_hops == 0 {
+            // The path of no edges: its one node, when the row holds the path
+            if self.output_path_detail {
+                self.take(allowance, 1)?;
+            }
             self.buffer(OutputRow {
                 input_idx,
                 edge_id: None,
@@ -792,7 +831,7 @@ impl VariableLengthExpandOperator {
                     parent: None,
                 })
             });
-            self.extend(&mut search, source, 0, root.as_ref())?;
+            self.extend(&mut search, allowance, source, 0, root.as_ref())?;
         }
         Ok(search)
     }
@@ -804,11 +843,14 @@ impl VariableLengthExpandOperator {
     fn extend(
         &self,
         search: &mut RowSearch,
+        allowance: &mut Allowance,
         node: NodeId,
         length: u32,
         segment: Option<&Arc<PathSegment>>,
     ) -> Result<(), OperatorError> {
-        for (target, edge) in self.get_edges(node, search.condition_row.as_mut())? {
+        for (target, edge) in
+            self.get_edges(node, search.condition_row.as_mut(), Some(allowance))?
+        {
             let extended = match segment {
                 Some(segment) => {
                     if !self.is_expansion_allowed(segment, target, edge, search.source) {
@@ -835,13 +877,27 @@ impl VariableLengthExpandOperator {
     /// Emits and extends the paths of `search`, shortest first, until the
     /// output buffer holds a chunk. Returns whether the search has paths
     /// left.
-    fn advance(&mut self, search: &mut RowSearch) -> Result<bool, OperatorError> {
+    fn advance(
+        &mut self,
+        search: &mut RowSearch,
+        allowance: &mut Allowance,
+    ) -> Result<bool, OperatorError> {
         let with_edges = self.output_path_detail || self.output_edge_list;
         while !self.output_full() {
             let Some(path) = search.pop() else {
                 return Ok(false);
             };
             if (self.min_hops..=self.max_hops).contains(&path.length) {
+                // The node and edge ids the row copies out of the path
+                if with_edges {
+                    let edges = path.length as usize;
+                    let copied = if self.output_path_detail {
+                        2 * edges + 1
+                    } else {
+                        edges
+                    };
+                    self.take(allowance, copied)?;
+                }
                 let segment = path.segment.as_ref();
                 self.buffer(OutputRow {
                     input_idx: search.input_idx,
@@ -857,7 +913,13 @@ impl VariableLengthExpandOperator {
                 });
             }
             if path.length < self.max_hops {
-                self.extend(search, path.node, path.length, path.segment.as_ref())?;
+                self.extend(
+                    search,
+                    allowance,
+                    path.node,
+                    path.length,
+                    path.segment.as_ref(),
+                )?;
             }
         }
         Ok(!search.open.is_empty())
@@ -941,7 +1003,7 @@ impl VariableLengthExpandOperator {
                         .get(&node)
                         .map_or((0, None), |&(depth, first)| (depth, Some(first)))
                 };
-                for (target, edge) in self.get_edges(node, condition_row.as_mut())? {
+                for (target, edge) in self.get_edges(node, condition_row.as_mut(), None)? {
                     if trail_source {
                         let first = node_first.unwrap_or(edge);
                         let closing = if target == source_node {
@@ -1008,9 +1070,19 @@ impl VariableLengthExpandOperator {
     /// them: resumes the search from the current input row, and starts the
     /// searches from the next ones.
     fn fill_output_buffer(&mut self) -> Result<(), OperatorError> {
+        // One read of the statement's count and one write of what the searches took, also
+        // when they fail
+        let mut allowance = Allowance::of(self.expansions.as_deref());
+        let filled = self.fill_within(&mut allowance);
+        allowance.settle(self.expansions.as_deref());
+        filled
+    }
+
+    /// [`Self::fill_output_buffer`], taking the expansions from `allowance`.
+    fn fill_within(&mut self, allowance: &mut Allowance) -> Result<(), OperatorError> {
         while !self.output_full() {
             if let Some(mut search) = self.search.take() {
-                if self.advance(&mut search)? {
+                if self.advance(&mut search, allowance)? {
                     self.search = Some(search);
                 }
                 continue;
@@ -1032,7 +1104,7 @@ impl VariableLengthExpandOperator {
                 }
                 self.output_buffer.extend(results);
             } else {
-                self.search = Some(self.start_search(input_idx, source_node)?);
+                self.search = Some(self.start_search(input_idx, source_node, allowance)?);
             }
         }
         Ok(())
@@ -2959,6 +3031,40 @@ mod tests {
             }
         }
         Ok((lengths, chunks))
+    }
+
+    /// A search takes one expansion per edge it reads to extend a path and per node and edge
+    /// id a row copies out of its path: it runs at exactly that many and fails one below.
+    #[test]
+    fn a_search_takes_its_expansions_exactly() {
+        // From Alix two edges to Gus and two back: a search of up to two edges reads Alix's 2
+        // edges, then Gus's 2 for each of the two paths that end there
+        for (case, detail, edge_list, expansions) in [
+            ("targets", false, false, 2 + 2 * 2),
+            ("an edge list", false, true, 2 + 2 * 2 + 2 + 4 * 2),
+            ("a path", true, false, 2 + 2 * 2 + 2 * 3 + 4 * 5),
+        ] {
+            let run = |limit: u64| {
+                let store = parallel_edges(2);
+                let mut expand = from_sources(&store, 1, 2)
+                    .with_path_length_output()
+                    .with_path_expansions(Arc::new(PathExpansions::new(limit)));
+                if detail {
+                    expand = expand.with_path_detail_output();
+                }
+                if edge_list {
+                    expand = expand.with_edge_list_output();
+                }
+                lengths_and_chunks(&mut expand)
+            };
+            let (lengths, _) = run(expansions).unwrap_or_else(|e| panic!("{case}: {e}"));
+            assert_eq!(lengths, [1, 1, 2, 2, 2, 2], "{case}");
+            let error = run(expansions - 1).expect_err(case);
+            assert!(
+                error.to_string().contains("path expansion limit"),
+                "{case}: {error}"
+            );
+        }
     }
 
     #[test]

@@ -4,7 +4,9 @@
 use super::ast::*;
 use super::lexer::{Lexer, Token, TokenKind};
 use crate::query::keywords::unescape_string;
-use crate::query::limits::{Chain, Nesting, nesting_error_message};
+use crate::query::limits::{
+    Chain, DEFAULT_MAX_IDENTIFIER_LENGTH, NameLimit, Nesting, nesting_error_message,
+};
 use crate::query::schema::IndexOptionValue;
 use grafeo_common::types::{Decimal, DecimalError, DecimalType, MAX_DECIMAL_DIGITS};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result, SourceSpan};
@@ -69,12 +71,22 @@ pub struct Parser<'a> {
     /// The quote its advice writes a delimited name in: a backtick in GQL, a
     /// double quote in a SQL/PGQ `GRAPH_TABLE` (SQL has no backtick).
     name_quote: char,
+    /// The first double-quoted name longer than the identifier length limit:
+    /// the lexer reads `"..."` as a string, and only the parser knows where
+    /// one stands as a name (see [`Self::note_double_quoted_name`]).
+    double_quoted: std::cell::Cell<NameLimit>,
 }
 
 impl<'a> Parser<'a> {
     /// Creates a new parser for the given input.
     pub fn new(input: &'a str) -> Self {
-        let mut lexer = Lexer::new(input);
+        Self::with_max_identifier_length(input, DEFAULT_MAX_IDENTIFIER_LENGTH)
+    }
+
+    /// A parser for `input` that records the first name longer than `max`
+    /// bytes (see [`Self::names`]).
+    pub(crate) fn with_max_identifier_length(input: &'a str, max: usize) -> Self {
+        let mut lexer = Lexer::new(input).with_max_identifier_length(max);
         let current = lexer.next_token();
         Self {
             lexer,
@@ -84,22 +96,28 @@ impl<'a> Parser<'a> {
             source: input,
             nesting: Nesting::default(),
             name_quote: '`',
+            double_quoted: std::cell::Cell::new(NameLimit::new(max)),
         }
     }
 
     /// Parses the `[OPTIONAL] MATCH` clause whose first token starts at `at`
     /// in `source`, as a SQL/PGQ `GRAPH_TABLE` holds one, and returns it
     /// with the span of the token after it, where the caller's own parser
-    /// goes on. Its positions are `source`'s.
+    /// goes on. Its positions are `source`'s. The clause nests from the
+    /// caller's `nesting` and checks its names against the caller's `names`;
+    /// both are handed back with the clause.
     ///
     /// # Errors
     ///
     /// Returns an error if the clause is not GQL's `MATCH` clause syntax.
-    pub fn parse_match_clause_at(
+    #[cfg(feature = "sql-pgq")]
+    pub(crate) fn parse_match_clause_at(
         source: &'a str,
         at: SourceSpan,
+        nesting: &mut Nesting,
+        names: &mut NameLimit,
     ) -> Result<(MatchClause, SourceSpan)> {
-        let mut lexer = Lexer::starting_at(source, at);
+        let mut lexer = Lexer::starting_at(source, at, *names);
         let current = lexer.next_token();
         let mut parser = Self {
             lexer,
@@ -107,11 +125,30 @@ impl<'a> Parser<'a> {
             peeked: None,
             peeked_second: None,
             source,
-            nesting: Nesting::default(),
+            nesting: *nesting,
             name_quote: '"',
+            double_quoted: std::cell::Cell::new(names.cleared()),
         };
-        let clause = parser.parse_match_clause()?;
-        Ok((clause, parser.current.span))
+        let clause = parser.parse_match_clause();
+        *nesting = parser.nesting;
+        *names = parser.names();
+        Ok((clause?, parser.current.span))
+    }
+
+    /// The identifier length limit, with the first name the parser read over
+    /// it.
+    pub(crate) fn names(&self) -> NameLimit {
+        let mut names = self.lexer.names();
+        names.merge(self.double_quoted.get());
+        names
+    }
+
+    /// Notes the current token, a double-quoted name, against the identifier
+    /// length limit: its bytes between the quotes, as written.
+    fn note_double_quoted_name(&self) {
+        let mut names = self.double_quoted.get();
+        names.note(self.current.span, self.current.text.len().saturating_sub(2));
+        self.double_quoted.set(names);
     }
 
     /// Enters one level of nesting, or fails past the nesting limit.
@@ -288,6 +325,7 @@ impl<'a> Parser<'a> {
         if self.current.kind == TokenKind::QuotedIdentifier {
             text[1..text.len() - 1].replace("``", "`")
         } else if self.is_double_quoted_name() {
+            self.note_double_quoted_name();
             string_literal_value(text)
         } else {
             text.clone()
@@ -3517,6 +3555,7 @@ impl<'a> Parser<'a> {
             return Ok(name);
         }
         if self.current.kind == TokenKind::String && self.current.text.starts_with('"') {
+            self.note_double_quoted_name();
             let name = string_literal_value(&self.current.text);
             self.advance();
             return Ok(name);
@@ -8106,6 +8145,43 @@ fn exact_float(value: i64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A SQL/PGQ `GRAPH_TABLE`'s `MATCH` nests from the depth its statement is
+    /// at, so the whole statement nests at most `MAX_NESTING_DEPTH` levels; the
+    /// names it reads go to the statement's record.
+    #[cfg(feature = "sql-pgq")]
+    #[test]
+    fn a_match_clause_inside_another_statement_nests_from_its_depth() {
+        use crate::query::limits::MAX_NESTING_DEPTH;
+
+        let source = "MATCH (n {v: ((((1))))})";
+        let at = Lexer::new(source).next_token().span;
+        let parse_at = |outer: u32| {
+            let mut nesting = Nesting::default();
+            assert!((0..outer).all(|_| nesting.enter()));
+            let mut names = NameLimit::default();
+            Parser::parse_match_clause_at(source, at, &mut nesting, &mut names).map(drop)
+        };
+        parse_at(0).unwrap();
+        // The deepest outer depth the clause still fits under.
+        let fits = (0..=MAX_NESTING_DEPTH)
+            .take_while(|&outer| parse_at(outer).is_ok())
+            .last()
+            .unwrap();
+        assert!(
+            fits < MAX_NESTING_DEPTH - 4,
+            "the clause takes levels: {fits}"
+        );
+        let error = parse_at(fits + 1).unwrap_err().to_string();
+        assert!(error.contains(&nesting_error_message()), "{error}");
+
+        let mut nesting = Nesting::default();
+        let mut names = NameLimit::new(3);
+        let long = "MATCH (alix) RETURN alix";
+        let at = Lexer::new(long).next_token().span;
+        Parser::parse_match_clause_at(long, at, &mut nesting, &mut names).unwrap();
+        assert!(names.error(long).is_some(), "the long name is handed back");
+    }
 
     /// The first WHERE or FILTER among the clauses of `query`.
     fn filter_of(query: &QueryStatement) -> Option<WhereClause> {

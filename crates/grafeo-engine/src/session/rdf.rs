@@ -53,6 +53,9 @@ impl SessionInner {
                 shuffle_unordered: cfg.shuffle_unordered,
                 rules: crate::query::optimizer::PlannerRules::all(),
                 path_search_budget: cfg.path_search_budget,
+                parse_limits: cfg.parse_limits,
+                #[cfg(lpg_language)]
+                path_expansion_limit: cfg.path_expansion_limit,
             },
             graph_model: cfg.graph_model,
             #[cfg(query_language)]

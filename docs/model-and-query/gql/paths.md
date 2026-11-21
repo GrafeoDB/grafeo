@@ -142,6 +142,8 @@ Use path modes to control traversal behavior in cyclic graphs. `ACYCLIC` prevent
 
 An unbounded `WALK` (`-[:KNOWS*]->` without a path mode or selector) is refused with `42001` before it runs: around a cycle its walks never end, so ISO GQL requires an upper bound, a path mode such as `TRAIL` or `ACYCLIC`, or a selector such as `ANY SHORTEST` (see [Unbounded quantifiers](patterns.md#unbounded-quantifiers-need-a-mode-or-a-selector)). A bounded walk (`-[:KNOWS*1..5]->`) returns every walk within its bounds.
 
+Two limits end a path search that grows too large, and each error names its setting (see [Query limits](../../get-started/configuration.md#query-limits)): the memory one search may hold at once (the path search budget, `GRAFEO-S001`), and the work all the path searches of one statement may do together (the path expansion limit, 100 million by default: each edge a search reads to extend a path, and each node and edge it copies out of a path into a row, `GRAFEO-Q009`). A search for `DISTINCT` targets visits each node once and is not counted.
+
 ### Path Mode Inside Parenthesized Patterns (G049)
 
 Path modes can also be placed inside a parenthesized quantified pattern, overriding any outer mode:

@@ -23,7 +23,12 @@ use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 /// # Errors
 ///
 /// Returns an error if the query cannot be parsed or translated.
-pub fn translate(query: &str) -> Result<LogicalPlan> {
+pub fn translate(
+    query: &str,
+    limits: &grafeo_adapters::query::limits::ParseLimits,
+) -> Result<LogicalPlan> {
+    // The statement's length is its text's, the `EXPLAIN` included.
+    limits.check_query(query)?;
     let trimmed = query.trim_start();
     let (explain, profile, actual_query) = if trimmed
         .get(..7)
@@ -47,7 +52,7 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
         (false, false, query)
     };
 
-    let statement = gremlin::parse(actual_query)?;
+    let statement = gremlin::parse_with(actual_query, limits)?;
     let translator = GremlinTranslator::new();
     let plan = translator.translate_statement(&statement)?;
     let mut plan = crate::query::limits::check_plan_depth(plan)?;
@@ -2368,6 +2373,14 @@ mod tests {
     use super::*;
     use crate::query::plan::{LimitOp, SkipOp, SortOp};
 
+    /// [`super::translate`] under the default parse limits.
+    fn translate(query: &str) -> Result<LogicalPlan> {
+        super::translate(
+            query,
+            &grafeo_adapters::query::limits::ParseLimits::default(),
+        )
+    }
+
     // === Basic Traversal Tests ===
 
     #[test]
@@ -3783,22 +3796,20 @@ mod tests {
     #[test]
     fn translate_repeat_times() {
         let plan =
-            super::translate("g.V().has('Person', 'name', 'Alix').repeat(out('KNOWS')).times(2)")
-                .unwrap();
+            translate("g.V().has('Person', 'name', 'Alix').repeat(out('KNOWS')).times(2)").unwrap();
         assert!(plan.root.has_mutations() || !plan.root.has_mutations()); // plan is valid
     }
 
     #[test]
     fn translate_repeat_emit() {
         let plan =
-            super::translate("g.V().has('Person', 'name', 'Alix').repeat(out('KNOWS')).emit()")
-                .unwrap();
+            translate("g.V().has('Person', 'name', 'Alix').repeat(out('KNOWS')).emit()").unwrap();
         assert!(!plan.root.has_mutations());
     }
 
     #[test]
     fn translate_repeat_until() {
-        let plan = super::translate(
+        let plan = translate(
             "g.V().has('Person', 'name', 'Alix').repeat(out('KNOWS')).until(has('name', 'Gus'))",
         )
         .unwrap();
@@ -3808,15 +3819,14 @@ mod tests {
     #[test]
     fn translate_repeat_in_direction() {
         let plan =
-            super::translate("g.V().has('Person', 'name', 'Alix').repeat(in('KNOWS')).times(1)")
-                .unwrap();
+            translate("g.V().has('Person', 'name', 'Alix').repeat(in('KNOWS')).times(1)").unwrap();
         assert!(!plan.root.has_mutations());
     }
 
     #[test]
     fn translate_repeat_both_direction() {
-        let plan = super::translate("g.V().has('Person', 'name', 'Alix').repeat(both()).times(1)")
-            .unwrap();
+        let plan =
+            translate("g.V().has('Person', 'name', 'Alix').repeat(both()).times(1)").unwrap();
         assert!(!plan.root.has_mutations());
     }
 
@@ -3824,27 +3834,27 @@ mod tests {
 
     #[test]
     fn test_explain_prefix_sets_explain_flag() {
-        let plan = super::translate("EXPLAIN g.V().hasLabel('Person')").unwrap();
+        let plan = translate("EXPLAIN g.V().hasLabel('Person')").unwrap();
         assert!(plan.explain, "EXPLAIN prefix should set explain flag");
         assert!(!plan.profile, "EXPLAIN should not set profile flag");
     }
 
     #[test]
     fn test_explain_analyze_sets_profile_flag() {
-        let plan = super::translate("EXPLAIN ANALYZE g.V().hasLabel('Person')").unwrap();
+        let plan = translate("EXPLAIN ANALYZE g.V().hasLabel('Person')").unwrap();
         assert!(!plan.explain, "EXPLAIN ANALYZE should not set explain flag");
         assert!(plan.profile, "EXPLAIN ANALYZE should set profile flag");
     }
 
     #[test]
     fn test_explain_case_insensitive() {
-        let plan = super::translate("explain g.V().hasLabel('Person')").unwrap();
+        let plan = translate("explain g.V().hasLabel('Person')").unwrap();
         assert!(plan.explain, "explain (lowercase) should set explain flag");
     }
 
     #[test]
     fn test_no_explain_prefix_normal_query() {
-        let plan = super::translate("g.V().hasLabel('Person')").unwrap();
+        let plan = translate("g.V().hasLabel('Person')").unwrap();
         assert!(!plan.explain);
         assert!(!plan.profile);
     }

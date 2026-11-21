@@ -12,6 +12,9 @@ use std::sync::Arc;
 use grafeo_common::grafeo_debug_span;
 use grafeo_common::types::{EpochId, TransactionId, Value};
 use grafeo_common::utils::error::{Error, Result};
+// A processor has no configuration of its own: it parses under the default limits.
+#[cfg(query_language)]
+use grafeo_adapters::query::limits::ParseLimits;
 use grafeo_core::execution::operators::Recording;
 use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::apply::GraphBackend;
@@ -518,27 +521,27 @@ impl QueryProcessor {
             #[cfg(feature = "gql")]
             QueryLanguage::Gql => {
                 use crate::query::translators::gql;
-                gql::translate(query)
+                gql::translate(query, &ParseLimits::default())
             }
             #[cfg(feature = "cypher")]
             QueryLanguage::Cypher => {
                 use crate::query::translators::cypher;
-                cypher::translate(query)
+                cypher::translate(query, &ParseLimits::default())
             }
             #[cfg(feature = "gremlin")]
             QueryLanguage::Gremlin => {
                 use crate::query::translators::gremlin;
-                gremlin::translate(query)
+                gremlin::translate(query, &ParseLimits::default())
             }
             #[cfg(feature = "graphql")]
             QueryLanguage::GraphQL => {
                 use crate::query::translators::graphql;
-                graphql::translate(query)
+                graphql::translate(query, &ParseLimits::default())
             }
             #[cfg(feature = "sql-pgq")]
             QueryLanguage::SqlPgq => {
                 use crate::query::translators::sql_pgq;
-                sql_pgq::translate(query)
+                sql_pgq::translate(query, &ParseLimits::default())
             }
             #[allow(unreachable_patterns)]
             _ => Err(Error::Internal(format!(
@@ -723,13 +726,17 @@ impl QueryProcessor {
             #[cfg(feature = "sparql")]
             QueryLanguage::Sparql => {
                 use crate::query::translators::sparql;
-                sparql::translate_with_bindings(query, &params.cloned().unwrap_or_default())
+                sparql::translate_with_bindings(
+                    query,
+                    &params.cloned().unwrap_or_default(),
+                    &ParseLimits::default(),
+                )
             }
             #[cfg(all(feature = "graphql", feature = "triple-store"))]
             QueryLanguage::GraphQLRdf => {
                 use crate::query::translators::graphql_rdf;
                 // Default namespace for GraphQL-RDF queries
-                graphql_rdf::translate(query, "http://example.org/")
+                graphql_rdf::translate(query, "http://example.org/", &ParseLimits::default())
             }
             // Only a build with a property graph language has other ones.
             #[cfg(lpg_language)]

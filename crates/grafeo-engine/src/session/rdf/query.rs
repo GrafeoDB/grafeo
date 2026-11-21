@@ -106,8 +106,11 @@ impl SessionInner {
     fn execute_graphql_rdf_untimed(&self, query: &str) -> Result<QueryResult> {
         use crate::query::{optimizer::Optimizer, translators::graphql_rdf};
 
-        let mut logical_plan =
-            self.translated(graphql_rdf::translate(query, "http://example.org/")?)?;
+        let mut logical_plan = self.translated(graphql_rdf::translate(
+            query,
+            "http://example.org/",
+            &self.plan_options.parse_limits,
+        )?)?;
         crate::query::processor::substitute_with_defaults(&mut logical_plan, None)?;
         let active = self.active_store();
         let optimizer = Optimizer::from_graph_store(&*active);
@@ -136,8 +139,11 @@ impl SessionInner {
         };
 
         // Parse and translate the query to a logical plan
-        let mut logical_plan =
-            self.translated(graphql_rdf::translate(query, "http://example.org/")?)?;
+        let mut logical_plan = self.translated(graphql_rdf::translate(
+            query,
+            "http://example.org/",
+            &self.plan_options.parse_limits,
+        )?)?;
 
         // The query's own defaults, then the parameters given
         substitute_with_defaults(&mut logical_plan, Some(&params))?;
@@ -158,7 +164,8 @@ impl SessionInner {
     fn execute_sparql_untimed(&self, query: &str) -> Result<QueryResult> {
         use crate::query::{optimizer::Optimizer, translators::sparql};
 
-        let logical_plan = self.translated(sparql::translate(query)?)?;
+        let logical_plan =
+            self.translated(sparql::translate(query, &self.plan_options.parse_limits)?)?;
         let optimizer = Optimizer::for_rdf_plan(&self.rdf_store, &logical_plan);
         let optimized_plan = optimizer.optimize(logical_plan)?;
         self.run_rdf_plan(&optimized_plan, "sparql")
@@ -182,7 +189,11 @@ impl SessionInner {
     ) -> Result<QueryResult> {
         use crate::query::{optimizer::Optimizer, translators::sparql};
 
-        let logical_plan = self.translated(sparql::translate_with_bindings(query, &params)?)?;
+        let logical_plan = self.translated(sparql::translate_with_bindings(
+            query,
+            &params,
+            &self.plan_options.parse_limits,
+        )?)?;
 
         let optimizer = Optimizer::for_rdf_plan(&self.rdf_store, &logical_plan);
         let optimized_plan = optimizer.optimize(logical_plan)?;

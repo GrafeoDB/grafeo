@@ -1,6 +1,7 @@
-//! The path search budget through C (#492): `grafeo_options_set_path_search_budget` on the
-//! options object. Zero is refused at the setter; the budget binds, with its error naming its
-//! code and the setting.
+//! The query resource limits through C (#492): `grafeo_options_set_path_search_budget`,
+//! `_set_path_expansion_limit`, `_set_max_query_length` and `_set_max_identifier_length` on the
+//! options object. Zero is refused at the setter; each setting binds, with its error naming
+//! its code and the setting.
 
 use std::ffi::{CStr, CString};
 
@@ -11,8 +12,9 @@ use crate::database::{
 use crate::error::{GrafeoStatus, grafeo_last_error};
 use crate::options::{
     GrafeoOptions, grafeo_open_with_options, grafeo_options_free, grafeo_options_new,
-    grafeo_options_set_history_retention_limit, grafeo_options_set_path_search_budget,
-    grafeo_options_set_snapshot_retention_limit,
+    grafeo_options_set_history_retention_limit, grafeo_options_set_max_identifier_length,
+    grafeo_options_set_max_query_length, grafeo_options_set_path_expansion_limit,
+    grafeo_options_set_path_search_budget, grafeo_options_set_snapshot_retention_limit,
 };
 use crate::types::GrafeoDatabase;
 
@@ -47,21 +49,62 @@ fn run(db: *mut GrafeoDatabase, query: &str) -> Result<(), String> {
 }
 
 #[test]
-fn zero_is_refused_at_the_setter() {
+fn zero_is_refused_at_each_setter() {
     let options = grafeo_options_new();
     assert_ne!(
         grafeo_options_set_path_search_budget(options, 0),
+        GrafeoStatus::Ok
+    );
+    assert_ne!(
+        grafeo_options_set_path_expansion_limit(options, 0),
+        GrafeoStatus::Ok
+    );
+    assert_ne!(
+        grafeo_options_set_max_query_length(options, 0),
+        GrafeoStatus::Ok
+    );
+    assert_ne!(
+        grafeo_options_set_max_identifier_length(options, 0),
         GrafeoStatus::Ok
     );
     grafeo_options_free(options);
 }
 
 #[test]
-fn the_path_search_budget_binds() {
+fn each_setting_binds() {
+    let db = opened(|o| grafeo_options_set_path_expansion_limit(o, 4));
+    let error = run(db, PATHS).expect_err("five expansions over four");
+    assert!(
+        error.contains("GRAFEO-Q009") && error.contains("path_expansion_limit"),
+        "{error}"
+    );
+    grafeo_free_database(db);
+    let db = opened(|o| grafeo_options_set_path_expansion_limit(o, 5));
+    assert_eq!(run(db, PATHS), Ok(()));
+    grafeo_free_database(db);
+
     let db = opened(|o| grafeo_options_set_path_search_budget(o, 1));
     let error = run(db, PATHS).expect_err("no path fits in one byte");
     assert!(
         error.contains("GRAFEO-S001") && error.contains("path_search_budget"),
+        "{error}"
+    );
+    grafeo_free_database(db);
+
+    let db = opened(|o| grafeo_options_set_max_query_length(o, 200));
+    assert_eq!(run(db, PATHS), Ok(()));
+    let error = run(db, &format!("{PATHS}{}", " ".repeat(200))).expect_err("over 200 bytes");
+    assert!(
+        error.contains("GRAFEO-Q002") && error.contains("max_query_length"),
+        "{error}"
+    );
+    grafeo_free_database(db);
+
+    let db = opened(|o| grafeo_options_set_max_identifier_length(o, 8));
+    assert_eq!(run(db, "MATCH (abcdefgh:Star) RETURN abcdefgh.n"), Ok(()));
+    let error = run(db, "MATCH (abcdefghi:Star) RETURN 1").expect_err("a name of nine bytes");
+    assert!(
+        error.contains("GRAFEO-Q002") && error.contains("max_identifier_length"),
         "{error}"
     );
     grafeo_free_database(db);

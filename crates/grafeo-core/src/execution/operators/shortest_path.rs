@@ -6,6 +6,7 @@
 //! every path of the k shortest lengths, under a path mode.
 
 use super::expand::{EdgeWalk, stored_types, visible_edges_from};
+use super::path_expansions::{Allowance, PathExpansions, path_expansion_error};
 use super::variable_length_expand::{
     DEFAULT_PATH_SEARCH_BUDGET, PathMode, PathSegment, path_budget_error,
 };
@@ -146,6 +147,9 @@ pub struct ShortestPathOperator {
     view: ReadView,
     /// Counts the edges the expansion reads.
     reads: Option<Arc<ReadCounter>>,
+    /// The path expansions the statement may still make (see
+    /// [`Self::with_path_expansions`]); `None` outside a statement, without a limit.
+    expansions: Option<Arc<PathExpansions>>,
     /// The columns written after the length.
     outputs: PathOutputs,
     /// A condition every edge of a path meets (see [`Self::with_edge_condition`]).
@@ -277,6 +281,7 @@ impl ShortestPathOperator {
             max_hops: None,
             view,
             reads: None,
+            expansions: None,
             outputs: PathOutputs::default(),
             edge_condition: None,
             budget: DEFAULT_PATH_SEARCH_BUDGET,
@@ -301,6 +306,25 @@ impl ShortestPathOperator {
     pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
         self.reads = Some(reads);
         self
+    }
+
+    /// Takes the path expansions the search makes from the statement's `expansions`: each
+    /// edge it reads to extend a path, and each node and edge id of a path it returns in a
+    /// row. Past the statement's limit it fails with `GRAFEO-Q009`. Without it the search is
+    /// not limited.
+    #[must_use]
+    pub fn with_path_expansions(mut self, expansions: Arc<PathExpansions>) -> Self {
+        self.expansions = Some(expansions);
+        self
+    }
+
+    /// The error of a search past the statement's path expansion limit.
+    fn expansions_out(&self) -> OperatorError {
+        path_expansion_error(
+            "A shortest path search",
+            self.expansions.as_deref(),
+            SHORTEST_PATH_ADVICE,
+        )
     }
 
     /// Sets whether to find all shortest paths.
@@ -369,8 +393,14 @@ impl ShortestPathOperator {
         self
     }
 
-    /// The search for the input row `row` of `chunk`.
-    fn search_for_row(&self, chunk: &DataChunk, row: usize) -> PathSearch<'_> {
+    /// The search for the input row `row` of `chunk`, taking its expansions from
+    /// `allowance`.
+    fn search_for_row(
+        &self,
+        chunk: &DataChunk,
+        row: usize,
+        allowance: Allowance,
+    ) -> PathSearch<'_> {
         let condition_row = self.edge_condition.as_ref().map(|_| {
             let mut types: Vec<LogicalType> = (0..chunk.column_count())
                 .map(|i| {
@@ -396,6 +426,7 @@ impl ShortestPathOperator {
             operator: self,
             condition_row,
             condition_error: RefCell::new(None),
+            allowance: RefCell::new(allowance),
         }
     }
 }
@@ -410,6 +441,9 @@ struct PathSearch<'a> {
     /// The first error of the edge condition or of a read of the store,
     /// which fails the search (see [`paths`](Self::paths)).
     condition_error: RefCell<Option<OperatorError>>,
+    /// The expansions the search may still make: past them it fails as on a
+    /// failed read.
+    allowance: RefCell<Allowance>,
 }
 
 /// The steps that reach each node of a layer of a search: from which node,
@@ -441,6 +475,14 @@ impl PathSearch<'_> {
                 return Vec::new();
             }
         };
+        // Each edge read is an expansion; past the limit the search reads no
+        // more and ends with the error
+        if !self.allowance.borrow_mut().take(edges.len()) {
+            self.condition_error
+                .borrow_mut()
+                .get_or_insert_with(|| op.expansions_out());
+            return Vec::new();
+        }
         if let (Some(condition), Some(row)) = (&op.edge_condition, &self.condition_row) {
             let mut row = row.borrow_mut();
             let edge_column = row.column_count() - 1;
@@ -1138,8 +1180,9 @@ fn steps_into<'a>(
         .map_or(&[], Vec::as_slice)
 }
 
-impl Operator for ShortestPathOperator {
-    fn next(&mut self) -> OperatorResult {
+impl ShortestPathOperator {
+    /// [`Operator::next`], taking the expansions from `allowance`.
+    fn next_within(&mut self, allowance: &mut Allowance) -> OperatorResult {
         if self.exhausted {
             return Ok(None);
         }
@@ -1154,6 +1197,9 @@ impl Operator for ShortestPathOperator {
                         self.exhausted = true;
                         return Ok(None);
                     };
+                    // The input's own path searches took from the statement's
+                    // count meanwhile
+                    allowance.refresh(self.expansions.as_deref());
                     let rows = chunk.selected_indices().collect();
                     PendingInput {
                         chunk,
@@ -1224,12 +1270,21 @@ impl Operator for ShortestPathOperator {
 
                 // A null endpoint (from an earlier OPTIONAL MATCH) has no path
                 let paths = match (source, target) {
-                    (Some(s), Some(t)) => self.search_for_row(input_chunk, row).paths(s, t)?,
+                    (Some(s), Some(t)) => {
+                        let search = self.search_for_row(input_chunk, row, *allowance);
+                        let found = search.paths(s, t);
+                        *allowance = search.allowance.into_inner();
+                        found?
+                    }
                     _ => Vec::new(),
                 };
 
                 // Output one row per path
                 for path in paths {
+                    // The node and edge ids the row copies out of the path
+                    if !allowance.take(path.nodes.len() + path.edges.len()) {
+                        return Err(self.expansions_out());
+                    }
                     ids += path.nodes.len() + path.edges.len();
                     // Copy input columns
                     for col_idx in 0..num_input_cols {
@@ -1321,6 +1376,17 @@ impl Operator for ShortestPathOperator {
                 return Ok(Some(chunk));
             }
         }
+    }
+}
+
+impl Operator for ShortestPathOperator {
+    fn next(&mut self) -> OperatorResult {
+        // One read of the statement's count and one write of what the
+        // searches took, also when they fail
+        let mut allowance = Allowance::of(self.expansions.as_deref());
+        let next = self.next_within(&mut allowance);
+        allowance.settle(self.expansions.as_deref());
+        next
     }
 
     fn reset(&mut self) {
@@ -2282,7 +2348,11 @@ mod tests {
         let found = |path: Option<FoundPath>| path.map(|path| ids(&path.nodes, &path.edges));
 
         let op = path_search(&store, vec![], false, (1, None));
-        let search = op.search_for_row(&DataChunk::empty(), 0);
+        let search = op.search_for_row(
+            &DataChunk::empty(),
+            0,
+            Allowance::of(op.expansions.as_deref()),
+        );
         assert_eq!(
             found(search.shortest_path(a, d)),
             Some(ids(&[a, c, d], &[ac, cd]))
@@ -2296,7 +2366,10 @@ mod tests {
         let op = path_search(&store, vec![], false, (1, None))
             .with_edge_condition(Box::new(AvoidEdges(vec![ac])));
         assert_eq!(
-            found(op.search_for_row(&row, 0).shortest_path(a, d)),
+            found(
+                op.search_for_row(&row, 0, Allowance::of(op.expansions.as_deref()))
+                    .shortest_path(a, d)
+            ),
             Some(ids(&[a, b, c, d], &[ab, bc, cd]))
         );
     }

@@ -3,9 +3,10 @@ using Xunit;
 namespace Grafeo.Tests;
 
 /// <summary>
-/// The path search budget through C# (#492): <see cref="GrafeoOptions.SetPathSearchBudget"/>.
-/// Zero fails at the open; the budget binds, with its error code and the setting named in the
-/// message. The snapshot retention limit, <see cref="GrafeoOptions.SetSnapshotRetentionLimit"/>:
+/// The query resource limits through C# (#492): <see cref="GrafeoOptions.SetPathSearchBudget"/>,
+/// <see cref="GrafeoOptions.SetPathExpansionLimit"/>, <see cref="GrafeoOptions.SetMaxQueryLength"/>
+/// and <see cref="GrafeoOptions.SetMaxIdentifierLength"/>. Zero fails at the open; each setting
+/// binds, with its error code and the setting named in the message. The snapshot retention limit, <see cref="GrafeoOptions.SetSnapshotRetentionLimit"/>:
 /// below 1 MiB fails at the open; past it an open transaction fails with GRAFEO-T012.
 /// </summary>
 public sealed class QueryLimitsTests
@@ -38,19 +39,42 @@ public sealed class QueryLimitsTests
     [Fact]
     public void ZeroIsRefused()
     {
-        using var options = new GrafeoOptions();
-        Assert.ThrowsAny<Exception>(() =>
+        foreach (var set in new Action<GrafeoOptions>[]
         {
-            options.SetPathSearchBudget(0);
-            using var db = GrafeoDB.Open(null, options);
-        });
+            o => o.SetPathSearchBudget(0),
+            o => o.SetPathExpansionLimit(0),
+            o => o.SetMaxQueryLength(0),
+            o => o.SetMaxIdentifierLength(0),
+        })
+        {
+            using var options = new GrafeoOptions();
+            Assert.ThrowsAny<Exception>(() =>
+            {
+                set(options);
+                using var db = GrafeoDB.Open(null, options);
+            });
+        }
     }
 
     [Fact]
-    public void ThePathSearchBudgetBinds()
+    public void EachSettingBinds()
     {
-        using var db = Opened(o => o.SetPathSearchBudget(1));
-        AssertRefused(db, Paths, "GRAFEO-S001", "path_search_budget");
+        using (var db = Opened(o => o.SetPathExpansionLimit(4)))
+            AssertRefused(db, Paths, "GRAFEO-Q009", "path_expansion_limit");
+        using (var db = Opened(o => o.SetPathExpansionLimit(5)))
+            Assert.Equal(5, db.Execute(Paths).Rows.Count);
+        using (var db = Opened(o => o.SetPathSearchBudget(1)))
+            AssertRefused(db, Paths, "GRAFEO-S001", "path_search_budget");
+        using (var db = Opened(o => o.SetMaxQueryLength(200)))
+        {
+            Assert.Equal(5, db.Execute(Paths).Rows.Count);
+            AssertRefused(db, Paths + new string(' ', 200), "GRAFEO-Q002", "max_query_length");
+        }
+        using (var db = Opened(o => o.SetMaxIdentifierLength(8)))
+        {
+            Assert.Single(db.Execute("MATCH (abcdefgh:Star) RETURN abcdefgh.n").Rows);
+            AssertRefused(db, "MATCH (abcdefghi:Star) RETURN 1", "GRAFEO-Q002", "max_identifier_length");
+        }
     }
 
     private const string ReadBio = "MATCH (p:Person {name: 'Alix'}) RETURN p.bio AS bio";

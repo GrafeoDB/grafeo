@@ -29,8 +29,12 @@ const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 /// # Errors
 ///
 /// Returns an error if the query cannot be parsed or translated.
-pub fn translate(query: &str, namespace: &str) -> Result<LogicalPlan> {
-    let doc = graphql::parse(query)?;
+pub fn translate(
+    query: &str,
+    namespace: &str,
+    limits: &grafeo_adapters::query::limits::ParseLimits,
+) -> Result<LogicalPlan> {
+    let doc = graphql::parse_with(query, limits)?;
     let translator = GraphQLRdfTranslator::new(namespace);
     let plan = translator.translate_document(&doc)?;
     crate::query::limits::check_plan_depth(plan)
@@ -489,6 +493,15 @@ impl GraphQLRdfTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`super::translate`] under the default parse limits.
+    fn translate(query: &str, namespace: &str) -> Result<LogicalPlan> {
+        super::translate(
+            query,
+            namespace,
+            &grafeo_adapters::query::limits::ParseLimits::default(),
+        )
+    }
 
     const TEST_NS: &str = "http://example.org/";
 

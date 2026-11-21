@@ -55,8 +55,11 @@ pub enum GqlTranslationResult {
 /// # Errors
 ///
 /// Returns an error if the query cannot be parsed or translated.
-pub fn translate(query: &str) -> Result<LogicalPlan> {
-    match translate_full(query)? {
+pub fn translate(
+    query: &str,
+    limits: &grafeo_adapters::query::limits::ParseLimits,
+) -> Result<LogicalPlan> {
+    match translate_full(query, limits)? {
         GqlTranslationResult::Plan(plan) => Ok(plan),
         GqlTranslationResult::SessionCommand(_) => Err(Error::from(QueryError::new(
             QueryErrorKind::Unsupported,
@@ -74,8 +77,11 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
 /// # Errors
 ///
 /// Returns an error if the query cannot be parsed or translated.
-pub fn translate_full(query: &str) -> Result<GqlTranslationResult> {
-    let statement = gql::parse(query)?;
+pub fn translate_full(
+    query: &str,
+    limits: &grafeo_adapters::query::limits::ParseLimits,
+) -> Result<GqlTranslationResult> {
+    let statement = gql::parse_with(query, limits)?;
     // The graph a `USE g` focuses the statement on, which it reads and
     // writes in place of the session's current graph.
     let graph = focus::statement_graph(&statement)?;
@@ -3198,6 +3204,22 @@ fn bound_as(names: Vec<(String, String)>, predicate: LogicalExpression) -> Logic
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`super::translate`] under the default parse limits.
+    fn translate(query: &str) -> Result<LogicalPlan> {
+        super::translate(
+            query,
+            &grafeo_adapters::query::limits::ParseLimits::default(),
+        )
+    }
+
+    /// [`super::translate_full`] under the default parse limits.
+    fn translate_full(query: &str) -> Result<GqlTranslationResult> {
+        super::translate_full(
+            query,
+            &grafeo_adapters::query::limits::ParseLimits::default(),
+        )
+    }
 
     // === Basic MATCH Tests ===
 

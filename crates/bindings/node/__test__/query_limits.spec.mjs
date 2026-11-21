@@ -1,6 +1,6 @@
-// The path search budget from Node (#492): GrafeoDB.create(path, { pathSearchBudget }). Zero is
-// refused; the budget binds, with its error code and the option named in the message. The
-// snapshot retention limit, { snapshotRetentionLimit }: below 1 MiB is refused; past it an open
+// The query resource limits from Node (#492): GrafeoDB.create(path, { pathSearchBudget,
+// pathExpansionLimit, maxQueryLength, maxIdentifierLength }). Zero is refused; each setting
+// binds, with its error code and the option named in the message. The snapshot retention limit, { snapshotRetentionLimit }: below 1 MiB is refused; past it an open
 // transaction throws GRAFEO-T012.
 
 import { describe, it, expect } from 'vitest'
@@ -27,14 +27,39 @@ async function refused(db, query) {
 }
 
 describe('query limits', () => {
-  it('refuses a zero pathSearchBudget', () => {
-    expect(() => GrafeoDB.create(undefined, { pathSearchBudget: 0 })).toThrow()
+  for (const option of ['pathSearchBudget', 'pathExpansionLimit', 'maxQueryLength', 'maxIdentifierLength']) {
+    it(`refuses a zero ${option}`, () => {
+      expect(() => GrafeoDB.create(undefined, { [option]: 0 })).toThrow()
+    })
+  }
+
+  it('binds the path expansion limit', async () => {
+    const error = await refused(await star({ pathExpansionLimit: 4 }), PATHS)
+    expect(error.errorCode).toBe('GRAFEO-Q009')
+    expect(error.message).toContain('pathExpansionLimit')
+    expect((await (await star({ pathExpansionLimit: 5 })).execute(PATHS)).toArray()).toHaveLength(5)
   })
 
   it('binds the path search budget', async () => {
     const error = await refused(await star({ pathSearchBudget: 1 }), PATHS)
     expect(error.errorCode).toBe('GRAFEO-S001')
     expect(error.message).toContain('pathSearchBudget')
+  })
+
+  it('binds the query length', async () => {
+    const db = await star({ maxQueryLength: 200 })
+    expect((await db.execute(PATHS)).toArray()).toHaveLength(5)
+    const error = await refused(db, PATHS + ' '.repeat(200))
+    expect(error.errorCode).toBe('GRAFEO-Q002')
+    expect(error.message).toContain('maxQueryLength')
+  })
+
+  it('binds the identifier length', async () => {
+    const db = await star({ maxIdentifierLength: 8 })
+    expect((await db.execute('MATCH (abcdefgh:Star) RETURN abcdefgh.n')).toArray()).toHaveLength(1)
+    const error = await refused(db, 'MATCH (abcdefghi:Star) RETURN 1')
+    expect(error.errorCode).toBe('GRAFEO-Q002')
+    expect(error.message).toContain('maxIdentifierLength')
   })
 
   it('refuses a snapshotRetentionLimit below 1 MiB', () => {

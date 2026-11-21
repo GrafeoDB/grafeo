@@ -48,6 +48,7 @@ pub mod merge_claim;
 mod mutation;
 mod node_seek;
 mod parameter_scan;
+mod path_expansions;
 mod project;
 pub mod push;
 mod range_scan;
@@ -122,6 +123,7 @@ pub use node_seek::{
     NodeSeekOperator, SeekKey, find_indexed_as_compared, find_through_label_indexes,
 };
 pub use parameter_scan::{ParameterScanOperator, ParameterState};
+pub use path_expansions::{DEFAULT_PATH_EXPANSION_LIMIT, PathExpansions};
 pub use project::{EntityValue, ProjectExpr, ProjectOperator};
 pub use push::{
     AggregatePushOperator, DistinctMaterializingOperator, DistinctPushOperator, FilterPushOperator,

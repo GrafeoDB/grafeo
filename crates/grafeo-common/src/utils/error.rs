@@ -50,6 +50,9 @@ pub enum ErrorCode {
     /// The statement reaches outside the database (a file, a URL, a model)
     /// and the session has no external access.
     QueryExternalAccessDenied,
+    /// The statement passed a limit on the work it may do: the path expansion limit. Not
+    /// retryable: the same statement passes it again.
+    QueryLimit,
 
     // Transaction errors (T)
     /// Write-write conflict (retry possible).
@@ -133,6 +136,7 @@ impl ErrorCode {
             Self::QueryExecution => "GRAFEO-Q006",
             Self::QueryPermissionDenied => "GRAFEO-Q007",
             Self::QueryExternalAccessDenied => "GRAFEO-Q008",
+            Self::QueryLimit => "GRAFEO-Q009",
 
             Self::TransactionConflict => "GRAFEO-T001",
             Self::TransactionTimeout => "GRAFEO-T002",
@@ -740,11 +744,18 @@ pub enum LimitBound {
     CheckpointRoom,
     /// The memory one path search may hold.
     PathSearchBudget,
+    /// The bytes of a statement's text.
+    QueryLength,
+    /// The bytes of one name in a statement, as written between its delimiters.
+    IdentifierLength,
+    /// The path expansions one statement may make.
+    PathExpansionLimit,
 }
 
 impl LimitBound {
     /// The bound's name in messages: "memory limit", "query memory limit", "spill limit",
-    /// "checkpoint room", "path search budget".
+    /// "checkpoint room", "path search budget", "query length limit", "identifier length
+    /// limit", "path expansion limit".
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -753,6 +764,9 @@ impl LimitBound {
             Self::SpillLimit => "spill limit",
             Self::CheckpointRoom => "checkpoint room",
             Self::PathSearchBudget => "path search budget",
+            Self::QueryLength => "query length limit",
+            Self::IdentifierLength => "identifier length limit",
+            Self::PathExpansionLimit => "path expansion limit",
         }
     }
 
@@ -770,6 +784,15 @@ impl LimitBound {
             Self::CheckpointRoom => "Config::with_spill_path",
             Self::PathSearchBudget => {
                 "Config::with_path_search_budget (Python path_search_budget, Node pathSearchBudget)"
+            }
+            Self::QueryLength => {
+                "Config::with_max_query_length (Python max_query_length, Node maxQueryLength)"
+            }
+            Self::IdentifierLength => {
+                "Config::with_max_identifier_length (Python max_identifier_length, Node maxIdentifierLength)"
+            }
+            Self::PathExpansionLimit => {
+                "Config::with_path_expansion_limit (Python path_expansion_limit, Node pathExpansionLimit)"
             }
         }
     }
@@ -1003,6 +1026,7 @@ impl QueryError {
             QueryErrorKind::Unsupported => ErrorCode::QueryUnsupported,
             QueryErrorKind::PermissionDenied => ErrorCode::QueryPermissionDenied,
             QueryErrorKind::ExternalAccessDenied => ErrorCode::QueryExternalAccessDenied,
+            QueryErrorKind::Limit => ErrorCode::QueryLimit,
         }
     }
 
@@ -1151,6 +1175,9 @@ pub enum QueryErrorKind {
     /// The statement reaches outside the database (a file, a URL, a model)
     /// on a session without external access (GQLSTATUS 42501).
     ExternalAccessDenied,
+    /// The statement passed a limit on the work one statement may do, such as the path
+    /// expansion limit (GQLSTATUS 22000: ISO/IEC 39075 has no class for a program limit).
+    Limit,
 }
 
 impl fmt::Display for QueryErrorKind {
@@ -1171,6 +1198,7 @@ impl fmt::Display for QueryErrorKind {
             }
             QueryErrorKind::DivisionByZero => write!(f, "division by zero"),
             QueryErrorKind::NegativeLimit => write!(f, "negative limit value"),
+            QueryErrorKind::Limit => write!(f, "query limit"),
             QueryErrorKind::InvalidValueType | QueryErrorKind::WrongKind => {
                 write!(f, "invalid value type")
             }

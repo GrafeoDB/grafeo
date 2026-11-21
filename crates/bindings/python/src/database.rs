@@ -638,6 +638,19 @@ impl PyGrafeoDB {
     /// of memory_limit, at most 256 MiB, and never more than memory_limit. A
     /// search over it raises GRAFEO-S001. For this open only.
     ///
+    /// path_expansion_limit is how many path expansions one statement's
+    /// variable-length and shortest-path searches may make together: each
+    /// edge they read to extend a path, and each node and edge they copy out
+    /// of a path into a row. 100 million by default; a statement over it
+    /// raises GRAFEO-Q009. For this open only.
+    ///
+    /// max_query_length is how many bytes a statement's text may have (the
+    /// values passed as parameters do not count), 16 MiB by default;
+    /// max_identifier_length is how many bytes one name in it may have, as
+    /// written between its delimiters (string literals and IRIs are not
+    /// names), 16 KiB by default. A statement over either raises GRAFEO-Q002.
+    /// For this open only.
+    ///
     /// snapshot_retention_limit is how many bytes of replaced data an open
     /// transaction's snapshot may keep: what the commits since it began
     /// replaced that it can still read. By default a quarter of memory_limit,
@@ -671,6 +684,9 @@ impl PyGrafeoDB {
         memory_limit=None,
         query_memory_limit=None,
         path_search_budget=None,
+        path_expansion_limit=None,
+        max_query_length=None,
+        max_identifier_length=None,
         snapshot_retention_limit=None,
         history_retention_limit=None,
         spill_limit=None,
@@ -695,6 +711,9 @@ impl PyGrafeoDB {
         memory_limit: Option<usize>,
         query_memory_limit: Option<usize>,
         path_search_budget: Option<usize>,
+        path_expansion_limit: Option<u64>,
+        max_query_length: Option<usize>,
+        max_identifier_length: Option<usize>,
         snapshot_retention_limit: Option<u64>,
         history_retention_limit: Option<u64>,
         spill_limit: Option<u64>,
@@ -735,6 +754,15 @@ impl PyGrafeoDB {
         }
         if let Some(bytes) = path_search_budget {
             config = config.with_path_search_budget(bytes);
+        }
+        if let Some(expansions) = path_expansion_limit {
+            config = config.with_path_expansion_limit(expansions);
+        }
+        if let Some(bytes) = max_query_length {
+            config = config.with_max_query_length(bytes);
+        }
+        if let Some(bytes) = max_identifier_length {
+            config = config.with_max_identifier_length(bytes);
         }
         if let Some(bytes) = snapshot_retention_limit {
             config = config.with_snapshot_retention_limit(bytes);

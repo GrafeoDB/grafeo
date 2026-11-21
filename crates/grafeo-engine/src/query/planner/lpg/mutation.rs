@@ -912,6 +912,7 @@ impl super::Planner {
             .with_hop_bounds(sp.min_hops, sp.max_hops)
             .with_read_counter(self.read_counter())
             .with_memory_budget(self.path_search_budget)
+            .with_path_expansions(self.path_expansions())
             .with_path_output();
 
         // The edge condition reads a row of the input columns and the
@@ -1304,27 +1305,30 @@ impl super::Planner {
                 .collect::<Vec<_>>()
         });
 
-        let plan = bind_body(&proc_def.name, &proc_def.body, &param_map)?;
+        let session = self.session_planning.as_ref().ok_or_else(|| {
+            Error::from(grafeo_common::utils::error::QueryError::unsupported(
+                format!(
+                    "a stored procedure call needs a session (procedure '{}')",
+                    proc_def.name
+                ),
+            ))
+        })?;
+        // The body is parsed under the limits of the session that calls it.
+        let plan = bind_body(
+            &proc_def.name,
+            &proc_def.body,
+            &param_map,
+            &session.parse_limits(),
+        )?;
         // The body runs as the same statement run directly: on the graph its
         // `USE` names, checked here before anything runs, else on the
         // calling statement's, in its transaction.
-        let planning = self
-            .session_planning
-            .as_ref()
-            .ok_or_else(|| {
-                Error::from(grafeo_common::utils::error::QueryError::unsupported(
-                    format!(
-                        "a stored procedure call needs a session (procedure '{}')",
-                        proc_def.name
-                    ),
-                ))
-            })?
-            .for_body(
-                &proc_def.name,
-                &self.session_context,
-                plan.graph.as_deref(),
-                plan.root.has_mutations(),
-            )?;
+        let planning = session.for_body(
+            &proc_def.name,
+            &self.session_context,
+            plan.graph.as_deref(),
+            plan.root.has_mutations(),
+        )?;
         let operator = Box::new(UserProcedureOperator::new(
             plan,
             return_columns,
@@ -1333,6 +1337,7 @@ impl super::Planner {
                 planning,
                 write_counter: self.write_counter(),
                 read_counter: self.read_counter(),
+                path_expansions: self.path_expansions(),
             },
         ));
 

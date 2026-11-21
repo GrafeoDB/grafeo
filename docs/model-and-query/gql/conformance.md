@@ -529,7 +529,7 @@ refuses `=~` and LIKE with an error that says so.
 
 | ID | Feature | Status |
 |----|---------|--------|
-| GB01 | Long identifiers | Supported |
+| GB01 | Long identifiers | Supported (up to 16 KiB by default, `Config::with_max_identifier_length`) |
 | GB02 | Double minus sign comments | Supported |
 | GB03 | Double solidus comments | Supported |
 | GL01 | Hexadecimal literals | **Supported** |

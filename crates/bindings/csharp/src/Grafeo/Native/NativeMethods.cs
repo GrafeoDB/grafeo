@@ -41,6 +41,18 @@ internal static partial class NativeMethods
     [LibraryImport(LibName)]
     internal static partial int grafeo_options_set_path_search_budget(OptionsHandle options, ulong bytes);
 
+    /// <summary>Sets the path expansion limit, above zero.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int grafeo_options_set_path_expansion_limit(OptionsHandle options, ulong expansions);
+
+    /// <summary>Sets the query length limit in bytes, above zero.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int grafeo_options_set_max_query_length(OptionsHandle options, ulong bytes);
+
+    /// <summary>Sets the identifier length limit in bytes, above zero.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int grafeo_options_set_max_identifier_length(OptionsHandle options, ulong bytes);
+
     /// <summary>Sets the snapshot retention limit in bytes; below 1 MiB the open fails.</summary>
     [LibraryImport(LibName)]
     internal static partial int grafeo_options_set_snapshot_retention_limit(OptionsHandle options, ulong bytes);

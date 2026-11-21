@@ -387,6 +387,11 @@ pub(crate) struct PlanOptions {
     pub rules: crate::query::optimizer::PlannerRules,
     /// The bytes one path search may hold (`Config::path_search_budget`).
     pub path_search_budget: usize,
+    /// The statement and name lengths the parsers accept (`Config::parse_limits`).
+    pub parse_limits: grafeo_adapters::query::limits::ParseLimits,
+    /// The path expansions one statement may make (`Config::path_expansion_limit`).
+    #[cfg(lpg_language)]
+    pub path_expansion_limit: u64,
 }
 
 /// Runtime configuration for creating a new session.
@@ -411,6 +416,12 @@ pub(crate) struct SessionConfig {
     /// The bytes one path search may hold (`Config::path_search_budget`).
     #[cfg(query_language)]
     pub path_search_budget: usize,
+    /// The statement and name lengths the parsers accept (`Config::parse_limits`).
+    #[cfg(query_language)]
+    pub parse_limits: grafeo_adapters::query::limits::ParseLimits,
+    /// The path expansions one statement may make (`Config::path_expansion_limit`).
+    #[cfg(lpg_language)]
+    pub path_expansion_limit: u64,
     /// Buffer manager for memory-aware query execution.
     #[cfg(any(lpg_language, rdf_language))]
     pub buffer_manager: Option<Arc<grafeo_common::memory::buffer::BufferManager>>,
@@ -666,6 +677,9 @@ impl SessionInner {
                 shuffle_unordered: cfg.shuffle_unordered,
                 rules: crate::query::optimizer::PlannerRules::all(),
                 path_search_budget: cfg.path_search_budget,
+                parse_limits: cfg.parse_limits,
+                #[cfg(lpg_language)]
+                path_expansion_limit: cfg.path_expansion_limit,
             },
             graph_model: cfg.graph_model,
             #[cfg(query_language)]
@@ -864,6 +878,9 @@ impl SessionInner {
                 shuffle_unordered: cfg.shuffle_unordered,
                 rules: crate::query::optimizer::PlannerRules::all(),
                 path_search_budget: cfg.path_search_budget,
+                parse_limits: cfg.parse_limits,
+                #[cfg(lpg_language)]
+                path_expansion_limit: cfg.path_expansion_limit,
             },
             graph_model: cfg.graph_model,
             #[cfg(query_language)]
@@ -4421,7 +4438,7 @@ impl SessionInner {
         // plans are cached, never session or schema commands. A statement
         // with values takes its prepared plan, which keeps the parameters,
         // and fills a copy of it with this call's values (`fill_prepared`).
-        let cache_key = self.plan_cache_key(query, QueryLanguage::Gql);
+        let cache_key = self.plan_cache_key(query, QueryLanguage::Gql)?;
         // Read before planning: a change of the schema meanwhile keeps the
         // plan out of the cache.
         let generation = self.plan_cache().generation();
@@ -4448,7 +4465,7 @@ impl SessionInner {
                     // Filled and bound per call: this run's copy.
                     plan.plan().clone()
                 }
-                None => match gql::translate_full(query)? {
+                None => match gql::translate_full(query, &self.plan_options.parse_limits)? {
                     gql::GqlTranslationResult::SessionCommand(cmd) => {
                         return self.execute_session_command(cmd);
                     }
@@ -4623,7 +4640,7 @@ impl SessionInner {
         );
 
         // Parse and translate, rejecting anything that isn't a streamable query.
-        let translation = gql::translate_full(query)?;
+        let translation = gql::translate_full(query, &self.plan_options.parse_limits)?;
         let logical_plan = match translation {
             gql::GqlTranslationResult::SessionCommand(_) => {
                 return Err(grafeo_common::utils::error::Error::from(
@@ -4663,7 +4680,7 @@ impl SessionInner {
         self.check_graph_access(false)?;
 
         // Cache + bind + optimize (same path as execute).
-        let cache_key = self.plan_cache_key(query, QueryLanguage::Gql);
+        let cache_key = self.plan_cache_key(query, QueryLanguage::Gql)?;
         // Read before planning: a change of the schema meanwhile keeps the
         // plan out of the cache.
         let generation = self.plan_cache().generation();
@@ -4858,7 +4875,7 @@ impl SessionInner {
 
         // A statement without parameters whose optimized plan is cached
         // skips the parse and translation (see execute_gql).
-        let cache_key = self.plan_cache_key(query, QueryLanguage::Cypher);
+        let cache_key = self.plan_cache_key(query, QueryLanguage::Cypher)?;
         let generation = self.plan_cache().generation();
         let cached = self.cached_plan(&cache_key, params);
         let optimized_plan = if let Some(plan) = cached {
@@ -4879,7 +4896,7 @@ impl SessionInner {
                     plan.plan().clone()
                 }
                 // Schema DDL and SHOW commands run before the normal query path.
-                None => match cypher::translate_full(query)? {
+                None => match cypher::translate_full(query, &self.plan_options.parse_limits)? {
                     cypher::CypherTranslationResult::SchemaCommand(cmd) => {
                         self.check_schema_command(&cmd)?;
                         return self.execute_schema_command(cmd);
@@ -5000,7 +5017,8 @@ impl SessionInner {
         let start_time = Instant::now();
 
         // Parse and translate the query to a logical plan
-        let mut logical_plan = self.translated(gremlin::translate(query)?)?;
+        let mut logical_plan =
+            self.translated(gremlin::translate(query, &self.plan_options.parse_limits)?)?;
 
         // No parameters are supplied, so one the query uses is missing.
         substitute_params(&mut logical_plan, &std::collections::HashMap::new())?;
@@ -5081,7 +5099,8 @@ impl SessionInner {
         let start_time = Instant::now();
 
         // Parse and translate the query to a logical plan
-        let mut logical_plan = self.translated(gremlin::translate(query)?)?;
+        let mut logical_plan =
+            self.translated(gremlin::translate(query, &self.plan_options.parse_limits)?)?;
 
         // Substitute parameters
         substitute_params(&mut logical_plan, &params)?;
@@ -5148,7 +5167,8 @@ impl SessionInner {
         #[cfg(feature = "metrics")]
         let start_time = Instant::now();
 
-        let mut logical_plan = self.translated(graphql::translate(query)?)?;
+        let mut logical_plan =
+            self.translated(graphql::translate(query, &self.plan_options.parse_limits)?)?;
 
         // Substitute default parameter values from variable declarations; a
         // variable without a default is missing.
@@ -5216,7 +5236,8 @@ impl SessionInner {
         let start_time = Instant::now();
 
         // Parse and translate the query to a logical plan
-        let mut logical_plan = self.translated(graphql::translate(query)?)?;
+        let mut logical_plan =
+            self.translated(graphql::translate(query, &self.plan_options.parse_limits)?)?;
 
         // Merge default params with caller-supplied params
         if !logical_plan.default_params.is_empty() {
@@ -5291,7 +5312,7 @@ impl SessionInner {
         // A statement without parameters whose optimized plan is cached
         // skips the parse and translation (see execute_gql); DDL is never
         // cached.
-        let cache_key = self.plan_cache_key(query, QueryLanguage::SqlPgq);
+        let cache_key = self.plan_cache_key(query, QueryLanguage::SqlPgq)?;
         let generation = self.plan_cache().generation();
         let cached = self.cached_plan(&cache_key, params);
         let optimized_plan = if let Some(plan) = cached {
@@ -5313,7 +5334,8 @@ impl SessionInner {
                 }
                 None => {
                     // Parse and translate
-                    let logical_plan = self.translated(sql_pgq::translate(query)?)?;
+                    let logical_plan = self
+                        .translated(sql_pgq::translate(query, &self.plan_options.parse_limits)?)?;
 
                     // Property graph DDL is a standalone change of its own (see
                     // `create_property_graph`), outside the query pipeline.
@@ -6259,7 +6281,7 @@ impl SessionInner {
             #[cfg(feature = "gql")]
             "gql" => {
                 use crate::query::translators::gql::{GqlTranslationResult as Gql, translate_full};
-                match translate_full(query)? {
+                match translate_full(query, &self.plan_options.parse_limits)? {
                     Gql::SessionCommand(command) => {
                         return Ok(Self::session_command_writes(&command));
                     }
@@ -6274,7 +6296,7 @@ impl SessionInner {
                 use crate::query::translators::cypher::{
                     CypherTranslationResult as Cypher, translate_full,
                 };
-                match translate_full(query)? {
+                match translate_full(query, &self.plan_options.parse_limits)? {
                     Cypher::Plan(plan) => plan,
                     Cypher::SchemaCommand(command) => {
                         return Ok(Self::schema_command_writes(&command));
@@ -6287,17 +6309,31 @@ impl SessionInner {
                 }
             }
             #[cfg(feature = "gremlin")]
-            "gremlin" => crate::query::translators::gremlin::translate(query)?,
+            "gremlin" => crate::query::translators::gremlin::translate(
+                query,
+                &self.plan_options.parse_limits,
+            )?,
             #[cfg(feature = "graphql")]
-            "graphql" => crate::query::translators::graphql::translate(query)?,
+            "graphql" => crate::query::translators::graphql::translate(
+                query,
+                &self.plan_options.parse_limits,
+            )?,
             #[cfg(all(feature = "graphql", feature = "triple-store"))]
-            "graphql-rdf" => {
-                crate::query::translators::graphql_rdf::translate(query, "http://example.org/")?
-            }
+            "graphql-rdf" => crate::query::translators::graphql_rdf::translate(
+                query,
+                "http://example.org/",
+                &self.plan_options.parse_limits,
+            )?,
             #[cfg(feature = "sql-pgq")]
-            "sql" | "sql-pgq" => crate::query::translators::sql_pgq::translate(query)?,
+            "sql" | "sql-pgq" => crate::query::translators::sql_pgq::translate(
+                query,
+                &self.plan_options.parse_limits,
+            )?,
             #[cfg(all(feature = "sparql", feature = "triple-store"))]
-            "sparql" => crate::query::translators::sparql::translate(query)?,
+            "sparql" => crate::query::translators::sparql::translate(
+                query,
+                &self.plan_options.parse_limits,
+            )?,
             other => return Err(Self::unknown_language(other)),
         };
         // EXPLAIN shows the plan and runs nothing.
@@ -6386,7 +6422,10 @@ impl SessionInner {
                 return PlanWrites::from(true);
             }
             // A body that does not translate fails when the call is planned.
-            let Ok(body) = crate::query::translators::gql::translate(&procedure.body) else {
+            let Ok(body) = crate::query::translators::gql::translate(
+                &procedure.body,
+                &self.plan_options.parse_limits,
+            ) else {
                 return PlanWrites::from(false);
             };
             let writes = if body.root.has_mutations() {
@@ -7231,7 +7270,11 @@ impl SessionInner {
                 });
             }
             // A body that does not translate fails when the call is planned.
-            let body = crate::query::translators::gql::translate(&procedure.body).ok()?;
+            let body = crate::query::translators::gql::translate(
+                &procedure.body,
+                &self.plan_options.parse_limits,
+            )
+            .ok()?;
             return body
                 .root
                 .reaches_outside(&mut |inner| self.call_reaches_outside(inner, depth + 1));

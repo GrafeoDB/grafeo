@@ -5,7 +5,9 @@
 #[allow(clippy::wildcard_imports)]
 use super::ast::*;
 use super::lexer::{Lexer, Token, TokenKind};
-use crate::query::limits::{Chain, Nesting, nesting_error_message};
+use crate::query::limits::{
+    Chain, DEFAULT_MAX_IDENTIFIER_LENGTH, NameLimit, Nesting, nesting_error_message,
+};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 
 /// SPARQL Parser.
@@ -50,7 +52,19 @@ pub const PREDEFINED_PREFIXES: [(&str, &str); 5] = [
 impl<'a> Parser<'a> {
     /// Creates a new parser for the given query string.
     pub fn new(source: &'a str) -> Self {
-        let mut lexer = Lexer::new(source);
+        Self::with_max_identifier_length(source, DEFAULT_MAX_IDENTIFIER_LENGTH)
+    }
+
+    /// The identifier length limit, with the first name the parser read over
+    /// it.
+    pub(crate) fn names(&self) -> NameLimit {
+        self.lexer.names()
+    }
+
+    /// A parser for `source` that records the first name longer than `max`
+    /// bytes (see [`Self::names`]).
+    pub(crate) fn with_max_identifier_length(source: &'a str, max: usize) -> Self {
+        let mut lexer = Lexer::new(source).with_max_identifier_length(max);
         let current = lexer.next_token();
         Self {
             lexer,

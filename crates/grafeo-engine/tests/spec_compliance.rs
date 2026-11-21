@@ -2983,7 +2983,21 @@ mod gql_parser_unit {
 
 #[cfg(feature = "gql")]
 mod gql_translator_unit {
-    use grafeo_engine::query::translators::gql;
+    /// The GQL translator under the default parse limits.
+    mod gql {
+        use grafeo_adapters::query::limits::ParseLimits;
+        use grafeo_common::utils::error::Result;
+        use grafeo_engine::query::plan::LogicalPlan;
+        pub use grafeo_engine::query::translators::gql::GqlTranslationResult;
+
+        pub fn translate(query: &str) -> Result<LogicalPlan> {
+            grafeo_engine::query::translators::gql::translate(query, &ParseLimits::default())
+        }
+
+        pub fn translate_full(query: &str) -> Result<GqlTranslationResult> {
+            grafeo_engine::query::translators::gql::translate_full(query, &ParseLimits::default())
+        }
+    }
 
     #[test]
     fn translate_returns_plan_for_query() {

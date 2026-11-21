@@ -36,13 +36,14 @@ Categories:
 | Code          | Name                | Retryable | Meaning                                                    |
 | ------------- | ------------------- | --------- | ---------------------------------------------------------- |
 | `GRAFEO-Q001` | QuerySyntax         | no        | Parser rejected the query. Check the reported line/column. |
-| `GRAFEO-Q002` | QuerySemantic       | no        | Parsed but invalid: unknown label, graph or procedure, a variable nothing binds (in a stored procedure's body too), a call with another number of arguments, an unknown `YIELD` column, etc. GQLSTATUS `42002` for a name that resolves to nothing, `42000` for the rest. |
+| `GRAFEO-Q002` | QuerySemantic       | no        | Parsed but invalid: unknown label, graph or procedure, a variable nothing binds (in a stored procedure's body too), a call with another number of arguments, an unknown `YIELD` column, a statement or a name longer than its limit (`Config::with_max_query_length`, `Config::with_max_identifier_length`), etc. GQLSTATUS `42002` for a name that resolves to nothing, `42000` for the rest. |
 | `GRAFEO-Q003` | QueryTimeout        | **yes**   | Query exceeded its deadline. Raise `query_timeout` or narrow the pattern. |
 | `GRAFEO-Q004` | QueryUnsupported    | no        | The database or this build cannot run the statement: a feature the build leaves out (vector or text indexes, procedures, RDF, an import format), a language of another graph model (GQL on an RDF database), an operation the database cannot do (a backup of an in-memory database), or an isolation level that is not available yet (`SERIALIZABLE`). |
 | `GRAFEO-Q005` | QueryOptimization   | no        | Optimizer could not produce a plan. Report with the query text if you hit this. |
 | `GRAFEO-Q006` | QueryExecution      | no        | A valid statement failed while it ran, on its data: a file to load that cannot be read, a SPARQL graph that exists already or does not exist, a write to a node the transaction deleted, an integer or decimal result out of range, a float converted to an integer outside its range, a division by zero, or text a cast cannot read as a number (GQLSTATUS `22003`, `22012` and `22018`). |
 | `GRAFEO-Q007` | QueryPermissionDenied | no      | The session may not do what the statement does: a write, DDL or a writing procedure on a read-only session (`Role::ReadOnly`, Python `db.session(read_only=True)`), an administration statement without the admin role, or a graph its grants do not cover (GQLSTATUS `42501`). Python raises `GrafeoPermissionError`, a subclass of `GrafeoError`. |
 | `GRAFEO-Q008` | QueryExternalAccessDenied | no  | The statement reads or writes outside the database (a load of a file, a procedure that reaches a file, a URL or a model) on a session without external access (`Identity::with_external_access(false)`, Python `db.session(external_access=False)`); GQLSTATUS `42501`. `CALL grafeo.procedures()` lists what each procedure reaches in its `external_access` column. Python raises `GrafeoPermissionError`. |
+| `GRAFEO-Q009` | QueryLimit          | no        | The statement's path searches passed the path expansion limit (`Config::with_path_expansion_limit`, 100 million by default): the edges they read to extend paths and the path elements they returned. Bound the quantifier, keep fewer paths or return `DISTINCT` targets, or raise the limit; GQLSTATUS `22000`. |
 
 ## Transaction (T)
 
@@ -107,7 +108,7 @@ GQLSTATUS says what kind of condition it is, as SQL's SQLSTATE does:
 | `22G03`   | invalid value type             | `LIMIT $k` with `k = 'three'`, a procedure argument of another type |
 | `22G04`   | values not comparable          | two values a comparison cannot compare: a node and a number under `<` in GQL, and two values of different kinds in SQL/PGQ, `=` included |
 | `22G12`   | invalid value type             | an operator or a list index given an operand of a kind it does not take, found as the statement runs: `RETURN true + 1`, `RETURN -'a'`, `RETURN [1, 2, 3][1.5]` |
-| `22000`   | data exception                 | other failures on the statement's data, such as a vector of another size than its index or a property value past its size limit |
+| `22000`   | data exception                 | other failures on the statement's data, such as a vector of another size than its index or a property value past its size limit, and a statement past the path expansion limit (`GRAFEO-Q009`) |
 | `G2000`   | graph type violation           | a write the graph's schema refuses: a property of another type than its node or edge type declares, a missing `NOT NULL` property, a label, edge type or property a closed graph type does not declare, a `UNIQUE`, `NOT NULL` or key constraint |
 | `G1001`   | dependent object error: edges still exist | `DELETE` of a node that still has edges (use `DETACH DELETE`) |
 | `02000`   | no data                        | a node or edge that does not exist               |

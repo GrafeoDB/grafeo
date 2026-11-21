@@ -455,15 +455,9 @@ pub(super) struct StoreAccount {
     /// Per region, what the ops admitted since the last settle carry: not
     /// counted yet (the bracket of their writes is open, see `Bracket`).
     pending: [usize; 2],
-    /// Per region, what the last admitted op asked for besides a step: the
-    /// headroom a settle leaves in the grant.
+    /// Per region, what the last admitted op asked for: the headroom a
+    /// settle leaves in the grant.
     headroom: [usize; 2],
-}
-
-/// The multiple of `step` (the manager's grant step) at or above `bytes`,
-/// saturating.
-fn step_above(bytes: usize, step: usize) -> usize {
-    bytes.checked_next_multiple_of(step).unwrap_or(usize::MAX)
 }
 
 /// `bytes`, a total of counted lines, which no store reaches past
@@ -677,9 +671,10 @@ impl StoreAccount {
 
     /// Admits a refusable op that carries about `payload` bytes of values
     /// and thaws about `thaw` bytes, and may grow the index buffers
-    /// (`indexes`): keeps a step and that much headroom, past what it counts
-    /// and what the ops admitted since the last settle carry, in each grant
-    /// the op may grow, growing a short grant to the next step. Two compares
+    /// (`indexes`): keeps that much headroom past what it counts and what the
+    /// ops admitted since the last settle carry, and as much again (at most a
+    /// step), in each grant the op may grow, growing a short grant to
+    /// `BufferManager::grant_size` of that. Two compares
     /// when the grants have room. When admission refuses, it gives back what
     /// it grew for the op, nothing changed, and the op needs the returned
     /// bytes.
@@ -712,10 +707,10 @@ impl StoreAccount {
             if place == 1 && !indexes {
                 continue;
             }
-            let wanted = sane(counted)
+            let base = sane(counted)
                 .saturating_add(self.pending[place])
-                .saturating_add(step)
                 .saturating_add(op);
+            let wanted = base.saturating_add(base.min(step));
             let grant = match place {
                 0 => &mut self.storage,
                 _ => &mut self.indexes,
@@ -724,7 +719,7 @@ impl StoreAccount {
             if held >= wanted {
                 continue;
             }
-            let grow = step_above(wanted, step).saturating_sub(held);
+            let grow = manager.grant_size(wanted).saturating_sub(held);
             let grant = grant.get_or_insert_with(|| manager.empty_grant(region));
             if ADMISSION_REFUSES && !grant.try_grow(grow) {
                 // A refusal changes nothing: what this admission grew goes back.
@@ -751,15 +746,14 @@ impl StoreAccount {
 
     /// Brings each grant up to the bytes its lines count (forced: the ops
     /// were admitted, or must not fail), after folding in the thaws, and
-    /// gives back what a grant holds past two steps and the last admitted
-    /// op's headroom over them: `counted <= grant < counted + 2 steps +
-    /// headroom`.
+    /// gives back what a grant holds past `BufferManager::settled_size` of
+    /// them and the last admitted op's headroom.
     pub(super) fn settle(&mut self) {
         self.settle_to(true);
     }
 
     /// [`settle`](Self::settle) without the hysteresis: a grant keeps no
-    /// more than the step its counted bytes round up to, so what a spill or
+    /// more than `BufferManager::grant_size` of its counted bytes, so what a spill or
     /// a compression freed leaves the buffer manager's count at once (the
     /// eviction cycle relies on it).
     pub(super) fn settle_tight(&mut self) {
@@ -773,7 +767,6 @@ impl StoreAccount {
         let Some(Manager(manager)) = &self.manager else {
             return;
         };
-        let step = manager.grant_step();
         let [storage, index, _] = self.totals;
         for (place, (region, counted)) in [
             (MemoryRegion::GraphStorage, storage),
@@ -792,22 +785,18 @@ impl StoreAccount {
             if held < counted {
                 grant
                     .get_or_insert_with(|| manager.empty_grant(region))
-                    .grow_forced(step_above(counted, step).saturating_sub(held));
+                    .grow_forced(manager.grant_size(counted).saturating_sub(held));
                 continue;
             }
-            let (bound, kept) = if slack {
-                (
-                    counted.saturating_add(2 * step).saturating_add(headroom),
-                    step_above(counted.saturating_add(step).saturating_add(headroom), step),
-                )
+            let kept = if slack {
+                manager.settled_size(held, counted.saturating_add(headroom))
             } else {
-                let kept = step_above(counted, step);
-                (kept.saturating_add(1), kept)
+                manager.grant_size(counted)
             };
-            if held >= bound
+            if kept < held
                 && let Some(grant) = grant.as_mut()
             {
-                grant.shrink(held.saturating_sub(kept));
+                grant.shrink(held - kept);
             }
         }
     }
@@ -1162,6 +1151,86 @@ mod tests {
         assert_counted(&store, "the index kept by the writes");
         assert!(store.drop_property_index("id"));
         assert_counted(&store, "the drop");
+    }
+
+    /// A small store's storage grant grows through the powers of two below the
+    /// step, every write admitted, and holds whole steps above it.
+    #[test]
+    fn a_small_store_grows_through_the_powers_of_two_without_a_refusal() {
+        let store = RowGroupStore::new();
+        let manager = BufferManager::with_budget(64 << 20);
+        store.attach_memory(Arc::clone(&manager));
+        let step = manager.grant_step();
+        let mut sizes = Vec::new();
+        for batch in 0..10_000_i64 {
+            let storage = manager.stats().region_usage(MemoryRegion::GraphStorage);
+            if storage > 2 * step {
+                break;
+            }
+            if sizes.last() != Some(&storage) {
+                sizes.push(storage);
+            }
+            let mut tx = Tx::begin(&store, 10 + batch.cast_unsigned());
+            for i in batch * 50..(batch + 1) * 50 {
+                tx.create_node(&["Person"], &[("i", Value::Int64(i))])
+                    .unwrap_or_else(|error| panic!("node {i} is admitted: {error}"));
+            }
+            tx.commit()
+                .unwrap_or_else(|error| panic!("commit {batch}: {error}"));
+            assert_granted(&store, &manager, "a small store's growth");
+        }
+        let small: Vec<usize> = sizes
+            .iter()
+            .copied()
+            .filter(|&size| size > 0 && size < step && size.is_power_of_two())
+            .collect();
+        assert!(
+            small.len() >= 4,
+            "the storage grant passes several powers of two below the {step}-byte step: {sizes:?}"
+        );
+        assert!(
+            sizes.iter().all(|&size| size < step || size % step == 0),
+            "from one step up the grant holds whole steps: {sizes:?}"
+        );
+        assert_counted(&store, "a small store's growth");
+    }
+
+    /// At a step that is no power of two (48 KiB, a 3 MiB budget), admitting
+    /// and settling the ops of a small store keeps its grant: the settle does
+    /// not give back what the next admission takes again, so the grant moves a
+    /// bounded number of times over many writes.
+    #[test]
+    fn a_small_store_keeps_its_admission_room_at_any_step() {
+        for budget in [3 << 20, 64 << 20] {
+            let manager = BufferManager::with_budget(budget);
+            let step = manager.grant_step();
+            let mut account = super::StoreAccount::default();
+            account.attach(Arc::clone(&manager));
+            account.grown(super::Line::NodeColumns, 28 << 10);
+            account.settle();
+            let mut changes = 0;
+            let mut last = account.granted();
+            for op in 0..200 {
+                account.admit(64, 0, false).unwrap();
+                let admitted = account.granted();
+                account.grown(super::Line::NodeColumns, 64);
+                account.settle();
+                for now in [admitted, account.granted()] {
+                    if now != last {
+                        changes += 1;
+                        last = now;
+                    }
+                }
+                assert!(
+                    account.granted() >= account.totals[0],
+                    "op {op}: the count is covered"
+                );
+            }
+            assert!(
+                changes <= 4,
+                "a {step}-byte step: the grant moved {changes} times over 200 writes"
+            );
+        }
     }
 
     /// A load counts what it loaded from one walk, its cold chunks hold

@@ -448,11 +448,6 @@ fn event_heap_bytes(event: &ChangeEvent) -> usize {
         + properties(&event.after)
 }
 
-/// `bytes` rounded up to the grant step `step`.
-fn step_above(bytes: usize, step: usize) -> usize {
-    bytes.checked_next_multiple_of(step).unwrap_or(usize::MAX)
-}
-
 impl CdcLog {
     /// Creates a new empty CDC log with a fresh HLC clock and default retention.
     #[must_use]
@@ -509,15 +504,15 @@ impl CdcLog {
     }
 
     /// Brings the grant to the counted bytes, forced (a commit, which must
-    /// not fail, records the events): two loads and a compare while it is
-    /// within two steps above them.
+    /// not fail, records the events): two loads and a few compares while it
+    /// is within the bounds of `BufferManager::settled_size`.
     fn settle(&self) {
         let Some(manager) = self.memory.manager.get() else {
             return;
         };
         let counted = self.counted.load(Ordering::Relaxed);
         let granted = self.memory.granted.load(Ordering::Relaxed);
-        if counted <= granted && granted - counted < 2 * manager.grant_step() {
+        if manager.settled_size(granted, counted) == granted {
             return;
         }
         let mut grant = self.memory.grant.lock();
@@ -532,7 +527,7 @@ impl CdcLog {
     }
 
     /// [`settle`](Self::settle) without the slack: the grant keeps no more
-    /// than the step the counted bytes round up to, so what an eviction
+    /// than the counted bytes' `BufferManager::grant_size`, so what an eviction
     /// pruned leaves the buffer manager's count at once (the eviction cycle
     /// reads it). The bytes the grant gave back.
     fn settle_tight(&self) -> usize {
@@ -546,7 +541,7 @@ impl CdcLog {
         if held < counted {
             manager.settle_forced(&mut grant, MemoryRegion::ExecutionBuffers, counted);
         } else if let Some(grant) = grant.as_mut() {
-            given_back = held.saturating_sub(step_above(counted, manager.grant_step()));
+            given_back = held.saturating_sub(manager.grant_size(counted));
             grant.shrink(given_back);
         }
         self.memory.granted.store(
@@ -1956,8 +1951,7 @@ mod tests {
         assert_eq!(freed, granted - log.granted_bytes());
         assert!(freed > 0);
         assert!(
-            log.granted_bytes() >= counted
-                && log.granted_bytes() <= step_above(counted, manager.grant_step()),
+            log.granted_bytes() >= counted && log.granted_bytes() <= manager.grant_size(counted),
             "granted {} for {counted}",
             log.granted_bytes()
         );

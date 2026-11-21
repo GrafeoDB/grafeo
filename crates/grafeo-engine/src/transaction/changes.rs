@@ -117,25 +117,23 @@ struct State {
 struct RdfReservation {
     /// The bytes the inserts recorded so far estimate.
     bytes: usize,
-    /// Their grant, grown a step at a time.
+    /// Their grant, grown to `BufferManager::grant_size` of them.
     grant: Option<MemoryGrant>,
 }
 
 #[cfg(feature = "triple-store")]
 impl RdfReservation {
     /// Reserves `bytes` more from `manager`: an atomic only when they pass
-    /// the grant's step; whether the memory limit had room.
+    /// the grant's rounding; whether the memory limit had room.
     fn reserve(&mut self, manager: &Arc<BufferManager>, bytes: usize) -> bool {
         let wanted = self.bytes.saturating_add(bytes);
         let held = self.grant.as_ref().map_or(0, MemoryGrant::size);
         if wanted > held {
-            let step = wanted
-                .checked_next_multiple_of(manager.grant_step())
-                .unwrap_or(usize::MAX);
+            let size = manager.grant_size(wanted);
             let grant = self
                 .grant
                 .get_or_insert_with(|| manager.empty_grant(MemoryRegion::GraphStorage));
-            if !grant.try_grow(step - held) {
+            if !grant.try_grow(size - held) {
                 return false;
             }
         }
@@ -151,7 +149,7 @@ impl RdfReservation {
 
 impl State {
     /// Brings the grant to what the set holds: a compare while it is within
-    /// two steps above it (see `BufferManager::settle_forced`).
+    /// its bounds (see `BufferManager::settle_forced`).
     fn settle(&mut self, memory: Option<&Arc<BufferManager>>) {
         if let Some(manager) = memory {
             let held = self.set.approx_bytes();

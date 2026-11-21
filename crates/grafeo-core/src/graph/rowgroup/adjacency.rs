@@ -34,9 +34,17 @@ pub(super) struct Adjacent {
     pub edge: u64,
 }
 
+/// From how many entries of the longer of two runs per entry of the shorter the two
+/// gallop rather than merge: where galloping overtakes the merge in wall clock, measured
+/// on hardware (a merge's branch is predictable when the runs differ in length, which an
+/// instruction count does not show). The lower of two machines' crossovers: the merge is
+/// ahead up to 32 to 1 on one (galloping from 40 to 1) and up to 112 to 1 on the other.
+const MERGE_RATIO: usize = 32;
+
 /// Calls `found` with each pair of an entry of `near` and of `far`, two runs sorted by
-/// other end, that reach one node, galloping through the longer from the shorter. The
-/// probes it took. The one place that knows how a run is sorted.
+/// other end, that reach one node, in the order of the other ends: by a merge of the two,
+/// or galloping through the longer from the shorter when it is [`MERGE_RATIO`] times as
+/// long or more. The probes it took. The one place that knows how a run is sorted.
 pub(super) fn intersect_runs(
     near: &[Adjacent],
     far: &[Adjacent],
@@ -44,6 +52,75 @@ pub(super) fn intersect_runs(
 ) -> usize {
     let swapped = near.len() > far.len();
     let (short, long) = if swapped { (far, near) } else { (near, far) };
+    if long.len() < short.len().saturating_mul(MERGE_RATIO) {
+        merge_runs(short, long, swapped, found)
+    } else {
+        gallop_runs(short, long, swapped, found)
+    }
+}
+
+/// [`intersect_runs`] by a merge. Equal ends give every pair of their entries, as
+/// [`gallop_runs`] gives them; the entries of one end are few (parallel edges), so they
+/// are counted one by one. The comparisons it made, as probes.
+// Compiled on its own: inlined into `common_edges_seen`, its long-side advance took two
+// instructions a step instead of one (Callgrind). One call per intersection.
+#[inline(never)]
+fn merge_runs(
+    short: &[Adjacent],
+    long: &[Adjacent],
+    swapped: bool,
+    found: &mut dyn FnMut(&Adjacent, &Adjacent),
+) -> usize {
+    let (mut index, mut at, mut probes) = (0, 0, 0);
+    while index < short.len() && at < long.len() {
+        let (near, far) = (short[index].other, long[at].other);
+        probes += 1;
+        match near.cmp(&far) {
+            std::cmp::Ordering::Less => index += 1,
+            std::cmp::Ordering::Greater => at += 1,
+            std::cmp::Ordering::Equal => {
+                let same = |entry: &&Adjacent| entry.other == near;
+                let run = short[index..].iter().take_while(same).count();
+                let count = long[at..].iter().take_while(same).count();
+                pairs(
+                    &short[index..index + run],
+                    &long[at..at + count],
+                    swapped,
+                    found,
+                );
+                index += run;
+                at += count;
+            }
+        }
+    }
+    probes
+}
+
+/// Every pair of an entry of `short` and of `long`, the near hop's entry first.
+fn pairs(
+    short: &[Adjacent],
+    long: &[Adjacent],
+    swapped: bool,
+    found: &mut dyn FnMut(&Adjacent, &Adjacent),
+) {
+    for short_entry in short {
+        for long_entry in long {
+            if swapped {
+                found(long_entry, short_entry);
+            } else {
+                found(short_entry, long_entry);
+            }
+        }
+    }
+}
+
+/// [`intersect_runs`] by galloping through `long` from each entry of `short`.
+fn gallop_runs(
+    short: &[Adjacent],
+    long: &[Adjacent],
+    swapped: bool,
+    found: &mut dyn FnMut(&Adjacent, &Adjacent),
+) -> usize {
     let mut probes = 0;
     let mut from = 0;
     let mut index = 0;
@@ -54,14 +131,14 @@ pub(super) fn intersect_runs(
         probes += reads + 1;
         from = start;
         let count = long[start..].partition_point(|entry| entry.other == other);
-        for short_entry in &short[index..index + run] {
-            for long_entry in &long[start..start + count] {
-                if swapped {
-                    found(long_entry, short_entry);
-                } else {
-                    found(short_entry, long_entry);
-                }
-            }
+        // Most entries of the shorter run meet nothing in the longer: no call for them.
+        if count > 0 {
+            pairs(
+                &short[index..index + run],
+                &long[start..start + count],
+                swapped,
+                found,
+            );
         }
         index += run;
     }
@@ -808,6 +885,104 @@ mod tests {
         large.push_run(&run(&entries));
         assert_eq!(large.delta_len, 0, "the run past the minimum merged");
         assert_eq!(large.sorted.len(), MERGE_MIN + 3);
+    }
+
+    /// The merge and galloping give the same pairs in the same order, the near hop's entry
+    /// first, on seeded runs with parallel edges (an other end repeated), empty runs, runs of
+    /// one, both orders of the two, and length ratios on both sides of [`MERGE_RATIO`]; and
+    /// `intersect_runs` gives the same as either.
+    #[test]
+    fn the_merge_gives_the_pairs_galloping_gives() {
+        use super::{MERGE_RATIO, gallop_runs, intersect_runs, merge_runs};
+
+        let mut state = 0x5EED_0E23_u64;
+        let mut below = |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let mut make = |len: usize, universe: u64, first_edge: u64| -> Vec<Adjacent> {
+            let mut run: Vec<Adjacent> = (0..len as u64)
+                .map(|at| edge(3, below(universe), first_edge + at))
+                .collect();
+            run.sort_unstable();
+            run
+        };
+        let lengths = [0, 1, 2, 3, 5, 8, 16];
+        let mut cases = 0;
+        for &short in &lengths {
+            for ratio in [1, 2, 5, MERGE_RATIO - 1, MERGE_RATIO, MERGE_RATIO + 1, 160] {
+                let long = short * ratio;
+                // A small universe repeats other ends (parallel edges); a wide one rarely meets.
+                for universe in [4_u64, (long as u64 * 4).max(8)] {
+                    let near = make(short, universe, 0);
+                    let far = make(long, universe, 1_000_000);
+                    for (a, b) in [(&near, &far), (&far, &near)] {
+                        let swapped = a.len() > b.len();
+                        let (s, l) = if swapped { (b, a) } else { (a, b) };
+                        let mut by_gallop = Vec::new();
+                        gallop_runs(s, l, swapped, &mut |x, y| by_gallop.push((x.edge, y.edge)));
+                        let mut by_merge = Vec::new();
+                        merge_runs(s, l, swapped, &mut |x, y| by_merge.push((x.edge, y.edge)));
+                        assert_eq!(
+                            by_merge, by_gallop,
+                            "{short} against {long}, universe {universe}"
+                        );
+                        let mut chosen = Vec::new();
+                        intersect_runs(a, b, &mut |x, y| chosen.push((x.edge, y.edge)));
+                        assert_eq!(chosen, by_gallop, "intersect_runs, {short} against {long}");
+                        // An oracle that shares no code with either: every pair of an entry of the
+                        // first argument and of the second that reach one node, first argument first.
+                        let mut brute: Vec<(u64, u64)> = a
+                            .iter()
+                            .flat_map(|x| {
+                                b.iter()
+                                    .filter(move |y| y.other == x.other)
+                                    .map(move |y| (x.edge, y.edge))
+                            })
+                            .collect();
+                        brute.sort_unstable();
+                        let mut sorted = chosen.clone();
+                        sorted.sort_unstable();
+                        assert_eq!(sorted, brute, "every meeting pair, {short} against {long}");
+                        assert!(
+                            chosen
+                                .iter()
+                                .all(|(x, _)| a.iter().any(|entry| entry.edge == *x)),
+                            "the first argument's entry first, {short} against {long}"
+                        );
+                        cases += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, lengths.len() * 7 * 2 * 2);
+    }
+
+    /// Runs just under [`MERGE_RATIO`] times as long merge, and runs that long gallop: the
+    /// probes `intersect_runs` takes are those of that path.
+    #[test]
+    fn the_merge_ratio_parts_the_two_paths() {
+        use super::{MERGE_RATIO, gallop_runs, intersect_runs, merge_runs};
+
+        let short: Vec<Adjacent> = (0..4_u64).map(|at| edge(3, at * 97, at)).collect();
+        for (long_len, merges) in [(4 * MERGE_RATIO - 1, true), (4 * MERGE_RATIO, false)] {
+            let long: Vec<Adjacent> = (0..long_len as u64)
+                .map(|at| edge(3, at * 3, 1_000 + at))
+                .collect();
+            let probes = |run: fn(
+                &[Adjacent],
+                &[Adjacent],
+                bool,
+                &mut dyn FnMut(&Adjacent, &Adjacent),
+            ) -> usize| { run(&short, &long, false, &mut |_, _| {}) };
+            let (by_merge, by_gallop) = (probes(merge_runs), probes(gallop_runs));
+            assert_ne!(by_merge, by_gallop, "the two paths must be told apart");
+            let chosen = intersect_runs(&short, &long, &mut |_, _| {});
+            let expected = if merges { by_merge } else { by_gallop };
+            assert_eq!(chosen, expected, "{long_len} against 4, merges: {merges}");
+        }
     }
 
     #[test]

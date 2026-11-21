@@ -166,7 +166,7 @@ tests:
   - name: s13_failing_on_incorrect_unicode_literal
     xfail:
       spec: "openCypher TCK 2024.3 Literals6: [13] Failing on incorrect unicode literal"
-      issue: fix in 0.6.5
+      issue: "#800"
     query: |
       RETURN '\uH'
     expect:

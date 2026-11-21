@@ -205,7 +205,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_1
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #1"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN 123 XOR true
     expect:
@@ -217,7 +217,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_2
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #2"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN 123.4 XOR false
     expect:
@@ -229,7 +229,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_3
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #3"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN 123.4 XOR null
     expect:
@@ -241,7 +241,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_4
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #4"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN 'foo' XOR true
     expect:
@@ -253,7 +253,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_5
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #5"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN [] XOR false
     expect:
@@ -265,7 +265,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_6
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #6"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN [true] XOR false
     expect:
@@ -277,7 +277,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_7
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #7"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN [null] XOR null
     expect:
@@ -289,7 +289,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_8
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #8"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN {} XOR true
     expect:
@@ -301,7 +301,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_9
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #9"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN {x: []} XOR true
     expect:
@@ -313,7 +313,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_10
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #10"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN false XOR 123
     expect:
@@ -325,7 +325,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_11
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #11"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN true XOR 123.4
     expect:
@@ -337,7 +337,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_12
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #12"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN false XOR 'foo'
     expect:
@@ -349,7 +349,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_13
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #13"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN null XOR 'foo'
     expect:
@@ -361,7 +361,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_14
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #14"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN true XOR []
     expect:
@@ -373,7 +373,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_15
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #15"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN true XOR [false]
     expect:
@@ -385,7 +385,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_16
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #16"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN null XOR [null]
     expect:
@@ -397,7 +397,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_17
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #17"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN false XOR {}
     expect:
@@ -409,7 +409,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_18
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #18"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN false XOR {x: []}
     expect:
@@ -421,7 +421,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_19
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #19"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN 123 XOR 'foo'
     expect:
@@ -433,7 +433,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_20
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #20"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN 123.4 XOR 123.4
     expect:
@@ -445,7 +445,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_21
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #21"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN 'foo' XOR {x: []}
     expect:
@@ -457,7 +457,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_22
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #22"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN [true] XOR [true]
     expect:
@@ -469,7 +469,7 @@ tests:
   - name: s8_fail_on_exclusive_disjunction_of_at_least_one_non_booleans_23
     xfail:
       spec: "openCypher TCK 2024.3 Boolean3: [8] Fail on exclusive disjunction of at least one non-booleans #23"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN {x: []} XOR [123]
     expect:

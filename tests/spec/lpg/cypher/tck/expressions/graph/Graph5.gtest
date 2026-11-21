@@ -171,7 +171,7 @@ tests:
   - name: s5_label_expression_on_null
     xfail:
       spec: "openCypher TCK 2024.3 Graph5: [5] Label expression on null"
-      issue: fix in 0.6.5
+      issue: "#800"
     setup:
       - |
         CREATE (s:Single)

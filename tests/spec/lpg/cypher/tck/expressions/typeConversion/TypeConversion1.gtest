@@ -94,7 +94,7 @@ tests:
   - name: s5_fail_toboolean_on_invalid_types_example_list_1
     xfail:
       spec: "openCypher TCK 2024.3 TypeConversion1: [5] Fail `toBoolean()` on invalid types #Example: list #1"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()
@@ -110,7 +110,7 @@ tests:
   - name: s5_fail_toboolean_on_invalid_types_example_map_2
     xfail:
       spec: "openCypher TCK 2024.3 TypeConversion1: [5] Fail `toBoolean()` on invalid types #Example: map #2"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()
@@ -126,7 +126,7 @@ tests:
   - name: s5_fail_toboolean_on_invalid_types_example_float_3
     xfail:
       spec: "openCypher TCK 2024.3 TypeConversion1: [5] Fail `toBoolean()` on invalid types #Example: float #3"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()
@@ -142,7 +142,7 @@ tests:
   - name: s5_fail_toboolean_on_invalid_types_example_node_4
     xfail:
       spec: "openCypher TCK 2024.3 TypeConversion1: [5] Fail `toBoolean()` on invalid types #Example: node #4"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()
@@ -158,7 +158,7 @@ tests:
   - name: s5_fail_toboolean_on_invalid_types_example_relationship_5
     xfail:
       spec: "openCypher TCK 2024.3 TypeConversion1: [5] Fail `toBoolean()` on invalid types #Example: relationship #5"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()
@@ -174,7 +174,7 @@ tests:
   - name: s5_fail_toboolean_on_invalid_types_example_path_6
     xfail:
       spec: "openCypher TCK 2024.3 TypeConversion1: [5] Fail `toBoolean()` on invalid types #Example: path #6"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()

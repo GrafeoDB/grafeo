@@ -67,7 +67,7 @@ tests:
   - name: s3_statically_access_a_field_of_a_map_resulting_from_an_expression
     xfail:
       spec: "openCypher TCK 2024.3 Map1: [3] Statically access a field of a map resulting from an expression"
-      issue: fix in 0.6.5
+      issue: "#800"
     query: |
       WITH [123, {existing: 42, notMissing: null}] AS list
       RETURN (list[1]).missing, (list[1]).notMissing, (list[1]).existing
@@ -169,7 +169,7 @@ tests:
   - name: s5_statically_access_a_field_with_a_delimited_identifier_5
     xfail:
       spec: "openCypher TCK 2024.3 Map1: [5] Statically access a field with a delimited identifier #5"
-      issue: fix in 0.6.5
+      issue: "#800"
     query: |
       WITH {null: 'Mats', NULL: 'Pontus'} AS map
       RETURN map.`null` AS result
@@ -183,7 +183,7 @@ tests:
   - name: s5_statically_access_a_field_with_a_delimited_identifier_6
     xfail:
       spec: "openCypher TCK 2024.3 Map1: [5] Statically access a field with a delimited identifier #6"
-      issue: fix in 0.6.5
+      issue: "#800"
     query: |
       WITH {null: 'Mats', NULL: 'Pontus'} AS map
       RETURN map.`NULL` AS result
@@ -198,7 +198,7 @@ tests:
   - name: s6_fail_when_performing_property_access_on_a_non_map_1
     xfail:
       spec: "openCypher TCK 2024.3 Map1: [6] Fail when performing property access on a non-map #1"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       WITH 123 AS nonMap
       RETURN nonMap.num
@@ -211,7 +211,7 @@ tests:
   - name: s6_fail_when_performing_property_access_on_a_non_map_2
     xfail:
       spec: "openCypher TCK 2024.3 Map1: [6] Fail when performing property access on a non-map #2"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       WITH 42.45 AS nonMap
       RETURN nonMap.num
@@ -224,7 +224,7 @@ tests:
   - name: s6_fail_when_performing_property_access_on_a_non_map_3
     xfail:
       spec: "openCypher TCK 2024.3 Map1: [6] Fail when performing property access on a non-map #3"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       WITH true AS nonMap
       RETURN nonMap.num
@@ -237,7 +237,7 @@ tests:
   - name: s6_fail_when_performing_property_access_on_a_non_map_4
     xfail:
       spec: "openCypher TCK 2024.3 Map1: [6] Fail when performing property access on a non-map #4"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       WITH false AS nonMap
       RETURN nonMap.num
@@ -250,7 +250,7 @@ tests:
   - name: s6_fail_when_performing_property_access_on_a_non_map_5
     xfail:
       spec: "openCypher TCK 2024.3 Map1: [6] Fail when performing property access on a non-map #5"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       WITH 'string' AS nonMap
       RETURN nonMap.num
@@ -263,7 +263,7 @@ tests:
   - name: s6_fail_when_performing_property_access_on_a_non_map_6
     xfail:
       spec: "openCypher TCK 2024.3 Map1: [6] Fail when performing property access on a non-map #6"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       WITH [123, true] AS nonMap
       RETURN nonMap.num

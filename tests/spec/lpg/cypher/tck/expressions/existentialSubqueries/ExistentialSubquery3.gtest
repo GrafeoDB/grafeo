@@ -45,7 +45,7 @@ tests:
   - name: s1_nested_simple_existential_subquery
     xfail:
       spec: "openCypher TCK 2024.3 ExistentialSubquery3: [1] Nested simple existential subquery"
-      issue: fix in 0.6.5
+      issue: "fix in 0.6.5"
     setup:
       - |
         CREATE (a:A {prop: 1})-[:R]->(b:B {prop: 1}),
@@ -69,7 +69,7 @@ tests:
   - name: s2_nested_full_existential_subquery
     xfail:
       spec: "openCypher TCK 2024.3 ExistentialSubquery3: [2] Nested full existential subquery"
-      issue: fix in 0.6.5
+      issue: "fix in 0.6.5"
     setup:
       - |
         CREATE (a:A {prop: 1})-[:R]->(b:B {prop: 1}),
@@ -93,7 +93,7 @@ tests:
   - name: s3_nested_full_existential_subquery_with_pattern_predicate
     xfail:
       spec: "openCypher TCK 2024.3 ExistentialSubquery3: [3] Nested full existential subquery with pattern predicate"
-      issue: fix in 0.6.5
+      issue: "fix in 0.6.5"
     setup:
       - |
         CREATE (a:A {prop: 1})-[:R]->(b:B {prop: 1}),

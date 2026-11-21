@@ -45,7 +45,7 @@ tests:
   - name: s1_should_construct_week_date_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({year: 1816, week: 1}) AS d
@@ -59,10 +59,10 @@ tests:
   - name: s1_should_construct_week_date_2
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [1] Should construct week date #2"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({year: 1816, week: 52}) AS d
@@ -76,10 +76,10 @@ tests:
   - name: s1_should_construct_week_date_3
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [1] Should construct week date #3"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({year: 1817, week: 1}) AS d
@@ -93,10 +93,10 @@ tests:
   - name: s1_should_construct_week_date_4
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [1] Should construct week date #4"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({year: 1817, week: 10}) AS d
@@ -110,10 +110,10 @@ tests:
   - name: s1_should_construct_week_date_5
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [1] Should construct week date #5"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({year: 1817, week: 30}) AS d
@@ -127,10 +127,10 @@ tests:
   - name: s1_should_construct_week_date_6
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [1] Should construct week date #6"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({year: 1817, week: 52}) AS d
@@ -144,10 +144,10 @@ tests:
   - name: s1_should_construct_week_date_7
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [1] Should construct week date #7"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({year: 1818, week: 1}) AS d
@@ -161,10 +161,10 @@ tests:
   - name: s1_should_construct_week_date_8
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [1] Should construct week date #8"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({year: 1818, week: 52}) AS d
@@ -178,10 +178,10 @@ tests:
   - name: s1_should_construct_week_date_9
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [1] Should construct week date #9"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({year: 1818, week: 53}) AS d
@@ -195,10 +195,10 @@ tests:
   - name: s1_should_construct_week_date_10
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [1] Should construct week date #10"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({year: 1819, week: 1}) AS d
@@ -212,10 +212,10 @@ tests:
   - name: s1_should_construct_week_date_11
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [1] Should construct week date #11"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({year: 1819, week: 52}) AS d
@@ -229,10 +229,10 @@ tests:
   - name: s1_should_construct_week_date_12
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [1] Should construct week date #12"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({dayOfWeek: 2, year: 1817, week: 1}) AS d
@@ -246,10 +246,10 @@ tests:
   - name: s1_should_construct_week_date_13
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [1] Should construct week date #13"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({date: date('1816-12-30'), week: 2, dayOfWeek: 3}) AS d
@@ -263,10 +263,10 @@ tests:
   - name: s1_should_construct_week_date_14
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [1] Should construct week date #14"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({date: date('1816-12-31'), week: 2}) AS d
@@ -280,10 +280,10 @@ tests:
   - name: s1_should_construct_week_date_15
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [1] Should construct week date #15"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({date: date('1816-12-31'), year: 1817, week: 2}) AS d
@@ -297,10 +297,10 @@ tests:
   - name: s2_should_construct_week_localdatetime_1
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [2] Should construct week localdatetime #1"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1816, week: 1}) AS d
@@ -314,10 +314,10 @@ tests:
   - name: s2_should_construct_week_localdatetime_2
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [2] Should construct week localdatetime #2"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1816, week: 52}) AS d
@@ -331,10 +331,10 @@ tests:
   - name: s2_should_construct_week_localdatetime_3
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [2] Should construct week localdatetime #3"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1817, week: 1}) AS d
@@ -348,10 +348,10 @@ tests:
   - name: s2_should_construct_week_localdatetime_4
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [2] Should construct week localdatetime #4"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1817, week: 10}) AS d
@@ -365,10 +365,10 @@ tests:
   - name: s2_should_construct_week_localdatetime_5
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [2] Should construct week localdatetime #5"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1817, week: 30}) AS d
@@ -382,10 +382,10 @@ tests:
   - name: s2_should_construct_week_localdatetime_6
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [2] Should construct week localdatetime #6"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1817, week: 52}) AS d
@@ -399,10 +399,10 @@ tests:
   - name: s2_should_construct_week_localdatetime_7
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [2] Should construct week localdatetime #7"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1818, week: 1}) AS d
@@ -416,10 +416,10 @@ tests:
   - name: s2_should_construct_week_localdatetime_8
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [2] Should construct week localdatetime #8"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1818, week: 52}) AS d
@@ -433,10 +433,10 @@ tests:
   - name: s2_should_construct_week_localdatetime_9
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [2] Should construct week localdatetime #9"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1818, week: 53}) AS d
@@ -450,10 +450,10 @@ tests:
   - name: s2_should_construct_week_localdatetime_10
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [2] Should construct week localdatetime #10"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1819, week: 1}) AS d
@@ -467,10 +467,10 @@ tests:
   - name: s2_should_construct_week_localdatetime_11
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [2] Should construct week localdatetime #11"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1819, week: 52}) AS d
@@ -484,10 +484,10 @@ tests:
   - name: s2_should_construct_week_localdatetime_12
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [2] Should construct week localdatetime #12"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({dayOfWeek: 2, year: 1817, week: 1}) AS d
@@ -501,10 +501,10 @@ tests:
   - name: s2_should_construct_week_localdatetime_13
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [2] Should construct week localdatetime #13"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({date: date('1816-12-30'), week: 2, dayOfWeek: 3}) AS d
@@ -518,10 +518,10 @@ tests:
   - name: s2_should_construct_week_localdatetime_14
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [2] Should construct week localdatetime #14"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({date: date('1816-12-31'), week: 2}) AS d
@@ -535,10 +535,10 @@ tests:
   - name: s2_should_construct_week_localdatetime_15
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [2] Should construct week localdatetime #15"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({date: date('1816-12-31'), year: 1817, week: 2}) AS d
@@ -552,10 +552,10 @@ tests:
   - name: s3_should_construct_week_datetime_1
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [3] Should construct week datetime #1"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1816, week: 1}) AS d
@@ -569,10 +569,10 @@ tests:
   - name: s3_should_construct_week_datetime_2
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [3] Should construct week datetime #2"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1816, week: 52}) AS d
@@ -586,10 +586,10 @@ tests:
   - name: s3_should_construct_week_datetime_3
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [3] Should construct week datetime #3"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1817, week: 1}) AS d
@@ -603,10 +603,10 @@ tests:
   - name: s3_should_construct_week_datetime_4
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [3] Should construct week datetime #4"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1817, week: 10}) AS d
@@ -620,10 +620,10 @@ tests:
   - name: s3_should_construct_week_datetime_5
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [3] Should construct week datetime #5"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1817, week: 30}) AS d
@@ -637,10 +637,10 @@ tests:
   - name: s3_should_construct_week_datetime_6
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [3] Should construct week datetime #6"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1817, week: 52}) AS d
@@ -654,10 +654,10 @@ tests:
   - name: s3_should_construct_week_datetime_7
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [3] Should construct week datetime #7"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1818, week: 1}) AS d
@@ -671,10 +671,10 @@ tests:
   - name: s3_should_construct_week_datetime_8
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [3] Should construct week datetime #8"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1818, week: 52}) AS d
@@ -688,10 +688,10 @@ tests:
   - name: s3_should_construct_week_datetime_9
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [3] Should construct week datetime #9"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1818, week: 53}) AS d
@@ -705,10 +705,10 @@ tests:
   - name: s3_should_construct_week_datetime_10
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [3] Should construct week datetime #10"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1819, week: 1}) AS d
@@ -722,10 +722,10 @@ tests:
   - name: s3_should_construct_week_datetime_11
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [3] Should construct week datetime #11"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1819, week: 52}) AS d
@@ -739,10 +739,10 @@ tests:
   - name: s3_should_construct_week_datetime_12
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [3] Should construct week datetime #12"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({dayOfWeek: 2, year: 1817, week: 1}) AS d
@@ -756,10 +756,10 @@ tests:
   - name: s3_should_construct_week_datetime_13
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [3] Should construct week datetime #13"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({date: date('1816-12-30'), week: 2, dayOfWeek: 3}) AS d
@@ -773,10 +773,10 @@ tests:
   - name: s3_should_construct_week_datetime_14
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [3] Should construct week datetime #14"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({date: date('1816-12-31'), week: 2}) AS d
@@ -790,10 +790,10 @@ tests:
   - name: s3_should_construct_week_datetime_15
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [3] Should construct week datetime #15"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({date: date('1816-12-31'), year: 1817, week: 2}) AS d
@@ -807,7 +807,7 @@ tests:
   - name: s4_should_construct_date_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({year: 1984, month: 10, day: 11}) AS result
@@ -821,7 +821,7 @@ tests:
   - name: s4_should_construct_date_2
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({year: 1984, month: 10}) AS result
@@ -835,10 +835,10 @@ tests:
   - name: s4_should_construct_date_3
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [4] Should construct date #3"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({year: 1984, week: 10, dayOfWeek: 3}) AS result
@@ -852,10 +852,10 @@ tests:
   - name: s4_should_construct_date_4
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [4] Should construct date #4"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({year: 1984, week: 10}) AS result
@@ -869,7 +869,7 @@ tests:
   - name: s4_should_construct_date_5
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({year: 1984}) AS result
@@ -883,10 +883,10 @@ tests:
   - name: s4_should_construct_date_6
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [4] Should construct date #6"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({year: 1984, ordinalDay: 202}) AS result
@@ -900,10 +900,10 @@ tests:
   - name: s4_should_construct_date_7
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [4] Should construct date #7"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({year: 1984, quarter: 3, dayOfQuarter: 45}) AS result
@@ -917,10 +917,10 @@ tests:
   - name: s4_should_construct_date_8
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [4] Should construct date #8"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date({year: 1984, quarter: 3}) AS result
@@ -934,10 +934,10 @@ tests:
   - name: s5_should_construct_local_time_1
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [5] Should construct local time #1"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime({hour: 12, minute: 31, second: 14, nanosecond: 789, millisecond: 123, microsecond: 456}) AS result
@@ -951,7 +951,7 @@ tests:
   - name: s5_should_construct_local_time_2
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS result
@@ -965,10 +965,10 @@ tests:
   - name: s5_should_construct_local_time_3
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [5] Should construct local time #3"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime({hour: 12, minute: 31, second: 14, microsecond: 645876}) AS result
@@ -982,10 +982,10 @@ tests:
   - name: s5_should_construct_local_time_4
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [5] Should construct local time #4"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime({hour: 12, minute: 31, second: 14, millisecond: 645}) AS result
@@ -999,7 +999,7 @@ tests:
   - name: s5_should_construct_local_time_5
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime({hour: 12, minute: 31, second: 14}) AS result
@@ -1013,10 +1013,10 @@ tests:
   - name: s5_should_construct_local_time_6
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [5] Should construct local time #6"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime({hour: 12, minute: 31}) AS result
@@ -1030,10 +1030,10 @@ tests:
   - name: s5_should_construct_local_time_7
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [5] Should construct local time #7"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime({hour: 12}) AS result
@@ -1047,10 +1047,10 @@ tests:
   - name: s6_should_construct_time_1
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [6] Should construct time #1"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time({hour: 12, minute: 31, second: 14, nanosecond: 789, millisecond: 123, microsecond: 456}) AS result
@@ -1064,7 +1064,7 @@ tests:
   - name: s6_should_construct_time_2
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS result
@@ -1078,7 +1078,7 @@ tests:
   - name: s6_should_construct_time_3
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time({hour: 12, minute: 31, second: 14, nanosecond: 3}) AS result
@@ -1092,10 +1092,10 @@ tests:
   - name: s6_should_construct_time_4
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [6] Should construct time #4"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time({hour: 12, minute: 31, second: 14, microsecond: 645876}) AS result
@@ -1109,10 +1109,10 @@ tests:
   - name: s6_should_construct_time_5
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [6] Should construct time #5"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time({hour: 12, minute: 31, second: 14, millisecond: 645}) AS result
@@ -1126,7 +1126,7 @@ tests:
   - name: s6_should_construct_time_6
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time({hour: 12, minute: 31, second: 14}) AS result
@@ -1140,10 +1140,10 @@ tests:
   - name: s6_should_construct_time_7
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [6] Should construct time #7"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time({hour: 12, minute: 31}) AS result
@@ -1157,10 +1157,10 @@ tests:
   - name: s6_should_construct_time_8
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [6] Should construct time #8"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time({hour: 12}) AS result
@@ -1174,7 +1174,7 @@ tests:
   - name: s6_should_construct_time_9
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}) AS result
@@ -1188,10 +1188,10 @@ tests:
   - name: s6_should_construct_time_10
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [6] Should construct time #10"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time({hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS result
@@ -1205,10 +1205,10 @@ tests:
   - name: s6_should_construct_time_11
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [6] Should construct time #11"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time({hour: 12, minute: 31, second: 14, millisecond: 645, timezone: '+01:00'}) AS result
@@ -1222,7 +1222,7 @@ tests:
   - name: s6_should_construct_time_12
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time({hour: 12, minute: 31, second: 14, timezone: '+01:00'}) AS result
@@ -1236,10 +1236,10 @@ tests:
   - name: s6_should_construct_time_13
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [6] Should construct time #13"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time({hour: 12, minute: 31, timezone: '+01:00'}) AS result
@@ -1253,10 +1253,10 @@ tests:
   - name: s6_should_construct_time_14
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [6] Should construct time #14"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time({hour: 12, timezone: '+01:00'}) AS result
@@ -1270,10 +1270,10 @@ tests:
   - name: s7_should_construct_local_date_time_1
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #1"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 789, millisecond: 123, microsecond: 456}) AS result
@@ -1287,10 +1287,10 @@ tests:
   - name: s7_should_construct_local_date_time_2
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #2"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS result
@@ -1304,10 +1304,10 @@ tests:
   - name: s7_should_construct_local_date_time_3
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #3"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 3}) AS result
@@ -1321,10 +1321,10 @@ tests:
   - name: s7_should_construct_local_date_time_4
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #4"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, microsecond: 645876}) AS result
@@ -1338,10 +1338,10 @@ tests:
   - name: s7_should_construct_local_date_time_5
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #5"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, millisecond: 645}) AS result
@@ -1355,7 +1355,7 @@ tests:
   - name: s7_should_construct_local_date_time_6
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14}) AS result
@@ -1369,10 +1369,10 @@ tests:
   - name: s7_should_construct_local_date_time_7
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #7"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31}) AS result
@@ -1386,10 +1386,10 @@ tests:
   - name: s7_should_construct_local_date_time_8
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #8"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, month: 10, day: 11, hour: 12}) AS result
@@ -1403,10 +1403,10 @@ tests:
   - name: s7_should_construct_local_date_time_9
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #9"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, month: 10, day: 11}) AS result
@@ -1420,10 +1420,10 @@ tests:
   - name: s7_should_construct_local_date_time_10
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #10"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS result
@@ -1437,10 +1437,10 @@ tests:
   - name: s7_should_construct_local_date_time_11
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #11"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, microsecond: 645876}) AS result
@@ -1454,10 +1454,10 @@ tests:
   - name: s7_should_construct_local_date_time_12
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #12"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS result
@@ -1471,10 +1471,10 @@ tests:
   - name: s7_should_construct_local_date_time_13
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #13"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14}) AS result
@@ -1488,10 +1488,10 @@ tests:
   - name: s7_should_construct_local_date_time_14
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #14"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31}) AS result
@@ -1505,10 +1505,10 @@ tests:
   - name: s7_should_construct_local_date_time_15
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #15"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12}) AS result
@@ -1522,10 +1522,10 @@ tests:
   - name: s7_should_construct_local_date_time_16
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #16"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, week: 10, dayOfWeek: 3}) AS result
@@ -1539,10 +1539,10 @@ tests:
   - name: s7_should_construct_local_date_time_17
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #17"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS result
@@ -1556,10 +1556,10 @@ tests:
   - name: s7_should_construct_local_date_time_18
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #18"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, microsecond: 645876}) AS result
@@ -1573,10 +1573,10 @@ tests:
   - name: s7_should_construct_local_date_time_19
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #19"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, millisecond: 645}) AS result
@@ -1590,10 +1590,10 @@ tests:
   - name: s7_should_construct_local_date_time_20
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #20"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14}) AS result
@@ -1607,10 +1607,10 @@ tests:
   - name: s7_should_construct_local_date_time_21
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #21"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31}) AS result
@@ -1624,10 +1624,10 @@ tests:
   - name: s7_should_construct_local_date_time_22
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #22"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, ordinalDay: 202, hour: 12}) AS result
@@ -1641,10 +1641,10 @@ tests:
   - name: s7_should_construct_local_date_time_23
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #23"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, ordinalDay: 202}) AS result
@@ -1658,10 +1658,10 @@ tests:
   - name: s7_should_construct_local_date_time_24
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #24"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS result
@@ -1675,10 +1675,10 @@ tests:
   - name: s7_should_construct_local_date_time_25
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #25"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, minute: 31, second: 14, microsecond: 645876}) AS result
@@ -1692,10 +1692,10 @@ tests:
   - name: s7_should_construct_local_date_time_26
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #26"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, minute: 31, second: 14, millisecond: 645}) AS result
@@ -1709,10 +1709,10 @@ tests:
   - name: s7_should_construct_local_date_time_27
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #27"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, minute: 31, second: 14}) AS result
@@ -1726,10 +1726,10 @@ tests:
   - name: s7_should_construct_local_date_time_28
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #28"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, minute: 31}) AS result
@@ -1743,10 +1743,10 @@ tests:
   - name: s7_should_construct_local_date_time_29
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #29"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12}) AS result
@@ -1760,10 +1760,10 @@ tests:
   - name: s7_should_construct_local_date_time_30
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #30"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984, quarter: 3, dayOfQuarter: 45}) AS result
@@ -1777,10 +1777,10 @@ tests:
   - name: s7_should_construct_local_date_time_31
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [7] Should construct local date time #31"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime({year: 1984}) AS result
@@ -1794,10 +1794,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_1
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #1"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 789, millisecond: 123, microsecond: 456}) AS result
@@ -1811,10 +1811,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_2
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #2"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS result
@@ -1828,10 +1828,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_3
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #3"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, microsecond: 645876}) AS result
@@ -1845,10 +1845,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_4
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #4"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, millisecond: 645}) AS result
@@ -1862,7 +1862,7 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_5
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14}) AS result
@@ -1876,10 +1876,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_6
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #6"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31}) AS result
@@ -1893,10 +1893,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_7
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #7"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, hour: 12}) AS result
@@ -1910,10 +1910,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_8
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #8"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11}) AS result
@@ -1927,10 +1927,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_9
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #9"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS result
@@ -1944,10 +1944,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_10
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #10"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, microsecond: 645876}) AS result
@@ -1961,10 +1961,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_11
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #11"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645}) AS result
@@ -1978,10 +1978,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_12
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #12"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14}) AS result
@@ -1995,10 +1995,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_13
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #13"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31}) AS result
@@ -2012,10 +2012,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_14
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #14"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12}) AS result
@@ -2029,10 +2029,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_15
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #15"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, week: 10, dayOfWeek: 3}) AS result
@@ -2046,10 +2046,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_16
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #16"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS result
@@ -2063,10 +2063,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_17
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #17"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, microsecond: 645876}) AS result
@@ -2080,10 +2080,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_18
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #18"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, millisecond: 645}) AS result
@@ -2097,10 +2097,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_19
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #19"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14}) AS result
@@ -2114,10 +2114,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_20
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #20"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31}) AS result
@@ -2131,10 +2131,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_21
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #21"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, ordinalDay: 202, hour: 12}) AS result
@@ -2148,10 +2148,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_22
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #22"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, ordinalDay: 202}) AS result
@@ -2165,10 +2165,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_23
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #23"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS result
@@ -2182,10 +2182,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_24
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #24"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, minute: 31, second: 14, microsecond: 645876}) AS result
@@ -2199,10 +2199,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_25
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #25"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, minute: 31, second: 14, millisecond: 645}) AS result
@@ -2216,10 +2216,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_26
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #26"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, minute: 31, second: 14}) AS result
@@ -2233,10 +2233,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_27
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #27"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, minute: 31}) AS result
@@ -2250,10 +2250,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_28
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #28"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12}) AS result
@@ -2267,10 +2267,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_29
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #29"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, quarter: 3, dayOfQuarter: 45}) AS result
@@ -2284,10 +2284,10 @@ tests:
   - name: s8_should_construct_date_time_with_default_time_zone_30
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [8] Should construct date time with default time zone #30"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984}) AS result
@@ -2301,10 +2301,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_1
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #1"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}) AS result
@@ -2318,10 +2318,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_2
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #2"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS result
@@ -2335,10 +2335,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_3
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #3"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, millisecond: 645, timezone: '+01:00'}) AS result
@@ -2352,7 +2352,7 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_4
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, timezone: '+01:00'}) AS result
@@ -2366,10 +2366,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_5
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #5"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, timezone: '+01:00'}) AS result
@@ -2383,10 +2383,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_6
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #6"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: '+01:00'}) AS result
@@ -2400,10 +2400,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_7
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #7"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, timezone: '+01:00'}) AS result
@@ -2417,10 +2417,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_8
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #8"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}) AS result
@@ -2434,10 +2434,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_9
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #9"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS result
@@ -2451,10 +2451,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_10
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #10"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645, timezone: '+01:00'}) AS result
@@ -2468,10 +2468,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_11
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #11"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, timezone: '+01:00'}) AS result
@@ -2485,10 +2485,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_12
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #12"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, timezone: '+01:00'}) AS result
@@ -2502,10 +2502,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_13
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #13"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, timezone: '+01:00'}) AS result
@@ -2519,10 +2519,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_14
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #14"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, week: 10, dayOfWeek: 3, timezone: '+01:00'}) AS result
@@ -2536,10 +2536,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_15
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #15"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}) AS result
@@ -2553,10 +2553,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_16
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #16"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS result
@@ -2570,10 +2570,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_17
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #17"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, millisecond: 645, timezone: '+01:00'}) AS result
@@ -2587,10 +2587,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_18
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #18"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: '+01:00'}) AS result
@@ -2604,10 +2604,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_19
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #19"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, timezone: '+01:00'}) AS result
@@ -2621,10 +2621,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_20
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #20"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, ordinalDay: 202, hour: 12, timezone: '+01:00'}) AS result
@@ -2638,10 +2638,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_21
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #21"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, ordinalDay: 202, timezone: '+01:00'}) AS result
@@ -2655,10 +2655,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_22
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #22"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}) AS result
@@ -2672,10 +2672,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_23
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #23"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: '+01:00'}) AS result
@@ -2689,10 +2689,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_24
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #24"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, minute: 31, second: 14, millisecond: 645, timezone: '+01:00'}) AS result
@@ -2706,10 +2706,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_25
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #25"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, minute: 31, second: 14, timezone: '+01:00'}) AS result
@@ -2723,10 +2723,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_26
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #26"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, minute: 31, timezone: '+01:00'}) AS result
@@ -2740,10 +2740,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_27
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #27"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, timezone: '+01:00'}) AS result
@@ -2757,10 +2757,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_28
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #28"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, quarter: 3, dayOfQuarter: 45, timezone: '+01:00'}) AS result
@@ -2774,10 +2774,10 @@ tests:
   - name: s9_should_construct_date_time_with_offset_time_zone_29
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [9] Should construct date time with offset time zone #29"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, timezone: '+01:00'}) AS result
@@ -2791,10 +2791,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_1
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #1"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: 'Europe/Stockholm'}) AS result
@@ -2808,10 +2808,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_2
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #2"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: 'Europe/Stockholm'}) AS result
@@ -2825,10 +2825,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_3
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #3"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, millisecond: 645, timezone: 'Europe/Stockholm'}) AS result
@@ -2842,10 +2842,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_4
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #4"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, timezone: 'Europe/Stockholm'}) AS result
@@ -2859,10 +2859,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_5
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #5"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, timezone: 'Europe/Stockholm'}) AS result
@@ -2876,10 +2876,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_6
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #6"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, hour: 12, timezone: 'Europe/Stockholm'}) AS result
@@ -2893,10 +2893,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_7
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #7"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, timezone: 'Europe/Stockholm'}) AS result
@@ -2910,10 +2910,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_8
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #8"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: 'Europe/Stockholm'}) AS result
@@ -2927,10 +2927,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_9
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #9"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: 'Europe/Stockholm'}) AS result
@@ -2944,10 +2944,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_10
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #10"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, millisecond: 645, timezone: 'Europe/Stockholm'}) AS result
@@ -2961,10 +2961,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_11
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #11"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, second: 14, timezone: 'Europe/Stockholm'}) AS result
@@ -2978,10 +2978,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_12
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #12"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, minute: 31, timezone: 'Europe/Stockholm'}) AS result
@@ -2995,10 +2995,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_13
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #13"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, week: 10, dayOfWeek: 3, hour: 12, timezone: 'Europe/Stockholm'}) AS result
@@ -3012,10 +3012,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_14
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #14"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, week: 10, dayOfWeek: 3, timezone: 'Europe/Stockholm'}) AS result
@@ -3029,10 +3029,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_15
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #15"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: 'Europe/Stockholm'}) AS result
@@ -3046,10 +3046,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_16
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #16"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: 'Europe/Stockholm'}) AS result
@@ -3063,10 +3063,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_17
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #17"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, millisecond: 645, timezone: 'Europe/Stockholm'}) AS result
@@ -3080,10 +3080,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_18
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #18"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, second: 14, timezone: 'Europe/Stockholm'}) AS result
@@ -3097,10 +3097,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_19
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #19"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, ordinalDay: 202, hour: 12, minute: 31, timezone: 'Europe/Stockholm'}) AS result
@@ -3114,10 +3114,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_20
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #20"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, ordinalDay: 202, hour: 12, timezone: 'Europe/Stockholm'}) AS result
@@ -3131,10 +3131,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_21
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #21"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, ordinalDay: 202, timezone: 'Europe/Stockholm'}) AS result
@@ -3148,10 +3148,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_22
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #22"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: 'Europe/Stockholm'}) AS result
@@ -3165,10 +3165,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_23
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #23"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, minute: 31, second: 14, microsecond: 645876, timezone: 'Europe/Stockholm'}) AS result
@@ -3182,10 +3182,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_24
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #24"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, minute: 31, second: 14, millisecond: 645, timezone: 'Europe/Stockholm'}) AS result
@@ -3199,10 +3199,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_25
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #25"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, minute: 31, second: 14, timezone: 'Europe/Stockholm'}) AS result
@@ -3216,10 +3216,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_26
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #26"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, minute: 31, timezone: 'Europe/Stockholm'}) AS result
@@ -3233,10 +3233,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_27
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #27"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, quarter: 3, dayOfQuarter: 45, hour: 12, timezone: 'Europe/Stockholm'}) AS result
@@ -3250,10 +3250,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_28
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #28"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, quarter: 3, dayOfQuarter: 45, timezone: 'Europe/Stockholm'}) AS result
@@ -3267,10 +3267,10 @@ tests:
   - name: s10_should_construct_date_time_with_named_time_zone_29
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [10] Should construct date time with named time zone #29"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, timezone: 'Europe/Stockholm'}) AS result
@@ -3284,10 +3284,10 @@ tests:
   - name: s11_should_construct_date_time_from_epoch
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [11] Should construct date time from epoch"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.fromepoch(416779, 999999999) AS d1,
@@ -3302,7 +3302,7 @@ tests:
   - name: s12_should_construct_duration_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration({days: 14, hours: 16, minutes: 12}) AS result
@@ -3316,10 +3316,10 @@ tests:
   - name: s12_should_construct_duration_2
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [12] Should construct duration #2"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration({months: 5, days: 1.5}) AS result
@@ -3333,10 +3333,10 @@ tests:
   - name: s12_should_construct_duration_3
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [12] Should construct duration #3"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration({months: 0.75}) AS result
@@ -3350,10 +3350,10 @@ tests:
   - name: s12_should_construct_duration_4
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [12] Should construct duration #4"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration({weeks: 2.5}) AS result
@@ -3367,7 +3367,7 @@ tests:
   - name: s12_should_construct_duration_5
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70}) AS result
@@ -3381,10 +3381,10 @@ tests:
   - name: s12_should_construct_duration_6
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [12] Should construct duration #6"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration({days: 14, seconds: 70, milliseconds: 1}) AS result
@@ -3398,10 +3398,10 @@ tests:
   - name: s12_should_construct_duration_7
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [12] Should construct duration #7"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration({days: 14, seconds: 70, microseconds: 1}) AS result
@@ -3415,7 +3415,7 @@ tests:
   - name: s12_should_construct_duration_8
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration({days: 14, seconds: 70, nanoseconds: 1}) AS result
@@ -3429,10 +3429,10 @@ tests:
   - name: s12_should_construct_duration_9
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [12] Should construct duration #9"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration({minutes: 1.5, seconds: 1}) AS result
@@ -3446,10 +3446,10 @@ tests:
   - name: s13_should_construct_temporal_with_time_offset_with_second_precision_1
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [13] Should construct temporal with time offset with second precision #1"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time({hour: 12, minute: 34, second: 56, timezone: '+02:05:00'}) AS result
@@ -3463,10 +3463,10 @@ tests:
   - name: s13_should_construct_temporal_with_time_offset_with_second_precision_2
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [13] Should construct temporal with time offset with second precision #2"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time({hour: 12, minute: 34, second: 56, timezone: '+02:05:59'}) AS result
@@ -3480,10 +3480,10 @@ tests:
   - name: s13_should_construct_temporal_with_time_offset_with_second_precision_3
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [13] Should construct temporal with time offset with second precision #3"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time({hour: 12, minute: 34, second: 56, timezone: '-02:05:07'}) AS result
@@ -3497,10 +3497,10 @@ tests:
   - name: s13_should_construct_temporal_with_time_offset_with_second_precision_4
     xfail:
       spec: "openCypher TCK 2024.3 Temporal1: [13] Should construct temporal with time offset with second precision #4"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 34, second: 56, timezone: '+02:05:59'}) AS result

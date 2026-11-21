@@ -60,7 +60,7 @@ tests:
   - name: s2_fail_when_using_return_without_variables_in_scope
     xfail:
       spec: "openCypher TCK 2024.3 Return7: [2] Fail when using RETURN * without variables in scope"
-      issue: fix in 0.6.5
+      issue: "#798"
     query: |
       MATCH ()
       RETURN *

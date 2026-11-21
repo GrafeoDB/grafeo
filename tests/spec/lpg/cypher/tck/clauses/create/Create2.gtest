@@ -355,7 +355,7 @@ tests:
   - name: s22_fail_when_creating_a_variable_length_relationship
     xfail:
       spec: "openCypher TCK 2024.3 Create2: [22] Fail when creating a variable-length relationship"
-      issue: fix in 0.6.5
+      issue: "#795"
     query: |
       CREATE ()-[:FOO*2]->()
     expect:

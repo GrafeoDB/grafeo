@@ -205,7 +205,7 @@ tests:
   - name: s11_order_by_should_order_distinct_types_in_the_expected_order
     xfail:
       spec: "openCypher TCK 2024.3 ReturnOrderBy1: [11] ORDER BY should order distinct types in the expected order"
-      issue: fix in 0.6.4
+      issue: "#799"
     setup:
       - |
         CREATE (:N)-[:REL]->()
@@ -234,7 +234,7 @@ tests:
   - name: s12_order_by_desc_should_order_distinct_types_in_the_expected_order
     xfail:
       spec: "openCypher TCK 2024.3 ReturnOrderBy1: [12] ORDER BY DESC should order distinct types in the expected order"
-      issue: fix in 0.6.4
+      issue: "#799"
     setup:
       - |
         CREATE (:N)-[:REL]->()

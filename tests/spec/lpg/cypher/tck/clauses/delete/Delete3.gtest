@@ -45,7 +45,7 @@ tests:
   - name: s1_detach_deleting_paths
     xfail:
       spec: "openCypher TCK 2024.3 Delete3: [1] Detach deleting paths"
-      issue: fix in 0.6.5
+      issue: "#797"
     setup:
       - |
         CREATE (x:X), (n1), (n2), (n3)

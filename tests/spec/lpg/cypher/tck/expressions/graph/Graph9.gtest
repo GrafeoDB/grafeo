@@ -73,7 +73,7 @@ tests:
   - name: s3_properties_on_null
     xfail:
       spec: "openCypher TCK 2024.3 Graph9: [3] `properties()` on null"
-      issue: fix in 0.6.5
+      issue: "#800"
     query: |
       OPTIONAL MATCH (n:DoesNotExist)
       OPTIONAL MATCH (n)-[r:NOT_THERE]->()
@@ -99,7 +99,7 @@ tests:
   - name: s5_properties_failing_on_an_integer_literal
     xfail:
       spec: "openCypher TCK 2024.3 Graph9: [5] `properties()` failing on an integer literal"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN properties(1)
     expect:
@@ -111,7 +111,7 @@ tests:
   - name: s6_properties_failing_on_a_string_literal
     xfail:
       spec: "openCypher TCK 2024.3 Graph9: [6] `properties()` failing on a string literal"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN properties('Cypher')
     expect:
@@ -123,7 +123,7 @@ tests:
   - name: s7_properties_failing_on_a_list_of_booleans
     xfail:
       spec: "openCypher TCK 2024.3 Graph9: [7] `properties()` failing on a list of booleans"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN properties([true, false])
     expect:

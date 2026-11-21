@@ -244,7 +244,7 @@ tests:
   - name: s5_percentiledisc_failing_in_more_involved_query
     xfail:
       spec: "openCypher TCK 2024.3 Aggregation6: [5] `percentileDisc()` failing in more involved query"
-      issue: fix in 0.6.5
+      issue: "#796"
     setup:
       - |
         UNWIND range(0, 10) AS i

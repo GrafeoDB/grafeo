@@ -421,7 +421,7 @@ tests:
   - name: s22_fail_when_imposing_new_predicates_on_a_variable_that_is_already_bound
     xfail:
       spec: "openCypher TCK 2024.3 Merge5: [22] Fail when imposing new predicates on a variable that is already bound"
-      issue: fix in 0.6.5
+      issue: "#795"
     query: |
       CREATE (a:Foo)
       MERGE (a)-[r:KNOWS]->(a:Bar)
@@ -497,7 +497,7 @@ tests:
   - name: s29_fail_on_merging_relationship_with_null_property
     xfail:
       spec: "openCypher TCK 2024.3 Merge5: [29] Fail on merging relationship with null property"
-      issue: fix in 0.6.5
+      issue: "#797"
     query: |
       CREATE (a), (b)
       MERGE (a)-[r:X {num: null}]->(b)

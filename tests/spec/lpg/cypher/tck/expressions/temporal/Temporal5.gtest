@@ -45,10 +45,10 @@ tests:
   - name: s1_should_provide_accessors_for_date
     xfail:
       spec: "openCypher TCK 2024.3 Temporal5: [1] Should provide accessors for date"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -67,10 +67,10 @@ tests:
   - name: s2_should_provide_accessors_for_date_in_last_weekyear
     xfail:
       spec: "openCypher TCK 2024.3 Temporal5: [2] Should provide accessors for date in last weekYear"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -89,7 +89,7 @@ tests:
   - name: s3_should_provide_accessors_for_local_time
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -108,7 +108,7 @@ tests:
   - name: s4_should_provide_accessors_for_time
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -127,10 +127,10 @@ tests:
   - name: s5_should_provide_accessors_for_local_date_time
     xfail:
       spec: "openCypher TCK 2024.3 Temporal5: [5] Should provide accessors for local date time"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -150,10 +150,10 @@ tests:
   - name: s6_should_provide_accessors_for_date_time
     xfail:
       spec: "openCypher TCK 2024.3 Temporal5: [6] Should provide accessors for date time"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -174,7 +174,7 @@ tests:
   - name: s7_should_provide_accessors_for_duration
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |

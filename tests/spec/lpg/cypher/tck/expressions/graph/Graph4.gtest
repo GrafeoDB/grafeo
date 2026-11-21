@@ -73,7 +73,7 @@ tests:
   - name: s3_type_on_null_relationship
     xfail:
       spec: "openCypher TCK 2024.3 Graph4: [3] `type()` on null relationship"
-      issue: fix in 0.6.5
+      issue: "#800"
     setup:
       - |
         CREATE ()
@@ -123,7 +123,7 @@ tests:
   - name: s6_type_failing_on_invalid_arguments_1
     xfail:
       spec: "openCypher TCK 2024.3 Graph4: [6] `type()` failing on invalid arguments #1"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()
@@ -139,7 +139,7 @@ tests:
   - name: s6_type_failing_on_invalid_arguments_2
     xfail:
       spec: "openCypher TCK 2024.3 Graph4: [6] `type()` failing on invalid arguments #2"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()
@@ -155,7 +155,7 @@ tests:
   - name: s6_type_failing_on_invalid_arguments_3
     xfail:
       spec: "openCypher TCK 2024.3 Graph4: [6] `type()` failing on invalid arguments #3"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()
@@ -171,7 +171,7 @@ tests:
   - name: s6_type_failing_on_invalid_arguments_4
     xfail:
       spec: "openCypher TCK 2024.3 Graph4: [6] `type()` failing on invalid arguments #4"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()
@@ -187,7 +187,7 @@ tests:
   - name: s6_type_failing_on_invalid_arguments_5
     xfail:
       spec: "openCypher TCK 2024.3 Graph4: [6] `type()` failing on invalid arguments #5"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()
@@ -203,7 +203,7 @@ tests:
   - name: s7_failing_when_using_type_on_a_node
     xfail:
       spec: "openCypher TCK 2024.3 Graph4: [7] Failing when using `type()` on a node"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       MATCH (r)
       RETURN type(r)

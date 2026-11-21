@@ -1386,6 +1386,12 @@ tests:
       spec: "ISO/IEC 39075 20.2"
       issue: "fix in 0.6.1"
     query: "RETURN 1 AS v"
+
+  - name: an_unquoted_number
+    xfail:
+      spec: "ISO/IEC 39075 20.2"
+      issue: #748
+    query: "RETURN 1 AS v"
 """
 
 T9_PYTEST = """import pytest
@@ -1545,6 +1551,8 @@ def test_t9_a_gtest_xfail_names_its_spec_and_a_valid_issue(tmp_path: Path) -> No
             (gtest, t9_line(T9_GTEST, "name: no_issue_yet", "issue:")),
             (gtest, t9_line(T9_GTEST, "name: not_a_number", "issue:")),
             (gtest, t9_line(T9_GTEST, "name: a_release_already_made", "issue:")),
+            # Unquoted, `#748` starts a YAML comment: the runners read no issue.
+            (gtest, t9_line(T9_GTEST, "name: an_unquoted_number", "issue:")),
         ]
     )
 

@@ -131,7 +131,7 @@ tests:
   - name: s7_labels_on_null_node
     xfail:
       spec: "openCypher TCK 2024.3 Graph3: [7] `labels()` on null node"
-      issue: fix in 0.6.5
+      issue: "#800"
     query: |
       OPTIONAL MATCH (n:DoesNotExist)
       RETURN labels(n), labels(null)
@@ -159,7 +159,7 @@ tests:
   - name: s9_labels_failing_on_invalid_arguments
     xfail:
       spec: "openCypher TCK 2024.3 Graph3: [9] `labels()` failing on invalid arguments"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE (:Foo), (:Foo:Bar)

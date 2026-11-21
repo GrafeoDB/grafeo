@@ -1134,7 +1134,7 @@ tests:
   - name: s15_fail_any_quantifier_on_type_mismatch_between_list_elements_and_predicate_1
     xfail:
       spec: "openCypher TCK 2024.3 Quantifier3: [15] Fail any quantifier on type mismatch between list elements and predicate #1"
-      issue: fix in 0.6.5
+      issue: "fix in 0.6.5"
     query: |
       RETURN any(x IN ['Clara'] WHERE x % 2 = 0) AS result
     expect:
@@ -1146,7 +1146,7 @@ tests:
   - name: s15_fail_any_quantifier_on_type_mismatch_between_list_elements_and_predicate_2
     xfail:
       spec: "openCypher TCK 2024.3 Quantifier3: [15] Fail any quantifier on type mismatch between list elements and predicate #2"
-      issue: fix in 0.6.5
+      issue: "fix in 0.6.5"
     query: |
       RETURN any(x IN [false, true] WHERE x % 2 = 0) AS result
     expect:
@@ -1158,7 +1158,7 @@ tests:
   - name: s15_fail_any_quantifier_on_type_mismatch_between_list_elements_and_predicate_3
     xfail:
       spec: "openCypher TCK 2024.3 Quantifier3: [15] Fail any quantifier on type mismatch between list elements and predicate #3"
-      issue: fix in 0.6.5
+      issue: "fix in 0.6.5"
     query: |
       RETURN any(x IN ['Clara', 'Bob', 'Dave', 'Alice'] WHERE x % 2 = 0) AS result
     expect:

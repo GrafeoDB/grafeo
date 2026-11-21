@@ -45,7 +45,7 @@ tests:
   - name: s1_return_a_pattern_comprehension
     xfail:
       spec: "openCypher TCK 2024.3 Pattern2: [1] Return a pattern comprehension"
-      issue: fix in 0.6.5
+      issue: "#800"
     setup:
       - |
         CREATE (a:A), (b:B)
@@ -66,7 +66,7 @@ tests:
   - name: s2_return_a_pattern_comprehension_with_label_predicate
     xfail:
       spec: "openCypher TCK 2024.3 Pattern2: [2] Return a pattern comprehension with label predicate"
-      issue: fix in 0.6.5
+      issue: "#800"
     setup:
       - |
         CREATE (a:A), (b:B), (c:C), (d:D)
@@ -86,7 +86,7 @@ tests:
   - name: s3_return_a_pattern_comprehension_with_bound_nodes
     xfail:
       spec: "openCypher TCK 2024.3 Pattern2: [3] Return a pattern comprehension with bound nodes"
-      issue: fix in 0.6.5
+      issue: "#800"
     setup:
       - |
         CREATE (a:A), (b:B)
@@ -140,7 +140,7 @@ tests:
   - name: s6_aggregate_on_a_pattern_comprehension
     xfail:
       spec: "openCypher TCK 2024.3 Pattern2: [6] Aggregate on a pattern comprehension"
-      issue: fix in 0.6.5
+      issue: "#800"
     setup:
       - |
         CREATE (a:A), (:A), (:A)
@@ -158,7 +158,7 @@ tests:
   - name: s7_use_a_pattern_comprehension_inside_a_list_comprehension
     xfail:
       spec: "openCypher TCK 2024.3 Pattern2: [7] Use a pattern comprehension inside a list comprehension"
-      issue: fix in 0.6.5
+      issue: "#800"
     setup:
       - |
         CREATE (n1:X {n: 1}), (m1:Y), (i1:Y), (i2:Y)
@@ -183,7 +183,7 @@ tests:
   - name: s8_use_a_pattern_comprehension_in_with
     xfail:
       spec: "openCypher TCK 2024.3 Pattern2: [8] Use a pattern comprehension in WITH"
-      issue: fix in 0.6.5
+      issue: "#800"
     setup:
       - |
         CREATE (a:A), (b:B)
@@ -204,7 +204,7 @@ tests:
   - name: s9_use_a_variable_length_pattern_comprehension_in_with
     xfail:
       spec: "openCypher TCK 2024.3 Pattern2: [9] Use a variable-length pattern comprehension in WITH"
-      issue: fix in 0.6.5
+      issue: "#800"
     setup:
       - |
         CREATE (:A)-[:T]->(:B)
@@ -222,7 +222,7 @@ tests:
   - name: s10_use_a_pattern_comprehension_in_return
     xfail:
       spec: "openCypher TCK 2024.3 Pattern2: [10] Use a pattern comprehension in RETURN"
-      issue: fix in 0.6.5
+      issue: "#800"
     setup:
       - |
         CREATE (a:A), (:A), (:A)
@@ -242,7 +242,7 @@ tests:
   - name: s11_use_a_pattern_comprehension_and_order_by
     xfail:
       spec: "openCypher TCK 2024.3 Pattern2: [11] Use a pattern comprehension and ORDER BY"
-      issue: fix in 0.6.5
+      issue: "#800"
     setup:
       - |
         CREATE (a {time: 10}), (b {time: 20})

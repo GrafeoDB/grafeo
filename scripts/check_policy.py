@@ -1000,20 +1000,25 @@ def gtest_xfail_findings(rel: str, text: str, floor: Release | None) -> list[Fin
             if len(child) - len(child.lstrip()) <= indent:
                 break
             key, _, value = child.strip().partition(":")
-            keys[key.strip()] = (below + 1, unquoted(value))
+            keys[key.strip()] = (below + 1, value.strip())
         for key in ("spec", "issue"):
             if key not in keys:
                 findings.append(
                     finding("T9", rel, index + 1, f"the xfail has no `{key}:`")
                 )
-        if "spec" in keys and not keys["spec"][1].strip():
+        if "spec" in keys and not unquoted(keys["spec"][1]).strip():
             findings.append(
                 finding("T9", rel, keys["spec"][0], "the xfail's `spec:` is empty")
             )
         if "issue" in keys:
-            problem = issue_problem(keys["issue"][1], floor)
+            line, issue = keys["issue"]
+            if issue.startswith("#"):
+                # YAML reads an unquoted `#` as the start of a comment.
+                problem = f"`{issue}` unquoted is a YAML comment, so the issue is empty: quote it"
+            else:
+                problem = issue_problem(unquoted(issue), floor)
             if problem:
-                findings.append(finding("T9", rel, keys["issue"][0], problem))
+                findings.append(finding("T9", rel, line, problem))
     return findings
 
 

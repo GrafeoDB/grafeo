@@ -82,7 +82,7 @@ tests:
   - name: s3_set_a_property_by_selecting_the_node_using_a_simple_expression
     xfail:
       spec: "openCypher TCK 2024.3 Set1: [3] Set a property by selecting the node using a simple expression"
-      issue: fix in 0.6.5
+      issue: "#800"
     setup:
       - |
         CREATE (:A)
@@ -102,7 +102,7 @@ tests:
   - name: s4_set_a_property_by_selecting_the_relationship_using_a_simple_expression
     xfail:
       spec: "openCypher TCK 2024.3 Set1: [4] Set a property by selecting the relationship using a simple expression"
-      issue: fix in 0.6.5
+      issue: "#800"
     setup:
       - |
         CREATE ()-[:REL]->()
@@ -189,7 +189,7 @@ tests:
   - name: s10_failing_when_setting_a_list_of_maps_as_a_property
     xfail:
       spec: "openCypher TCK 2024.3 Set1: [10] Failing when setting a list of maps as a property"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       CREATE (a)
       SET a.maplist = [{num: 1}]

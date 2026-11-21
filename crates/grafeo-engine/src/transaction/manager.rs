@@ -14,6 +14,26 @@ use super::changes::TransactionChanges;
 use super::history::{History, HistoryImage};
 use crate::config::HistoryRetention;
 
+/// Why a [`TransactionManager`] refuses commits until the database is opened
+/// again (see [`TransactionManager::refuse_commits`]).
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    not(feature = "grafeo-file"),
+    expect(
+        dead_code,
+        reason = "only a database file's checkpoint or restore refuses commits"
+    )
+)]
+pub(crate) enum CommitRefusal {
+    /// A checkpoint's outcome is unknown and the database has no WAL: a
+    /// commit would be durable only at a checkpoint, and none can run.
+    OutcomeUnknown(String),
+    /// A restore replaced the stores but its checkpoint failed: a commit on
+    /// top would replay onto the previous image. With the cause when the
+    /// checkpoint's outcome is unknown, `None` when it failed in a known way.
+    FailedRestore(Option<String>),
+}
+
 /// State of a transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1057,6 +1077,9 @@ pub struct TransactionManager {
     /// Set when a commit did not complete (its [`CommitGuard`] was dropped
     /// without `complete`): no commit can run afterwards.
     poisoned: AtomicBool,
+    /// Why commits are refused until a reopen while reads, checkpoints and
+    /// copies go on (see [`refuse_commits`](Self::refuse_commits)).
+    commit_refusal: Mutex<Option<CommitRefusal>>,
     /// Set by [`close_for_writes`](Self::close_for_writes) when a persistent
     /// database closes: no commit and no write outside a transaction can run
     /// afterwards.
@@ -2092,6 +2115,7 @@ impl TransactionManager {
             commit_lock: Mutex::new(()),
             write_freeze: RwLock::new(()),
             poisoned: AtomicBool::new(false),
+            commit_refusal: Mutex::new(None),
             closed: AtomicBool::new(false),
             unpublishable_from: AtomicU64::new(u64::MAX),
             publish_turn: Mutex::new(()),
@@ -2988,6 +3012,7 @@ impl TransactionManager {
         // commit lock: any epoch published after it would publish its
         // stamped versions too.
         self.check_no_incomplete_commit()?;
+        self.check_commits_allowed()?;
         self.check_open()?;
         // One write lock: the checks, the state and the commit epoch change
         // together, so no other commit sees this one half started.
@@ -3111,10 +3136,26 @@ impl TransactionManager {
     ///
     /// [`TransactionError::IncompleteCommit`] or
     /// [`TransactionError::DatabaseClosed`].
+    pub(crate) fn hold_commits_for_drop(&self) -> Result<CommitsHeld<'_>> {
+        let held = self.hold_commits()?;
+        // Under the commit lock, as a commit's check: a drop is a change the
+        // log and the next checkpoint carry.
+        self.check_commits_allowed()?;
+        self.check_open()?;
+        Ok(held)
+    }
+
+    /// Holds commits off for a change outside a transaction (see
+    /// [`hold_commits`](Self::hold_commits)), refused as a commit is.
+    ///
+    /// # Errors
+    ///
+    /// As [`hold_commits_for_change`](Self::hold_commits_for_change).
     pub(crate) fn hold_commits_for_change(&self) -> Result<CommitsHeld<'_>> {
         let commit = self.commit_lock.lock();
         self.wait_for_written_commits();
         self.check_no_incomplete_commit()?;
+        self.check_commits_allowed()?;
         self.check_open()?;
         Ok(CommitsHeld {
             writes: None,
@@ -3189,6 +3230,37 @@ impl TransactionManager {
             return Err(Error::Transaction(TransactionError::IncompleteCommit));
         }
         Ok(())
+    }
+
+    /// Refuses every commit and write outside a transaction from now on,
+    /// until the database is opened again; reads, checkpoints and copies go
+    /// on. The first refusal stays.
+    #[cfg(feature = "grafeo-file")]
+    pub(crate) fn refuse_commits(&self, refusal: CommitRefusal) {
+        self.commit_refusal.lock().get_or_insert(refusal);
+    }
+
+    /// Fails when commits are refused (see
+    /// [`refuse_commits`](Self::refuse_commits)).
+    fn check_commits_allowed(&self) -> Result<()> {
+        match &*self.commit_refusal.lock() {
+            None => Ok(()),
+            Some(CommitRefusal::OutcomeUnknown(cause)) => Err(Error::from(
+                grafeo_common::utils::error::StorageError::CheckpointOutcomeUnknown(format!(
+                    "a database without a WAL takes no commits after a checkpoint whose \
+                     outcome is unknown ({cause}): reopen the database"
+                )),
+            )),
+            Some(CommitRefusal::FailedRestore(None)) => {
+                Err(Error::Transaction(TransactionError::IncompleteCommit))
+            }
+            Some(CommitRefusal::FailedRestore(Some(cause))) => Err(Error::from(
+                grafeo_common::utils::error::StorageError::CheckpointOutcomeUnknown(format!(
+                    "a restore whose checkpoint outcome is unknown takes no commits ({cause}): \
+                     reopen the database"
+                )),
+            )),
+        }
     }
 
     /// Aborts a transaction, undoing the changes it recorded that nobody

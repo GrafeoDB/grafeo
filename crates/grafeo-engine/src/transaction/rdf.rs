@@ -781,10 +781,31 @@ impl RdfWriter {
         triple: Triple,
         insert: bool,
     ) -> std::result::Result<(), OperatorError> {
+        if insert {
+            self.refuse_unnamed_new_graph(graph)?;
+        }
         let _writing = self.manager.write_in_progress();
         self.changes
             .record_triple(graph, triple, insert)
             .map_err(OperatorError::from)
+    }
+
+    /// Refuses a write that would create the named graph `graph` with an
+    /// empty name (`<>`, an empty IRI without a base): an empty name names no
+    /// graph, and the triple ids of change events keep the default graph
+    /// apart from it only by a tag. A graph with an empty name that a file
+    /// already holds stays readable and writable.
+    fn refuse_unnamed_new_graph(
+        &self,
+        graph: Option<&str>,
+    ) -> std::result::Result<(), OperatorError> {
+        match graph {
+            Some(name) if !self.graph_exists(name) => {
+                crate::database::refuse_empty_graph_name(name)
+                    .map_err(|error| OperatorError::Wrapped(Box::new(error)))
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Whether the transaction sees `triple` in `graph`: its own writes
@@ -887,19 +908,34 @@ impl RdfWriter {
     /// transaction sees and, for a `MOVE`, the source's drop or clear. A copy,
     /// move or add of a graph onto itself changes nothing (SPARQL 1.1 Update,
     /// sections 3.2.3 and 3.2.4): once its check passed, it records nothing.
+    /// An operation that would create a graph with an empty name is refused,
+    /// or, `silent`, does nothing (SPARQL 1.1 Update: with `SILENT` "the
+    /// result of the operation will always be success").
     ///
     /// # Errors
     ///
     /// A write conflict naming the graph (`GRAFEO-T001`); the error of
-    /// `check`; the change set's refusal (a memory limit, a broken
-    /// invariant).
+    /// `check`; the refusal of an empty graph name without `silent`; the
+    /// change set's refusal (a memory limit, a broken invariant).
     pub(crate) fn graph_op(
         &self,
         op: RdfGraphOp,
+        silent: bool,
         check: impl FnOnce(&Self) -> std::result::Result<bool, OperatorError>,
     ) -> std::result::Result<(), OperatorError> {
         if !check(self)? || onto_itself(&op) {
             return Ok(());
+        }
+        let creates = match &op {
+            RdfGraphOp::Create { name } => Some(name.as_str()),
+            RdfGraphOp::Copy { target, .. }
+            | RdfGraphOp::Move { target, .. }
+            | RdfGraphOp::Add { target, .. } => target.as_deref(),
+            RdfGraphOp::Drop { .. } | RdfGraphOp::Clear { .. } => None,
+        };
+        match self.refuse_unnamed_new_graph(creates) {
+            Err(_) if silent => return Ok(()),
+            refused => refused?,
         }
         let (drops, adds, moves) = (
             matches!(op, RdfGraphOp::Drop { .. }),

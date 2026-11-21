@@ -330,7 +330,26 @@ pub extern "C" fn grafeo_version() -> *const c_char {
 // Change Data Capture
 // =========================================================================
 
-/// Enable or disable CDC for all future sessions.
+/// Turns change data capture on or off for all future sessions, and stores
+/// the setting with the database: a reopen has it as it was. An in-memory
+/// database keeps it while it is open.
+///
+/// Does not affect sessions that were already created. Returns an error
+/// status when the setting cannot be stored (a read-only open, a failed
+/// checkpoint); it stays as it was.
+#[cfg(feature = "cdc")]
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_set_cdc(db: *mut GrafeoDatabase, enabled: bool) -> GrafeoStatus {
+    let db = db_ref!(db);
+    match or_fail!(db.inner.read()).set_cdc(enabled) {
+        Ok(()) => GrafeoStatus::Ok,
+        Err(e) => set_error(&e),
+    }
+}
+
+/// Deprecated since 0.6.4, removed in 0.7.0: use [`grafeo_set_cdc`], which
+/// stores the setting and returns a status. Enables or disables CDC for all
+/// future sessions for as long as the database is open: nothing is stored.
 ///
 /// Does not affect sessions that were already created.
 #[cfg(feature = "cdc")]
@@ -343,6 +362,10 @@ pub extern "C" fn grafeo_set_cdc_enabled(db: *mut GrafeoDatabase, enabled: bool)
         return;
     };
     match db.inner.read() {
+        #[expect(
+            deprecated,
+            reason = "the deprecated C function keeps the deprecated in-memory setter until 0.7.0"
+        )]
         Ok(db) => db.set_cdc_enabled(enabled),
         Err(e) => {
             set_error(&e);

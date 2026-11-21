@@ -1659,18 +1659,28 @@ impl JsGrafeoDB {
 #[cfg(feature = "cdc")]
 #[napi]
 impl JsGrafeoDB {
-    /// Enable CDC for all future sessions.
+    /// Enable CDC for all future sessions, and store the setting with the
+    /// database: a reopen has it on. An in-memory database keeps it while it
+    /// is open. Throws when the setting cannot be stored (a read-only open,
+    /// a failed checkpoint); it stays as it was.
     #[napi(js_name = "enableCdc")]
     pub fn enable_cdc(&self) -> Result<()> {
-        self.inner.read()?.set_cdc_enabled(true);
-        Ok(())
+        self.set_cdc(true)
     }
 
-    /// Disable CDC for all future sessions.
+    /// Disable CDC for all future sessions, and store the setting with the
+    /// database: a reopen has it off. Throws as `enableCdc` does.
     #[napi(js_name = "disableCdc")]
     pub fn disable_cdc(&self) -> Result<()> {
-        self.inner.read()?.set_cdc_enabled(false);
-        Ok(())
+        self.set_cdc(false)
+    }
+
+    fn set_cdc(&self, enabled: bool) -> Result<()> {
+        self.inner
+            .read()?
+            .set_cdc(enabled)
+            .map_err(NodeGrafeoError::from)
+            .map_err(napi::Error::from)
     }
 
     /// Returns whether CDC is currently enabled for new sessions.

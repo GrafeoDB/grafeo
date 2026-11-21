@@ -26,6 +26,8 @@ mod async_ops;
 pub mod backup;
 pub(crate) mod catalog_records;
 pub(crate) mod catalog_section;
+#[cfg(all(feature = "cdc", feature = "wal", feature = "grafeo-file"))]
+pub(crate) mod cdc_cursor;
 #[cfg(feature = "grafeo-file")]
 mod checkpoint_timer;
 #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
@@ -851,6 +853,15 @@ impl Open {
                 );
             }
 
+            // A stored feed is durable only through the WAL: a writable open
+            // without one is refused before it writes anything.
+            #[cfg(feature = "cdc")]
+            if (cfg!(not(feature = "wal")) || !config.wal_enabled())
+                && catalog.cdc_config().is_some_and(|record| record.enabled)
+            {
+                return Err(config_error(crate::config::ConfigError::CdcWithoutWal));
+            }
+
             // A sidecar WAL holds the commits since the last checkpoint that a
             // writer left without `close()`: they are replayed whatever
             // `wal_enabled` says (it decides only whether new commits are
@@ -951,8 +962,19 @@ impl Open {
         store.attach_planning_generation(Arc::clone(query_cache.planning_generation()));
         store.anchor_plan_statistics();
 
+        // The stored setting, or `Config::with_cdc()` for this open only (as
+        // every stored setting): only the stored one keeps a durable feed.
         #[cfg(feature = "cdc")]
-        let cdc_enabled_val = config.cdc_enabled();
+        let cdc_enabled_val = {
+            let stored = catalog.cdc_config().is_some_and(|record| record.enabled);
+            if config.cdc_enabled() && !stored && config.path().is_some() {
+                grafeo_common::grafeo_warn!(
+                    "change data capture is on for this open only: Config::with_cdc() does not \
+                     store it with the database; GrafeoDB::set_cdc(true) stores it"
+                );
+            }
+            config.cdc_enabled() || stored
+        };
         #[cfg(all(feature = "wal", feature = "grafeo-file"))]
         let wal_retention_limit = config.wal_retention_limit();
         #[cfg(feature = "cdc")]
@@ -1094,6 +1116,19 @@ impl Open {
                 .collect::<Vec<_>>(),
             reads_a_0_5_database,
         )?;
+
+        // The cursor follows the stored setting: one missing (removed by
+        // hand, or a crash before a toggle's checkpoint wrote the setting)
+        // starts at the image's checkpoint, which loses nothing; one left
+        // behind by a setting stored off goes. Before the checkpoint timer
+        // starts, so no checkpoint releases the log after the image first.
+        #[cfg(all(feature = "cdc", feature = "wal", feature = "grafeo-file"))]
+        if !db.read_only
+            && let (Some(fm), Some(wal)) = (db.file_manager.as_ref(), db.wal.as_ref())
+        {
+            let stored = db.catalog.cdc_config().is_some_and(|record| record.enabled);
+            cdc_cursor::follow_setting(wal.dir(), stored, fm.active_header().checkpoint_lsn)?;
+        }
 
         // Start the automatic checkpointer if a trigger is configured.
         #[cfg(feature = "grafeo-file")]
@@ -1510,14 +1545,26 @@ impl Open {
         Ok(())
     }
 
-    /// Whether a backup chain needs the sidecar WAL of `fm` after `close()`:
-    /// it holds a backup cursor, so the segments from the cursor's log
-    /// position on (a checkpoint keeps them) are the next incremental
-    /// backup's. A cursor that cannot be read keeps the WAL too: removing it
-    /// would end the chain.
+    /// Whether a cursor needs the sidecar WAL of `fm` after `close()`: it
+    /// holds a backup cursor, so the segments from the cursor's log position
+    /// on (a checkpoint keeps them) are the next incremental backup's, or a
+    /// change data capture cursor while the setting is stored on, whose
+    /// consumer reads the segments after it (one left after the setting went
+    /// off holds nothing). A backup cursor that cannot be read keeps the WAL
+    /// too: removing it would end the chain.
     #[cfg(all(feature = "wal", feature = "grafeo-file"))]
-    fn backup_chain_needs_wal(fm: &GrafeoFileManager) -> bool {
-        match backup::read_backup_cursor(&fm.sidecar_wal_path()) {
+    fn cursor_needs_wal(&self, fm: &GrafeoFileManager) -> bool {
+        let wal_dir = fm.sidecar_wal_path();
+        #[cfg(feature = "cdc")]
+        if self
+            .catalog
+            .cdc_config()
+            .is_some_and(|record| record.enabled)
+            && cdc_cursor::any_in(&wal_dir)
+        {
+            return true;
+        }
+        match backup::read_backup_cursor(&wal_dir) {
             Ok(cursor) => cursor.is_some(),
             Err(error) => {
                 grafeo_common::grafeo_warn!(
@@ -1528,9 +1575,9 @@ impl Open {
         }
     }
 
-    /// Without the `wal` feature there are no backups.
+    /// Without the `wal` feature there are no cursors.
     #[cfg(all(feature = "grafeo-file", not(feature = "wal")))]
-    fn backup_chain_needs_wal(_fm: &GrafeoFileManager) -> bool {
+    fn cursor_needs_wal(&self, _fm: &GrafeoFileManager) -> bool {
         false
     }
 
@@ -2372,6 +2419,7 @@ impl Open {
     // === Named Graph Management ===
 
     pub(crate) fn create_graph(&self, name: &str) -> Result<bool> {
+        refuse_empty_graph_name(name)?;
         if self.root_store().is_none() {
             return Err(grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::new(
@@ -2649,6 +2697,27 @@ impl Open {
             return checkpointed.map(|_| ());
         }
 
+        // After a checkpoint whose outcome is unknown, only a reopen knows
+        // which image the file holds: no checkpoint runs, and the WAL stays
+        // for the reopen to replay on top of it.
+        #[cfg(feature = "grafeo-file")]
+        if let Some(ref fm) = self.file_manager
+            && let Err(refused) = fm.check_checkpoint_allowed()
+        {
+            #[cfg(feature = "wal")]
+            if let Some(ref wal) = self.wal {
+                if let Err(e) = wal.sync() {
+                    grafeo_common::grafeo_warn!("failed to sync the WAL while closing: {e}");
+                }
+                wal.close();
+            }
+            if let Err(e) = fm.close() {
+                grafeo_common::grafeo_warn!("failed to release the database file: {e}");
+            }
+            *is_open = false;
+            return Err(refused);
+        }
+
         // Checkpoint to the database file, then remove the sidecar WAL.
         #[cfg(feature = "grafeo-file")]
         if let Some(ref fm) = self.file_manager {
@@ -2678,7 +2747,7 @@ impl Open {
             let nothing_new = !log_ahead
                 && !self.transaction_manager.changed_since_checkpoint()
                 && self.transaction_manager.active_count() == 0
-                && !Self::backup_chain_needs_wal(fm);
+                && !self.cursor_needs_wal(fm);
             let (flush_result, _held) = if nothing_new {
                 (flush::FlushResult::default(), Some(held))
             } else {
@@ -2710,10 +2779,11 @@ impl Open {
                     use grafeo_common::testing::crash::maybe_crash;
                     maybe_crash("close:before_remove_sidecar_wal");
                 }
-                // A backup chain reads the segments after its cursor: the
-                // checkpoint kept them, and they stay, with the cursor, for
-                // the next incremental backup after a reopen.
-                if !Self::backup_chain_needs_wal(fm) {
+                // A backup chain, or a change data capture consumer, reads
+                // the segments after its cursor: the checkpoint kept them,
+                // and they stay, with the cursor, for the next incremental
+                // backup or feed read after a reopen.
+                if !self.cursor_needs_wal(fm) {
                     fm.remove_sidecar_wal()?;
                 }
             } else {
@@ -3109,6 +3179,7 @@ impl Open {
             && let Ok(sources) = self.checkpoint_sources()
         {
             let checkpoint_fm = Arc::clone(fm);
+            let hopeless_fm = Arc::clone(fm);
             let transaction_manager = Arc::clone(&self.transaction_manager);
             // Without a WAL, a commit with changes after the file's last
             // checkpoint is the interval's work.
@@ -3120,7 +3191,10 @@ impl Open {
             };
             let job = checkpoint_timer::Job {
                 checkpoint: Box::new(move || flush::flush(&checkpoint_fm, &sources).map(|_| ())),
-                hopeless: Box::new(move || transaction_manager.has_incomplete_commit()),
+                hopeless: Box::new(move || {
+                    transaction_manager.has_incomplete_commit()
+                        || hopeless_fm.outcome_unknown().is_some()
+                }),
                 log,
                 segment_bytes: self.config.wal_segment_size(),
                 changed,
@@ -3186,12 +3260,20 @@ impl Open {
         // A disk override the next open would refuse is refused now.
         changes.check_section_tiers().map_err(config_error)?;
         let path = normalize_path(path)?;
+        // Under the checkpoint guard, from reading the stored record to the
+        // checkpoint that stores the new one: two calls never lose one
+        // change, and after a checkpoint whose outcome is unknown nothing
+        // more is stored.
+        let sources = self.checkpoint_sources()?;
+        let _checkpoint = fm.checkpoint_guard();
+        fm.check_checkpoint_allowed()?;
         let stored = self
             .catalog
             .stored_config()
             .unwrap_or_else(|| stored_config::record_of(&self.config, &path));
         let changed = stored_config::changed(stored, changes, &path)?;
         let retention = stored_config::history_retention(changed.history_retention);
+        let commits = self.transaction_manager.hold_commits()?;
         let previous = self.catalog.set_stored_config(Some(changed));
         // The history retention takes effect from now on, and before the
         // checkpoint, which then holds the history it keeps (H2c).
@@ -3203,7 +3285,12 @@ impl Open {
         let keeps_history =
             || root.set_keeps_history(self.transaction_manager.history_image().is_some());
         keeps_history();
-        if let Err(error) = self.checkpoint_to_file(fm) {
+        if let Err(error) = flush::flush_held(fm, &sources, None, commits) {
+            // A checkpoint whose outcome is unknown may have stored it: the
+            // new record stays, as a reopen may find it.
+            if flush::is_outcome_unknown(&error) {
+                return Err(error);
+            }
             // Nothing was stored: the record goes back to what the file holds.
             self.catalog.set_stored_config(previous);
             self.transaction_manager
@@ -3476,6 +3563,25 @@ fn undetected_memory(
         .then_some(crate::admin::OpenWarning::MemoryDetectionFallback {
             budget: budget as u64,
         })
+}
+
+/// Refuses `name` when it is empty, with the one error every entry point that
+/// creates a graph gives (GQL and SQL/PGQ, SPARQL, the direct API): the
+/// zero-length name is the GQL catalog root's (ISO/IEC 39075 4.3), so it
+/// names no graph. A graph with an empty name a file already holds stays
+/// readable and writable.
+///
+/// # Errors
+///
+/// The Semantic error "A graph name must not be empty" for an empty `name`.
+pub(crate) fn refuse_empty_graph_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(Error::from(grafeo_common::utils::error::QueryError::new(
+            grafeo_common::utils::error::QueryErrorKind::Semantic,
+            "A graph name must not be empty",
+        )));
+    }
+    Ok(())
 }
 
 /// The error of a configuration [`Config::validate`] refuses: a setting the
@@ -4727,7 +4833,8 @@ impl GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if arena allocation fails, or if the database uses an
+    /// Returns an error for an empty name (as GQL's `CREATE GRAPH` refuses
+    /// it), if arena allocation fails, or if the database uses an
     /// external store ([`with_store`](Self::with_store),
     /// [`with_read_store`](Self::with_read_store)), which has no named graphs;
     /// the database-closed error after `close()`,
@@ -4959,6 +5066,13 @@ impl GrafeoDB {
     /// `GRAFEO-T007`, and a later `close()` or the drop persists. The
     /// sessions, streams and views it had handed out stay revoked, their open
     /// transactions rolled back, and fail with `GRAFEO-T007`: open new ones.
+    ///
+    /// After a checkpoint whose outcome is unknown (`GRAFEO-S008`: it failed
+    /// between writing its header and syncing it), `close()` writes no
+    /// checkpoint and keeps the WAL: it releases the database and returns that
+    /// error, and the next open finds one of the two images and replays the
+    /// WAL on top. A database without a WAL takes no commits from that
+    /// failure on, as none could be stored.
     pub fn close(&self) -> Result<()> {
         // Taken first: a statement or session that starts from here on fails with `T007`, and a
         // second `close()` finds nothing to do. The open state then waits for the statements in
@@ -5109,7 +5223,10 @@ impl GrafeoDB {
     /// or pins a section that cannot be moved to disk to
     /// [`TierOverride::ForceDisk`](grafeo_common::storage::TierOverride::ForceDisk),
     /// the database-closed error after `close()`, and the errors of the
-    /// checkpoint.
+    /// checkpoint. After a checkpoint whose outcome is unknown
+    /// (`GRAFEO-S008`: it failed between writing its header and syncing it),
+    /// the new configuration stays, as the next open may find it, and the
+    /// call is refused until a reopen.
     #[cfg(feature = "grafeo-file")]
     pub fn set_stored_config(&self, changes: &Config) -> Result<()> {
         self.live()?.set_stored_config(changes)
@@ -5128,6 +5245,12 @@ impl GrafeoDB {
     /// Subsequent incremental backups hold the
     /// commits after E. A read-only database writes what it sees, the
     /// commits it replayed from the WAL included.
+    ///
+    /// After a checkpoint whose outcome is unknown (`GRAFEO-S008`), a copy
+    /// holds the state in memory, including the new value of the call that
+    /// failed. With a WAL, reopen first for a copy that matches the source.
+    /// Without a WAL, copy first, since a reopen loses the commits made after
+    /// the last good checkpoint.
     ///
     /// # Errors
     ///
@@ -6049,7 +6172,7 @@ mod tests {
             assert!(!db.is_cdc_enabled());
 
             // Enable at runtime
-            db.set_cdc_enabled(true);
+            db.set_cdc(true).unwrap();
             assert!(db.is_cdc_enabled());
 
             let id = db.create_node(&["Person"]).unwrap();
@@ -6057,7 +6180,7 @@ mod tests {
             assert_eq!(history.len(), 1, "CDC enabled at runtime records events");
 
             // Disable again
-            db.set_cdc_enabled(false);
+            db.set_cdc(false).unwrap();
             let id2 = db.create_node(&["Person"]).unwrap();
             let history2 = db.history(id2).unwrap();
             assert!(

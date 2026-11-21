@@ -27,6 +27,15 @@ When opening a database after a crash:
 3. Uncommitted transactions are rolled back
 4. Database is restored to a consistent state
 
+A checkpoint that fails between writing its header and syncing it leaves its outcome unknown
+(`GRAFEO-S008`): the next open finds the new image or the previous one, whole, and replays the
+WAL on top. Until that open the database takes no more checkpoints, `close()` keeps the WAL, and
+a database without a WAL takes no commits. After a checkpoint whose outcome is
+unknown, a copy holds the state in memory, including the new value of the call
+that failed. With a WAL, reopen first for a copy that matches the source.
+Without a WAL, copy first, since a reopen loses the commits made after the last
+good checkpoint.
+
 ```python
 # Recovery happens automatically on open
 db = grafeo.GrafeoDB(path="my_graph.db")

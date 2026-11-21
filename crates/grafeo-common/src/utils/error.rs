@@ -69,8 +69,9 @@ pub enum ErrorCode {
     TransactionDeadlock,
     /// The database is closed: it takes no more calls.
     DatabaseClosed,
-    /// A commit did not complete: nothing commits, checkpoints or saves until
-    /// the database is reopened.
+    /// A commit or a restore did not complete: nothing commits until the
+    /// database is reopened (after a commit, nothing checkpoints or saves
+    /// either).
     IncompleteCommit,
     /// A commit could not be written to the write-ahead log and was rolled
     /// back (retry possible).
@@ -99,6 +100,16 @@ pub enum ErrorCode {
     /// An incremental backup cannot continue its chain: the log it starts
     /// from was removed. A new full backup starts a new chain.
     BackupChainBroken,
+    /// The durable change feed cannot go on from its cursor: a checkpoint
+    /// removed the log there (the retention limit cut it).
+    CdcFeedTruncated,
+    /// The change data capture setting is stored, but its cursor step
+    /// failed: the next open, or the same call again, completes it.
+    CdcCursorPending,
+    /// A checkpoint failed between writing its header and syncing it: the
+    /// next open finds the new image or the previous one, and until then
+    /// nothing more is checkpointed. Reopen the database.
+    CheckpointOutcomeUnknown,
 
     // Validation errors (V)
     /// Request validation failed.
@@ -156,6 +167,9 @@ impl ErrorCode {
             Self::StorageRecoveryFailed => "GRAFEO-S003",
             Self::DatabaseLocked => "GRAFEO-S004",
             Self::BackupChainBroken => "GRAFEO-S005",
+            Self::CdcFeedTruncated => "GRAFEO-S006",
+            Self::CdcCursorPending => "GRAFEO-S007",
+            Self::CheckpointOutcomeUnknown => "GRAFEO-S008",
 
             Self::InvalidInput => "GRAFEO-V001",
             Self::NodeNotFound => "GRAFEO-V002",
@@ -538,11 +552,13 @@ pub enum TransactionError {
     /// reads included. Open it again.
     DatabaseClosed,
 
-    /// An earlier commit did not complete (it panicked between its commit
-    /// epoch and its completion), so the store may hold part of it: no
-    /// transaction commits and nothing is checkpointed, saved or copied
-    /// until the database is reopened. Reads still see every commit
-    /// published before it.
+    /// An earlier commit or restore did not complete, and no transaction
+    /// commits until the database is reopened. A commit that panicked between
+    /// its commit epoch and its completion may have left part of it in the
+    /// store, so nothing is checkpointed, saved or copied either; reads still
+    /// see every commit published before it. A restore whose checkpoint
+    /// failed holds the restored state in memory, which a commit on top
+    /// would replay onto the previous image; checkpoints and copies go on.
     IncompleteCommit,
 
     /// The commit could not be written to the write-ahead log (the reason
@@ -626,9 +642,9 @@ impl fmt::Display for TransactionError {
             TransactionError::DatabaseClosed => write!(f, "the database is closed: open it again"),
             TransactionError::IncompleteCommit => write!(
                 f,
-                "an earlier commit did not complete, so no transaction can commit and nothing \
-                 can be checkpointed, saved or copied: reopen the database (reads still see \
-                 every commit published before it)"
+                "an earlier commit or restore did not complete, so no transaction can commit \
+                 (after a commit, nothing can be checkpointed, saved or copied either): reopen \
+                 the database (reads still work)"
             ),
             TransactionError::LogWriteFailed(reason) => write!(
                 f,
@@ -690,6 +706,25 @@ pub enum StorageError {
     /// follows): only a new full backup helps, not a retry.
     BackupChainBroken(String),
 
+    /// The durable change feed's cursor is behind the log that is left: a
+    /// checkpoint removed the log below `first_available`, the first log
+    /// position still there, because it passed the retention limit.
+    CdcFeedTruncated {
+        /// The first log position the feed can still read.
+        first_available: u64,
+    },
+
+    /// The change data capture setting is stored off, but the cursor of its
+    /// feed could not be removed (the cause follows): the next open, or
+    /// `set_cdc(false)` again, removes it. Until then it keeps no log.
+    CdcCursorPending(String),
+
+    /// A checkpoint failed between writing its header and syncing it (the
+    /// cause follows), or a call is refused after one that did: the next open
+    /// finds the new image or the previous one, whole. Until then the
+    /// database takes no more checkpoints. Only a reopen helps, not a retry.
+    CheckpointOutcomeUnknown(String),
+
     /// One of the database's bounds refused memory or spill space; nothing changed.
     LimitReached(Box<LimitRefusal>),
 }
@@ -704,6 +739,9 @@ impl StorageError {
             Self::RecoveryFailed(_) => ErrorCode::StorageRecoveryFailed,
             Self::Locked(_) => ErrorCode::DatabaseLocked,
             Self::BackupChainBroken(_) => ErrorCode::BackupChainBroken,
+            Self::CdcFeedTruncated { .. } => ErrorCode::CdcFeedTruncated,
+            Self::CdcCursorPending(_) => ErrorCode::CdcCursorPending,
+            Self::CheckpointOutcomeUnknown(_) => ErrorCode::CheckpointOutcomeUnknown,
         }
     }
 }
@@ -717,6 +755,20 @@ impl fmt::Display for StorageError {
             StorageError::CheckpointFailed(msg) => write!(f, "Checkpoint failed: {msg}"),
             StorageError::Locked(msg) => write!(f, "Database locked: {msg}"),
             StorageError::BackupChainBroken(msg) => write!(f, "Backup chain broken: {msg}"),
+            StorageError::CdcFeedTruncated { first_available } => write!(
+                f,
+                "The change feed's cursor is behind the log that is left: a checkpoint removed \
+                 the log below position {first_available}, past the retention limit \
+                 (Config::with_wal_retention_limit)"
+            ),
+            StorageError::CdcCursorPending(msg) => write!(
+                f,
+                "Change data capture is stored off, but its cursor could not be removed \
+                 ({msg}): the next open, or set_cdc(false) again, removes it"
+            ),
+            StorageError::CheckpointOutcomeUnknown(msg) => {
+                write!(f, "Checkpoint outcome unknown: {msg}")
+            }
             StorageError::LimitReached(refusal) => write!(f, "{refusal}"),
         }
     }
@@ -1323,9 +1375,9 @@ mod tests {
         );
         assert_eq!(
             err.to_string(),
-            "GRAFEO-T008: an earlier commit did not complete, so no transaction can commit and \
-             nothing can be checkpointed, saved or copied: reopen the database (reads still see \
-             every commit published before it)"
+            "GRAFEO-T008: an earlier commit or restore did not complete, so no transaction can \
+             commit (after a commit, nothing can be checkpointed, saved or copied either): \
+             reopen the database (reads still work)"
         );
     }
 

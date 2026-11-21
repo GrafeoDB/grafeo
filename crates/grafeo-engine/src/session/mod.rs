@@ -1483,6 +1483,9 @@ impl SessionInner {
                 copy_of,
                 open: _,
             } => {
+                // Before `IF NOT EXISTS`, which covers only a graph that exists: an
+                // empty name is no name.
+                crate::database::refuse_empty_graph_name(&name)?;
                 // ISO/IEC 39075 Section 12.4: graphs are created within the current schema
                 if name.contains('/') {
                     return Err(Error::from(QueryError::new(
@@ -2051,6 +2054,7 @@ impl SessionInner {
                 grafeo_common::utils::error::TransactionError::ReadOnly,
             ));
         }
+        crate::database::refuse_empty_graph_name(&op.name)?;
         if op.name.contains('/') {
             return Err(semantic(format!(
                 "Graph name '{}' must not contain '/' (reserved as schema/graph separator)",
@@ -5848,7 +5852,11 @@ impl SessionInner {
             if self.records_cdc
                 && let Some(changes) = &changes
             {
-                changes.read(|set| self.cdc_log.record_commit(set, commit_epoch));
+                changes.read(|set| {
+                    if let Some(stamps) = self.cdc_log.reserve_for(set) {
+                        self.cdc_log.record_commit(set, commit_epoch, stamps);
+                    }
+                });
             }
 
             #[cfg(feature = "testing-statement-injection")]

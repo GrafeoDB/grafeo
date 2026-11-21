@@ -12,4 +12,5 @@
 //! is a `[[test]]` entry in `Cargo.toml` instead, with a comment saying why.
 
 mod decimal_reference;
+mod hlc_reservations;
 mod memory_grants;

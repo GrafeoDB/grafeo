@@ -87,7 +87,7 @@ mod tests {
     use super::*;
     use crate::database::{
         grafeo_close, grafeo_execute, grafeo_free_database, grafeo_free_result, grafeo_free_string,
-        grafeo_open_memory, grafeo_set_cdc_enabled,
+        grafeo_open_memory, grafeo_set_cdc,
     };
 
     fn events_of(json: *mut c_char) -> Vec<serde_json::Value> {
@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn the_history_of_a_node_and_its_edges_in_the_shared_shape() {
         let db = grafeo_open_memory();
-        grafeo_set_cdc_enabled(db, true);
+        assert_eq!(grafeo_set_cdc(db, true), crate::error::GrafeoStatus::Ok);
         run(
             db,
             "INSERT (:Person {name: 'Butch'})-[:KNOWS]->(:Person {name: 'Hans'})",

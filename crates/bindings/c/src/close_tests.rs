@@ -341,6 +341,9 @@ fn every_call_on_a_closed_database_fails_with_t007() {
     ];
     #[cfg(feature = "cdc")]
     rows.extend([
+        row("grafeo_set_cdc", || {
+            status(crate::database::grafeo_set_cdc(db, true))
+        }),
         row("grafeo_set_cdc_enabled", || {
             crate::database::grafeo_set_cdc_enabled(db, true);
             true

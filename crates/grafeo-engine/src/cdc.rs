@@ -8,9 +8,12 @@
 //!
 //! Every write emits a [`ChangeEvent`] keyed by [`EntityId`]. Three id
 //! variants cover the three supported data models: `Node(NodeId)` and
-//! `Edge(EdgeId)` for LPG, `Triple(u64)` for RDF (hashed via a
-//! content-stable triple hash so the log can key events by triple
-//! content without maintaining a separate id registry).
+//! `Edge(EdgeId)` for LPG, `Triple(u64)` for RDF: the first 8 bytes of
+//! SHA-256 over the triple's terms and its graph, so the log keys events by
+//! triple content without a separate id registry, and the id is the same in
+//! every process and release. It is a 64-bit hash, unique in practice but
+//! not guaranteed: a consumer that must not conflate two triples keys on the
+//! terms the event carries.
 //! [`ChangeKind`] distinguishes
 //! `Create` / `Update` / `Delete`; the `before` and `after` property maps
 //! are populated only for the variants that can carry them (`Update` has
@@ -41,7 +44,10 @@
 //! timestamp from the embedded [`HlcClock`]. The clock guarantees
 //! strictly-increasing timestamps across all threads within a process
 //! (wall-clock ms in the upper 48 bits, logical counter in the lower
-//! 16, with the logical bits bumped on collision).
+//! 16, carrying into the milliseconds past 65,535). A commit reserves one
+//! run of consecutive timestamps for its writes, and write `i` (from 0, in
+//! the order applied) gets the run's first plus `i`, a write folded into a
+//! create included, so a later commit's timestamps are larger.
 //!
 //! # Integration with the commit path
 //!
@@ -154,7 +160,9 @@ pub enum EntityId {
     Node(NodeId),
     /// An edge identifier.
     Edge(EdgeId),
-    /// An RDF triple, identified by a content hash of its terms.
+    /// An RDF triple, identified by a hash of its terms and its graph: the
+    /// same in every process and release, unique in practice but not
+    /// guaranteed (key on the event's terms when that matters).
     Triple(u64),
 }
 
@@ -355,6 +363,9 @@ pub struct CdcLog {
     events: RwLock<HbHashMap<(Option<String>, EntityId), Vec<ChangeEvent>>>,
     clock: Arc<HlcClock>,
     retention: CdcRetentionConfig,
+    /// The calls of the triple helpers that recorded nothing (see
+    /// [`dropped_lines`](Self::dropped_lines)).
+    dropped_lines: std::sync::atomic::AtomicU64,
     /// What [`heap_memory_bytes`](Self::heap_memory_bytes) walks, kept as
     /// events come and go, under the events' write lock (one writer: a load
     /// and a store, no read-modify-write).
@@ -456,10 +467,27 @@ impl CdcLog {
             events: RwLock::new(HbHashMap::new()),
             clock: Arc::new(HlcClock::new()),
             retention,
+            dropped_lines: std::sync::atomic::AtomicU64::new(0),
             counted: AtomicUsize::new(0),
             held_events: AtomicUsize::new(0),
             memory: LogMemory::default(),
         }
+    }
+
+    /// How many calls of [`record_triple_insert`](Self::record_triple_insert)
+    /// and [`record_triple_delete`](Self::record_triple_delete) recorded
+    /// nothing: their terms were not one N-Triples triple (a blank argument
+    /// included), or the build has no triple store to read them. Each also
+    /// logs a warning, which a build without the `tracing` feature drops, so
+    /// this count is the signal there.
+    #[must_use]
+    pub fn dropped_lines(&self) -> u64 {
+        self.dropped_lines.load(Ordering::Relaxed)
+    }
+
+    /// Counts a helper call that recorded nothing.
+    fn drop_line(&self) {
+        self.dropped_lines.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Returns the next HLC timestamp from this log's clock.
@@ -674,7 +702,16 @@ impl CdcLog {
     /// Records an RDF triple insertion.
     ///
     /// The terms must be N-Triples encoded (e.g. `<http://example.org/s>`,
-    /// `"hello"`, `"42"^^<http://www.w3.org/2001/XMLSchema#integer>`).
+    /// `"hello"`, `"42"^^<http://www.w3.org/2001/XMLSchema#integer>`). The
+    /// event carries the parsed terms and the id a commit gives the triple.
+    /// `graph` is the named graph's IRI without angle brackets (as SPARQL's
+    /// `GRAPH <iri>` names it), or `None` for the default graph.
+    ///
+    /// Terms that are not one N-Triples triple (a blank argument included),
+    /// or a build without the triple store (the `triple-store` feature) to
+    /// read them with, record nothing: the call logs a warning that names
+    /// why (in a build with `tracing`) and counts in
+    /// [`dropped_lines`](Self::dropped_lines).
     pub fn record_triple_insert(
         &self,
         subject: &str,
@@ -683,31 +720,20 @@ impl CdcLog {
         graph: Option<&str>,
         epoch: EpochId,
     ) {
-        let id = triple_hash(subject, predicate, object, graph);
-        self.record(ChangeEvent {
-            entity_id: EntityId::Triple(id),
-            graph: graph.map(ToString::to_string),
-            kind: ChangeKind::Create,
+        self.record_parsed_triple(
+            [subject, predicate, object],
+            graph,
+            ChangeKind::Create,
             epoch,
-            timestamp: self.clock.now(),
-            before: None,
-            after: None,
-            labels: None,
-            before_labels: None,
-            edge_type: None,
-            src_id: None,
-            dst_id: None,
-            deleted_with: None,
-            triple_subject: Some(subject.to_string()),
-            triple_predicate: Some(predicate.to_string()),
-            triple_object: Some(object.to_string()),
-            triple_graph: graph.map(ToString::to_string),
-        });
+        );
     }
 
     /// Records an RDF triple deletion.
     ///
-    /// The terms must be N-Triples encoded.
+    /// The terms must be N-Triples encoded, and `graph` is as for
+    /// [`record_triple_insert`](Self::record_triple_insert); terms that do not
+    /// parse record nothing, warn and count in
+    /// [`dropped_lines`](Self::dropped_lines), as there.
     pub fn record_triple_delete(
         &self,
         subject: &str,
@@ -716,26 +742,12 @@ impl CdcLog {
         graph: Option<&str>,
         epoch: EpochId,
     ) {
-        let id = triple_hash(subject, predicate, object, graph);
-        self.record(ChangeEvent {
-            entity_id: EntityId::Triple(id),
-            graph: graph.map(ToString::to_string),
-            kind: ChangeKind::Delete,
+        self.record_parsed_triple(
+            [subject, predicate, object],
+            graph,
+            ChangeKind::Delete,
             epoch,
-            timestamp: self.clock.now(),
-            before: None,
-            after: None,
-            labels: None,
-            before_labels: None,
-            edge_type: None,
-            src_id: None,
-            dst_id: None,
-            deleted_with: None,
-            triple_subject: Some(subject.to_string()),
-            triple_predicate: Some(predicate.to_string()),
-            triple_object: Some(object.to_string()),
-            triple_graph: graph.map(ToString::to_string),
-        });
+        );
     }
 
     /// Records a property update.
@@ -1068,49 +1080,208 @@ impl MemoryConsumer for CdcLog {
     }
 }
 
-/// Computes a stable-within-process content hash for an RDF triple.
-///
-/// Used as the raw `u64` in `EntityId::Triple` so the CDC log can key events
-/// by triple content without storing a separate ID registry.
-fn triple_hash(subject: &str, predicate: &str, object: &str, graph: Option<&str>) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    subject.hash(&mut h);
-    predicate.hash(&mut h);
-    object.hash(&mut h);
-    graph.hash(&mut h);
-    h.finish()
-}
-
 impl CdcLog {
-    /// Records the events of a commit at `epoch` that changed what `set`
-    /// holds (see [`events_for_commit`]). Called in the commit's ordered
-    /// step, where no other commit runs: the timestamps the log's clock
-    /// gives follow the commit epochs, so a later commit's events never
-    /// carry an earlier timestamp.
-    pub(crate) fn record_commit(&self, set: &grafeo_common::change::ChangeSet, epoch: EpochId) {
-        if set.is_empty() {
-            return;
+    /// Records the event of the N-Triples `terms` (subject, predicate,
+    /// object) in the graph with storage key `graph` (`None` for the default
+    /// graph), as a commit records it: the terms parsed, then the event
+    /// [`triple_event`] builds, with the normalised terms and their
+    /// [`triple_id`]. Terms that are not one triple (a blank argument
+    /// included, which a shifted line could hide) record nothing and take no
+    /// timestamp: the warning names why, and [`dropped_lines`](Self::dropped_lines)
+    /// counts it.
+    #[cfg(feature = "triple-store")]
+    fn record_parsed_triple(
+        &self,
+        [subject, predicate, object]: [&str; 3],
+        graph: Option<&str>,
+        kind: ChangeKind,
+        epoch: EpochId,
+    ) {
+        let line = format!("{subject} {predicate} {object} .");
+        let refused = |reason: String| {
+            grafeo_common::grafeo_warn!("no change event recorded: `{line}` {reason}");
+            self.drop_line();
+        };
+        if [subject, predicate, object]
+            .iter()
+            .any(|term| term.trim().is_empty())
+        {
+            return refused("has a blank term".to_string());
         }
-        self.record_batch(events_for_commit(set, epoch, &self.clock));
+        let triple = match grafeo_core::graph::rdf::parse_ntriples_text(&line) {
+            Ok(triples) => match triples.as_slice() {
+                [triple] => grafeo_common::storage::log_record::TripleRecord::from(triple),
+                _ => return refused("is not one N-Triples triple".to_string()),
+            },
+            Err(error) => return refused(format!("is no N-Triples triple: {error}")),
+        };
+        self.record(triple_event(graph, &triple, kind, epoch, self.clock.now()));
+    }
+
+    /// A build without the triple store has no reader for the terms, so it
+    /// records nothing, warns and counts the call.
+    #[cfg(not(feature = "triple-store"))]
+    fn record_parsed_triple(
+        &self,
+        terms: [&str; 3],
+        _graph: Option<&str>,
+        _kind: ChangeKind,
+        _epoch: EpochId,
+    ) {
+        grafeo_common::grafeo_warn!(
+            "no change event recorded for `{} {} {}`: reading N-Triples terms needs the triple \
+             store (the `triple-store` feature)",
+            terms[0],
+            terms[1],
+            terms[2]
+        );
+        self.drop_line();
     }
 }
 
-/// The change events of a commit at `epoch` from its change set, one per
-/// write in the order applied (see [`ChangeSet::ops`](grafeo_common::change::ChangeSet::ops):
-/// each data entry, and each row a bulk write kept with its range; a range
-/// without its rows, a bulk import's, has none), each naming its graph,
-/// timestamped by `clock` in that order. A triple's event names its RDF
-/// graph as `triple_graph`, as the RDF bulk writes report theirs. An event
-/// is built from the write's op and before-image: a create carries its
-/// labels or type and endpoints and the values it was created with, a
-/// delete what the entity held, an update the value or the labels before
-/// and after. The transaction's later changes to an entity it created are
-/// then folded into the create (see [`fold_into_creates`]).
-pub(crate) fn events_for_commit(
-    set: &grafeo_common::change::ChangeSet,
+/// The id of `triple` in the graph with storage key `graph` (`None` for the
+/// default graph): the first 8 bytes, little endian, of SHA-256 over
+/// [`canonical_triple_bytes`]. The same in every process and release. A
+/// 64-bit hash: unique in practice, not guaranteed, so a consumer that must
+/// not conflate two triples keys on the terms the event carries.
+#[cfg(feature = "triple-store")]
+pub(crate) fn triple_id(
+    triple: &grafeo_common::storage::log_record::TripleRecord,
+    graph: Option<&str>,
+) -> u64 {
+    use sha2::Digest as _;
+
+    let digest = sha2::Sha256::digest(canonical_triple_bytes(triple, graph));
+    let mut first = [0; 8];
+    first.copy_from_slice(&digest[..8]);
+    u64::from_le_bytes(first)
+}
+
+/// The encoding [`triple_id`] hashes, kept apart from the log's encoding so
+/// a revision of the log moves no id. For the subject, the predicate and the
+/// object in turn: a tag byte (0 an IRI, 1 a blank node, 2 a literal), then,
+/// each as its length (u64, little endian) and its UTF-8 bytes, the IRI, the
+/// blank node's label (without `_:`), or the literal's lexical form,
+/// datatype IRI and language tag (length 0 without one; a plain literal has
+/// the datatype `xsd:string`). Then a tag byte for the graph, 0 for the
+/// default graph and 1 for a named one, followed for a named graph by its
+/// storage key the same way: a named graph with an empty name keeps ids of
+/// its own.
+#[cfg(feature = "triple-store")]
+fn canonical_triple_bytes(
+    triple: &grafeo_common::storage::log_record::TripleRecord,
+    graph: Option<&str>,
+) -> Vec<u8> {
+    use grafeo_common::storage::log_record::TermRecord;
+
+    fn text(out: &mut Vec<u8>, text: &str) {
+        out.extend_from_slice(&(text.len() as u64).to_le_bytes());
+        out.extend_from_slice(text.as_bytes());
+    }
+    let mut out = Vec::new();
+    for term in [&triple.subject, &triple.predicate, &triple.object] {
+        match term {
+            TermRecord::Iri(iri) => {
+                out.push(0);
+                text(&mut out, iri);
+            }
+            TermRecord::Blank(label) => {
+                out.push(1);
+                text(&mut out, label);
+            }
+            TermRecord::Literal {
+                value,
+                datatype,
+                language,
+            } => {
+                out.push(2);
+                text(&mut out, value);
+                text(&mut out, datatype);
+                text(&mut out, language.as_deref().unwrap_or_default());
+            }
+        }
+    }
+    match graph {
+        None => out.push(0),
+        Some(key) => {
+            out.push(1);
+            text(&mut out, key);
+        }
+    }
+    out
+}
+
+/// The timestamps a commit reserved for its writes (see
+/// [`CdcLog::reserve_for`]): `writes` consecutive values from `first`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CommitStamps {
+    /// The first timestamp, write 0's.
+    pub first: HlcTimestamp,
+    /// How many writes the commit has, and so how many timestamps it holds.
+    pub writes: usize,
+}
+
+impl CdcLog {
+    /// The timestamps of a commit that changed `set`, reserved once for all
+    /// its writes: one per write of
+    /// [`ChangeSet::ops`](grafeo_common::change::ChangeSet::ops), a write
+    /// folded into a create included. `None` for a set without writes.
+    /// Called where commits are serialized in epoch order, so a later
+    /// commit's timestamps are larger.
+    pub(crate) fn reserve_for(
+        &self,
+        set: &grafeo_common::change::ChangeSet,
+    ) -> Option<CommitStamps> {
+        let writes = set.ops().count();
+        let count = std::num::NonZeroU64::new(u64::try_from(writes).ok()?)?;
+        Some(CommitStamps {
+            first: self.clock.reserve(count),
+            writes,
+        })
+    }
+
+    /// Records the events of a commit at `epoch` that changed what `set`
+    /// holds, with the timestamps `stamps` (from
+    /// [`reserve_for`](Self::reserve_for)); see [`events_for_ops`].
+    pub(crate) fn record_commit(
+        &self,
+        set: &grafeo_common::change::ChangeSet,
+        epoch: EpochId,
+        stamps: CommitStamps,
+    ) {
+        let ops = set.ops().map(|(slot, op, before)| {
+            let graph = set.graph(slot).and_then(|graph| graph.key.as_deref());
+            (graph, op, before)
+        });
+        self.record_batch(events_for_ops(ops, stamps.writes, epoch, stamps.first));
+    }
+}
+
+/// The change events of a commit at `epoch` whose writes are `ops`, in the
+/// order applied, each with its graph's storage key (`None` for the default
+/// graph): one per write of [`ChangeSet::ops`](grafeo_common::change::ChangeSet::ops)
+/// (each data entry, and each row a bulk write kept with its range; a range
+/// without its rows, a bulk import's, has none). Write `i` (from 0) is
+/// timestamped `first.plus(i)`; `writes` is how many there are (the room the
+/// events take). A triple's event names its RDF graph as
+/// `triple_graph`, as the RDF bulk writes report theirs. An event is built
+/// from the write's op and before-image: a create carries its labels or type
+/// and endpoints and the values it was created with, a delete what the
+/// entity held, an update the value or the labels before and after. The
+/// transaction's later changes to an entity it created are then folded into
+/// the create (see [`fold_into_creates`]); a folded write's timestamp is
+/// used up.
+pub(crate) fn events_for_ops<'a>(
+    ops: impl Iterator<
+        Item = (
+            Option<&'a str>,
+            &'a grafeo_common::change::DataOp,
+            &'a grafeo_common::change::Before,
+        ),
+    >,
+    writes: usize,
     epoch: EpochId,
-    clock: &HlcClock,
+    first: HlcTimestamp,
 ) -> Vec<ChangeEvent> {
     use grafeo_common::change::{Before, DataOp};
 
@@ -1128,10 +1299,11 @@ pub(crate) fn events_for_commit(
     let names = |labels: &grafeo_common::change::Labels| -> Vec<String> {
         labels.iter().map(ToString::to_string).collect()
     };
-    // Sized by the writes, not the entries: a batch is one entry for many
-    // rows.
-    let mut events = Vec::with_capacity(set.ops().count());
-    for (graph, op, before) in set.ops() {
+    let mut events = Vec::with_capacity(writes);
+    let mut timestamp = first;
+    for (graph, op, before) in ops {
+        let stamp = timestamp;
+        timestamp = timestamp.plus(1);
         let (entity_id, kind) = match op {
             DataOp::CreateNode { id, .. } => (EntityId::Node(*id), ChangeKind::Create),
             DataOp::CreateEdge { id, .. } => (EntityId::Edge(*id), ChangeKind::Create),
@@ -1147,24 +1319,22 @@ pub(crate) fn events_for_commit(
             #[cfg(feature = "triple-store")]
             DataOp::InsertTriple { triple } => {
                 events.push(triple_event(
-                    set,
                     graph,
                     triple,
                     ChangeKind::Create,
                     epoch,
-                    clock,
+                    stamp,
                 ));
                 continue;
             }
             #[cfg(feature = "triple-store")]
             DataOp::DeleteTriple { triple } => {
                 events.push(triple_event(
-                    set,
                     graph,
                     triple,
                     ChangeKind::Delete,
                     epoch,
-                    clock,
+                    stamp,
                 ));
                 continue;
             }
@@ -1174,12 +1344,10 @@ pub(crate) fn events_for_commit(
         };
         let mut event = ChangeEvent {
             entity_id,
-            graph: set
-                .graph(graph)
-                .and_then(|graph| graph.key.as_ref().map(ToString::to_string)),
+            graph: graph.map(ToString::to_string),
             kind,
             epoch,
-            timestamp: clock.now(),
+            timestamp: stamp,
             before: None,
             after: None,
             labels: None,
@@ -1270,28 +1438,26 @@ pub(crate) fn events_for_commit(
     fold_into_creates(events)
 }
 
-/// The event of a triple entry of graph `graph` (`kind` says whether it was
-/// inserted or deleted), as [`CdcLog::record_triple_insert`] and
-/// [`CdcLog::record_triple_delete`] build it: the terms as N-Triples strings.
+/// The event of a triple entry of the graph with storage key `graph`
+/// (`kind` says whether it was inserted or deleted), as
+/// [`CdcLog::record_triple_insert`] and [`CdcLog::record_triple_delete`]
+/// build it: the terms as N-Triples strings.
 #[cfg(feature = "triple-store")]
 fn triple_event(
-    set: &grafeo_common::change::ChangeSet,
-    graph: grafeo_common::change::GraphSlot,
+    graph: Option<&str>,
     triple: &grafeo_common::storage::log_record::TripleRecord,
     kind: ChangeKind,
     epoch: EpochId,
-    clock: &HlcClock,
+    timestamp: HlcTimestamp,
 ) -> ChangeEvent {
     let (subject, predicate, object) = crate::transaction::ntriples_terms(triple);
-    let graph = set
-        .graph(graph)
-        .and_then(|graph| graph.key.as_ref().map(ToString::to_string));
+    let graph = graph.map(ToString::to_string);
     ChangeEvent {
-        entity_id: EntityId::Triple(triple_hash(&subject, &predicate, &object, graph.as_deref())),
+        entity_id: EntityId::Triple(triple_id(triple, graph.as_deref())),
         graph: graph.clone(),
         kind,
         epoch,
-        timestamp: clock.now(),
+        timestamp,
         before: None,
         after: None,
         labels: None,
@@ -1847,5 +2013,41 @@ mod tests {
             populated_bytes > empty_bytes,
             "heap estimate must grow when events are recorded"
         );
+    }
+}
+
+#[cfg(all(test, feature = "triple-store"))]
+#[path = "cdc_triple_id_tests.rs"]
+mod triple_id_tests;
+
+/// A build without the triple store reads no N-Triples: the helpers record nothing.
+#[cfg(all(test, not(feature = "triple-store")))]
+mod without_the_triple_store {
+    use super::*;
+
+    #[test]
+    fn the_triple_helpers_record_nothing() {
+        let log = CdcLog::new();
+        let () = log.record_triple_insert("<a>", "<b>", "<c>", None, EpochId(1));
+        let () = log.record_triple_delete("<a>", "<b>", "<c>", None, EpochId(1));
+        assert_eq!(log.event_count(), 0);
+        assert_eq!(log.dropped_lines(), 2, "the count is the signal");
+    }
+}
+
+/// A refused line is counted in every build: without `tracing` the warning compiles to nothing,
+/// so the count is what a caller sees.
+#[cfg(test)]
+mod refused_lines {
+    use super::*;
+
+    #[test]
+    fn refused_triple_lines_are_counted() {
+        eprintln!("tracing on: {}", cfg!(feature = "tracing"));
+        let log = CdcLog::new();
+        log.record_triple_insert("<a>", "<b>", "\"unterminated", None, EpochId(1));
+        log.record_triple_delete("", "<b>", "<c>", None, EpochId(1));
+        assert_eq!(log.event_count(), 0);
+        assert_eq!(log.dropped_lines(), 2);
     }
 }

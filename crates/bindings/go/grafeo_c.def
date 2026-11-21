@@ -170,6 +170,7 @@ grafeo_session_execute_language
 grafeo_session_execute_with_params
 grafeo_session_open
 grafeo_session_stream_open
+grafeo_set_cdc
 grafeo_set_cdc_enabled
 grafeo_set_checkpoint_triggers
 grafeo_set_edge_property

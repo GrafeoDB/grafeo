@@ -475,7 +475,7 @@ fn an_import_waiting_for_a_commit_that_fails_refuses() {
 #[test]
 fn change_events_of_a_commit_are_seen_only_once_it_is_complete() {
     let db = Arc::new(GrafeoDB::new_in_memory());
-    db.set_cdc_enabled(true);
+    db.set_cdc(true).unwrap();
     let alix = db
         .create_node_with_props(&["Person"], [("name", Value::from("Alix"))])
         .unwrap();

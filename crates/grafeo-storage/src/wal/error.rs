@@ -225,6 +225,14 @@ pub enum WalError {
         /// The error of the cipher.
         reason: String,
     },
+
+    /// A change data capture cursor's name is not 1 to 64 of `a` to `z`,
+    /// `0` to `9`, `-` and `_`.
+    #[error("{name:?} is no CDC cursor name: use 1 to 64 of a to z, 0 to 9, - and _")]
+    InvalidCursorName {
+        /// The name given.
+        name: String,
+    },
 }
 
 impl WalError {
@@ -309,7 +317,9 @@ impl From<WalError> for Error {
             | WalError::RegionSource { .. } => {
                 Error::from(StorageError::RecoveryFailed(error.to_string()))
             }
-            WalError::RecordTooLarge { .. } => Error::InvalidValue(error.to_string()),
+            WalError::RecordTooLarge { .. } | WalError::InvalidCursorName { .. } => {
+                Error::InvalidValue(error.to_string())
+            }
             WalError::Unavailable { .. } => Error::Io(std::io::Error::other(error.to_string())),
             WalError::LsnOverflow | WalError::BeyondEnd { .. } | WalError::Encryption { .. } => {
                 Error::Internal(error.to_string())

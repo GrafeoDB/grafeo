@@ -3033,7 +3033,12 @@ impl RdfPlanner {
             },
             _ => GraphCheck::None,
         };
-        Ok(self.graph_operator("RdfClearGraph", RdfGraphOp::Clear { target }, check))
+        Ok(self.graph_operator(
+            "RdfClearGraph",
+            RdfGraphOp::Clear { target },
+            clear.silent,
+            check,
+        ))
     }
 
     /// Plans a CREATE GRAPH operator.
@@ -3048,7 +3053,7 @@ impl RdfPlanner {
             graph: create.graph.clone(),
             silent: create.silent,
         };
-        Ok(self.graph_operator("RdfCreateGraph", op, check))
+        Ok(self.graph_operator("RdfCreateGraph", op, create.silent, check))
     }
 
     /// Plans a DROP GRAPH operator.
@@ -3065,7 +3070,12 @@ impl RdfPlanner {
             },
             _ => GraphCheck::None,
         };
-        Ok(self.graph_operator("RdfDropGraph", RdfGraphOp::Drop { target }, check))
+        Ok(self.graph_operator(
+            "RdfDropGraph",
+            RdfGraphOp::Drop { target },
+            drop_op.silent,
+            check,
+        ))
     }
 
     /// Plans a COPY graph operator.
@@ -3078,7 +3088,7 @@ impl RdfPlanner {
             target: copy.destination.clone(),
         };
         let check = GraphCheck::source(&copy.source, copy.silent);
-        Ok(self.graph_operator("RdfCopyGraph", op, check))
+        Ok(self.graph_operator("RdfCopyGraph", op, copy.silent, check))
     }
 
     /// Plans a MOVE graph operator.
@@ -3091,7 +3101,7 @@ impl RdfPlanner {
             target: move_op.destination.clone(),
         };
         let check = GraphCheck::source(&move_op.source, move_op.silent);
-        Ok(self.graph_operator("RdfMoveGraph", op, check))
+        Ok(self.graph_operator("RdfMoveGraph", op, move_op.silent, check))
     }
 
     /// Plans an ADD graph operator.
@@ -3104,21 +3114,23 @@ impl RdfPlanner {
             target: add.destination.clone(),
         };
         let check = GraphCheck::source(&add.source, add.silent);
-        Ok(self.graph_operator("RdfAddGraph", op, check))
+        Ok(self.graph_operator("RdfAddGraph", op, add.silent, check))
     }
 
     /// The operator of the whole-graph operation `op`, named `name`, which
-    /// `check` checks before it applies.
+    /// `check` checks before it applies; `silent` for its `SILENT` form.
     fn graph_operator(
         &self,
         name: &'static str,
         op: RdfGraphOp,
+        silent: bool,
         check: GraphCheck,
     ) -> (Box<dyn Operator>, Vec<String>, Vec<LogicalType>) {
         let operator = Box::new(RdfGraphOperator {
             writer: self.writer.clone(),
             name,
             op,
+            silent,
             check,
             done: false,
         });
@@ -3494,6 +3506,8 @@ struct RdfGraphOperator {
     /// The operator's name in a plan.
     name: &'static str,
     op: RdfGraphOp,
+    /// Its `SILENT` form: a refusal of the operation is success with no effect.
+    silent: bool,
     check: GraphCheck,
     done: bool,
 }
@@ -3510,7 +3524,7 @@ impl Operator for RdfGraphOperator {
         let writer = update_writer(&self.writer)?;
         // Whether a graph exists, as the transaction sees it: its snapshot
         // with its own graph operations and inserts.
-        writer.graph_op(self.op.clone(), |writer| match check {
+        writer.graph_op(self.op.clone(), self.silent, |writer| match check {
             GraphCheck::None => Ok(true),
             GraphCheck::Absent { graph, silent } => match (writer.graph_exists(graph), silent) {
                 (false, _) => Ok(true),
@@ -7181,6 +7195,7 @@ mod tests {
             op: RdfGraphOp::Clear {
                 target: RdfGraphTarget::Default,
             },
+            silent: false,
             check: GraphCheck::None,
             done: false,
         });

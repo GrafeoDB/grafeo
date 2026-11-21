@@ -181,7 +181,10 @@ GrafeoDatabase* grafeo_open_with_options(const char* path, const GrafeoOptions* 
 
 /* ---- Change Data Capture ------------------------------------------------- */
 
+/* Stores the setting with the database (an in-memory one keeps it while open). */
+GrafeoStatus grafeo_set_cdc(GrafeoDatabase* db, bool enabled);
 /* No error return: see "Error handling" above (closed: no change, false). */
+GRAFEO_DEPRECATED("changes the setting for this open only; use grafeo_set_cdc, which stores it and returns a status; removed in 0.7.0")
 void grafeo_set_cdc_enabled(GrafeoDatabase* db, bool enabled);
 bool grafeo_is_cdc_enabled(GrafeoDatabase* db);
 

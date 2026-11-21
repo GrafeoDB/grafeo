@@ -1029,10 +1029,17 @@ impl super::Open {
         // A checkpoint reads the stores while it writes its image, with
         // commits going on: a restore replaces them whole, so it waits for
         // one in progress, and the next one waits for it. Commits wait for
-        // the restore too, from the first store it replaces to the
-        // checkpoint that makes it durable (#677).
+        // the restore too, from the first store it replaces until its
+        // checkpoint returns (#677); after one that failed they are refused
+        // until a reopen, decided before any of them goes on.
         #[cfg(feature = "grafeo-file")]
         let _checkpoint = self.file_manager.as_ref().map(|fm| fm.checkpoint_guard());
+        // After a checkpoint whose outcome is unknown nothing more is
+        // stored: refused before a store is replaced.
+        #[cfg(feature = "grafeo-file")]
+        if let Some(fm) = &self.file_manager {
+            fm.check_checkpoint_allowed()?;
+        }
         let commits = self.transaction_manager.hold_commits()?;
         self.transaction_manager.check_open()?;
         // Validates the snapshot and refuses data this build cannot read
@@ -1058,7 +1065,19 @@ impl super::Open {
         // here reopens what the restore put in place, not what it replaced.
         #[cfg(feature = "grafeo-file")]
         if let Some(fm) = &self.file_manager {
-            super::flush::flush_held(fm, &self.checkpoint_sources()?, None, commits)?;
+            // The stores hold the restored state: a commit on top of it after
+            // a failed checkpoint would replay onto the previous image, so
+            // commits wait for a reopen, which finds one state whole.
+            let stored = self
+                .checkpoint_sources()
+                .and_then(|sources| super::flush::flush_keeping(fm, &sources, &commits));
+            if let Err(error) = stored {
+                let unknown = super::flush::is_outcome_unknown(&error).then(|| error.to_string());
+                self.transaction_manager
+                    .refuse_commits(crate::transaction::CommitRefusal::FailedRestore(unknown));
+                drop(commits);
+                return Err(error);
+            }
         }
         #[cfg(not(feature = "grafeo-file"))]
         drop(commits);
@@ -1439,6 +1458,12 @@ impl super::GrafeoDB {
     /// with the same key chain: it has a new database id and so its own
     /// keys.
     ///
+    /// After a checkpoint whose outcome is unknown (`GRAFEO-S008`), a copy
+    /// holds the state in memory, including the new value of the call that
+    /// failed. With a WAL, reopen first for a copy that matches the source.
+    /// Without a WAL, copy first, since a reopen loses the commits made after
+    /// the last good checkpoint.
+    ///
     /// # Errors
     ///
     /// Returns an error if `path` already exists, if the file cannot be
@@ -1619,6 +1644,12 @@ impl super::GrafeoDB {
     /// complete (the restored database could never be checkpointed, see
     /// [`TransactionManager`](crate::transaction::TransactionManager)),
     /// on a read-only database, and the database-closed error after `close()`.
+    /// After a checkpoint whose outcome is unknown (`GRAFEO-S008`) it is
+    /// refused before anything changes, until a reopen. A restore whose own
+    /// checkpoint fails keeps the restored state in memory and refuses
+    /// commits until a reopen (`GRAFEO-T008`, or `GRAFEO-S008` when the
+    /// outcome is unknown), which finds the previous state or the restored
+    /// one, whole: a commit on top would replay onto the previous image.
     pub fn restore_snapshot(&self, data: &[u8]) -> Result<()> {
         self.live()?.restore_snapshot(data)
     }
@@ -2559,10 +2590,11 @@ mod tests {
         assert!(db.has_property_index("email"));
     }
 
-    /// A `write_image` that fails, before or after the new header is
-    /// written, leaves no file behind: the file `create` made would open as
-    /// an empty database, and a retry would find the path taken. The retry
-    /// then succeeds.
+    /// A `write_image` that fails, before the new header is written or
+    /// before it is synced, leaves no file behind: the file `create` made
+    /// would open as an empty database, and a retry would find the path
+    /// taken. The retry then succeeds. A failed cut of the file after the
+    /// header's sync fails nothing: the image is written whole.
     #[cfg(all(
         feature = "wal",
         feature = "grafeo-file",
@@ -2580,14 +2612,36 @@ mod tests {
             "checkpoint:after_chunks",
             "checkpoint:after_data_sync",
             "checkpoint:after_header",
-            "checkpoint:before_trim",
+            "checkpoint:header_sync",
         ];
         for (count, point) in (1..).zip(points) {
-            let error = with_failure_at(count, || db.live().unwrap().write_image(&path))
-                .unwrap_err()
-                .to_string();
+            let error =
+                with_failure_at(count, || db.live().unwrap().write_image(&path)).unwrap_err();
+            // The copy's failure is an I/O error of the cause's kind (the injected one's).
+            assert!(
+                matches!(&error, grafeo_common::utils::error::Error::Io(io)
+                    if io.kind() == std::io::ErrorKind::Other),
+                "{point}: {error:?}"
+            );
+            let error = error.to_string();
             assert!(error.contains(point), "the original error: {error}");
+            assert!(
+                !error.contains("reopen"),
+                "{point}: the copy's outcome is known: {error}"
+            );
             assert!(!path.exists(), "{point}: the failed image is removed");
+        }
+        for (count, point) in [(5, "checkpoint:before_trim"), (6, "checkpoint:trim")] {
+            with_failure_at(count, || db.live().unwrap().write_image(&path)).unwrap();
+            assert_eq!(
+                grafeo_common::testing::crash::fired_failure().as_deref(),
+                Some(point)
+            );
+            let written = GrafeoDB::open(&path).unwrap();
+            assert_eq!(written.node_count().unwrap(), 1, "count {count}");
+            written.close().unwrap();
+            drop(written);
+            std::fs::remove_file(&path).unwrap();
         }
 
         db.live().unwrap().write_image(&path).unwrap();

@@ -1092,10 +1092,14 @@ class GrafeoDB implements Finalizable {
     return _bindings.grafeoIsCdcEnabled(_handle);
   }
 
-  /// Turn change data capture on or off.
+  /// Turn change data capture on or off, and store the setting with the
+  /// database: a reopen has it as it was (an in-memory database keeps it while
+  /// it is open). Throws when the setting cannot be stored (a read-only open,
+  /// a failed checkpoint); it stays as it was.
   set cdcEnabled(bool enabled) {
     _checkOpen();
-    _bindings.grafeoSetCdcEnabled(_handle, enabled);
+    final status = _bindings.grafeoSetCdc(_handle, enabled);
+    if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
   }
 
   /// Every recorded change of node [id], oldest first.

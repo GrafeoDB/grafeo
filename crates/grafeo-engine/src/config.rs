@@ -456,6 +456,15 @@ pub enum ConfigError {
     SnapshotRetentionLimitTooSmall(u64),
     /// [`Config::with_history_retention_limit`] must be greater than zero.
     ZeroHistoryRetentionLimit,
+    /// Change data capture is stored on (or turned on) for a database
+    /// without a WAL: the setting keeps the WAL from its cursor, and nothing
+    /// would log the commits of that open. Raised by a
+    /// writable open without the WAL while the setting is stored on, and by
+    /// `GrafeoDB::set_cdc(true)` without a WAL.
+    CdcWithoutWal,
+    /// `GrafeoDB::set_cdc` on a database on a store of its own (`with_store`),
+    /// which has no file to store the setting in.
+    CdcWithoutFile,
 }
 
 /// Whether a section of `section_type` can be moved to disk: whether its
@@ -561,6 +570,17 @@ impl fmt::Display for ConfigError {
             Self::ZeroHistoryRetentionLimit => {
                 write!(f, "history_retention_limit must be greater than zero")
             }
+            Self::CdcWithoutWal => write!(
+                f,
+                "change data capture stored with a database keeps its WAL from a cursor, \
+                 and this open has no WAL: open it with the WAL, open it read-only, or \
+                 turn CDC off from an open with the WAL"
+            ),
+            Self::CdcWithoutFile => write!(
+                f,
+                "a database on a store of its own has no file to store the change data \
+                 capture setting in: turn capture on for an open with Config::with_cdc()"
+            ),
         }
     }
 }
@@ -1871,6 +1891,10 @@ impl Config {
     /// ([`ErrorCode::BackupChainBroken`](grafeo_common::utils::error::ErrorCode::BackupChainBroken)),
     /// and a full backup starts a new chain. Raise it when more than this
     /// much is written between two incremental backups.
+    ///
+    /// The same limit holds for the WAL a change data capture cursor keeps
+    /// (see [`GrafeoDB::set_cdc`](crate::GrafeoDB::set_cdc)): past it the
+    /// oldest segments go, with a warning once.
     #[must_use]
     pub fn with_wal_retention_limit(mut self, bytes: u64) -> Self {
         self.wal_retention_limit = bytes;

@@ -151,13 +151,12 @@ fn not_applied(op: &StandaloneOp, reason: &str) -> Error {
 ///
 /// # Errors
 ///
-/// The database-closed error after `close()`, and
-/// the incomplete-commit error after a commit that did not complete.
+/// The database-closed error after `close()`, the incomplete-commit error
+/// after a commit that did not complete, and the refusal of commits after a
+/// failed restore or, without a WAL, a checkpoint whose outcome is unknown.
 pub(crate) fn hold(manager: &TransactionManager, writes_too: bool) -> Result<CommitsHeld<'_>> {
     let held = if writes_too {
-        let held = manager.hold_commits()?;
-        manager.check_open()?;
-        held
+        manager.hold_commits_for_drop()?
     } else {
         manager.hold_commits_for_change()?
     };
@@ -382,6 +381,7 @@ pub(crate) fn claims_of(op: &StandaloneOp) -> Vec<crate::transaction::KeyClaim> 
         }
         StandaloneOp::PutCatalog(record) => vec![match record {
             CatalogRecord::StoredConfig(_) => claim("stored configuration", String::new()),
+            CatalogRecord::CdcConfig(_) => claim("change data capture setting", String::new()),
             CatalogRecord::Schema(record) => claim("schema", record.name.clone()),
             CatalogRecord::NodeType(record) => claim("node type", record.name.clone()),
             CatalogRecord::EdgeType(record) => claim("edge type", record.name.clone()),
@@ -401,6 +401,7 @@ pub(crate) fn claims_of(op: &StandaloneOp) -> Vec<crate::transaction::KeyClaim> 
         }],
         StandaloneOp::DropCatalog(key) => vec![match key {
             CatalogKey::StoredConfig => claim("stored configuration", String::new()),
+            CatalogKey::CdcConfig => claim("change data capture setting", String::new()),
             CatalogKey::Schema(name) => claim("schema", name.clone()),
             CatalogKey::NodeType(name) => claim("node type", name.clone()),
             CatalogKey::EdgeType(name) => claim("edge type", name.clone()),
@@ -788,6 +789,7 @@ fn holds_rules(record: &CatalogRecord) -> bool {
         | CatalogRecord::GraphBinding(_)
         | CatalogRecord::Constraint(_) => true,
         CatalogRecord::StoredConfig(_)
+        | CatalogRecord::CdcConfig(_)
         | CatalogRecord::Schema(_)
         | CatalogRecord::Index(_)
         | CatalogRecord::LabelIndex(_)
@@ -805,6 +807,7 @@ fn key_of_rules(key: &CatalogKey) -> bool {
         | CatalogKey::GraphBinding(_)
         | CatalogKey::Constraint(_) => true,
         CatalogKey::StoredConfig
+        | CatalogKey::CdcConfig
         | CatalogKey::Schema(_)
         | CatalogKey::Index { .. }
         | CatalogKey::LabelIndex { .. }
@@ -915,6 +918,10 @@ fn put<S: RootStore>(
     match record {
         CatalogRecord::StoredConfig(config) => {
             catalog.set_stored_config(Some(config.clone()));
+            Ok(())
+        }
+        CatalogRecord::CdcConfig(config) => {
+            catalog.set_cdc_config(Some(*config));
             Ok(())
         }
         CatalogRecord::Schema(schema) => {
@@ -1160,6 +1167,13 @@ fn drop_entry<S: RootStore>(
                 Ok(())
             } else {
                 applying.missing(op, "the database stores no configuration")
+            }
+        }
+        CatalogKey::CdcConfig => {
+            if catalog.set_cdc_config(None).is_some() {
+                Ok(())
+            } else {
+                applying.missing(op, "the database stores no change data capture setting")
             }
         }
         CatalogKey::Schema(name) => {

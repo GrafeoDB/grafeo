@@ -496,9 +496,17 @@ export declare class GrafeoDB {
    * the checkpoint fails, or after `close()`.
    */
   compact(): any
-  /** Enable CDC for all future sessions. */
+  /**
+   * Enable CDC for all future sessions, and store the setting with the
+   * database: a reopen has it on. An in-memory database keeps it while it
+   * is open. Throws when the setting cannot be stored (a read-only open,
+   * a failed checkpoint); it stays as it was.
+   */
   enableCdc(): void
-  /** Disable CDC for all future sessions. */
+  /**
+   * Disable CDC for all future sessions, and store the setting with the
+   * database: a reopen has it off. Throws as `enableCdc` does.
+   */
   disableCdc(): void
   /** Returns whether CDC is currently enabled for new sessions. */
   get isCdcEnabled(): boolean

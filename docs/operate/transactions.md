@@ -507,7 +507,7 @@ Transaction errors use standardized `GRAFEO-TXXX` codes:
 | `GRAFEO-T005` | Reserved for Serializable isolation, which is refused for now (`GRAFEO-Q004`) | Yes |
 | `GRAFEO-T006` | Deadlock detected | Yes |
 | `GRAFEO-T007` | Database closed: a call after `close()` | No |
-| `GRAFEO-T008` | Incomplete commit: an earlier commit did not complete, reopen the database | No |
+| `GRAFEO-T008` | Incomplete commit: an earlier commit or restore did not complete, reopen the database | No |
 | `GRAFEO-T009` | The commit could not be written to the write-ahead log and was rolled back | Yes |
 | `GRAFEO-T010` | Commit outcome unknown: the log could not be made durable, reopen the database before retrying | No |
 | `GRAFEO-T011` | The write-ahead log takes no more writes after an earlier failure, reopen the database | No |

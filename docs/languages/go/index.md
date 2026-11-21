@@ -225,7 +225,7 @@ epoch, err := db.EpochAsOf(grafeo.AtTime(time.Now().Add(-time.Hour)))
 
 ## Change History
 
-With change data capture on (`db.SetCDCEnabled(true)`), every committed change is recorded as a `ChangeEvent` (kind, epoch, properties before and after, labels, the endpoints of an edge, and `DeletedWith` on an edge a detach delete removed).
+With change data capture on (`db.SetCDC(true)`, which stores the setting with the database), every committed change is recorded as a `ChangeEvent` (kind, epoch, properties before and after, labels, the endpoints of an edge, and `DeletedWith` on an edge a detach delete removed).
 
 ```go
 events, err := db.NodeHistory(id)

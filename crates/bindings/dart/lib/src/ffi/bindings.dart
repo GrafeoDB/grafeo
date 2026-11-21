@@ -864,10 +864,10 @@ final class GrafeoBindings {
   // Change data capture
   // ===========================================================================
 
-  /// Turn change data capture on or off.
-  late final grafeoSetCdcEnabled = library.lookupFunction<
-      Void Function(Pointer<Void>, Bool),
-      void Function(Pointer<Void>, bool)>('grafeo_set_cdc_enabled');
+  /// Turn change data capture on or off and store the setting. Returns GrafeoStatus.
+  late final grafeoSetCdc = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Bool),
+      int Function(Pointer<Void>, bool)>('grafeo_set_cdc');
 
   /// Whether change data capture is on.
   late final grafeoIsCdcEnabled = library.lookupFunction<

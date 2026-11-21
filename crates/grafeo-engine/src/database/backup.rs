@@ -258,7 +258,7 @@ fn write_prepared_manifest(backup_dir: &Path, manifest: &BackupManifest) -> Resu
     write_metadata(
         &path,
         &data,
-        "manifest",
+        "backup manifest",
         "backup:manifest_sync",
         "backup:manifest_directory_sync",
     )
@@ -313,7 +313,7 @@ pub fn write_backup_cursor(wal_dir: &Path, cursor: &BackupCursor) -> Result<()> 
     write_metadata(
         &path,
         &data,
-        "cursor",
+        "backup cursor",
         "backup:cursor_sync",
         "backup:cursor_directory_sync",
     )
@@ -345,7 +345,7 @@ pub fn remove_backup_cursor(wal_dir: &Path) -> Result<bool> {
 }
 
 /// Publishes synced metadata, then makes its renamed directory entry durable.
-fn write_metadata(
+pub(super) fn write_metadata(
     path: &Path,
     data: &[u8],
     kind: &str,
@@ -355,38 +355,34 @@ fn write_metadata(
     let mut temp_path = path.as_os_str().to_owned();
     temp_path.push(".tmp");
     let temp_path = std::path::PathBuf::from(temp_path);
-    let mut file = std::fs::File::create(&temp_path).map_err(|e| {
-        Error::Internal(format!(
-            "failed to create backup {kind} {}: {e}",
-            temp_path.display()
+    let io = |step: &str, shown: &Path, e: std::io::Error| {
+        Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("failed to {step} {kind} {}: {e}", shown.display()),
         ))
-    })?;
-    file.write_all(data).map_err(|e| {
-        Error::Internal(format!(
-            "failed to write backup {kind} {}: {e}",
-            temp_path.display()
-        ))
-    })?;
-    grafeo_common::testing::crash::maybe_fail(sync_point)?;
-    file.sync_all().map_err(|e| {
-        Error::Internal(format!(
-            "failed to sync backup {kind} {}: {e}",
-            temp_path.display()
-        ))
-    })?;
-    drop(file);
-    std::fs::rename(&temp_path, path).map_err(|e| {
-        Error::Internal(format!(
-            "failed to finalize backup {kind} {}: {e}",
-            path.display()
-        ))
-    })?;
+    };
+    let written = (|| {
+        let mut file =
+            std::fs::File::create(&temp_path).map_err(|e| io("create", &temp_path, e))?;
+        file.write_all(data)
+            .map_err(|e| io("write", &temp_path, e))?;
+        grafeo_common::testing::crash::maybe_fail(sync_point)?;
+        file.sync_all().map_err(|e| io("sync", &temp_path, e))?;
+        drop(file);
+        std::fs::rename(&temp_path, path).map_err(|e| io("finalize", path, e))
+    })();
+    if let Err(error) = written {
+        // A half-written file stays out of the directory; the next write
+        // creates it anew.
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(error);
+    }
     sync_backup_entry(path, directory_sync_point)
 }
 
 /// Persists the directory entry of a backup or restore file or directory. This retains
 /// the platform floor of `flush::sync_parent_dir`: no directory fsync off Unix.
-fn sync_backup_entry(path: &Path, sync_point: &str) -> Result<()> {
+pub(super) fn sync_backup_entry(path: &Path, sync_point: &str) -> Result<()> {
     #[cfg(unix)]
     grafeo_common::testing::crash::maybe_fail(sync_point)?;
     #[cfg(not(unix))]
@@ -881,9 +877,10 @@ fn file_checksum(path: &Path) -> Result<(u32, u64)> {
 /// The active database header of a copied `.grafeo` file: the image it opens
 /// at, with its epoch and log position (headers are never encrypted).
 ///
-/// The manager's in-memory header can be older: after a checkpoint that
-/// failed once its header was written, the manager keeps serving the
-/// previous image while the file opens at the new one.
+/// The manager's in-memory header can be older: after a checkpoint whose
+/// outcome is unknown (it failed between writing its header and syncing it),
+/// the manager keeps serving the previous image while the file may open at
+/// the new one.
 fn copied_header(file_data: &[u8], path: &Path) -> Result<DbHeaderV3> {
     let page = |index: usize| {
         let start = index * PAGE_BYTES;

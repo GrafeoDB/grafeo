@@ -780,7 +780,7 @@ fn encode_catalog_key(key: &CatalogKey, out: &mut PayloadWriter<'_>) -> Result<(
         }
         CatalogKey::Index { graph, index } => encode_bincode_payload(&(graph, index), out),
         // There is one: the kind names it.
-        CatalogKey::StoredConfig => Ok(()),
+        CatalogKey::StoredConfig | CatalogKey::CdcConfig => Ok(()),
     }
 }
 
@@ -854,6 +854,13 @@ fn decode_catalog_key(required: bool, payload: &[u8]) -> Result<Option<CatalogKe
         10 => {
             return Err(Error::corruption(format!(
                 "the key of the stored configuration holds {} bytes, where it holds none",
+                key.len()
+            )));
+        }
+        14 if key.is_empty() => CatalogKey::CdcConfig,
+        14 => {
+            return Err(Error::corruption(format!(
+                "the key of the change data capture setting holds {} bytes, where it holds none",
                 key.len()
             )));
         }
@@ -2181,6 +2188,21 @@ mod tests {
             &[10],
         ];
         assert_eq!(keys, expected);
+    }
+
+    /// The change data capture setting's key is its kind alone, as the stored configuration's
+    /// is, and reads back; one with bytes after the kind is damage.
+    #[test]
+    fn the_cdc_setting_key_is_its_kind() {
+        let record = standalone(StandaloneOp::DropCatalog(CatalogKey::CdcConfig));
+        let bytes = framed(&record);
+        assert_eq!(read_all(&bytes).unwrap(), [record]);
+        assert!(
+            decode_catalog_key(true, &[14, 0])
+                .unwrap_err()
+                .to_string()
+                .contains("change data capture")
+        );
     }
 
     /// A catalog record inside a log record is the catalog section's own

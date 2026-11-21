@@ -553,9 +553,9 @@ internal static partial class NativeMethods
     // Change Data Capture
     // =========================================================================
 
-    /// <summary>Enable or disable CDC tracking.</summary>
+    /// <summary>Turn CDC on or off and store the setting with the database.</summary>
     [LibraryImport(LibName)]
-    internal static partial void grafeo_set_cdc_enabled(DatabaseHandle db, [MarshalAs(UnmanagedType.U1)] bool enabled);
+    internal static partial int grafeo_set_cdc(DatabaseHandle db, [MarshalAs(UnmanagedType.U1)] bool enabled);
 
     /// <summary>Check if CDC is enabled.</summary>
     [LibraryImport(LibName)]

@@ -4358,22 +4358,25 @@ impl PyGrafeoDB {
 
     // ── Change Data Capture ─────────────────────────────────────────────
 
-    /// Enable CDC for all future sessions.
+    /// Enable CDC for all future sessions, and store the setting with the
+    /// database: a reopen has it on. An in-memory database keeps it while it
+    /// is open.
     ///
-    /// Existing sessions are not affected.
+    /// Existing sessions are not affected. Raises when the setting cannot be
+    /// stored (a read-only open, a failed checkpoint); it stays as it was.
     #[cfg(feature = "cdc")]
-    fn enable_cdc(&self) -> PyResult<()> {
-        self.inner.read()?.set_cdc_enabled(true);
-        Ok(())
+    fn enable_cdc(&self, py: Python<'_>) -> PyResult<()> {
+        self.released(py, |db| Ok(db.set_cdc(true)?))
     }
 
-    /// Disable CDC for all future sessions.
+    /// Disable CDC for all future sessions, and store the setting with the
+    /// database: a reopen has it off.
     ///
-    /// Existing sessions are not affected.
+    /// Existing sessions are not affected. Raises when the setting cannot be
+    /// stored (a read-only open, a failed checkpoint); it stays as it was.
     #[cfg(feature = "cdc")]
-    fn disable_cdc(&self) -> PyResult<()> {
-        self.inner.read()?.set_cdc_enabled(false);
-        Ok(())
+    fn disable_cdc(&self, py: Python<'_>) -> PyResult<()> {
+        self.released(py, |db| Ok(db.set_cdc(false)?))
     }
 
     /// Returns whether CDC is currently enabled for new sessions.

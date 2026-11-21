@@ -220,6 +220,8 @@ pub(crate) use changes::{StreamingChanges, TransactionChanges};
 pub(crate) use history::HistoryImage;
 #[cfg(feature = "wal")]
 pub(crate) use manager::CommitGuard;
+#[cfg(feature = "grafeo-file")]
+pub(crate) use manager::CommitRefusal;
 pub(crate) use manager::WrittenCommit;
 pub(crate) use manager::{ClaimMark, CommitsHeld};
 pub use manager::{

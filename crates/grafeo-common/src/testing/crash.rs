@@ -97,6 +97,17 @@ mod inner {
     thread_local! {
         static FAILURE_COUNTER: Cell<u64> = const { Cell::new(u64::MAX) };
         static FAILURE_ENABLED: Cell<bool> = const { Cell::new(false) };
+        static FAILURE_FIRED: std::cell::RefCell<Option<String>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// The point where the failure the last [`with_failure_at`] on this
+    /// thread armed fired, or `None` when its count was not reached: a sweep
+    /// over every count stops at the first count that fires nothing, even
+    /// when a failure at an earlier count was handled and the call succeeded.
+    #[must_use]
+    pub fn fired_failure() -> Option<String> {
+        FAILURE_FIRED.with(|fired| fired.borrow().clone())
     }
 
     /// Returns an error when the failure counter reaches zero.
@@ -121,6 +132,7 @@ mod inner {
             previous
         });
         if previous == 1 {
+            FAILURE_FIRED.with(|fired| *fired.borrow_mut() = Some(point.to_string()));
             return Err(Error::Io(std::io::Error::other(format!(
                 "injected failure at: {point}"
             ))));
@@ -141,6 +153,7 @@ mod inner {
             }
         }
 
+        FAILURE_FIRED.with(|fired| *fired.borrow_mut() = None);
         FAILURE_COUNTER.with(|counter| counter.set(count));
         FAILURE_ENABLED.with(|enabled| enabled.set(true));
         let _disarm = Disarm;
@@ -175,6 +188,12 @@ mod inner {
     /// Runs `f`: without the feature nothing is armed.
     pub fn with_failure_at<T>(_count: u64, f: impl FnOnce() -> T) -> T {
         f()
+    }
+
+    /// Without the feature no failure fires.
+    #[must_use]
+    pub fn fired_failure() -> Option<String> {
+        None
     }
 }
 
@@ -261,6 +280,22 @@ mod tests {
             "the error names the point: {error}"
         );
         assert!(outcomes[2].is_ok(), "the failure fires once");
+    }
+
+    /// The fired point is reported even when the caller handled the error, and a count past
+    /// every point reports none.
+    #[test]
+    #[cfg(feature = "testing-crash-injection")]
+    fn the_fired_failure_names_its_point_until_the_next_arming() {
+        with_failure_at(2, || {
+            let _ = maybe_fail("point_1");
+            let _ = maybe_fail("point_2");
+        });
+        assert_eq!(fired_failure().as_deref(), Some("point_2"));
+        with_failure_at(3, || {
+            let _ = maybe_fail("point_1");
+        });
+        assert_eq!(fired_failure(), None, "the count was not reached");
     }
 
     #[test]

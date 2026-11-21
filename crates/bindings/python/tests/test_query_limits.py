@@ -1,7 +1,8 @@
-"""The path search budget from Python (#492): `GrafeoDB(path_search_budget=...)`. Zero and
-negative values are refused; the budget binds, with its error code and the keyword named in the
-message. The snapshot retention limit, `GrafeoDB(snapshot_retention_limit=...)`: below 1 MiB is
-refused; past it an open transaction raises GRAFEO-T012.
+"""The query resource limits from Python (#492): `GrafeoDB(path_search_budget=...,
+path_expansion_limit=..., max_query_length=..., max_identifier_length=...)`. Zero and negative
+values are refused; each setting binds, with its error code and the keyword named in the message.
+The snapshot retention limit, `GrafeoDB(snapshot_retention_limit=...)`: below 1 MiB is refused;
+past it an open transaction raises GRAFEO-T012.
 """
 
 import pytest
@@ -13,6 +14,12 @@ STAR = (
     "(c)-[:E]->(:Leaf {n: 3}), (c)-[:E]->(:Leaf {n: 4}), (c)-[:E]->(:Leaf {n: 5})"
 )
 PATHS = "MATCH (s:Star)-[:E*1..2]->(t) RETURN t.n AS n"
+KEYWORDS = [
+    "path_search_budget",
+    "path_expansion_limit",
+    "max_query_length",
+    "max_identifier_length",
+]
 
 
 def star(**keywords):
@@ -21,22 +28,50 @@ def star(**keywords):
     return db
 
 
+def refused(db, query):
+    with pytest.raises(grafeo.GrafeoError) as raised:
+        db.execute(query)
+    return raised.value
+
+
+@pytest.mark.parametrize("keyword", KEYWORDS)
 @pytest.mark.parametrize("value", [0, -1])
-def test_zero_and_negative_budgets_are_refused(value):
+def test_zero_and_negative_values_are_refused(keyword, value):
     with pytest.raises((ValueError, OverflowError, grafeo.GrafeoError)):
-        grafeo.GrafeoDB(path_search_budget=value)
+        grafeo.GrafeoDB(**{keyword: value})
 
 
-def test_the_default_runs_the_paths():
+def test_the_defaults_run_the_statements():
     assert len(list(star().execute(PATHS))) == 5
 
 
+def test_the_path_expansion_limit_binds():
+    error = refused(star(path_expansion_limit=4), PATHS)
+    assert error.error_code == "GRAFEO-Q009", str(error)
+    assert "path_expansion_limit" in str(error), str(error)
+    assert len(list(star(path_expansion_limit=5).execute(PATHS))) == 5
+
+
 def test_the_path_search_budget_binds():
-    db = star(path_search_budget=1)
-    with pytest.raises(grafeo.GrafeoError) as raised:
-        db.execute(PATHS)
-    assert raised.value.error_code == "GRAFEO-S001", str(raised.value)
-    assert "path_search_budget" in str(raised.value), str(raised.value)
+    error = refused(star(path_search_budget=1), PATHS)
+    assert error.error_code == "GRAFEO-S001", str(error)
+    assert "path_search_budget" in str(error), str(error)
+
+
+def test_the_query_length_binds():
+    db = star(max_query_length=200)
+    assert len(list(db.execute(PATHS))) == 5
+    error = refused(db, PATHS + " " * 200)
+    assert error.error_code == "GRAFEO-Q002", str(error)
+    assert "max_query_length" in str(error), str(error)
+
+
+def test_the_identifier_length_binds():
+    db = star(max_identifier_length=8)
+    assert len(list(db.execute("MATCH (abcdefgh:Star) RETURN abcdefgh.n"))) == 1
+    error = refused(db, "MATCH (abcdefghi:Star) RETURN 1")
+    assert error.error_code == "GRAFEO-Q002", str(error)
+    assert "max_identifier_length" in str(error), str(error)
 
 
 def test_a_snapshot_retention_limit_below_1_mib_is_refused():

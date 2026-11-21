@@ -675,6 +675,23 @@ impl Binder {
                 if let Some(edge_variable) = &sp.edge_variable {
                     self.bind_element(edge_variable, Element::Edge)?;
                 }
+                // The edge patterns after the first, and the nodes between
+                for step in &sp.steps {
+                    if let Some(condition) = &step.node_condition {
+                        self.bind_element(&condition.variable, Element::Node)?;
+                        self.validate_expression(&condition.predicate)?;
+                    }
+                    if let Some(node_variable) = &step.node_variable {
+                        self.bind_element(node_variable, Element::Node)?;
+                    }
+                    if let Some(condition) = &step.edge_condition {
+                        self.bind_element(&condition.variable, Element::Edge)?;
+                        self.validate_expression(&condition.predicate)?;
+                    }
+                    if let Some(edge_variable) = &step.edge_variable {
+                        self.bind_element(edge_variable, Element::Edge)?;
+                    }
+                }
                 // nodes(p) and edges(p) read these columns
                 for column in [
                     format!("_path_nodes_{}", sp.path_alias),
@@ -2774,6 +2791,7 @@ mod tests {
             edge_variable: None,
             quantified: true,
             edge_condition: None,
+            steps: Vec::new(),
         }));
 
         let mut binder = Binder::new();
@@ -2818,6 +2836,7 @@ mod tests {
             edge_variable: None,
             quantified: true,
             edge_condition: None,
+            steps: Vec::new(),
         }));
 
         let mut binder = Binder::new();

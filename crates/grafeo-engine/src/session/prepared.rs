@@ -36,13 +36,23 @@ impl SessionInner {
     /// The plan cache's key for `query` in `language` in this session: its
     /// current schema and graph and its planner rules, which the plan is made
     /// for.
+    ///
+    /// # Errors
+    ///
+    /// A statement longer than the session's query length limit has no key:
+    /// it fails here, before the cache is read, as its parse would (the key
+    /// leaves out the whitespace around the text, so a longer text can share
+    /// the key of a shorter one).
     pub(super) fn plan_cache_key(
         &self,
         query: &str,
         language: crate::query::processor::QueryLanguage,
-    ) -> CacheKey {
-        CacheKey::in_scope(query, language, self.current_schema(), self.current_graph())
-            .with_rules(self.plan_options.rules)
+    ) -> Result<CacheKey> {
+        self.plan_options.parse_limits.check_query(query)?;
+        Ok(
+            CacheKey::in_scope(query, language, self.current_schema(), self.current_graph())
+                .with_rules(self.plan_options.rules),
+        )
     }
 
     /// The cached plan of a statement in this session (`key`): for a call
@@ -173,7 +183,8 @@ mod tests {
             let key = session
                 .inner()
                 .unwrap()
-                .plan_cache_key(query, QueryLanguage::Gql);
+                .plan_cache_key(query, QueryLanguage::Gql)
+                .unwrap();
             session
                 .inner()
                 .unwrap()

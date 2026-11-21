@@ -29,6 +29,8 @@ mod database;
 mod batch;
 #[cfg(feature = "cdc")]
 mod cdc;
+#[cfg(all(test, feature = "cdc"))]
+mod cdc_setting_tests;
 #[cfg(test)]
 mod close_tests;
 mod edges;

@@ -154,14 +154,16 @@ tests:
         - [0]
 
   - name: values_and_triples_take_signed_numbers
+    # A signed number keeps its sign in its lexical form, so +3.5 is its own term, which a
+    # value of VALUES joins only where the triple holds it too.
     setup:
-      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/balance> -12 . <http://ex.org/gus> <http://ex.org/balance> 3.5 }"
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/balance> -12 . <http://ex.org/gus> <http://ex.org/balance> +3.5 . <http://ex.org/vincent> <http://ex.org/balance> 3.5 }"
     query: |
       SELECT ?who ?b WHERE { VALUES ?b { -12 +3.5 } ?who <http://ex.org/balance> ?b }
     expect:
       rows:
         - [http://ex.org/alix, -12]
-        - [http://ex.org/gus, 3.5]
+        - [http://ex.org/gus, "+3.5"]
 
   - name: values_keeps_a_language_tag
     query: |

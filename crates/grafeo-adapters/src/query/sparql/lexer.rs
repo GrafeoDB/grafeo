@@ -2,6 +2,8 @@
 
 use grafeo_common::utils::error::SourceSpan;
 
+use crate::query::limits::NameLimit;
+
 /// A token in the SPARQL language.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
@@ -267,6 +269,8 @@ pub struct Lexer<'a> {
     position: usize,
     line: u32,
     column: u32,
+    /// The identifier length limit, and the first name found over it.
+    names: NameLimit,
 }
 
 impl<'a> Lexer<'a> {
@@ -277,11 +281,48 @@ impl<'a> Lexer<'a> {
             position: 0,
             line: 1,
             column: 1,
+            names: NameLimit::default(),
         }
+    }
+
+    /// Checks each name against a limit of `max` bytes (see
+    /// [`ParseLimits`](crate::query::limits::ParseLimits)).
+    pub(crate) fn with_max_identifier_length(mut self, max: usize) -> Self {
+        self.names = NameLimit::new(max);
+        self
+    }
+
+    /// The identifier length limit, with the first name found over it.
+    pub(crate) fn names(&self) -> NameLimit {
+        self.names
+    }
+
+    /// The first name over the identifier length limit of `max` bytes in all
+    /// of `input`.
+    pub(crate) fn scan_names(input: &str, max: usize) -> NameLimit {
+        let mut lexer = Lexer::new(input).with_max_identifier_length(max);
+        while lexer.next_token().kind != TokenKind::Eof {}
+        lexer.names
     }
 
     /// Returns the next token.
     pub fn next_token(&mut self) -> Token {
+        let token = self.scan_token();
+        // The bytes of a name between its delimiters: a variable without its
+        // `?` or `$`, a blank node label without its `_:`, and a prefixed
+        // name whole, its colon included.
+        let length = match token.kind {
+            TokenKind::Variable => token.text.len().saturating_sub(1),
+            TokenKind::BlankNodeLabel => token.text.len().saturating_sub(2),
+            TokenKind::PrefixedName => token.text.len(),
+            _ => return token,
+        };
+        self.names.note(token.span, length);
+        token
+    }
+
+    /// Reads the next token.
+    fn scan_token(&mut self) -> Token {
         self.skip_whitespace_and_comments();
 
         let start = self.position;
@@ -348,6 +389,13 @@ impl<'a> Lexer<'a> {
                 } else {
                     TokenKind::Colon
                 }
+            }
+            // A sign directly before a number is part of it (grammar [148] to [154], tokens
+            // by longest match, section 19.8): `+1` is one integer, `+ 1` an operator and an
+            // integer.
+            '+' | '-' if self.signs_a_number() => {
+                self.advance();
+                self.scan_number()
             }
             '+' => {
                 self.advance();
@@ -494,6 +542,17 @@ impl<'a> Lexer<'a> {
 
     fn current_char(&self) -> char {
         self.input[self.position..].chars().next().unwrap_or('\0')
+    }
+
+    /// Whether the sign at the current position starts a number: a digit follows it, or a `.`
+    /// and a digit.
+    fn signs_a_number(&self) -> bool {
+        let mut chars = self.input[self.position..].chars().skip(1);
+        match (chars.next(), chars.next()) {
+            (Some(digit), _) if digit.is_ascii_digit() => true,
+            (Some('.'), Some(digit)) => digit.is_ascii_digit(),
+            _ => false,
+        }
     }
 
     fn peek_char(&self) -> char {

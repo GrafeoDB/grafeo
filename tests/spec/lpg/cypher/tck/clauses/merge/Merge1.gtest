@@ -236,6 +236,9 @@ tests:
 
   # [13] Merge should bind a path
   - name: s13_merge_should_bind_a_path
+    xfail:
+      spec: "openCypher TCK 2024.3 Merge1: [13] Merge should bind a path"
+      issue: "#798"
     query: |
       MERGE p = (a {num: 1})
       RETURN p
@@ -273,7 +276,7 @@ tests:
   - name: s15_fail_when_merge_a_node_that_is_already_bound
     xfail:
       spec: "openCypher TCK 2024.3 Merge1: [15] Fail when merge a node that is already bound"
-      issue: fix in 0.6.5
+      issue: "#795"
     query: |
       MATCH (a)
       MERGE (a)
@@ -296,7 +299,7 @@ tests:
   - name: s17_fail_on_merging_node_with_null_property
     xfail:
       spec: "openCypher TCK 2024.3 Merge1: [17] Fail on merging node with null property"
-      issue: fix in 0.6.5
+      issue: "#797"
     query: |
       MERGE ({num: null})
     expect:

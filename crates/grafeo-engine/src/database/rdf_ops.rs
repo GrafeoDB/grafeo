@@ -62,7 +62,7 @@ impl Open {
         use crate::query::{optimizer::Optimizer, planner::rdf::RdfPlanner, translators::sparql};
 
         // Parse and translate the SPARQL query to a logical plan
-        let logical_plan = sparql::translate(query)?;
+        let logical_plan = sparql::translate(query, &self.config.parse_limits())?;
 
         // Optimize the plan using RDF-specific statistics
         let optimizer = Optimizer::for_rdf_plan(&self.rdf_store, &logical_plan);

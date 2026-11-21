@@ -158,7 +158,11 @@ echo "  Gzip:   $(( GZ_SIZE / 1024 )) KB"
 # types and the `cellTypes` builder, which makes JS values without
 # serde_json), openCypher TCK fixes 2.7 KB, nodes and edges built into values
 # 2.6 KB, the rest under 1 KB. Lite sits just over the 1408 KB warn line, as
-# 0.6.3 did, and under the 1536 KB limit.
+# 0.6.3 did, and under the 1536 KB limit. Later in 0.6.4, the snapshot and
+# history retention limits (in every binding) and the query memory limit in
+# every build took lite to 1442 KB (1,476,588 bytes), +32 KB (+2.3%) over
+# 0.6.3, after boxing the expired snapshot's error saved 9 KB; the release
+# measures again at its end.
 if [[ "$FEATURES" == *"full"* ]]; then
     WARN_THRESHOLD=2228224   # 2176 KB
     FAIL_THRESHOLD=2359296   # 2304 KB

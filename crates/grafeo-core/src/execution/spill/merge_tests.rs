@@ -78,6 +78,13 @@ fn manager() -> (TempDir, Arc<SpillManager>) {
     (dir, manager)
 }
 
+/// A statement's context capped at `limit`, spilling through `manager`.
+fn context(manager: &Arc<SpillManager>, limit: usize) -> OperatorMemoryContext {
+    OperatorMemoryContext::new(BufferManager::with_budget(256 << 20))
+        .with_spill_manager(Some(Arc::clone(manager)))
+        .with_query_limit(limit)
+}
+
 /// The memory of an operator in a statement capped at `limit`.
 fn memory(manager: &Arc<SpillManager>, limit: usize) -> OperatorMemory {
     OperatorMemory::new(
@@ -216,12 +223,14 @@ fn a_tight_grant_narrows_the_fan_in_and_holds() {
 /// behind; at the floor the merge gives the in-memory sort.
 #[test]
 fn a_merge_refuses_below_its_floor_and_answers_at_it() {
+    // A run's smallest read buffer and its next row, and the batch's first row.
     let unit = 2 * MERGE_MIN_READ_BUFFER;
+    let first = MERGE_MIN_READ_BUFFER;
     for (runs, floor) in [
         (0, 0),
-        (1, unit),
-        (2, 2 * unit),
-        (3, 2 * unit + MERGE_READ_BUFFER),
+        (1, unit + first),
+        (2, 2 * unit + first),
+        (3, 2 * unit + first + MERGE_READ_BUFFER),
     ] {
         let rows = input(runs * 8);
         if floor > 0 {
@@ -248,6 +257,36 @@ fn a_merge_refuses_below_its_floor_and_answers_at_it() {
     }
 }
 
+/// The floor holds rows up to the size a plan keeps room for: two runs of
+/// rows of about 3.5 KiB are refused when the merge is planned below it, not
+/// partway through, and every row comes out at it.
+#[test]
+fn rows_near_the_planned_size_are_refused_up_front_or_merged() {
+    let rows: Vec<Vec<Value>> = (0..16_i64)
+        .map(|place| {
+            vec![
+                Value::Int64(place * 7 % 16),
+                Value::Int64(place),
+                Value::from("x".repeat(3500)),
+            ]
+        })
+        .collect();
+    let floor = 2 * 2 * MERGE_MIN_READ_BUFFER + MERGE_MIN_READ_BUFFER;
+    let (dir, spill) = manager();
+    let refused =
+        runs_of(&spill, &rows, 8).merge(memory(&spill, floor - MERGE_MIN_READ_BUFFER), 100);
+    let error = refused.err().expect("refused when planned");
+    assert!(error.to_string().contains("query memory limit"), "{error}");
+    assert_eq!(files_left(&dir), 0);
+    let (dir, manager) = manager();
+    let mut merge = runs_of(&manager, &rows, 8)
+        .merge(memory(&manager, floor), 100)
+        .unwrap_or_else(|error| panic!("at the floor: {error}"));
+    assert_eq!(drain(&mut merge, 100).unwrap(), in_memory(&rows));
+    drop(merge);
+    assert_eq!(files_left(&dir), 0);
+}
+
 /// A grant that holds a pass's write buffer but not two full read buffers
 /// beside it: the merge reads two runs at a time through smaller buffers, and
 /// gives the same rows.
@@ -271,13 +310,14 @@ fn a_grant_short_of_two_full_buffers_shrinks_them() {
     assert_eq!(files_left(&dir), 0);
 }
 
-/// A batch ends where the grant does: with room for the buffers and a few
-/// rows, the merge hands out short batches, and every row in order.
+/// A batch ends where the grant does: with room for the buffers, their next
+/// rows and a batch's first row, and a few rows more, the merge hands out
+/// short batches, and every row in order.
 #[test]
 fn a_batch_ends_at_the_grant() {
     let (_dir, manager) = manager();
     let rows = input(2 * 500);
-    let limit = 2 * MERGE_READ_BUFFER + 8 * 1024;
+    let limit = 2 * MERGE_READ_BUFFER + 8 * 1024 + MERGE_MIN_READ_BUFFER;
     let mut merge = runs_of(&manager, &rows, 500)
         .merge(memory(&manager, limit), 10_000)
         .unwrap();
@@ -313,6 +353,82 @@ fn a_merge_dropped_midway_leaves_no_file() {
     assert_eq!(files_left(&dir), 3);
     drop(sorted);
     assert_eq!(files_left(&dir), 0);
+}
+
+/// Between batches the merge counts only its open runs, and its grant holds
+/// about that: the room a batch took goes back for the operators after it,
+/// which take the rows.
+#[test]
+fn a_merge_between_batches_holds_only_its_open_runs() {
+    // Under a 1 MiB cap the grants grow by steps of at most 16 KiB; a batch of
+    // 1,000 rows takes far more.
+    let (_dir, manager) = manager();
+    let ctx = context(&manager, 1 << 20);
+    let rows = input(4000);
+    let mut merge = runs_of(&manager, &rows, 1000)
+        .merge(OperatorMemory::new(ctx.clone()), 1000)
+        .unwrap();
+    while let Some(batch) = merge.next_batch().unwrap() {
+        // The plan's room: the open runs' read buffers and a next row each,
+        // and the next batch's first row; kept to a step.
+        let planned = merge.open_runs() * (merge.read_buffer() + MERGE_MIN_READ_BUFFER)
+            + MERGE_MIN_READ_BUFFER;
+        let granted = merge.memory().granted();
+        // It never gives back its open runs' read buffers.
+        assert!(
+            granted >= merge.open_runs() * merge.read_buffer(),
+            "{granted}"
+        );
+        assert!(
+            granted < planned + (16 << 10),
+            "{granted} granted for a plan of {planned} after a batch of {}",
+            batch.len()
+        );
+        // What it gave back left the statement's memory too.
+        assert_eq!(ctx.query().used(), granted);
+    }
+}
+
+/// A merge whose rows grow (short rows, then rows of about 3 KiB, under the
+/// 4 KiB a plan keeps for each) hands out every row while another operator of
+/// the statement takes all the memory the merge gives back between batches:
+/// the trim keeps the room the plan promised. Sixteen runs take keys in turn,
+/// so their heads grow together, by more than a grant step (32 KiB here).
+#[test]
+fn a_merge_keeps_its_planned_room_while_others_fill_the_cap() {
+    let (_dir, manager) = manager();
+    let limit = 2 << 20;
+    let ctx = context(&manager, limit);
+    // Run `r` holds the keys `j * 16 + r`: short rows first, then long ones.
+    let rows: Vec<Vec<Value>> = (0..16_i64)
+        .flat_map(|run| {
+            (0..40_i64).map(move |j| {
+                let size = if j < 20 { 8 } else { 3000 };
+                vec![
+                    Value::Int64(j * 16 + run),
+                    Value::Int64(j * 16 + run),
+                    Value::from("x".repeat(size)),
+                ]
+            })
+        })
+        .collect();
+    let mut merge = runs_of(&manager, &rows, 40)
+        .merge(OperatorMemory::new(ctx.clone()), 50)
+        .unwrap();
+    assert_eq!(merge.open_runs(), 16, "one pass");
+    let mut other = OperatorMemory::new(ctx.clone());
+    let mut got = Vec::new();
+    while let Some(batch) = merge
+        .next_batch()
+        .unwrap_or_else(|error| panic!("after {} rows: {error}", got.len()))
+    {
+        got.extend(batch);
+        // The rest of the cap, taken by the operator after the merge.
+        other
+            .set(other.bytes() + (limit - ctx.query().used()))
+            .unwrap();
+    }
+    assert_eq!(got, in_memory(&rows));
 }
 
 /// The merge gives back what it counts once it ends.

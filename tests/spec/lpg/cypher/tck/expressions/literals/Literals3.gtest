@@ -115,7 +115,7 @@ tests:
   - name: s8_return_the_smallest_hexadecimal_integer
     xfail:
       spec: "openCypher TCK 2024.3 Literals3: [8] Return the smallest hexadecimal integer"
-      issue: fix in 0.6.5
+      issue: "#800"
     query: |
       RETURN -0x8000000000000000 AS literal
     expect:

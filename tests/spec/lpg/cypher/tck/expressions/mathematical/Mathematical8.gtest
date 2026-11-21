@@ -45,7 +45,7 @@ tests:
   - name: s1_arithmetic_precedence_test
     xfail:
       spec: "openCypher TCK 2024.3 Mathematical8: [1] Arithmetic precedence test"
-      issue: fix in 0.6.5
+      issue: "#800"
     query: |
       RETURN 12 / 4 * 3 - 2 * 4
     expect:
@@ -58,7 +58,7 @@ tests:
   - name: s2_arithmetic_precedence_with_parenthesis_test
     xfail:
       spec: "openCypher TCK 2024.3 Mathematical8: [2] Arithmetic precedence with parenthesis test"
-      issue: fix in 0.6.5
+      issue: "#800"
     query: |
       RETURN 12 / 4 * (3 - 2 * 4)
     expect:

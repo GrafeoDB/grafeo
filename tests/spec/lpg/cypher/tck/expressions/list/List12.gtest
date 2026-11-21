@@ -148,7 +148,7 @@ tests:
   - name: s7_fail_when_using_aggregation_in_list_comprehension
     xfail:
       spec: "openCypher TCK 2024.3 List12: [7] Fail when using aggregation in list comprehension"
-      issue: fix in 0.6.5
+      issue: "#798"
     query: |
       MATCH (n)
       RETURN [x IN [1, 2, 3, 4, 5] | count(*)]

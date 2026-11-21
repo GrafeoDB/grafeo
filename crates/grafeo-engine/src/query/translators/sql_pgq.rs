@@ -32,7 +32,12 @@ use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 /// # Errors
 ///
 /// Returns an error if parsing fails or the AST contains unsupported constructs.
-pub fn translate(query: &str) -> Result<LogicalPlan> {
+pub fn translate(
+    query: &str,
+    limits: &grafeo_adapters::query::limits::ParseLimits,
+) -> Result<LogicalPlan> {
+    // The statement's length is its text's, the `EXPLAIN` included.
+    limits.check_query(query)?;
     let trimmed = query.trim_start();
     let (explain, profile, actual_query) = if trimmed
         .get(..7)
@@ -56,7 +61,7 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
         (false, false, query)
     };
 
-    let statement = sql_pgq::parse(actual_query)?;
+    let statement = sql_pgq::parse_with(actual_query, limits)?;
     let translator = SqlPgqTranslator::new(actual_query);
     let plan = translator.translate_statement(&statement)?;
     let mut plan = crate::query::limits::check_plan_depth(plan)?;
@@ -1417,6 +1422,14 @@ mod tests {
     use super::*;
     use crate::query::plan::{BuiltinFunction, ExpandDirection, ExpandOp};
 
+    /// [`super::translate`] under the default parse limits.
+    fn translate(query: &str) -> Result<LogicalPlan> {
+        super::translate(
+            query,
+            &grafeo_adapters::query::limits::ParseLimits::default(),
+        )
+    }
+
     #[test]
     fn test_translate_basic_node_query() {
         let plan = translate(
@@ -1970,7 +1983,7 @@ mod tests {
 
     #[test]
     fn test_explain_prefix_sets_explain_flag() {
-        let plan = super::translate(
+        let plan = translate(
             "EXPLAIN SELECT * FROM GRAPH_TABLE (MATCH (n:Person) COLUMNS (n.name AS name))",
         )
         .unwrap();
@@ -1980,7 +1993,7 @@ mod tests {
 
     #[test]
     fn test_explain_analyze_sets_profile_flag() {
-        let plan = super::translate(
+        let plan = translate(
             "EXPLAIN ANALYZE SELECT * FROM GRAPH_TABLE (MATCH (n:Person) COLUMNS (n.name AS name))",
         )
         .unwrap();
@@ -1990,10 +2003,9 @@ mod tests {
 
     #[test]
     fn test_no_explain_prefix_normal_query() {
-        let plan = super::translate(
-            "SELECT * FROM GRAPH_TABLE (MATCH (n:Person) COLUMNS (n.name AS name))",
-        )
-        .unwrap();
+        let plan =
+            translate("SELECT * FROM GRAPH_TABLE (MATCH (n:Person) COLUMNS (n.name AS name))")
+                .unwrap();
         assert!(!plan.explain);
         assert!(!plan.profile);
     }

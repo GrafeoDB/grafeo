@@ -139,10 +139,10 @@ const char*     grafeo_version(void);
      - grafeo_options_new returns an object to free with grafeo_options_free
        (NULL is ignored); it may open several databases and be freed once the
        open returns.
-     - The path search budget counts the paths a variable-length or
-       shortest-path search keeps at once, or what an RDF property path
-       search visits; the nodes an ANY SHORTEST or shortestPath search
-       visits are not counted yet.
+     - The path search budget counts everything one path search holds at
+       once (a variable-length, shortest-path or RDF property path search):
+       the nodes it visits, its queues and the paths it keeps. The same
+       bytes count against the query memory limit and the memory limit.
      - The snapshot retention limit is how many bytes of replaced data an
        open transaction's snapshot may keep; past it the transaction's next
        call fails with the retryable GRAFEO-T012 and rolls it back. Below
@@ -150,8 +150,17 @@ const char*     grafeo_version(void);
      - The history retention limit is how many bytes of replaced data the
        history window may keep; past it the window's start moves forward.
        No limit by default; zero fails the open. Not stored with the file.
-     - The memory and query memory limits and the path search budget must be
-       above zero (another status otherwise); a spill limit of 0 means
+     - The path expansion limit is how many path expansions one statement's
+       variable-length and shortest-path searches may make together: each
+       edge they read to extend a path, and each node and edge they copy out
+       of a path into a row. 100 million by default; past it GRAFEO-Q009.
+     - The query length limit is how many bytes a statement's text may have
+       (16 MiB by default; parameter values do not count), the identifier
+       length limit how many bytes one name in it may have (16 KiB by
+       default); a statement over either fails with GRAFEO-Q002.
+     - The memory and query memory limits, the path search budget, the path
+       expansion limit and the query and identifier lengths must be above
+       zero (another status otherwise); a spill limit of 0 means
        nothing spills, and unlimited spill, once set, wins over a spill limit.
        An in-memory database spills nothing whatever the settings.
      - grafeo_open_with_options opens in memory when path is NULL, else the
@@ -161,6 +170,9 @@ void            grafeo_options_free(GrafeoOptions* options);
 GrafeoStatus    grafeo_options_set_memory_limit(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_query_memory_limit(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_path_search_budget(GrafeoOptions* options, uint64_t bytes);
+GrafeoStatus    grafeo_options_set_path_expansion_limit(GrafeoOptions* options, uint64_t expansions);
+GrafeoStatus    grafeo_options_set_max_query_length(GrafeoOptions* options, uint64_t bytes);
+GrafeoStatus    grafeo_options_set_max_identifier_length(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_snapshot_retention_limit(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_history_retention_limit(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_spill_limit(GrafeoOptions* options, uint64_t bytes);
@@ -169,7 +181,10 @@ GrafeoDatabase* grafeo_open_with_options(const char* path, const GrafeoOptions* 
 
 /* ---- Change Data Capture ------------------------------------------------- */
 
+/* Stores the setting with the database (an in-memory one keeps it while open). */
+GrafeoStatus grafeo_set_cdc(GrafeoDatabase* db, bool enabled);
 /* No error return: see "Error handling" above (closed: no change, false). */
+GRAFEO_DEPRECATED("changes the setting for this open only; use grafeo_set_cdc, which stores it and returns a status; removed in 0.7.0")
 void grafeo_set_cdc_enabled(GrafeoDatabase* db, bool enabled);
 bool grafeo_is_cdc_enabled(GrafeoDatabase* db);
 

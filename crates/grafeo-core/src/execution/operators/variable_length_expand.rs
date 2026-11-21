@@ -2,13 +2,15 @@
 
 use super::expand::{EdgeWalk, stored_types, visible_edges_from};
 use super::filter::Predicate;
+use super::path_expansions::{Allowance, PathExpansions, path_expansion_error};
 use super::{Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
+use crate::execution::path_budget::{PathBudget, PathRefusal};
+use crate::execution::path_queue::PathQueue;
 use crate::graph::Direction;
 use crate::graph::GraphStore;
 use grafeo_common::types::{ArcStr, EdgeId, LogicalType, NodeId, ReadView};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
-use std::collections::VecDeque;
 use std::sync::Arc;
 
 /// The memory one path search may hold by default, in bytes: the paths a
@@ -95,11 +97,60 @@ pub(super) fn path_budget_error(
     )
 }
 
+/// `error` as the refusal of `what`, which holds `paths` paths, when
+/// `budget` refused (a refusal for a block of its queue, say, names the paths
+/// as one for a path does); a refusal of the statement's memory as it is.
+pub(super) fn with_path_count(
+    error: OperatorError,
+    what: &str,
+    paths: usize,
+    budget: &PathBudget,
+    advice: &str,
+) -> OperatorError {
+    use grafeo_common::utils::error::{LimitBound, LimitRefusal};
+
+    let OperatorError::Wrapped(wrapped) = &error else {
+        return error;
+    };
+    let Some(&LimitRefusal::Memory {
+        bound: LimitBound::PathSearchBudget,
+        requested,
+        ..
+    }) = wrapped.limit_refusal()
+    else {
+        return error;
+    };
+    path_budget_error(
+        what,
+        paths,
+        (
+            usize::try_from(requested).unwrap_or(usize::MAX),
+            budget.used(),
+        ),
+        budget.limit(),
+        advice,
+    )
+}
+
 /// What to do about a variable-length pattern over its budget: an unbounded
 /// walk around a cycle has no end, and reaches it.
 const VARIABLE_LENGTH_ADVICE: &str = "bound the quantifier, or use TRAIL, ACYCLIC or ANY \
      SHORTEST (`{1,5}` or `*1..5`, `MATCH TRAIL ...`, `shortestPath`), or return DISTINCT nodes \
      (`RETURN DISTINCT f`, `count(DISTINCT f)`)";
+
+/// A variable-length pattern's refusal, where it holds more than paths (the
+/// nodes a DISTINCT search reached, the path lists of its buffered rows).
+const VARIABLE_LENGTH_REFUSAL: PathRefusal = PathRefusal {
+    what: "A variable-length pattern",
+    advice: VARIABLE_LENGTH_ADVICE,
+};
+
+/// The bytes a node or edge id of a buffered row's path lists takes.
+const ID_BYTES: usize = std::mem::size_of::<NodeId>();
+
+/// The bytes of one open path's entry in the variable-length search's queue,
+/// for capacity accounting and tests.
+pub const PATH_QUEUE_ENTRY_BYTES: usize = std::mem::size_of::<OpenPath>();
 
 /// Path traversal mode controlling which paths are allowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -125,8 +176,9 @@ pub enum PathMode {
 /// first, which each call to [`next`](Operator::next) resumes until it has a
 /// chunk of rows: the rows stream out, and the search holds only the paths
 /// it has yet to emit or extend. Those may hold at most the memory budget
-/// (see [`Self::with_memory_budget`]); a search that would hold more fails
-/// with an error instead of growing until the process runs out of memory.
+/// (see [`Self::with_memory_budget`]) and the statement's memory; a search
+/// that would hold more fails with an error instead of growing until the
+/// process runs out of memory.
 #[allow(clippy::struct_excessive_bools)]
 pub struct VariableLengthExpandOperator {
     /// The store to traverse.
@@ -149,6 +201,9 @@ pub struct VariableLengthExpandOperator {
     view: ReadView,
     /// Counts the edges the expansion reads.
     reads: Option<Arc<ReadCounter>>,
+    /// The path expansions the statement may still make (see
+    /// [`Self::with_path_expansions`]); `None` outside a statement, without a limit.
+    expansions: Option<Arc<PathExpansions>>,
     /// Materialized input rows.
     input_rows: Option<Vec<InputRow>>,
     /// The next input row to search from.
@@ -156,13 +211,21 @@ pub struct VariableLengthExpandOperator {
     /// The search from the input row whose paths are being emitted, when
     /// one has paths left.
     search: Option<RowSearch>,
-    /// The bytes the search from one input row may hold (see
-    /// [`Self::with_memory_budget`]).
-    budget: usize,
-    /// Output buffer for pending results.
+    /// What the search from one input row holds, within its budget (see
+    /// [`Self::with_memory_budget`]) and as a grant of the statement's memory
+    /// it was built in: its queue, sets and vectors, its open paths, the ids
+    /// of the buffered rows and the nodes emitted for earlier rows. Started
+    /// over for each input row, so the grant is kept across rows; it goes
+    /// back when the operator drops.
+    path_budget: PathBudget,
+    /// The rows found and not yet output: at most one chunk in every mode
+    /// (a reachability search keeps its other targets as a node and a length
+    /// each, in `reached`). The budget counts the node and edge ids of their
+    /// path lists (`buffered_ids`), not the rows themselves.
     output_buffer: Vec<OutputRow>,
     /// The node and edge ids the rows in `output_buffer` hold in their path
-    /// lists, which bound a chunk of long paths before its row count does.
+    /// lists, which bound a chunk of long paths before its row count does,
+    /// and which the budget is charged as they are buffered.
     buffered_ids: usize,
     /// Whether the operator is exhausted.
     exhausted: bool,
@@ -181,6 +244,10 @@ pub struct VariableLengthExpandOperator {
     /// The nodes emitted for earlier input rows, with
     /// [`Self::with_reachability_across_rows`].
     emitted_across_rows: FxHashSet<NodeId>,
+    /// The targets of an input row's reachability search not yet buffered,
+    /// last first, with the row: a node and a length each, far less than a
+    /// buffered row, so they become rows a chunk at a time.
+    reached: Option<(usize, Vec<(NodeId, u32)>)>,
     /// A condition every edge of a path meets (see
     /// [`Self::with_edge_condition`]).
     edge_condition: Option<Box<dyn Predicate>>,
@@ -259,13 +326,10 @@ struct RowSearch {
     /// The node the paths start at.
     source: NodeId,
     /// The paths found and not yet emitted or extended, shortest first.
-    open: VecDeque<OpenPath>,
-    /// The bytes the paths in `open` are charged (see [`Self::cost`]).
-    held: usize,
-    /// The bytes `open` may be charged.
-    budget: usize,
-    /// The bytes a path is charged, and charged more for each of its edges
-    /// (see [`VariableLengthExpandOperator::path_charges`]).
+    open: PathQueue<OpenPath>,
+    /// The bytes a path is charged beyond its entry in `open`, and charged
+    /// more for each of its edges (see
+    /// [`VariableLengthExpandOperator::path_charges`]).
     per_path: usize,
     per_edge: usize,
     /// The row the edge condition reads (see
@@ -274,51 +338,48 @@ struct RowSearch {
 }
 
 impl RowSearch {
-    /// The bytes `path` is charged while it is open (see
+    /// The bytes an open path of `length` edges is charged (see
     /// [`VariableLengthExpandOperator::path_charges`]).
-    fn cost(&self, path: &OpenPath) -> usize {
-        let edges = usize::try_from(path.length).unwrap_or(usize::MAX);
+    fn cost(&self, length: u32) -> usize {
+        let edges = usize::try_from(length).unwrap_or(usize::MAX);
         self.per_path
             .saturating_add(edges.saturating_mul(self.per_edge))
     }
 
-    /// Adds a path to emit and extend later, within the budget: `open` is
-    /// charged at most the budget, and grows only by memory the system
-    /// grants.
-    fn push(&mut self, path: OpenPath) -> Result<(), OperatorError> {
+    /// Makes room in `open` for one more path of `length` edges, within
+    /// `budget`, before the path is built: `open` grows by blocks, each
+    /// charged before it is allocated, and the path is charged its
+    /// [`cost`](Self::cost).
+    fn make_room(&mut self, length: u32, budget: &mut PathBudget) -> Result<(), OperatorError> {
+        let cost = self.cost(length);
+        self.open
+            .reserve(budget)
+            .and_then(|()| budget.charge(cost))
+            .map_err(|error| self.as_path_count(error, budget))
+    }
+
+    /// `error` as the refusal that counts the paths held, when the budget
+    /// refused; a refusal of the statement's memory as it is.
+    fn as_path_count(&self, error: OperatorError, budget: &PathBudget) -> OperatorError {
         // A path is pushed as an extension of the one being extended, which
         // is out of `open` by then (popped, or at the start the source's
         // path of no edges): the search holds that one too.
-        let paths = self.open.len() + 1;
-        let cost = self.cost(&path);
-        if self.held.saturating_add(cost) > self.budget {
-            return Err(path_budget_error(
-                "A variable-length pattern",
-                paths,
-                (cost, self.held),
-                self.budget,
-                VARIABLE_LENGTH_ADVICE,
-            ));
-        }
-        let held = self.open.len();
-        if held == self.open.capacity() {
-            self.open.try_reserve(held.max(16)).map_err(|_| {
-                let noun = if paths == 1 { "path" } else { "paths" };
-                OperatorError::LimitExceeded(format!(
-                    "A variable-length pattern holds {paths} {noun} and the system has no memory \
-                     for more: {VARIABLE_LENGTH_ADVICE}"
-                ))
-            })?;
-        }
-        self.held += cost;
-        self.open.push_back(path);
-        Ok(())
+        with_path_count(
+            error,
+            "A variable-length pattern",
+            self.open.len() + 1,
+            budget,
+            VARIABLE_LENGTH_ADVICE,
+        )
     }
 
-    /// The next path to emit and extend, its charge released.
-    fn pop(&mut self) -> Option<OpenPath> {
-        let path = self.open.pop_front()?;
-        self.held -= self.cost(&path);
+    /// The next path to emit and extend, its charge per edge released. Its
+    /// segment stays charged while it lives: give it back with
+    /// [`release_segments`] once the path is done, which frees it and the
+    /// segments before it only when no extension holds them.
+    fn pop(&mut self, budget: &mut PathBudget) -> Option<OpenPath> {
+        let path = self.open.pop(budget)?;
+        budget.release(self.cost(path.length) - self.per_path);
         Some(path)
     }
 }
@@ -341,6 +402,24 @@ pub(super) struct PathSegment {
     pub(super) edge: Option<EdgeId>,
     /// Parent segment, or `None` for the root.
     pub(super) parent: Option<Arc<PathSegment>>,
+}
+
+/// What one segment of a followed path holds: the segment with the two
+/// counts of its `Arc` (its earlier segments are shared with the path it
+/// extends). Public for capacity accounting and tests.
+pub const SEGMENT_BYTES: usize =
+    std::mem::size_of::<PathSegment>() + 2 * std::mem::size_of::<usize>();
+
+/// Gives back to `budget` the segments that dropping `segment` frees: it, and
+/// each segment before it that only it held.
+pub(super) fn release_segments(budget: &mut PathBudget, segment: Arc<PathSegment>) {
+    let mut next = Some(segment);
+    while let Some(segment) = next {
+        next = Arc::into_inner(segment).and_then(|mut freed| {
+            budget.release(SEGMENT_BYTES);
+            freed.parent.take()
+        });
+    }
 }
 
 impl PathSegment {
@@ -417,10 +496,11 @@ impl VariableLengthExpandOperator {
             chunk_capacity: 2048,
             view,
             reads: None,
+            expansions: None,
             input_rows: None,
             current_input_idx: 0,
             search: None,
-            budget: DEFAULT_PATH_SEARCH_BUDGET,
+            path_budget: Self::path_budget(DEFAULT_PATH_SEARCH_BUDGET),
             output_buffer: Vec::new(),
             buffered_ids: 0,
             exhausted: false,
@@ -430,6 +510,7 @@ impl VariableLengthExpandOperator {
             path_mode: PathMode::Walk,
             reachability: Reachability::Off,
             emitted_across_rows: FxHashSet::default(),
+            reached: None,
             edge_condition: None,
         }
     }
@@ -552,15 +633,26 @@ impl VariableLengthExpandOperator {
     }
 
     /// Sets the memory the search from one input row may hold, in bytes:
-    /// the paths it has found and not yet emitted or extended (the default
-    /// is [`DEFAULT_PATH_SEARCH_BUDGET`]). A search that would hold more
-    /// fails with `GRAFEO-S001`, naming the path search budget, whose message
-    /// names the ways to need fewer paths and the setting. A reachability search (see
-    /// [`Self::with_reachability`]) holds each node at most once, and needs
-    /// no budget.
+    /// the paths it has found and not yet emitted or extended, the ids of
+    /// the rows it buffered, and for a reachability search (see
+    /// [`Self::with_reachability`]) the nodes it reached (the default is
+    /// [`DEFAULT_PATH_SEARCH_BUDGET`]). A search that would hold more fails
+    /// with `GRAFEO-S001`, naming the path search budget, whose message names
+    /// the ways to need less and the setting. What it holds is a grant of the
+    /// memory of the statement the operator is built for, so the query
+    /// memory limit refuses it too. Called while that statement is planned,
+    /// as the constructor is.
     pub fn with_memory_budget(mut self, bytes: usize) -> Self {
-        self.budget = bytes;
+        self.path_budget = Self::path_budget(bytes);
         self
+    }
+
+    /// A budget of `bytes`, whose charges are a grant of the memory of the
+    /// statement this thread plans (the operator is built in its scope).
+    fn path_budget(bytes: usize) -> PathBudget {
+        PathBudget::new(bytes, None)
+            .with_memory(crate::execution::memory::capture())
+            .with_refusal(VARIABLE_LENGTH_REFUSAL)
     }
 
     /// Counts the edges the expansion reads in `reads`.
@@ -568,6 +660,30 @@ impl VariableLengthExpandOperator {
     pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
         self.reads = Some(reads);
         self
+    }
+
+    /// Takes the path expansions the search makes from the statement's `expansions`: each
+    /// edge it reads to extend a path, and each node and edge id it copies into a row (a path
+    /// variable, an edge list). Past the statement's limit it fails with `GRAFEO-Q009`. A
+    /// reachability search takes none. Without it the search is not limited.
+    #[must_use]
+    pub fn with_path_expansions(mut self, expansions: Arc<PathExpansions>) -> Self {
+        self.expansions = Some(expansions);
+        self
+    }
+
+    /// Takes `n` expansions from `allowance`, or fails past the statement's limit.
+    #[inline]
+    fn take(&self, allowance: &mut Allowance, n: usize) -> Result<(), OperatorError> {
+        if allowance.take(n) {
+            Ok(())
+        } else {
+            Err(path_expansion_error(
+                "A variable-length pattern",
+                self.expansions.as_deref(),
+                VARIABLE_LENGTH_ADVICE,
+            ))
+        }
     }
 
     /// Materializes all input rows.
@@ -644,6 +760,7 @@ impl VariableLengthExpandOperator {
         &self,
         node_id: NodeId,
         condition_row: Option<&mut DataChunk>,
+        allowance: Option<&mut Allowance>,
     ) -> Result<Vec<(NodeId, EdgeId)>, OperatorError> {
         let mut edges = visible_edges_from(
             self.store.as_ref(),
@@ -655,6 +772,10 @@ impl VariableLengthExpandOperator {
                 reads: self.reads.as_deref(),
             },
         )?;
+        // Every edge read is an expansion, those the edge condition rejects too
+        if let Some(allowance) = allowance {
+            self.take(allowance, edges.len())?;
+        }
         if let (Some(condition), Some(row)) = (&self.edge_condition, condition_row) {
             let edge_column = row.column_count() - 1;
             let mut failure = None;
@@ -714,32 +835,30 @@ impl VariableLengthExpandOperator {
     /// The bytes one open path of the search is charged, and charged more
     /// for each of its edges (see `RowSearch::cost`).
     ///
-    /// A path is charged what it holds: its entry in the search's queue,
-    /// and, in a search that follows paths, the one segment it adds to the
-    /// path it extends (the segments of its prefix belong to that path and
-    /// the others that share them). An unbounded walk is charged a segment
+    /// A path is charged what it holds beyond its entry in the search's
+    /// queue, whose blocks are charged as it grows: in a search that follows
+    /// paths, the one segment it adds to the path it extends, which stays
+    /// charged as long as a path through it lives (see `RowSearch::pop`). An
+    /// unbounded walk is charged a segment
     /// per edge on top: a walk around a cycle never ends and can hold few
     /// paths at once, so a charge that grows with its length is what makes
     /// it reach the budget. A bounded search ends at its last hop, and a
     /// path in TRAIL, SIMPLE or ACYCLIC mode ends on its own.
     fn path_charges(&self) -> (usize, usize) {
-        // A segment and the two counts of its `Arc`
-        let segment = std::mem::size_of::<PathSegment>() + 2 * std::mem::size_of::<usize>();
-        let entry = std::mem::size_of::<OpenPath>();
         let per_path = if self.follows_paths() {
-            entry + segment
+            SEGMENT_BYTES
         } else {
-            entry
+            0
         };
         let unbounded_walk = self.path_mode == PathMode::Walk && self.max_hops == u32::MAX;
-        (per_path, if unbounded_walk { segment } else { 0 })
+        (per_path, if unbounded_walk { SEGMENT_BYTES } else { 0 })
     }
 
     /// The most node and edge ids the rows buffered for one chunk hold in
     /// their path lists: a chunk of long paths ends before its row count,
     /// at a sixty-fourth of the budget.
     fn max_buffered_ids(&self) -> usize {
-        (self.budget / 64 / std::mem::size_of::<NodeId>()).max(1)
+        (self.path_budget.limit() / 64 / ID_BYTES).max(1)
     }
 
     /// Whether the output buffer holds a chunk.
@@ -748,10 +867,71 @@ impl VariableLengthExpandOperator {
             || self.buffered_ids >= self.max_buffered_ids()
     }
 
-    /// Adds `row` to the output buffer.
-    fn buffer(&mut self, row: OutputRow) {
-        self.buffered_ids += row.path_ids();
+    /// The node and edge ids the row of a path of `length` edges holds in
+    /// its path lists.
+    fn row_ids(&self, length: u32) -> usize {
+        let edges = usize::try_from(length).unwrap_or(usize::MAX);
+        let nodes = if self.output_path_detail {
+            edges.saturating_add(1)
+        } else {
+            0
+        };
+        if self.output_path_detail || self.output_edge_list {
+            nodes.saturating_add(edges)
+        } else {
+            nodes
+        }
+    }
+
+    /// Adds the row of a path of `length` edges to the output buffer: its
+    /// ids are charged before `row` builds its path lists.
+    fn buffer(
+        &mut self,
+        length: u32,
+        row: impl FnOnce(&Self) -> OutputRow,
+    ) -> Result<(), OperatorError> {
+        let ids = self.row_ids(length);
+        self.path_budget.charge(ids.saturating_mul(ID_BYTES))?;
+        let row = row(self);
+        debug_assert_eq!(row.path_ids(), ids, "the ids charged are the row's");
+        self.buffered_ids += ids;
         self.output_buffer.push(row);
+        Ok(())
+    }
+
+    /// Starts the budget over for the search from the next input row: what
+    /// the last row's search held is gone, and what outlives it (the ids of
+    /// the rows still buffered, the nodes emitted for earlier rows) is
+    /// charged again.
+    fn start_row(&mut self) -> Result<(), OperatorError> {
+        self.path_budget.clear();
+        self.path_budget.charge(
+            self.buffered_ids
+                .saturating_mul(ID_BYTES)
+                .saturating_add(self.emitted_across_rows.allocation_size()),
+        )
+    }
+
+    /// Buffers the rows of the first of `targets` (last first) that fit the
+    /// chunk, for the input row `input_idx`: the buffer holds a chunk at
+    /// most, as for the paths (its rows' path ids are what grows with them).
+    fn buffer_targets(&mut self, input_idx: usize, targets: &mut Vec<(NodeId, u32)>) {
+        let room = self.chunk_capacity.saturating_sub(self.output_buffer.len());
+        let count = room.min(targets.len());
+        let first = targets.len() - count;
+        self.output_buffer.extend(
+            targets
+                .drain(first..)
+                .rev()
+                .map(|(target_id, path_length)| OutputRow {
+                    input_idx,
+                    edge_id: None,
+                    target_id,
+                    path_length,
+                    path_nodes: None,
+                    path_edges: None,
+                }),
+        );
     }
 
     /// Starts the search from the source of input row `input_idx`: emits
@@ -761,38 +941,47 @@ impl VariableLengthExpandOperator {
         &mut self,
         input_idx: usize,
         source: NodeId,
+        allowance: &mut Allowance,
     ) -> Result<RowSearch, OperatorError> {
         let follows_paths = self.follows_paths();
         if self.min_hops == 0 {
-            self.buffer(OutputRow {
+            // The path of no edges: its one node, when the row holds the path
+            if self.output_path_detail {
+                self.take(allowance, 1)?;
+            }
+            self.buffer(0, |expand| OutputRow {
                 input_idx,
                 edge_id: None,
                 target_id: source,
                 path_length: 0,
-                path_nodes: self.output_path_detail.then(|| vec![source]),
-                path_edges: (self.output_path_detail || self.output_edge_list).then(Vec::new),
-            });
+                path_nodes: expand.output_path_detail.then(|| vec![source]),
+                path_edges: (expand.output_path_detail || expand.output_edge_list).then(Vec::new),
+            })?;
         }
         let (per_path, per_edge) = self.path_charges();
         let mut search = RowSearch {
             input_idx,
             source,
-            open: VecDeque::new(),
-            held: 0,
-            budget: self.budget,
+            open: PathQueue::new(),
             per_path,
             per_edge,
             condition_row: self.condition_row(input_idx),
         };
         if self.max_hops > 0 {
-            let root = follows_paths.then(|| {
-                Arc::new(PathSegment {
+            let root = if follows_paths {
+                self.path_budget.charge(SEGMENT_BYTES)?;
+                Some(Arc::new(PathSegment {
                     node: source,
                     edge: None,
                     parent: None,
-                })
-            });
-            self.extend(&mut search, source, 0, root.as_ref())?;
+                }))
+            } else {
+                None
+            };
+            self.extend(&mut search, allowance, source, 0, root.as_ref())?;
+            if let Some(root) = root {
+                release_segments(&mut self.path_budget, root);
+            }
         }
         Ok(search)
     }
@@ -802,32 +991,34 @@ impl VariableLengthExpandOperator {
     /// order of the node's edges. `segment` is the path when the search
     /// follows paths.
     fn extend(
-        &self,
+        &mut self,
         search: &mut RowSearch,
+        allowance: &mut Allowance,
         node: NodeId,
         length: u32,
         segment: Option<&Arc<PathSegment>>,
     ) -> Result<(), OperatorError> {
-        for (target, edge) in self.get_edges(node, search.condition_row.as_mut())? {
-            let extended = match segment {
-                Some(segment) => {
-                    if !self.is_expansion_allowed(segment, target, edge, search.source) {
-                        continue;
-                    }
-                    Some(Arc::new(PathSegment {
-                        node: target,
-                        edge: Some(edge),
-                        parent: Some(Arc::clone(segment)),
-                    }))
-                }
-                None => None,
-            };
-            search.push(OpenPath {
+        for (target, edge) in
+            self.get_edges(node, search.condition_row.as_mut(), Some(allowance))?
+        {
+            if let Some(segment) = segment
+                && !self.is_expansion_allowed(segment, target, edge, search.source)
+            {
+                continue;
+            }
+            search.make_room(length + 1, &mut self.path_budget)?;
+            search.open.push(OpenPath {
                 node: target,
                 length: length + 1,
                 edge,
-                segment: extended,
-            })?;
+                segment: segment.map(|segment| {
+                    Arc::new(PathSegment {
+                        node: target,
+                        edge: Some(edge),
+                        parent: Some(Arc::clone(segment)),
+                    })
+                }),
+            });
         }
         Ok(())
     }
@@ -835,29 +1026,52 @@ impl VariableLengthExpandOperator {
     /// Emits and extends the paths of `search`, shortest first, until the
     /// output buffer holds a chunk. Returns whether the search has paths
     /// left.
-    fn advance(&mut self, search: &mut RowSearch) -> Result<bool, OperatorError> {
+    fn advance(
+        &mut self,
+        search: &mut RowSearch,
+        allowance: &mut Allowance,
+    ) -> Result<bool, OperatorError> {
         let with_edges = self.output_path_detail || self.output_edge_list;
         while !self.output_full() {
-            let Some(path) = search.pop() else {
+            let Some(path) = search.pop(&mut self.path_budget) else {
                 return Ok(false);
             };
             if (self.min_hops..=self.max_hops).contains(&path.length) {
+                // The node and edge ids the row copies out of the path
+                if with_edges {
+                    let edges = path.length as usize;
+                    let copied = if self.output_path_detail {
+                        2 * edges + 1
+                    } else {
+                        edges
+                    };
+                    self.take(allowance, copied)?;
+                }
                 let segment = path.segment.as_ref();
-                self.buffer(OutputRow {
+                self.buffer(path.length, |expand| OutputRow {
                     input_idx: search.input_idx,
                     edge_id: Some(path.edge),
                     target_id: path.node,
                     path_length: path.length,
                     path_nodes: segment
-                        .filter(|_| self.output_path_detail)
+                        .filter(|_| expand.output_path_detail)
                         .map(|segment| segment.collect_nodes(path.length)),
                     path_edges: segment
                         .filter(|_| with_edges)
                         .map(|segment| segment.collect_edges(path.length)),
-                });
+                })?;
             }
             if path.length < self.max_hops {
-                self.extend(search, path.node, path.length, path.segment.as_ref())?;
+                self.extend(
+                    search,
+                    allowance,
+                    path.node,
+                    path.length,
+                    path.segment.as_ref(),
+                )?;
+            }
+            if let Some(segment) = path.segment {
+                release_segments(&mut self.path_budget, segment);
             }
         }
         Ok(!search.open.is_empty())
@@ -900,30 +1114,28 @@ impl VariableLengthExpandOperator {
     /// found from both ends of its middle edge, and the source is emitted at
     /// the end of the layer of that length, when it is at most `max_hops`:
     /// the same rows as the paths give, the source perhaps later among them.
+    ///
+    /// Every set and vector grows within the budget, charged before it
+    /// allocates. The layers and sets are given back when it returns; the
+    /// targets, a node and a length each, stay charged until they are
+    /// buffered as rows.
     fn reachable_targets(
-        &self,
+        &mut self,
         input_idx: usize,
         source_node: NodeId,
-    ) -> Result<Vec<OutputRow>, OperatorError> {
-        let reached = |target_id, path_length| OutputRow {
-            input_idx,
-            edge_id: None,
-            target_id,
-            path_length,
-            path_nodes: None,
-            path_edges: None,
-        };
+    ) -> Result<Vec<(NodeId, u32)>, OperatorError> {
         let mut condition_row = self.condition_row(input_idx);
         let mut results = Vec::new();
         let mut emitted: FxHashSet<NodeId> = FxHashSet::default();
-        let mut layer = vec![source_node];
+        let mut layer = Vec::new();
+        push_within(&mut self.path_budget, &mut layer, source_node)?;
         let mut next_layer = Vec::new();
         // The nodes of a layer below `min_hops`, which is kept whole
         let mut in_next_layer: FxHashSet<NodeId> = FxHashSet::default();
 
         if self.min_hops == 0 {
-            emitted.insert(source_node);
-            results.push(reached(source_node, 0));
+            insert_within(&mut self.path_budget, &mut emitted, source_node)?;
+            push_within(&mut self.path_budget, &mut results, (source_node, 0))?;
         }
         // TRAIL mode: whether the source still waits for a closed trail, each
         // reached node's depth and first edge from the source, and the
@@ -941,7 +1153,7 @@ impl VariableLengthExpandOperator {
                         .get(&node)
                         .map_or((0, None), |&(depth, first)| (depth, Some(first)))
                 };
-                for (target, edge) in self.get_edges(node, condition_row.as_mut())? {
+                for (target, edge) in self.get_edges(node, condition_row.as_mut(), None)? {
                     if trail_source {
                         let first = node_first.unwrap_or(edge);
                         let closing = if target == source_node {
@@ -954,6 +1166,7 @@ impl VariableLengthExpandOperator {
                         {
                             (target_first != first).then_some(node_depth + target_depth + 1)
                         } else {
+                            self.path_budget.reserve_map(&mut first_edges, 1)?;
                             first_edges.insert(target, (depth, first));
                             None
                         };
@@ -964,27 +1177,34 @@ impl VariableLengthExpandOperator {
                             // A trail that ends here, in this layer (a self-loop
                             // or a parallel edge), reaches the source where the
                             // paths of this layer first do
-                            if emitting && closing == Some(depth) && emitted.insert(source_node) {
-                                results.push(reached(source_node, depth));
+                            if emitting
+                                && closing == Some(depth)
+                                && insert_within(&mut self.path_budget, &mut emitted, source_node)?
+                            {
+                                push_within(
+                                    &mut self.path_budget,
+                                    &mut results,
+                                    (source_node, depth),
+                                )?;
                                 trail_source = false;
                             }
                             continue;
                         }
                     }
                     if emitting {
-                        if emitted.insert(target) {
-                            results.push(reached(target, depth));
-                            next_layer.push(target);
+                        if insert_within(&mut self.path_budget, &mut emitted, target)? {
+                            push_within(&mut self.path_budget, &mut results, (target, depth))?;
+                            push_within(&mut self.path_budget, &mut next_layer, target)?;
                         }
-                    } else if in_next_layer.insert(target) {
-                        next_layer.push(target);
+                    } else if insert_within(&mut self.path_budget, &mut in_next_layer, target)? {
+                        push_within(&mut self.path_budget, &mut next_layer, target)?;
                     }
                 }
             }
             if trail_source && let Some(length) = closed_trail.filter(|&c| c <= depth) {
                 trail_source = false;
-                if emitted.insert(source_node) {
-                    results.push(reached(source_node, length));
+                if insert_within(&mut self.path_budget, &mut emitted, source_node)? {
+                    push_within(&mut self.path_budget, &mut results, (source_node, length))?;
                 }
             }
             if next_layer.is_empty() {
@@ -997,10 +1217,17 @@ impl VariableLengthExpandOperator {
         // A closed trail found in the last layer expanded, longer than it
         if trail_source
             && let Some(length) = closed_trail.filter(|&c| c <= self.max_hops)
-            && emitted.insert(source_node)
+            && insert_within(&mut self.path_budget, &mut emitted, source_node)?
         {
-            results.push(reached(source_node, length));
+            push_within(&mut self.path_budget, &mut results, (source_node, length))?;
         }
+        // The layers and sets go: only the targets stay held
+        self.path_budget.release(
+            emitted.allocation_size()
+                + in_next_layer.allocation_size()
+                + first_edges.allocation_size()
+                + (layer.capacity() + next_layer.capacity()) * std::mem::size_of::<NodeId>(),
+        );
         Ok(results)
     }
 
@@ -1008,9 +1235,29 @@ impl VariableLengthExpandOperator {
     /// them: resumes the search from the current input row, and starts the
     /// searches from the next ones.
     fn fill_output_buffer(&mut self) -> Result<(), OperatorError> {
+        // One read of the statement's count and one write of what the searches took, also
+        // when they fail
+        let mut allowance = Allowance::of(self.expansions.as_deref());
+        let filled = self.fill_within(&mut allowance);
+        allowance.settle(self.expansions.as_deref());
+        filled
+    }
+
+    /// [`Self::fill_output_buffer`], taking the expansions from `allowance`.
+    fn fill_within(&mut self, allowance: &mut Allowance) -> Result<(), OperatorError> {
         while !self.output_full() {
+            if let Some((input_idx, mut targets)) = self.reached.take() {
+                self.buffer_targets(input_idx, &mut targets);
+                if targets.is_empty() {
+                    self.path_budget
+                        .release(targets.capacity() * std::mem::size_of::<(NodeId, u32)>());
+                } else {
+                    self.reached = Some((input_idx, targets));
+                }
+                continue;
+            }
             if let Some(mut search) = self.search.take() {
-                if self.advance(&mut search)? {
+                if self.advance(&mut search, allowance)? {
                     self.search = Some(search);
                 }
                 continue;
@@ -1025,14 +1272,31 @@ impl VariableLengthExpandOperator {
                 break;
             };
             self.current_input_idx += 1;
+            self.start_row()?;
             if self.searches_reachability() {
                 let mut results = self.reachable_targets(input_idx, source_node)?;
                 if self.reachability == Reachability::AcrossInputRows {
-                    results.retain(|row| self.emitted_across_rows.insert(row.target_id));
+                    let mut refused = None;
+                    results.retain(|&(target, _)| {
+                        refused.is_none()
+                            && insert_within(
+                                &mut self.path_budget,
+                                &mut self.emitted_across_rows,
+                                target,
+                            )
+                            .unwrap_or_else(|error| {
+                                refused = Some(error);
+                                false
+                            })
+                    });
+                    if let Some(error) = refused {
+                        return Err(error);
+                    }
                 }
-                self.output_buffer.extend(results);
+                results.reverse();
+                self.reached = Some((input_idx, results));
             } else {
-                self.search = Some(self.start_search(input_idx, source_node)?);
+                self.search = Some(self.start_search(input_idx, source_node, allowance)?);
             }
         }
         Ok(())
@@ -1105,7 +1369,8 @@ impl Operator for VariableLengthExpandOperator {
         let take_count = self.output_buffer.len().min(self.chunk_capacity);
         let to_output: Vec<_> = self.output_buffer.drain(..take_count).collect();
         let taken_ids: usize = to_output.iter().map(OutputRow::path_ids).sum();
-        self.buffered_ids = self.buffered_ids.saturating_sub(taken_ids);
+        self.buffered_ids -= taken_ids;
+        self.path_budget.release(taken_ids * ID_BYTES);
 
         for out_row in &to_output {
             let input_row = &input_rows[out_row.input_idx];
@@ -1243,6 +1508,8 @@ impl Operator for VariableLengthExpandOperator {
         self.output_buffer.clear();
         self.buffered_ids = 0;
         self.emitted_across_rows.clear();
+        self.reached = None;
+        self.path_budget.clear();
         self.exhausted = false;
     }
 
@@ -1253,6 +1520,27 @@ impl Operator for VariableLengthExpandOperator {
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
         self
     }
+}
+
+/// Inserts `node` into `set`, which grows within `budget`: whether it is new.
+fn insert_within(
+    budget: &mut PathBudget,
+    set: &mut FxHashSet<NodeId>,
+    node: NodeId,
+) -> Result<bool, OperatorError> {
+    budget.reserve_set(set, 1)?;
+    Ok(set.insert(node))
+}
+
+/// Pushes `item` onto `items`, which grows within `budget`.
+fn push_within<T>(
+    budget: &mut PathBudget,
+    items: &mut Vec<T>,
+    item: T,
+) -> Result<(), OperatorError> {
+    budget.reserve_vec(items, 1)?;
+    items.push(item);
+    Ok(())
 }
 
 /// Edge ids as the `Value::Int64` items of an edge list.
@@ -2961,6 +3249,40 @@ mod tests {
         Ok((lengths, chunks))
     }
 
+    /// A search takes one expansion per edge it reads to extend a path and per node and edge
+    /// id a row copies out of its path: it runs at exactly that many and fails one below.
+    #[test]
+    fn a_search_takes_its_expansions_exactly() {
+        // From Alix two edges to Gus and two back: a search of up to two edges reads Alix's 2
+        // edges, then Gus's 2 for each of the two paths that end there
+        for (case, detail, edge_list, expansions) in [
+            ("targets", false, false, 2 + 2 * 2),
+            ("an edge list", false, true, 2 + 2 * 2 + 2 + 4 * 2),
+            ("a path", true, false, 2 + 2 * 2 + 2 * 3 + 4 * 5),
+        ] {
+            let run = |limit: u64| {
+                let store = parallel_edges(2);
+                let mut expand = from_sources(&store, 1, 2)
+                    .with_path_length_output()
+                    .with_path_expansions(Arc::new(PathExpansions::new(limit)));
+                if detail {
+                    expand = expand.with_path_detail_output();
+                }
+                if edge_list {
+                    expand = expand.with_edge_list_output();
+                }
+                lengths_and_chunks(&mut expand)
+            };
+            let (lengths, _) = run(expansions).unwrap_or_else(|e| panic!("{case}: {e}"));
+            assert_eq!(lengths, [1, 1, 2, 2, 2, 2], "{case}");
+            let error = run(expansions - 1).expect_err(case);
+            assert!(
+                error.to_string().contains("path expansion limit"),
+                "{case}: {error}"
+            );
+        }
+    }
+
     #[test]
     fn a_search_over_its_budget_fails_with_an_error_that_says_what_to_do() {
         // Three edges each way: 3^n walks of n edges, 2,187 of seven; six
@@ -3001,29 +3323,110 @@ mod tests {
 
     #[test]
     fn a_search_holds_the_paths_it_has_yet_to_emit_not_those_it_emitted() {
-        // Three edges each way, up to six edges: 1,092 walks, 729 of them of
-        // six edges, which the search holds at once after finding the last
-        // of them. A budget of exactly 729 open paths suffices, and the rows
-        // stream out in chunks of 50; one path less does not. A bounded walk
-        // is charged its entry alone, whatever its length.
-        let store = parallel_edges(3);
-        let (per_path, per_edge) = from_sources(&store, 1, 6).path_charges();
+        // A chain of 2,000 edges: 2,000 walks from its first node, one open
+        // at a time. Their entries take 64 KB at once; the queue holds the
+        // one open in a block of one entry at a budget of one entry,
+        // and the rows stream out in chunks of 50. A byte less does not hold
+        // it. A bounded walk is charged nothing per edge, whatever its length.
+        let store = Arc::new(RowGroupStore::new());
+        let mut last = store.create_node(&["Source"]);
+        for _ in 0..2_000 {
+            let next = store.create_node(&["Node"]);
+            store.create_edge(last, next, "NEXT");
+            last = next;
+        }
+        let (_, per_edge) = from_sources(&store, 1, 2_000).path_charges();
         assert_eq!(per_edge, 0, "a bounded walk is not charged per edge");
-        let expand = |open_paths: usize| {
-            from_sources(&store, 1, 6)
+        let expand = |budget: usize| {
+            from_sources(&store, 1, 2_000)
                 .with_path_length_output()
                 .with_chunk_capacity(50)
-                .with_memory_budget(open_paths * per_path)
+                .with_memory_budget(budget)
         };
-        let (lengths, chunks) = lengths_and_chunks(&mut expand(729)).unwrap();
-        assert_eq!(lengths.len(), 3 + 9 + 27 + 81 + 243 + 729);
-        assert!(lengths.is_sorted(), "shorter walks first");
-        assert_eq!(chunks, lengths.len().div_ceil(50), "full chunks of 50 rows");
+        let entry = crate::execution::PATH_QUEUE_ENTRY_BYTES;
+        let (lengths, chunks) = lengths_and_chunks(&mut expand(entry)).unwrap();
+        assert_eq!(lengths, (1..=2_000).collect::<Vec<u32>>());
+        assert_eq!(chunks, 40, "full chunks of 50 rows");
         assert!(
-            lengths_and_chunks(&mut expand(728))
+            lengths_and_chunks(&mut expand(entry - 1))
                 .is_err_and(|error| path_budget_message(&error).is_some()),
-            "728 open paths are one too few"
+            "a byte under one entry holds no open path"
         );
+    }
+
+    #[test]
+    fn a_search_counts_the_segments_its_open_paths_keep_alive() {
+        // The same chain of 2,000 edges in TRAIL mode, which follows each
+        // path whole: the one open path extends the one before it, so it
+        // keeps every segment back to the source alive, 2,000 of 48 bytes
+        // (96,000) at the end. Two of the queue's blocks (8 KiB) hold the
+        // open path's entry and its own segment, not the chain: refused.
+        // With room for the chain on top it answers.
+        const LENGTH: usize = 2_000;
+        let store = Arc::new(RowGroupStore::new());
+        let mut last = store.create_node(&["Source"]);
+        for _ in 0..LENGTH {
+            let next = store.create_node(&["Node"]);
+            store.create_edge(last, next, "NEXT");
+            last = next;
+        }
+        let segment = std::mem::size_of::<PathSegment>() + 2 * std::mem::size_of::<usize>();
+        let blocks = 2 * crate::execution::path_queue::BLOCK_BYTES;
+        assert!(segment < blocks && LENGTH * segment > blocks);
+        let expand = |budget: usize| {
+            from_sources(&store, 1, 2_000)
+                .with_path_mode(PathMode::Trail)
+                .with_memory_budget(budget)
+        };
+        let Err(error) = rows(&mut expand(blocks)) else {
+            panic!("answered: the chain's 2,000 live segments pass two blocks");
+        };
+        assert!(path_budget_message(&error).is_some(), "{error}");
+        assert_eq!(
+            rows(&mut expand(blocks + (LENGTH + 1) * segment))
+                .unwrap()
+                .len(),
+            LENGTH
+        );
+    }
+
+    #[test]
+    fn a_search_gives_back_the_segments_of_the_paths_it_is_done_with() {
+        // TRAIL from a source to 1,000 leaves, the last of which leads on
+        // along a chain of 1,000 edges. The leaves' segments go back as their
+        // paths are done, before the chain's are made, so the search holds
+        // one of the two at a time: room for 1,200 segments and nine of the
+        // queue's blocks is enough, where the two together are not
+        const LEAVES: usize = 1_000;
+        let store = Arc::new(RowGroupStore::new());
+        let source = store.create_node(&["Source"]);
+        let mut last = source;
+        for _ in 0..LEAVES {
+            last = store.create_node(&["Node"]);
+            store.create_edge(source, last, "NEXT");
+        }
+        for _ in 0..LEAVES {
+            let next = store.create_node(&["Node"]);
+            store.create_edge(last, next, "NEXT");
+            last = next;
+        }
+        let blocks = 9 * crate::execution::path_queue::BLOCK_BYTES;
+        assert!(1_200 * SEGMENT_BYTES + blocks < 2 * LEAVES * SEGMENT_BYTES + 4_096);
+        let mut expand = from_sources(&store, 1, 2_000)
+            .with_path_mode(PathMode::Trail)
+            .with_memory_budget(1_200 * SEGMENT_BYTES + blocks);
+        assert_eq!(rows(&mut expand).unwrap().len(), 2 * LEAVES);
+        assert!(
+            expand.path_budget.used() <= crate::execution::path_queue::BLOCK_BYTES + 512,
+            "the queue's spare and its index are left: {}",
+            expand.path_budget.used()
+        );
+        // A source with no edge: its own segment goes back too
+        let store = Arc::new(RowGroupStore::new());
+        store.create_node(&["Source"]);
+        let mut expand = from_sources(&store, 1, 2).with_path_mode(PathMode::Trail);
+        assert_eq!(rows(&mut expand).unwrap().len(), 0, "no path");
+        assert_eq!(expand.path_budget.used(), 0);
     }
 
     #[test]
@@ -3162,5 +3565,723 @@ mod tests {
         }
         assert_eq!(rows, 2_000);
         assert!(chunks > 1_000, "{chunks} chunks");
+    }
+
+    // --- The statement's memory: what a search holds is a grant of it ---
+
+    use crate::execution::memory::{self, OperatorMemoryContext, StatementMemory};
+    use grafeo_common::memory::buffer::BufferManager;
+
+    const KIB: usize = 1024;
+
+    /// A statement whose operators may hold `cap` bytes together.
+    fn statement(cap: usize) -> OperatorMemoryContext {
+        OperatorMemoryContext::new(BufferManager::with_budget(1 << 30)).with_query_limit(cap)
+    }
+
+    /// The expand `build` makes, built as an operator of `ctx`'s statement.
+    fn built_in(
+        ctx: &OperatorMemoryContext,
+        build: impl FnOnce() -> VariableLengthExpandOperator,
+    ) -> VariableLengthExpandOperator {
+        let _scope = memory::enter(StatementMemory::Budgeted(ctx.clone()));
+        build()
+    }
+
+    /// What a case of the matrix returns.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Output {
+        /// The targets and the path lengths.
+        Targets,
+        /// The path's nodes and edges too.
+        Path,
+        /// The edge column as the path's edges.
+        EdgeList,
+        /// Each target once per input row.
+        Distinct,
+        /// Each target once over all input rows.
+        DistinctAcrossRows,
+    }
+
+    const MODES: [PathMode; 4] = [
+        PathMode::Walk,
+        PathMode::Trail,
+        PathMode::Simple,
+        PathMode::Acyclic,
+    ];
+    const OUTPUTS: [Output; 5] = [
+        Output::Targets,
+        Output::Path,
+        Output::EdgeList,
+        Output::Distinct,
+        Output::DistinctAcrossRows,
+    ];
+
+    /// Alix (a `Source`) and seven others with an edge from each to each:
+    /// thousands of paths of five or six edges in every mode.
+    fn clique() -> Arc<RowGroupStore> {
+        let store = Arc::new(RowGroupStore::new());
+        let mut nodes = vec![store.create_node(&["Source"])];
+        nodes.extend((0..7).map(|_| store.create_node(&["Node"])));
+        for &from in &nodes {
+            for &to in &nodes {
+                if from != to {
+                    store.create_edge(from, to, "KNOWS");
+                }
+            }
+        }
+        store
+    }
+
+    /// `sources` `Source` nodes, each with an edge to `leaves` nodes of its
+    /// own.
+    fn fans(sources: usize, leaves: usize) -> Arc<RowGroupStore> {
+        let store = Arc::new(RowGroupStore::new());
+        for _ in 0..sources {
+            let hub = store.create_node(&["Source"]);
+            for _ in 0..leaves {
+                let leaf = store.create_node(&["Node"]);
+                store.create_edge(hub, leaf, "KNOWS");
+            }
+        }
+        store
+    }
+
+    /// Whether a case runs the reachability search, which holds each node
+    /// once: a fan of 5,000 leaves fills it; the others run the path search
+    /// over the clique.
+    fn searches_reachability(mode: PathMode, output: Output) -> bool {
+        matches!(output, Output::Distinct | Output::DistinctAcrossRows)
+            && matches!(mode, PathMode::Walk | PathMode::Trail)
+    }
+
+    /// The expand of a case over `store`.
+    fn case(
+        store: &Arc<RowGroupStore>,
+        mode: PathMode,
+        output: Output,
+    ) -> VariableLengthExpandOperator {
+        let max_hops = if searches_reachability(mode, output) {
+            3
+        } else if matches!(mode, PathMode::Walk | PathMode::Trail) {
+            5
+        } else {
+            6
+        };
+        let expand = from_sources(store, 1, max_hops)
+            .with_path_mode(mode)
+            .with_path_length_output()
+            .with_chunk_capacity(64);
+        match output {
+            Output::Targets => expand,
+            Output::Path => expand.with_path_detail_output(),
+            Output::EdgeList => expand.with_edge_list_output(),
+            Output::Distinct => expand.with_reachability(),
+            Output::DistinctAcrossRows => expand.with_reachability_across_rows(),
+        }
+    }
+
+    /// Every row of `expand`, each as its values, and the number of chunks;
+    /// or the error it ends with.
+    fn rows(expand: &mut VariableLengthExpandOperator) -> Result<Vec<Vec<String>>, OperatorError> {
+        let mut rows = Vec::new();
+        while let Some(chunk) = expand.next()? {
+            for row in 0..chunk.row_count() {
+                rows.push(
+                    (0..chunk.column_count())
+                        .map(|column| format!("{:?}", chunk.column(column).unwrap().get_value(row)))
+                        .collect(),
+                );
+            }
+        }
+        Ok(rows)
+    }
+
+    /// Runs `check` on each case of the matrix with its graph.
+    fn each_case(mut check: impl FnMut(&Arc<RowGroupStore>, PathMode, Output)) {
+        let (clique, fan) = (clique(), fans(1, 5_000));
+        for mode in MODES {
+            for output in OUTPUTS {
+                let store = if searches_reachability(mode, output) {
+                    &fan
+                } else {
+                    &clique
+                };
+                check(store, mode, output);
+            }
+        }
+    }
+
+    #[test]
+    fn under_its_budget_every_search_gives_the_rows_it_gives_unbounded() {
+        each_case(|store, mode, output| {
+            let oracle = rows(&mut case(store, mode, output)).unwrap();
+            assert!(
+                oracle.len() > 1_000,
+                "{mode:?} {output:?}: {} rows",
+                oracle.len()
+            );
+            let ctx = statement(256 << 20);
+            let mut expand = built_in(&ctx, || case(store, mode, output));
+            assert_eq!(rows(&mut expand).unwrap(), oracle, "{mode:?} {output:?}");
+            assert!(
+                ctx.query().used() > 0,
+                "{mode:?} {output:?}: counted in the statement"
+            );
+            drop(expand);
+            assert_eq!(ctx.query().used(), 0, "{mode:?} {output:?}");
+        });
+    }
+
+    #[test]
+    fn past_its_budget_every_search_is_refused_naming_the_budget() {
+        each_case(|store, mode, output| {
+            let ctx = statement(256 << 20);
+            let mut expand = built_in(&ctx, || {
+                case(store, mode, output).with_memory_budget(64 * KIB)
+            });
+            let error = rows(&mut expand).expect_err("more than 64 KiB at once");
+            let Some(message) = path_budget_message(&error) else {
+                panic!("{mode:?} {output:?}: expected the budget's refusal, got {error}");
+            };
+            assert!(message.contains("64 KiB"), "{mode:?} {output:?}: {message}");
+            assert!(
+                message.contains("A variable-length pattern"),
+                "{mode:?} {output:?}: {message}"
+            );
+            drop(expand);
+            assert_eq!(ctx.query().used(), 0, "{mode:?} {output:?}");
+        });
+    }
+
+    #[test]
+    fn past_the_statements_cap_every_search_is_refused_naming_the_query_memory_limit() {
+        each_case(|store, mode, output| {
+            let ctx = statement(64 * KIB);
+            let mut expand = built_in(&ctx, || case(store, mode, output));
+            let error = rows(&mut expand).expect_err("more than the statement's 64 KiB");
+            assert!(
+                path_budget_message(&error).is_none(),
+                "{mode:?} {output:?}: the statement's cap refused, not the budget: {error}"
+            );
+            assert!(
+                error.to_string().contains("query memory limit"),
+                "{mode:?} {output:?}: {error}"
+            );
+            drop(expand);
+            assert_eq!(ctx.query().used(), 0, "{mode:?} {output:?}");
+        });
+    }
+
+    #[test]
+    fn a_search_that_fails_mid_row_gives_the_statement_its_memory_back() {
+        // Walks of up to five edges over the clique, in chunks of 64: the
+        // first chunks come out, then the search fails within its row, on
+        // its budget or on the statement's cap
+        let store = clique();
+        for (cap, budget, by_the_budget) in [
+            (256 << 20, 64 * KIB, true),
+            (64 * KIB, DEFAULT_PATH_SEARCH_BUDGET, false),
+        ] {
+            let ctx = statement(cap);
+            let mut expand = built_in(&ctx, || {
+                case(&store, PathMode::Walk, Output::Path).with_memory_budget(budget)
+            });
+            let mut chunks = 0;
+            let error = loop {
+                match expand.next() {
+                    Ok(Some(_)) => chunks += 1,
+                    Ok(None) => panic!("the search fits in {budget} bytes and {cap}"),
+                    Err(error) => break error,
+                }
+            };
+            assert!(chunks > 0, "rows came out before the failure");
+            assert!(
+                ctx.query().used() > 0,
+                "the operator holds its grant until it drops"
+            );
+            assert_eq!(
+                path_budget_message(&error).is_some(),
+                by_the_budget,
+                "{error}"
+            );
+            if !by_the_budget {
+                assert!(error.to_string().contains("query memory limit"), "{error}");
+            }
+            drop(expand);
+            assert_eq!(
+                ctx.query().used(),
+                0,
+                "the statement holds nothing after the failure"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_too_long_for_the_budget_is_refused_before_its_lists_are_built() {
+        // One path of 2,000 edges: its 4,001 ids take 32,008 bytes in the
+        // output buffer. The search holds the one open path, its 2,001
+        // segments and at most two of the queue's blocks: with room for that
+        // and half the ids it is refused, with room for all of them it
+        // answers
+        let store = Arc::new(RowGroupStore::new());
+        let mut last = store.create_node(&["Source"]);
+        for _ in 0..2_000 {
+            let next = store.create_node(&["Node"]);
+            store.create_edge(last, next, "NEXT");
+            last = next;
+        }
+        let path = 2 * crate::execution::path_queue::BLOCK_BYTES + 2_001 * SEGMENT_BYTES;
+        let ids = 4_001 * ID_BYTES;
+        let mut expand = from_sources(&store, 2_000, 2_000)
+            .with_path_detail_output()
+            .with_memory_budget(path + ids / 2);
+        let error = rows(&mut expand).expect_err("the path's ids pass the budget");
+        assert!(path_budget_message(&error).is_some(), "{error}");
+        let mut expand = from_sources(&store, 2_000, 2_000)
+            .with_path_detail_output()
+            .with_memory_budget(path + ids);
+        assert_eq!(rows(&mut expand).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn rows_buffered_from_an_earlier_input_row_stay_charged() {
+        // Two chains from two sources, of 300 edges and of one: the rows of
+        // the first fill most of the buffer when the second's search starts
+        // over, and their ids stay charged
+        let store = Arc::new(RowGroupStore::new());
+        for length in [300, 1] {
+            let mut last = store.create_node(&["Source"]);
+            for _ in 0..length {
+                let next = store.create_node(&["Node"]);
+                store.create_edge(last, next, "NEXT");
+                last = next;
+            }
+        }
+        let mut expand = from_sources(&store, 1, 300)
+            .with_path_detail_output()
+            .with_chunk_capacity(1 << 20);
+        expand.materialize_input().unwrap();
+        expand.fill_output_buffer().unwrap();
+        assert_eq!(expand.output_buffer.len(), 301);
+        assert!(
+            expand.path_budget.used() >= expand.buffered_ids * std::mem::size_of::<NodeId>(),
+            "{} bytes held for {} ids",
+            expand.path_budget.used(),
+            expand.buffered_ids
+        );
+        assert_eq!(rows(&mut expand).unwrap().len(), 301);
+    }
+
+    /// The fewest bytes a hash table of `n` entries of `T` takes: an eighth
+    /// of its buckets stays empty, and each bucket has a control byte.
+    fn table_floor<T>(n: usize) -> usize {
+        n * 8 / 7 * (std::mem::size_of::<T>() + 1)
+    }
+
+    /// The fewest bytes a vector of `n` items of `T` takes.
+    fn vec_floor<T>(n: usize) -> usize {
+        n * std::mem::size_of::<T>()
+    }
+
+    #[test]
+    fn a_reachability_search_is_charged_every_set_and_vector_it_grows() {
+        // A source with an edge to each of 4,096 leaves. At its peak the
+        // budget counted at least each table and vector the search grew for
+        // the leaves at once
+        const LEAVES: usize = 4_096;
+        let store = fans(1, LEAVES);
+        let held = |expand: VariableLengthExpandOperator| {
+            let mut expand = expand;
+            assert_eq!(
+                rows(&mut expand).unwrap().len(),
+                if expand.min_hops == 1 { LEAVES } else { 0 }
+            );
+            (
+                expand.path_budget.peak(),
+                expand.emitted_across_rows.allocation_size(),
+            )
+        };
+        let emitted = table_floor::<NodeId>(LEAVES);
+        let results = vec_floor::<(NodeId, u32)>(LEAVES);
+        let next_layer = vec_floor::<NodeId>(LEAVES);
+        let first_edges = table_floor::<(NodeId, (u32, EdgeId))>(LEAVES);
+
+        // Emitted nodes, the rows and the next layer
+        let (used, _) = held(from_sources(&store, 1, 1).with_reachability());
+        assert!(used >= emitted + results + next_layer, "{used}");
+        // Below `min_hops`: the nodes of the next layer and the layer
+        let (used, _) = held(from_sources(&store, 2, 2).with_reachability());
+        assert!(used >= table_floor::<NodeId>(LEAVES) + next_layer, "{used}");
+        // TRAIL: each node's first edge too
+        let (used, _) = held(
+            from_sources(&store, 1, 1)
+                .with_path_mode(PathMode::Trail)
+                .with_reachability(),
+        );
+        assert!(
+            used >= emitted + results + next_layer + first_edges,
+            "{used}"
+        );
+        // Across input rows: the nodes emitted for every row stay charged
+        // once the search's own sets are given back
+        let mut expand = from_sources(&store, 1, 1).with_reachability_across_rows();
+        assert_eq!(rows(&mut expand).unwrap().len(), LEAVES);
+        let across = expand.emitted_across_rows.allocation_size();
+        assert!(across >= table_floor::<NodeId>(LEAVES));
+        assert!(expand.path_budget.peak() >= emitted + results + next_layer);
+        assert!(
+            expand.path_budget.used() >= across,
+            "{} held after the search",
+            expand.path_budget.used()
+        );
+    }
+
+    #[test]
+    fn a_reachability_search_holds_a_target_in_less_than_a_buffered_row() {
+        // A source with an edge to each of 4,096 leaves, its targets within
+        // two edges, at 256 KiB: 64 bytes a target. As 88-byte `OutputRow`s
+        // the 4,096 targets alone take 360,448 bytes, and the search is
+        // refused when that list doubles from 1,024 to 2,048 (298,416 bytes
+        // with the emitted set and the next layer). As a node and a length
+        // (16 bytes) the search holds at most 208,976 bytes: the emitted set's
+        // last growth to 8,192 buckets (73,760 reserved over its 36,880) with
+        // the 4,096 targets (65,536) and the next layer (32,768).
+        let store = fans(1, 4_096);
+        let mut expand = from_sources(&store, 1, 2)
+            .with_reachability()
+            .with_memory_budget(256 * KIB);
+        assert_eq!(rows(&mut expand).unwrap().len(), 4_096);
+        assert_eq!(
+            expand.path_budget.used(),
+            0,
+            "the targets go back once they are rows"
+        );
+    }
+
+    #[test]
+    fn the_nodes_emitted_for_earlier_rows_stay_charged() {
+        // Two sources: the first reaches 4,096 leaves, the second none. The
+        // second row's search starts over, and still counts the nodes the
+        // first emitted
+        let store = fans(1, 4_096);
+        store.create_node(&["Source"]);
+        let mut expand = from_sources(&store, 1, 1).with_reachability_across_rows();
+        assert_eq!(rows(&mut expand).unwrap().len(), 4_096);
+        assert!(
+            expand.path_budget.used() >= expand.emitted_across_rows.allocation_size(),
+            "{} bytes held, {} for the emitted nodes",
+            expand.path_budget.used(),
+            expand.emitted_across_rows.allocation_size()
+        );
+    }
+
+    #[test]
+    fn a_reachability_search_gives_back_its_layers_when_it_returns() {
+        // One target two edges from the source, through 4,096 middle nodes or
+        // through one, each target once over all input rows. The rows and the
+        // nodes emitted across rows are the same (the target); the wide
+        // search's layer below `min_hops` (a set of 4,096 nodes, 73,744
+        // bytes, and a vector of them, 32,768) is gone once the search
+        // returns, so both hold the same after it. Charged on, it is counted
+        // again under what the nodes emitted across rows hold as they grow.
+        let held = |middles: usize| {
+            let store = Arc::new(RowGroupStore::new());
+            let source = store.create_node(&["Source"]);
+            let target = store.create_node(&["Node"]);
+            for _ in 0..middles {
+                let middle = store.create_node(&["Node"]);
+                store.create_edge(source, middle, "KNOWS");
+                store.create_edge(middle, target, "KNOWS");
+            }
+            let mut expand = from_sources(&store, 2, 2).with_reachability_across_rows();
+            assert_eq!(rows(&mut expand).unwrap().len(), 1, "the target, once");
+            expand.path_budget.used()
+        };
+        let (wide, narrow) = (held(4_096), held(1));
+        assert!(
+            wide < narrow + crate::execution::path_queue::BLOCK_BYTES,
+            "the wide search holds {wide} bytes after it returned, the narrow one {narrow}"
+        );
+    }
+
+    /// A shape of a search within a small budget: a fan of leaves from the
+    /// source (each with a child of its own when `two`), searched in `mode`.
+    #[derive(Debug, Clone, Copy)]
+    struct SmallShape {
+        name: &'static str,
+        mode: PathMode,
+        two: bool,
+    }
+
+    const SMALL_SHAPES: [SmallShape; 4] = [
+        SmallShape {
+            name: "TRAIL fan",
+            mode: PathMode::Trail,
+            two: false,
+        },
+        SmallShape {
+            name: "WALK fan, targets only",
+            mode: PathMode::Walk,
+            two: false,
+        },
+        SmallShape {
+            name: "WALK, two hops",
+            mode: PathMode::Walk,
+            two: true,
+        },
+        SmallShape {
+            name: "TRAIL, two hops",
+            mode: PathMode::Trail,
+            two: true,
+        },
+    ];
+
+    impl SmallShape {
+        /// What 0.6.3 charged one queued path: its entry, and its segment when
+        /// the search followed paths.
+        fn charged_by_0_6_3(self) -> usize {
+            match self.mode {
+                PathMode::Walk => PATH_QUEUE_ENTRY_BYTES,
+                _ => PATH_QUEUE_ENTRY_BYTES + SEGMENT_BYTES,
+            }
+        }
+
+        /// The leaves 0.6.3 held within `budget`: as many queued paths as
+        /// its charge fits (a two-hop search queues each leaf's child as it
+        /// takes the leaf out).
+        fn held_by_0_6_3(self, budget: usize) -> usize {
+            budget / self.charged_by_0_6_3()
+        }
+
+        /// The leaves 0.6.4 holds at least within `budget`, by what it counts
+        /// that 0.6.3 did not:
+        /// - the queue's blocks, a quarter of the budget each below 16 KiB:
+        ///   the last one partly filled, and in a two-hop search also the
+        ///   first one partly drained;
+        /// - the block index at its doubled peak with its reservation slack,
+        ///   once there is more than one block;
+        /// - the source's segment, in a search that follows paths;
+        /// - in a two-hop TRAIL search, the segment of each leaf taken out
+        ///   while its child is queued.
+        fn held_at_least(self, budget: usize) -> usize {
+            // A block, by the rule (not by the queue): a quarter of what the
+            // budget leaves beside the index of four blocks
+            let small = crate::execution::path_queue::SMALL_BUDGET_BYTES;
+            let slot = crate::execution::path_queue::INDEX_SLOT_BYTES;
+            let index = crate::execution::path_budget::capacity_within(budget, 3) * slot;
+            let block = (budget.saturating_sub(index) / 4 / PATH_QUEUE_ENTRY_BYTES).clamp(
+                1,
+                crate::execution::path_queue::BLOCK_BYTES / PATH_QUEUE_ENTRY_BYTES,
+            ) * PATH_QUEUE_ENTRY_BYTES;
+            let wasted = if self.two { 2 } else { 1 };
+            let blocks = (self.held_by_0_6_3(budget) * PATH_QUEUE_ENTRY_BYTES).div_ceil(block)
+                + usize::from(self.two);
+            let slack =
+                crate::execution::path_budget::RESERVE_SLACK_ENTRIES * budget.min(small) / small;
+            let index = if blocks > 1 {
+                (3 * blocks + slack) * crate::execution::path_queue::INDEX_SLOT_BYTES
+            } else {
+                0
+            };
+            let (source, per_leaf) = match (self.mode, self.two) {
+                (PathMode::Walk, _) => (0, PATH_QUEUE_ENTRY_BYTES),
+                (_, false) => (SEGMENT_BYTES, PATH_QUEUE_ENTRY_BYTES + SEGMENT_BYTES),
+                (_, true) => (SEGMENT_BYTES, PATH_QUEUE_ENTRY_BYTES + 2 * SEGMENT_BYTES),
+            };
+            budget.saturating_sub(wasted * block + index + source) / per_leaf
+        }
+
+        /// The most leaves a search of this shape answers for within
+        /// `budget`.
+        fn held(self, budget: usize) -> usize {
+            let answers = |leaves: usize| {
+                let store = Arc::new(RowGroupStore::new());
+                let source = store.create_node(&["Source"]);
+                for _ in 0..leaves {
+                    let leaf = store.create_node(&["Node"]);
+                    store.create_edge(source, leaf, "KNOWS");
+                    if self.two {
+                        let child = store.create_node(&["Node"]);
+                        store.create_edge(leaf, child, "KNOWS");
+                    }
+                }
+                let mut expand = from_sources(&store, 1, if self.two { 2 } else { 1 })
+                    .with_path_mode(self.mode)
+                    .with_memory_budget(budget);
+                rows(&mut expand).is_ok()
+            };
+            // Answering is monotone in the leaves: double, then halve
+            let (mut low, mut high) = (0, 1);
+            while answers(high) {
+                low = high;
+                high *= 2;
+            }
+            while high - low > 1 {
+                let middle = usize::midpoint(low, high);
+                if answers(middle) {
+                    low = middle;
+                } else {
+                    high = middle;
+                }
+            }
+            low
+        }
+    }
+
+    #[test]
+    fn a_small_budget_holds_what_0_6_3_held_less_what_it_counts_more() {
+        for shape in SMALL_SHAPES {
+            for kib in [1, 4, 8] {
+                let budget = kib * KIB;
+                let (held, floor) = (shape.held(budget), shape.held_at_least(budget));
+                let by_0_6_3 = shape.held_by_0_6_3(budget);
+                assert!(
+                    held >= floor && floor <= by_0_6_3,
+                    "{} at {kib} KiB: held {held}, 0.6.3 held {by_0_6_3}, at least {floor} \
+                     ({} fewer for what 0.6.4 counts more)",
+                    shape.name,
+                    by_0_6_3 - floor
+                );
+            }
+        }
+    }
+
+    /// The most leaves a search of `shape` answers for at each of
+    /// `budgets`, in rising order: each count starts from the last, and each
+    /// fan is built once.
+    fn held_over(shape: SmallShape, budgets: &[usize]) -> Vec<usize> {
+        let mut fans: FxHashMap<usize, Arc<RowGroupStore>> = FxHashMap::default();
+        let mut answers = |leaves: usize, budget: usize| {
+            let store = fans.entry(leaves).or_insert_with(|| {
+                let store = Arc::new(RowGroupStore::new());
+                let source = store.create_node(&["Source"]);
+                for _ in 0..leaves {
+                    let leaf = store.create_node(&["Node"]);
+                    store.create_edge(source, leaf, "KNOWS");
+                    if shape.two {
+                        let child = store.create_node(&["Node"]);
+                        store.create_edge(leaf, child, "KNOWS");
+                    }
+                }
+                store
+            });
+            let mut expand = from_sources(store, 1, if shape.two { 2 } else { 1 })
+                .with_path_mode(shape.mode)
+                .with_memory_budget(budget);
+            rows(&mut expand).is_ok()
+        };
+        let mut held = 0;
+        budgets
+            .iter()
+            .map(|&budget| {
+                while held > 0 && !answers(held, budget) {
+                    held -= 1;
+                }
+                while answers(held + 1, budget) {
+                    held += 1;
+                }
+                held
+            })
+            .collect()
+    }
+
+    /// Every budget from 1 KiB to 32 KiB in steps of 8 bytes, the smallest
+    /// unit a search charges.
+    fn budgets_in_steps() -> Vec<usize> {
+        (KIB..=32 * KIB).step_by(8).collect()
+    }
+
+    #[test]
+    fn a_larger_small_budget_holds_at_most_a_block_fewer_paths() {
+        // At every budget from 1 KiB to 32 KiB in steps of 8 bytes, a search
+        // holds at least the most it held at any smaller budget less one
+        // block's entries; and past 16 KiB, where blocks reach full size, it
+        // holds no fewer than a byte below
+        let budgets = budgets_in_steps();
+        for shape in SMALL_SHAPES {
+            let held = held_over(shape, &budgets);
+            let mut most = 0;
+            for (&budget, &paths) in budgets.iter().zip(&held) {
+                let block = PathQueue::<OpenPath>::block_items_within(budget);
+                assert!(
+                    paths + block >= most,
+                    "{}: {paths} at {budget} bytes, {most} below, blocks of {block}",
+                    shape.name
+                );
+                most = most.max(paths);
+            }
+            let at = |budget: usize| held[(budget - KIB) / 8];
+            let (below, at_16_kib) = (held_over(shape, &[16 * KIB - 1])[0], at(16 * KIB));
+            assert!(
+                at_16_kib >= below,
+                "{}: {at_16_kib} at 16 KiB, {below} a byte below",
+                shape.name
+            );
+        }
+    }
+
+    #[test]
+    fn at_a_refusal_the_popped_paths_with_queued_extensions_are_counted() {
+        // A tree: the source, its 8 children, 8 grandchildren under each;
+        // TRAIL up to two edges. A budget of 2,784 bytes has blocks of 672
+        // (a quarter of what it leaves beside an index of 96, 21 entries):
+        // the source's segment, the children's block and segments and the
+        // grandchildren's block leave room for 21 grandchildren's segments,
+        // so the 6th grandchild of the 3rd child is refused. The source and
+        // the 3 children taken out are alive then through their queued
+        // extensions: 4 segments besides the 26 queued paths' own (5
+        // children and 21 grandchildren)
+        const WIDTH: usize = 8;
+        const BUDGET: usize = 2_784;
+        let store = Arc::new(RowGroupStore::new());
+        let source = store.create_node(&["Source"]);
+        for _ in 0..WIDTH {
+            let child = store.create_node(&["Node"]);
+            store.create_edge(source, child, "KNOWS");
+            for _ in 0..WIDTH {
+                let grandchild = store.create_node(&["Node"]);
+                store.create_edge(child, grandchild, "KNOWS");
+            }
+        }
+        let block = PathQueue::<OpenPath>::block_items_within(BUDGET) * PATH_QUEUE_ENTRY_BYTES;
+        assert_eq!(
+            block,
+            (BUDGET - 4 * crate::execution::path_queue::INDEX_SLOT_BYTES) / 4
+        );
+        let fixed = SEGMENT_BYTES + 2 * block + WIDTH * SEGMENT_BYTES;
+        let grandchildren = (BUDGET - fixed) / SEGMENT_BYTES;
+        assert_eq!(
+            fixed + grandchildren * SEGMENT_BYTES,
+            BUDGET,
+            "the budget fills"
+        );
+        let (child, nth) = (grandchildren / WIDTH + 1, grandchildren % WIDTH + 1);
+        assert_eq!((grandchildren, child, nth), (21, 3, 6));
+        let queued = WIDTH - child + grandchildren;
+        let live = 1 + child;
+
+        let mut expand = from_sources(&store, 1, 2)
+            .with_path_mode(PathMode::Trail)
+            .with_memory_budget(BUDGET);
+        expand.materialize_input().unwrap();
+        expand.start_row().unwrap();
+        let mut allowance = Allowance::of(None);
+        let mut search = expand.start_search(0, source, &mut allowance).unwrap();
+        let error = loop {
+            match expand.advance(&mut search, &mut allowance) {
+                Ok(true) => {}
+                Ok(false) => panic!("the tree fits the budget"),
+                Err(error) => break error,
+            }
+        };
+        assert!(path_budget_message(&error).is_some(), "{error}");
+        assert_eq!(search.open.len(), queued, "the queued paths");
+        let segments = expand.path_budget.used() - search.open.held_bytes();
+        assert_eq!(
+            segments - queued * SEGMENT_BYTES,
+            live * SEGMENT_BYTES,
+            "the segments of the source and the children taken out"
+        );
     }
 }

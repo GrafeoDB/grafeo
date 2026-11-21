@@ -864,10 +864,10 @@ final class GrafeoBindings {
   // Change data capture
   // ===========================================================================
 
-  /// Turn change data capture on or off.
-  late final grafeoSetCdcEnabled = library.lookupFunction<
-      Void Function(Pointer<Void>, Bool),
-      void Function(Pointer<Void>, bool)>('grafeo_set_cdc_enabled');
+  /// Turn change data capture on or off and store the setting. Returns GrafeoStatus.
+  late final grafeoSetCdc = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Bool),
+      int Function(Pointer<Void>, bool)>('grafeo_set_cdc');
 
   /// Whether change data capture is on.
   late final grafeoIsCdcEnabled = library.lookupFunction<
@@ -1215,6 +1215,24 @@ final class GrafeoBindings {
       Int32 Function(Pointer<Void>, Uint64),
       int Function(
           Pointer<Void>, int)>('grafeo_options_set_path_search_budget');
+
+  /// Sets the path expansion limit, above zero. Returns GrafeoStatus.
+  late final grafeoOptionsSetPathExpansionLimit = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64),
+      int Function(
+          Pointer<Void>, int)>('grafeo_options_set_path_expansion_limit');
+
+  /// Sets the query length limit in bytes, above zero. Returns GrafeoStatus.
+  late final grafeoOptionsSetMaxQueryLength = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64),
+      int Function(Pointer<Void>, int)>('grafeo_options_set_max_query_length');
+
+  /// Sets the identifier length limit in bytes, above zero. Returns
+  /// GrafeoStatus.
+  late final grafeoOptionsSetMaxIdentifierLength = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64),
+      int Function(
+          Pointer<Void>, int)>('grafeo_options_set_max_identifier_length');
 
   /// Sets the snapshot retention limit in bytes; below 1 MiB the open fails.
   /// Returns GrafeoStatus.

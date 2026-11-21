@@ -185,6 +185,10 @@ mod physical {
         read_overlay: Option<Arc<dyn RdfPathReadOverlay>>,
         state: Option<State>,
         exhausted: bool,
+        /// The statement it was planned in, captured at construction: each
+        /// search state's budget takes a grant of its memory, given back when
+        /// the state drops.
+        memory: Option<crate::execution::memory::OperatorMemoryContext>,
     }
 
     impl RdfPathOperator {
@@ -201,6 +205,7 @@ mod physical {
                 read_overlay: None,
                 state: None,
                 exhausted: false,
+                memory: crate::execution::memory::current(),
             }
         }
 
@@ -242,6 +247,10 @@ mod physical {
 
         fn next_chunk(&mut self) -> OperatorResult {
             if self.state.is_none() {
+                let memory = self.memory.clone().map_or_else(
+                    crate::execution::memory::OperatorMemory::unbudgeted,
+                    crate::execution::memory::OperatorMemory::new,
+                );
                 self.state = Some(State::new(
                     &self.store,
                     &self.view,
@@ -249,6 +258,7 @@ mod physical {
                     self.budget,
                     self.deadline,
                     self.read_overlay.clone(),
+                    memory,
                 )?);
             }
             let state = self.state.as_mut().expect("RDF path state initialized");
@@ -831,8 +841,9 @@ mod physical {
             limit: usize,
             deadline: Option<Instant>,
             read_overlay: Option<Arc<dyn RdfPathReadOverlay>>,
+            memory: crate::execution::memory::OperatorMemory,
         ) -> Result<Self, OperatorError> {
-            let mut budget = PathBudget::new(limit, deadline);
+            let mut budget = PathBudget::new(limit, deadline).with_memory(memory);
             budget.charge(size_of::<Self>())?;
             if let Some(overlay) = &read_overlay {
                 budget.charge(overlay.retained_bytes())?;
@@ -1325,6 +1336,7 @@ mod physical {
                     path.budget,
                     path.deadline,
                     None,
+                    crate::execution::memory::OperatorMemory::unbudgeted(),
                 )
                 .unwrap(),
             );
@@ -1385,6 +1397,7 @@ mod physical {
                 path.budget,
                 path.deadline,
                 None,
+                crate::execution::memory::OperatorMemory::unbudgeted(),
             )
             .unwrap();
             state.prepare_origins(&path.config).unwrap();

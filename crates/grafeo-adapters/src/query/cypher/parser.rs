@@ -6,7 +6,9 @@
 use super::ast::*;
 use super::lexer::{Lexer, Token, TokenKind};
 use crate::query::keywords::unescape_string;
-use crate::query::limits::{Chain, Nesting, nesting_error_message};
+use crate::query::limits::{
+    Chain, DEFAULT_MAX_IDENTIFIER_LENGTH, NameLimit, Nesting, nesting_error_message,
+};
 use crate::query::schema::IndexOptionValue;
 use grafeo_common::utils::error::{QueryError, QueryErrorKind, Result};
 
@@ -30,7 +32,13 @@ pub struct Parser<'a> {
 impl<'a> Parser<'a> {
     /// Creates a new parser for the given query.
     pub fn new(query: &'a str) -> Self {
-        let mut lexer = Lexer::new(query);
+        Self::with_max_identifier_length(query, DEFAULT_MAX_IDENTIFIER_LENGTH)
+    }
+
+    /// A parser for `query` that records the first name longer than `max`
+    /// bytes (see [`Self::names`]).
+    pub(crate) fn with_max_identifier_length(query: &'a str, max: usize) -> Self {
+        let mut lexer = Lexer::new(query).with_max_identifier_length(max);
         let current = lexer.next_token();
         let previous = Token {
             kind: TokenKind::Eof,
@@ -45,6 +53,12 @@ impl<'a> Parser<'a> {
             nesting: Nesting::default(),
             definite_error: false,
         }
+    }
+
+    /// The identifier length limit, with the first name the parser read over
+    /// it.
+    pub(crate) fn names(&self) -> NameLimit {
+        self.lexer.names()
     }
 
     /// Enters one level of nesting, or fails past the nesting limit.

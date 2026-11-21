@@ -514,7 +514,7 @@ tests:
   - name: s29_fail_when_re_using_a_relationship_in_the_same_pattern
     xfail:
       spec: "openCypher TCK 2024.3 Match3: [29] Fail when re-using a relationship in the same pattern"
-      issue: fix in 0.6.5
+      issue: "#795"
     query: |
       MATCH (a)-[r]->()-[r]->(a)
       RETURN r
@@ -527,7 +527,7 @@ tests:
   - name: s30_fail_when_using_a_list_or_nodes_as_a_node
     xfail:
       spec: "openCypher TCK 2024.3 Match3: [30] Fail when using a list or nodes as a node"
-      issue: fix in 0.6.5
+      issue: "#795"
     query: |
       MATCH (n)
       WITH [n] AS users

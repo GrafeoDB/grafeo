@@ -155,12 +155,12 @@ Per the standard, minimum conformance requires:
 | Feature | Status | Notes |
 |---------|--------|-------|
 | ALL | Supported | |
-| ANY | Partial | One path per pair of endpoints; over one edge pattern between two node patterns |
-| ANY k | Partial | k paths per pair of endpoints (the k shortest); over one edge pattern |
-| ALL SHORTEST | Partial | Over one edge pattern |
-| ANY SHORTEST | Partial | Over one edge pattern |
-| SHORTEST k | Partial | Over one edge pattern |
-| SHORTEST k GROUPS | Partial | Over one edge pattern |
+| ANY | Partial | One path per pair of endpoints; over a chain of edge patterns, not a parenthesized or alternated pattern, nor one with a questioned edge pattern (`->?`) |
+| ANY k | Partial | k paths per pair of endpoints (the k shortest); over a chain of edge patterns, not with `->?` |
+| ALL SHORTEST | Partial | Over a chain of edge patterns, not with `->?` |
+| ANY SHORTEST | Partial | Over a chain of edge patterns, not with `->?` |
+| SHORTEST k | Partial | Over a chain of edge patterns, not with `->?` |
+| SHORTEST k GROUPS | Partial | Over a chain of edge patterns, not with `->?` |
 | Path mode of a search prefix `ANY SHORTEST TRAIL` | Supported | |
 | Search prefix of one path pattern `p = ANY SHORTEST (...)` | Supported | |
 
@@ -290,11 +290,11 @@ refuses `=~` and LIKE with an error that says so.
 | G013 | Advanced path modes: ACYCLIC | Supported |
 | G014 | Explicit PATH/PATHS keywords | Supported |
 | G015 | All path search: explicit ALL keyword | Supported |
-| G016 | Any path search | Partial (over one edge pattern) |
-| G017 | All shortest path search | Partial (over one edge pattern) |
-| G018 | Any shortest path search | Partial (over one edge pattern) |
-| G019 | Counted shortest path search | Partial (over one edge pattern) |
-| G020 | Counted shortest group search | Partial (over one edge pattern) |
+| G016 | Any path search | Partial (over a chain of edge patterns, not with `->?`) |
+| G017 | All shortest path search | Partial (over a chain of edge patterns, not with `->?`) |
+| G018 | Any shortest path search | Partial (over a chain of edge patterns, not with `->?`) |
+| G019 | Counted shortest path search | Partial (over a chain of edge patterns, not with `->?`) |
+| G020 | Counted shortest group search | Partial (over a chain of edge patterns, not with `->?`) |
 | G030 | Path multiset alternation | **Supported** |
 | G031 | Path multiset alternation: var-length operands | **Supported** |
 | G032 | Path pattern union | Supported |
@@ -529,7 +529,7 @@ refuses `=~` and LIKE with an error that says so.
 
 | ID | Feature | Status |
 |----|---------|--------|
-| GB01 | Long identifiers | Supported |
+| GB01 | Long identifiers | Supported (up to 16 KiB by default, `Config::with_max_identifier_length`) |
 | GB02 | Double minus sign comments | Supported |
 | GB03 | Double solidus comments | Supported |
 | GL01 | Hexadecimal literals | **Supported** |

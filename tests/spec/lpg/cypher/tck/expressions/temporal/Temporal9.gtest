@@ -45,10 +45,10 @@ tests:
   - name: s1_should_truncate_date_1
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #1"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('millennium', date({year: 2017, month: 10, day: 11}), {day: 2}) AS result
@@ -62,10 +62,10 @@ tests:
   - name: s1_should_truncate_date_2
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #2"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('millennium', date({year: 2017, month: 10, day: 11}), {}) AS result
@@ -79,10 +79,10 @@ tests:
   - name: s1_should_truncate_date_3
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #3"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('millennium', datetime({year: 2017, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {day: 2}) AS result
@@ -96,10 +96,10 @@ tests:
   - name: s1_should_truncate_date_4
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #4"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('millennium', datetime({year: 2017, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -113,10 +113,10 @@ tests:
   - name: s1_should_truncate_date_5
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #5"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('millennium', localdatetime({year: 2017, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {day: 2}) AS result
@@ -130,10 +130,10 @@ tests:
   - name: s1_should_truncate_date_6
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #6"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('millennium', localdatetime({year: 2017, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -147,10 +147,10 @@ tests:
   - name: s1_should_truncate_date_7
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #7"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('century', date({year: 1984, month: 10, day: 11}), {day: 2}) AS result
@@ -164,10 +164,10 @@ tests:
   - name: s1_should_truncate_date_8
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #8"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('century', date({year: 1984, month: 10, day: 11}), {}) AS result
@@ -181,10 +181,10 @@ tests:
   - name: s1_should_truncate_date_9
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #9"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('century', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {day: 2}) AS result
@@ -198,10 +198,10 @@ tests:
   - name: s1_should_truncate_date_10
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #10"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('century', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -215,10 +215,10 @@ tests:
   - name: s1_should_truncate_date_11
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #11"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('century', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {day: 2}) AS result
@@ -232,10 +232,10 @@ tests:
   - name: s1_should_truncate_date_12
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #12"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('century', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -249,10 +249,10 @@ tests:
   - name: s1_should_truncate_date_13
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #13"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('decade', date({year: 1984, month: 10, day: 11}), {day: 2}) AS result
@@ -266,10 +266,10 @@ tests:
   - name: s1_should_truncate_date_14
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #14"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('decade', date({year: 1984, month: 10, day: 11}), {}) AS result
@@ -283,10 +283,10 @@ tests:
   - name: s1_should_truncate_date_15
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #15"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('decade', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {day: 2}) AS result
@@ -300,10 +300,10 @@ tests:
   - name: s1_should_truncate_date_16
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #16"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('decade', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -317,10 +317,10 @@ tests:
   - name: s1_should_truncate_date_17
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #17"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('decade', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {day: 2}) AS result
@@ -334,10 +334,10 @@ tests:
   - name: s1_should_truncate_date_18
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #18"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('decade', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -351,10 +351,10 @@ tests:
   - name: s1_should_truncate_date_19
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #19"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('year', date({year: 1984, month: 10, day: 11}), {day: 2}) AS result
@@ -368,10 +368,10 @@ tests:
   - name: s1_should_truncate_date_20
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #20"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('year', date({year: 1984, month: 10, day: 11}), {}) AS result
@@ -385,10 +385,10 @@ tests:
   - name: s1_should_truncate_date_21
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #21"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('year', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {day: 2}) AS result
@@ -402,10 +402,10 @@ tests:
   - name: s1_should_truncate_date_22
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #22"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('year', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -419,10 +419,10 @@ tests:
   - name: s1_should_truncate_date_23
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #23"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('year', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {day: 2}) AS result
@@ -436,10 +436,10 @@ tests:
   - name: s1_should_truncate_date_24
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #24"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('year', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -453,10 +453,10 @@ tests:
   - name: s1_should_truncate_date_25
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #25"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('weekYear', date({year: 1984, month: 2, day: 1}), {day: 5}) AS result
@@ -470,10 +470,10 @@ tests:
   - name: s1_should_truncate_date_26
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #26"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('weekYear', date({year: 1984, month: 2, day: 1}), {}) AS result
@@ -487,10 +487,10 @@ tests:
   - name: s1_should_truncate_date_27
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #27"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('weekYear', datetime({year: 1984, month: 1, day: 1, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {day: 5}) AS result
@@ -504,10 +504,10 @@ tests:
   - name: s1_should_truncate_date_28
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #28"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('weekYear', datetime({year: 1984, month: 1, day: 1, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -521,10 +521,10 @@ tests:
   - name: s1_should_truncate_date_29
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #29"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('weekYear', localdatetime({year: 1984, month: 1, day: 1, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {day: 5}) AS result
@@ -538,10 +538,10 @@ tests:
   - name: s1_should_truncate_date_30
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #30"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('weekYear', localdatetime({year: 1984, month: 1, day: 1, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -555,10 +555,10 @@ tests:
   - name: s1_should_truncate_date_31
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #31"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('quarter', date({year: 1984, month: 11, day: 11}), {day: 2}) AS result
@@ -572,10 +572,10 @@ tests:
   - name: s1_should_truncate_date_32
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #32"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('quarter', date({year: 1984, month: 11, day: 11}), {}) AS result
@@ -589,10 +589,10 @@ tests:
   - name: s1_should_truncate_date_33
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #33"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('quarter', datetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {day: 2}) AS result
@@ -606,10 +606,10 @@ tests:
   - name: s1_should_truncate_date_34
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #34"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('quarter', datetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -623,10 +623,10 @@ tests:
   - name: s1_should_truncate_date_35
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #35"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('quarter', localdatetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {day: 2}) AS result
@@ -640,10 +640,10 @@ tests:
   - name: s1_should_truncate_date_36
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #36"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('quarter', localdatetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -657,10 +657,10 @@ tests:
   - name: s1_should_truncate_date_37
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #37"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('month', date({year: 1984, month: 10, day: 11}), {day: 2}) AS result
@@ -674,10 +674,10 @@ tests:
   - name: s1_should_truncate_date_38
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #38"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('month', date({year: 1984, month: 10, day: 11}), {}) AS result
@@ -691,10 +691,10 @@ tests:
   - name: s1_should_truncate_date_39
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #39"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('month', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {day: 2}) AS result
@@ -708,10 +708,10 @@ tests:
   - name: s1_should_truncate_date_40
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #40"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('month', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -725,10 +725,10 @@ tests:
   - name: s1_should_truncate_date_41
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #41"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('month', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {day: 2}) AS result
@@ -742,10 +742,10 @@ tests:
   - name: s1_should_truncate_date_42
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #42"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('month', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -759,10 +759,10 @@ tests:
   - name: s1_should_truncate_date_43
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #43"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('week', date({year: 1984, month: 10, day: 11}), {dayOfWeek: 2}) AS result
@@ -776,10 +776,10 @@ tests:
   - name: s1_should_truncate_date_44
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #44"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('week', date({year: 1984, month: 10, day: 11}), {}) AS result
@@ -793,10 +793,10 @@ tests:
   - name: s1_should_truncate_date_45
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #45"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('week', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {dayOfWeek: 2}) AS result
@@ -810,10 +810,10 @@ tests:
   - name: s1_should_truncate_date_46
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #46"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('week', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -827,10 +827,10 @@ tests:
   - name: s1_should_truncate_date_47
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #47"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('week', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {dayOfWeek: 2}) AS result
@@ -844,10 +844,10 @@ tests:
   - name: s1_should_truncate_date_48
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #48"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('week', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -861,10 +861,10 @@ tests:
   - name: s1_should_truncate_date_49
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #49"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('day', date({year: 1984, month: 10, day: 11}), {}) AS result
@@ -878,10 +878,10 @@ tests:
   - name: s1_should_truncate_date_50
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #50"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('day', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -895,10 +895,10 @@ tests:
   - name: s1_should_truncate_date_51
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [1] Should truncate date #51"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.truncate('day', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -912,10 +912,10 @@ tests:
   - name: s2_should_truncate_datetime_1
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #1"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('millennium', date({year: 2017, month: 10, day: 11}), {day: 2}) AS result
@@ -929,10 +929,10 @@ tests:
   - name: s2_should_truncate_datetime_2
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #2"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('millennium', date({year: 2017, month: 10, day: 11}), {timezone: 'Europe/Stockholm'}) AS result
@@ -946,10 +946,10 @@ tests:
   - name: s2_should_truncate_datetime_3
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #3"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('millennium', date({year: 2017, month: 10, day: 11}), {}) AS result
@@ -963,10 +963,10 @@ tests:
   - name: s2_should_truncate_datetime_4
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #4"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('millennium', datetime({year: 2017, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {day: 2}) AS result
@@ -980,10 +980,10 @@ tests:
   - name: s2_should_truncate_datetime_5
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #5"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('millennium', datetime({year: 2017, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -997,10 +997,10 @@ tests:
   - name: s2_should_truncate_datetime_6
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #6"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('millennium', datetime({year: 2017, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {timezone: 'Europe/Stockholm'}) AS result
@@ -1014,10 +1014,10 @@ tests:
   - name: s2_should_truncate_datetime_7
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #7"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('millennium', localdatetime({year: 2017, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {day: 2}) AS result
@@ -1031,10 +1031,10 @@ tests:
   - name: s2_should_truncate_datetime_8
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #8"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('millennium', localdatetime({year: 2017, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {timezone: 'Europe/Stockholm'}) AS result
@@ -1048,10 +1048,10 @@ tests:
   - name: s2_should_truncate_datetime_9
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #9"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('millennium', localdatetime({year: 2017, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -1065,10 +1065,10 @@ tests:
   - name: s2_should_truncate_datetime_10
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #10"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('century', date({year: 1984, month: 10, day: 11}), {day: 2}) AS result
@@ -1082,10 +1082,10 @@ tests:
   - name: s2_should_truncate_datetime_11
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #11"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('century', date({year: 1984, month: 10, day: 11}), {}) AS result
@@ -1099,10 +1099,10 @@ tests:
   - name: s2_should_truncate_datetime_12
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #12"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('century', date({year: 2017, month: 10, day: 11}), {timezone: 'Europe/Stockholm'}) AS result
@@ -1116,10 +1116,10 @@ tests:
   - name: s2_should_truncate_datetime_13
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #13"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('century', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {day: 2}) AS result
@@ -1133,10 +1133,10 @@ tests:
   - name: s2_should_truncate_datetime_14
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #14"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('century', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -1150,10 +1150,10 @@ tests:
   - name: s2_should_truncate_datetime_15
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #15"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('century', datetime({year: 2017, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {timezone: 'Europe/Stockholm'}) AS result
@@ -1167,10 +1167,10 @@ tests:
   - name: s2_should_truncate_datetime_16
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #16"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('century', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {day: 2}) AS result
@@ -1184,10 +1184,10 @@ tests:
   - name: s2_should_truncate_datetime_17
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #17"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('century', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -1201,10 +1201,10 @@ tests:
   - name: s2_should_truncate_datetime_18
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #18"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('century', localdatetime({year: 2017, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {timezone: 'Europe/Stockholm'}) AS result
@@ -1218,10 +1218,10 @@ tests:
   - name: s2_should_truncate_datetime_19
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #19"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('decade', date({year: 1984, month: 10, day: 11}), {day: 2}) AS result
@@ -1235,10 +1235,10 @@ tests:
   - name: s2_should_truncate_datetime_20
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #20"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('decade', date({year: 1984, month: 10, day: 11}), {timezone: 'Europe/Stockholm'}) AS result
@@ -1252,10 +1252,10 @@ tests:
   - name: s2_should_truncate_datetime_21
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #21"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('decade', date({year: 1984, month: 10, day: 11}), {}) AS result
@@ -1269,10 +1269,10 @@ tests:
   - name: s2_should_truncate_datetime_22
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #22"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('decade', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {day: 2}) AS result
@@ -1286,10 +1286,10 @@ tests:
   - name: s2_should_truncate_datetime_23
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #23"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('decade', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -1303,10 +1303,10 @@ tests:
   - name: s2_should_truncate_datetime_24
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #24"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('decade', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {timezone: 'Europe/Stockholm'}) AS result
@@ -1320,10 +1320,10 @@ tests:
   - name: s2_should_truncate_datetime_25
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #25"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('decade', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {day: 2}) AS result
@@ -1337,10 +1337,10 @@ tests:
   - name: s2_should_truncate_datetime_26
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #26"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('decade', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {timezone: 'Europe/Stockholm'}) AS result
@@ -1354,10 +1354,10 @@ tests:
   - name: s2_should_truncate_datetime_27
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #27"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('decade', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -1371,10 +1371,10 @@ tests:
   - name: s2_should_truncate_datetime_28
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #28"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('year', date({year: 1984, month: 10, day: 11}), {day: 2}) AS result
@@ -1388,10 +1388,10 @@ tests:
   - name: s2_should_truncate_datetime_29
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #29"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('year', date({year: 1984, month: 10, day: 11}), {timezone: 'Europe/Stockholm'}) AS result
@@ -1405,10 +1405,10 @@ tests:
   - name: s2_should_truncate_datetime_30
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #30"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('year', date({year: 1984, month: 10, day: 11}), {}) AS result
@@ -1422,10 +1422,10 @@ tests:
   - name: s2_should_truncate_datetime_31
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #31"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('year', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {day: 2}) AS result
@@ -1439,10 +1439,10 @@ tests:
   - name: s2_should_truncate_datetime_32
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #32"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('year', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -1456,10 +1456,10 @@ tests:
   - name: s2_should_truncate_datetime_33
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #33"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('year', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {timezone: 'Europe/Stockholm'}) AS result
@@ -1473,10 +1473,10 @@ tests:
   - name: s2_should_truncate_datetime_34
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #34"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('year', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {day: 2}) AS result
@@ -1490,10 +1490,10 @@ tests:
   - name: s2_should_truncate_datetime_35
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #35"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('year', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {timezone: 'Europe/Stockholm'}) AS result
@@ -1507,10 +1507,10 @@ tests:
   - name: s2_should_truncate_datetime_36
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #36"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('year', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -1524,10 +1524,10 @@ tests:
   - name: s2_should_truncate_datetime_37
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #37"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('weekYear', date({year: 1984, month: 2, day: 1}), {day: 5}) AS result
@@ -1541,10 +1541,10 @@ tests:
   - name: s2_should_truncate_datetime_38
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #38"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('weekYear', date({year: 1984, month: 2, day: 1}), {timezone: 'Europe/Stockholm'}) AS result
@@ -1558,10 +1558,10 @@ tests:
   - name: s2_should_truncate_datetime_39
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #39"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('weekYear', date({year: 1984, month: 2, day: 1}), {}) AS result
@@ -1575,10 +1575,10 @@ tests:
   - name: s2_should_truncate_datetime_40
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #40"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('weekYear', datetime({year: 1984, month: 1, day: 1, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {day: 5}) AS result
@@ -1592,10 +1592,10 @@ tests:
   - name: s2_should_truncate_datetime_41
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #41"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('weekYear', datetime({year: 1984, month: 1, day: 1, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -1609,10 +1609,10 @@ tests:
   - name: s2_should_truncate_datetime_42
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #42"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('weekYear', datetime({year: 1984, month: 1, day: 1, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {timezone: 'Europe/Stockholm'}) AS result
@@ -1626,10 +1626,10 @@ tests:
   - name: s2_should_truncate_datetime_43
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #43"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('weekYear', localdatetime({year: 1984, month: 1, day: 1, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {day: 5}) AS result
@@ -1643,10 +1643,10 @@ tests:
   - name: s2_should_truncate_datetime_44
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #44"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('weekYear', localdatetime({year: 1984, month: 1, day: 1, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {timezone: 'Europe/Stockholm'}) AS result
@@ -1660,10 +1660,10 @@ tests:
   - name: s2_should_truncate_datetime_45
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #45"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('weekYear', localdatetime({year: 1984, month: 1, day: 1, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -1677,10 +1677,10 @@ tests:
   - name: s2_should_truncate_datetime_46
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #46"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('quarter', date({year: 1984, month: 11, day: 11}), {day: 2}) AS result
@@ -1694,10 +1694,10 @@ tests:
   - name: s2_should_truncate_datetime_47
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #47"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('quarter', date({year: 1984, month: 11, day: 11}), {timezone: 'Europe/Stockholm'}) AS result
@@ -1711,10 +1711,10 @@ tests:
   - name: s2_should_truncate_datetime_48
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #48"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('quarter', date({year: 1984, month: 11, day: 11}), {}) AS result
@@ -1728,10 +1728,10 @@ tests:
   - name: s2_should_truncate_datetime_49
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #49"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('quarter', datetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {day: 2}) AS result
@@ -1745,10 +1745,10 @@ tests:
   - name: s2_should_truncate_datetime_50
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #50"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('quarter', datetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -1762,10 +1762,10 @@ tests:
   - name: s2_should_truncate_datetime_51
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #51"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('quarter', datetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {timezone: 'Europe/Stockholm'}) AS result
@@ -1779,10 +1779,10 @@ tests:
   - name: s2_should_truncate_datetime_52
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #52"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('quarter', localdatetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {day: 2}) AS result
@@ -1796,10 +1796,10 @@ tests:
   - name: s2_should_truncate_datetime_53
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #53"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('quarter', localdatetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {timezone: 'Europe/Stockholm'}) AS result
@@ -1813,10 +1813,10 @@ tests:
   - name: s2_should_truncate_datetime_54
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #54"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('quarter', localdatetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -1830,10 +1830,10 @@ tests:
   - name: s2_should_truncate_datetime_55
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #55"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('month', date({year: 1984, month: 10, day: 11}), {day: 2}) AS result
@@ -1847,10 +1847,10 @@ tests:
   - name: s2_should_truncate_datetime_56
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #56"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('month', date({year: 1984, month: 10, day: 11}), {timezone: 'Europe/Stockholm'}) AS result
@@ -1864,10 +1864,10 @@ tests:
   - name: s2_should_truncate_datetime_57
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #57"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('month', date({year: 1984, month: 10, day: 11}), {}) AS result
@@ -1881,10 +1881,10 @@ tests:
   - name: s2_should_truncate_datetime_58
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #58"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('month', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {day: 2}) AS result
@@ -1898,10 +1898,10 @@ tests:
   - name: s2_should_truncate_datetime_59
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #59"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('month', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -1915,10 +1915,10 @@ tests:
   - name: s2_should_truncate_datetime_60
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #60"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('month', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {timezone: 'Europe/Stockholm'}) AS result
@@ -1932,10 +1932,10 @@ tests:
   - name: s2_should_truncate_datetime_61
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #61"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('month', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {day: 2}) AS result
@@ -1949,10 +1949,10 @@ tests:
   - name: s2_should_truncate_datetime_62
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #62"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('month', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {timezone: 'Europe/Stockholm'}) AS result
@@ -1966,10 +1966,10 @@ tests:
   - name: s2_should_truncate_datetime_63
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #63"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('month', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -1983,10 +1983,10 @@ tests:
   - name: s2_should_truncate_datetime_64
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #64"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('week', date({year: 1984, month: 10, day: 11}), {dayOfWeek: 2}) AS result
@@ -2000,10 +2000,10 @@ tests:
   - name: s2_should_truncate_datetime_65
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #65"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('week', date({year: 1984, month: 10, day: 11}), {timezone: 'Europe/Stockholm'}) AS result
@@ -2017,10 +2017,10 @@ tests:
   - name: s2_should_truncate_datetime_66
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #66"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('week', date({year: 1984, month: 10, day: 11}), {}) AS result
@@ -2034,10 +2034,10 @@ tests:
   - name: s2_should_truncate_datetime_67
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #67"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('week', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {dayOfWeek: 2}) AS result
@@ -2051,10 +2051,10 @@ tests:
   - name: s2_should_truncate_datetime_68
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #68"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('week', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -2068,10 +2068,10 @@ tests:
   - name: s2_should_truncate_datetime_69
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #69"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('week', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {timezone: 'Europe/Stockholm'}) AS result
@@ -2085,10 +2085,10 @@ tests:
   - name: s2_should_truncate_datetime_70
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #70"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('week', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {dayOfWeek: 2}) AS result
@@ -2102,10 +2102,10 @@ tests:
   - name: s2_should_truncate_datetime_71
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #71"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('week', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {timezone: 'Europe/Stockholm'}) AS result
@@ -2119,10 +2119,10 @@ tests:
   - name: s2_should_truncate_datetime_72
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #72"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('week', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -2136,10 +2136,10 @@ tests:
   - name: s2_should_truncate_datetime_73
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #73"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('day', date({year: 1984, month: 10, day: 11}), {nanosecond: 2}) AS result
@@ -2153,10 +2153,10 @@ tests:
   - name: s2_should_truncate_datetime_74
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #74"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('day', date({year: 1984, month: 10, day: 11}), {timezone: 'Europe/Stockholm'}) AS result
@@ -2170,10 +2170,10 @@ tests:
   - name: s2_should_truncate_datetime_75
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #75"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('day', date({year: 1984, month: 10, day: 11}), {}) AS result
@@ -2187,10 +2187,10 @@ tests:
   - name: s2_should_truncate_datetime_76
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #76"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('day', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -2204,10 +2204,10 @@ tests:
   - name: s2_should_truncate_datetime_77
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #77"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('day', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -2221,10 +2221,10 @@ tests:
   - name: s2_should_truncate_datetime_78
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #78"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('day', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {timezone: 'Europe/Stockholm'}) AS result
@@ -2238,10 +2238,10 @@ tests:
   - name: s2_should_truncate_datetime_79
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #79"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('day', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -2255,10 +2255,10 @@ tests:
   - name: s2_should_truncate_datetime_80
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #80"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('day', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {timezone: 'Europe/Stockholm'}) AS result
@@ -2272,10 +2272,10 @@ tests:
   - name: s2_should_truncate_datetime_81
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #81"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('day', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -2289,10 +2289,10 @@ tests:
   - name: s2_should_truncate_datetime_82
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #82"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('hour', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {nanosecond: 2}) AS result
@@ -2306,10 +2306,10 @@ tests:
   - name: s2_should_truncate_datetime_83
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #83"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('hour', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {timezone: 'Europe/Stockholm'}) AS result
@@ -2323,10 +2323,10 @@ tests:
   - name: s2_should_truncate_datetime_84
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #84"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('hour', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {}) AS result
@@ -2340,10 +2340,10 @@ tests:
   - name: s2_should_truncate_datetime_85
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #85"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('hour', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -2357,10 +2357,10 @@ tests:
   - name: s2_should_truncate_datetime_86
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #86"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('hour', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {timezone: 'Europe/Stockholm'}) AS result
@@ -2374,10 +2374,10 @@ tests:
   - name: s2_should_truncate_datetime_87
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #87"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('hour', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -2391,10 +2391,10 @@ tests:
   - name: s2_should_truncate_datetime_88
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #88"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('minute', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {nanosecond: 2}) AS result
@@ -2408,10 +2408,10 @@ tests:
   - name: s2_should_truncate_datetime_89
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #89"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('minute', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {timezone: 'Europe/Stockholm'}) AS result
@@ -2425,10 +2425,10 @@ tests:
   - name: s2_should_truncate_datetime_90
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #90"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('minute', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {}) AS result
@@ -2442,10 +2442,10 @@ tests:
   - name: s2_should_truncate_datetime_91
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #91"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('minute', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -2459,10 +2459,10 @@ tests:
   - name: s2_should_truncate_datetime_92
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #92"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('minute', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {timezone: 'Europe/Stockholm'}) AS result
@@ -2476,10 +2476,10 @@ tests:
   - name: s2_should_truncate_datetime_93
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #93"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('minute', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -2493,10 +2493,10 @@ tests:
   - name: s2_should_truncate_datetime_94
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #94"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('second', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -2510,10 +2510,10 @@ tests:
   - name: s2_should_truncate_datetime_95
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #95"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('second', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -2527,10 +2527,10 @@ tests:
   - name: s2_should_truncate_datetime_96
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #96"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('second', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -2544,10 +2544,10 @@ tests:
   - name: s2_should_truncate_datetime_97
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #97"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('second', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -2561,10 +2561,10 @@ tests:
   - name: s2_should_truncate_datetime_98
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #98"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('millisecond', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -2578,10 +2578,10 @@ tests:
   - name: s2_should_truncate_datetime_99
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #99"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('millisecond', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -2595,10 +2595,10 @@ tests:
   - name: s2_should_truncate_datetime_100
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #100"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('millisecond', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -2612,10 +2612,10 @@ tests:
   - name: s2_should_truncate_datetime_101
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #101"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('millisecond', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -2629,10 +2629,10 @@ tests:
   - name: s2_should_truncate_datetime_102
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #102"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('microsecond', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -2646,10 +2646,10 @@ tests:
   - name: s2_should_truncate_datetime_103
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #103"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('microsecond', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -2663,10 +2663,10 @@ tests:
   - name: s2_should_truncate_datetime_104
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #104"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('microsecond', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -2680,10 +2680,10 @@ tests:
   - name: s2_should_truncate_datetime_105
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [2] Should truncate datetime #105"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.truncate('microsecond', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -2697,10 +2697,10 @@ tests:
   - name: s3_should_truncate_localdatetime_1
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #1"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('millennium', date({year: 2017, month: 10, day: 11}), {day: 2}) AS result
@@ -2714,10 +2714,10 @@ tests:
   - name: s3_should_truncate_localdatetime_2
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #2"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('millennium', date({year: 2017, month: 10, day: 11}), {}) AS result
@@ -2731,10 +2731,10 @@ tests:
   - name: s3_should_truncate_localdatetime_3
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #3"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('millennium', datetime({year: 2017, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {day: 2}) AS result
@@ -2748,10 +2748,10 @@ tests:
   - name: s3_should_truncate_localdatetime_4
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #4"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('millennium', datetime({year: 2017, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -2765,10 +2765,10 @@ tests:
   - name: s3_should_truncate_localdatetime_5
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #5"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('millennium', localdatetime({year: 2017, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {day: 2}) AS result
@@ -2782,10 +2782,10 @@ tests:
   - name: s3_should_truncate_localdatetime_6
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #6"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('millennium', localdatetime({year: 2017, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -2799,10 +2799,10 @@ tests:
   - name: s3_should_truncate_localdatetime_7
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #7"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('century', date({year: 1984, month: 10, day: 11}), {day: 2}) AS result
@@ -2816,10 +2816,10 @@ tests:
   - name: s3_should_truncate_localdatetime_8
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #8"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('century', date({year: 1984, month: 10, day: 11}), {}) AS result
@@ -2833,10 +2833,10 @@ tests:
   - name: s3_should_truncate_localdatetime_9
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #9"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('century', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {day: 2}) AS result
@@ -2850,10 +2850,10 @@ tests:
   - name: s3_should_truncate_localdatetime_10
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #10"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('century', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -2867,10 +2867,10 @@ tests:
   - name: s3_should_truncate_localdatetime_11
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #11"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('century', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {day: 2}) AS result
@@ -2884,10 +2884,10 @@ tests:
   - name: s3_should_truncate_localdatetime_12
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #12"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('century', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -2901,10 +2901,10 @@ tests:
   - name: s3_should_truncate_localdatetime_13
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #13"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('decade', date({year: 1984, month: 10, day: 11}), {day: 2}) AS result
@@ -2918,10 +2918,10 @@ tests:
   - name: s3_should_truncate_localdatetime_14
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #14"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('decade', date({year: 1984, month: 10, day: 11}), {}) AS result
@@ -2935,10 +2935,10 @@ tests:
   - name: s3_should_truncate_localdatetime_15
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #15"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('decade', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {day: 2}) AS result
@@ -2952,10 +2952,10 @@ tests:
   - name: s3_should_truncate_localdatetime_16
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #16"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('decade', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -2969,10 +2969,10 @@ tests:
   - name: s3_should_truncate_localdatetime_17
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #17"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('decade', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {day: 2}) AS result
@@ -2986,10 +2986,10 @@ tests:
   - name: s3_should_truncate_localdatetime_18
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #18"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('decade', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -3003,10 +3003,10 @@ tests:
   - name: s3_should_truncate_localdatetime_19
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #19"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('year', date({year: 1984, month: 10, day: 11}), {day: 2}) AS result
@@ -3020,10 +3020,10 @@ tests:
   - name: s3_should_truncate_localdatetime_20
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #20"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('year', date({year: 1984, month: 10, day: 11}), {}) AS result
@@ -3037,10 +3037,10 @@ tests:
   - name: s3_should_truncate_localdatetime_21
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #21"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('year', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {day: 2}) AS result
@@ -3054,10 +3054,10 @@ tests:
   - name: s3_should_truncate_localdatetime_22
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #22"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('year', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -3071,10 +3071,10 @@ tests:
   - name: s3_should_truncate_localdatetime_23
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #23"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('year', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {day: 2}) AS result
@@ -3088,10 +3088,10 @@ tests:
   - name: s3_should_truncate_localdatetime_24
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #24"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('year', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -3105,10 +3105,10 @@ tests:
   - name: s3_should_truncate_localdatetime_25
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #25"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('weekYear', date({year: 1984, month: 2, day: 1}), {day: 5}) AS result
@@ -3122,10 +3122,10 @@ tests:
   - name: s3_should_truncate_localdatetime_26
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #26"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('weekYear', date({year: 1984, month: 2, day: 1}), {}) AS result
@@ -3139,10 +3139,10 @@ tests:
   - name: s3_should_truncate_localdatetime_27
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #27"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('weekYear', datetime({year: 1984, month: 1, day: 1, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {day: 5}) AS result
@@ -3156,10 +3156,10 @@ tests:
   - name: s3_should_truncate_localdatetime_28
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #28"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('weekYear', datetime({year: 1984, month: 1, day: 1, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -3173,10 +3173,10 @@ tests:
   - name: s3_should_truncate_localdatetime_29
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #29"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('weekYear', localdatetime({year: 1984, month: 1, day: 1, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {day: 5}) AS result
@@ -3190,10 +3190,10 @@ tests:
   - name: s3_should_truncate_localdatetime_30
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #30"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('weekYear', localdatetime({year: 1984, month: 1, day: 1, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -3207,10 +3207,10 @@ tests:
   - name: s3_should_truncate_localdatetime_31
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #31"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('quarter', date({year: 1984, month: 11, day: 11}), {day: 2}) AS result
@@ -3224,10 +3224,10 @@ tests:
   - name: s3_should_truncate_localdatetime_32
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #32"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('quarter', date({year: 1984, month: 11, day: 11}), {}) AS result
@@ -3241,10 +3241,10 @@ tests:
   - name: s3_should_truncate_localdatetime_33
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #33"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('quarter', datetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {day: 2}) AS result
@@ -3258,10 +3258,10 @@ tests:
   - name: s3_should_truncate_localdatetime_34
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #34"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('quarter', datetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -3275,10 +3275,10 @@ tests:
   - name: s3_should_truncate_localdatetime_35
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #35"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('quarter', localdatetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {day: 2}) AS result
@@ -3292,10 +3292,10 @@ tests:
   - name: s3_should_truncate_localdatetime_36
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #36"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('quarter', localdatetime({year: 1984, month: 11, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -3309,10 +3309,10 @@ tests:
   - name: s3_should_truncate_localdatetime_37
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #37"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('month', date({year: 1984, month: 10, day: 11}), {day: 2}) AS result
@@ -3326,10 +3326,10 @@ tests:
   - name: s3_should_truncate_localdatetime_38
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #38"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('month', date({year: 1984, month: 10, day: 11}), {}) AS result
@@ -3343,10 +3343,10 @@ tests:
   - name: s3_should_truncate_localdatetime_39
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #39"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('month', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {day: 2}) AS result
@@ -3360,10 +3360,10 @@ tests:
   - name: s3_should_truncate_localdatetime_40
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #40"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('month', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -3377,10 +3377,10 @@ tests:
   - name: s3_should_truncate_localdatetime_41
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #41"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('month', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {day: 2}) AS result
@@ -3394,10 +3394,10 @@ tests:
   - name: s3_should_truncate_localdatetime_42
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #42"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('month', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -3411,10 +3411,10 @@ tests:
   - name: s3_should_truncate_localdatetime_43
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #43"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('week', date({year: 1984, month: 10, day: 11}), {dayOfWeek: 2}) AS result
@@ -3428,10 +3428,10 @@ tests:
   - name: s3_should_truncate_localdatetime_44
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #44"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('week', date({year: 1984, month: 10, day: 11}), {}) AS result
@@ -3445,10 +3445,10 @@ tests:
   - name: s3_should_truncate_localdatetime_45
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #45"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('week', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {dayOfWeek: 2}) AS result
@@ -3462,10 +3462,10 @@ tests:
   - name: s3_should_truncate_localdatetime_46
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #46"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('week', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -3479,10 +3479,10 @@ tests:
   - name: s3_should_truncate_localdatetime_47
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #47"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('week', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {dayOfWeek: 2}) AS result
@@ -3496,10 +3496,10 @@ tests:
   - name: s3_should_truncate_localdatetime_48
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #48"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('week', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -3513,10 +3513,10 @@ tests:
   - name: s3_should_truncate_localdatetime_49
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #49"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('day', date({year: 1984, month: 10, day: 11}), {nanosecond: 2}) AS result
@@ -3530,10 +3530,10 @@ tests:
   - name: s3_should_truncate_localdatetime_50
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #50"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('day', date({year: 1984, month: 10, day: 11}), {}) AS result
@@ -3547,10 +3547,10 @@ tests:
   - name: s3_should_truncate_localdatetime_51
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #51"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('day', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -3564,10 +3564,10 @@ tests:
   - name: s3_should_truncate_localdatetime_52
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #52"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('day', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -3581,10 +3581,10 @@ tests:
   - name: s3_should_truncate_localdatetime_53
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #53"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('day', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -3598,10 +3598,10 @@ tests:
   - name: s3_should_truncate_localdatetime_54
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #54"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('day', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -3615,10 +3615,10 @@ tests:
   - name: s3_should_truncate_localdatetime_55
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #55"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('hour', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -3632,10 +3632,10 @@ tests:
   - name: s3_should_truncate_localdatetime_56
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #56"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('hour', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -3649,10 +3649,10 @@ tests:
   - name: s3_should_truncate_localdatetime_57
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #57"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('hour', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -3666,10 +3666,10 @@ tests:
   - name: s3_should_truncate_localdatetime_58
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #58"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('hour', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -3683,10 +3683,10 @@ tests:
   - name: s3_should_truncate_localdatetime_59
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #59"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('minute', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -3700,10 +3700,10 @@ tests:
   - name: s3_should_truncate_localdatetime_60
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #60"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('minute', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -3717,10 +3717,10 @@ tests:
   - name: s3_should_truncate_localdatetime_61
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #61"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('minute', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -3734,10 +3734,10 @@ tests:
   - name: s3_should_truncate_localdatetime_62
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #62"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('minute', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -3751,10 +3751,10 @@ tests:
   - name: s3_should_truncate_localdatetime_63
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #63"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('second', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -3768,10 +3768,10 @@ tests:
   - name: s3_should_truncate_localdatetime_64
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #64"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('second', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -3785,10 +3785,10 @@ tests:
   - name: s3_should_truncate_localdatetime_65
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #65"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('second', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -3802,10 +3802,10 @@ tests:
   - name: s3_should_truncate_localdatetime_66
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #66"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('second', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -3819,10 +3819,10 @@ tests:
   - name: s3_should_truncate_localdatetime_67
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #67"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('millisecond', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -3836,10 +3836,10 @@ tests:
   - name: s3_should_truncate_localdatetime_68
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #68"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('millisecond', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -3853,10 +3853,10 @@ tests:
   - name: s3_should_truncate_localdatetime_69
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #69"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('millisecond', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -3870,10 +3870,10 @@ tests:
   - name: s3_should_truncate_localdatetime_70
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #70"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('millisecond', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -3887,10 +3887,10 @@ tests:
   - name: s3_should_truncate_localdatetime_71
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #71"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('microsecond', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -3904,10 +3904,10 @@ tests:
   - name: s3_should_truncate_localdatetime_72
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #72"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('microsecond', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -3921,10 +3921,10 @@ tests:
   - name: s3_should_truncate_localdatetime_73
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #73"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('microsecond', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -3938,10 +3938,10 @@ tests:
   - name: s3_should_truncate_localdatetime_74
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [3] Should truncate localdatetime #74"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.truncate('microsecond', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -3955,10 +3955,10 @@ tests:
   - name: s4_should_truncate_localtime_1
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #1"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('day', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -3972,10 +3972,10 @@ tests:
   - name: s4_should_truncate_localtime_2
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #2"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('day', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -3989,10 +3989,10 @@ tests:
   - name: s4_should_truncate_localtime_3
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #3"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('day', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -4006,10 +4006,10 @@ tests:
   - name: s4_should_truncate_localtime_4
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #4"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('day', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -4023,10 +4023,10 @@ tests:
   - name: s4_should_truncate_localtime_5
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #5"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('hour', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -4040,10 +4040,10 @@ tests:
   - name: s4_should_truncate_localtime_6
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #6"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('hour', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -4057,10 +4057,10 @@ tests:
   - name: s4_should_truncate_localtime_7
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #7"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('hour', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -4074,10 +4074,10 @@ tests:
   - name: s4_should_truncate_localtime_8
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #8"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('hour', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -4091,10 +4091,10 @@ tests:
   - name: s4_should_truncate_localtime_9
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #9"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('hour', localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -4108,10 +4108,10 @@ tests:
   - name: s4_should_truncate_localtime_10
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #10"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('hour', localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -4125,10 +4125,10 @@ tests:
   - name: s4_should_truncate_localtime_11
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #11"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('hour', time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -4142,10 +4142,10 @@ tests:
   - name: s4_should_truncate_localtime_12
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #12"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('hour', time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -4159,10 +4159,10 @@ tests:
   - name: s4_should_truncate_localtime_13
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #13"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('minute', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -4176,10 +4176,10 @@ tests:
   - name: s4_should_truncate_localtime_14
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #14"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('minute', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -4193,10 +4193,10 @@ tests:
   - name: s4_should_truncate_localtime_15
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #15"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('minute', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -4210,10 +4210,10 @@ tests:
   - name: s4_should_truncate_localtime_16
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #16"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('minute', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -4227,10 +4227,10 @@ tests:
   - name: s4_should_truncate_localtime_17
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #17"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('minute', localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -4244,10 +4244,10 @@ tests:
   - name: s4_should_truncate_localtime_18
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #18"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('minute', localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -4261,10 +4261,10 @@ tests:
   - name: s4_should_truncate_localtime_19
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #19"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('minute', time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -4278,10 +4278,10 @@ tests:
   - name: s4_should_truncate_localtime_20
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #20"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('minute', time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -4295,10 +4295,10 @@ tests:
   - name: s4_should_truncate_localtime_21
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #21"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('second', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -4312,10 +4312,10 @@ tests:
   - name: s4_should_truncate_localtime_22
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #22"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('second', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -4329,10 +4329,10 @@ tests:
   - name: s4_should_truncate_localtime_23
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #23"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('second', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -4346,10 +4346,10 @@ tests:
   - name: s4_should_truncate_localtime_24
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #24"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('second', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -4363,10 +4363,10 @@ tests:
   - name: s4_should_truncate_localtime_25
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #25"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('second', localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -4380,10 +4380,10 @@ tests:
   - name: s4_should_truncate_localtime_26
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #26"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('second', localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -4397,10 +4397,10 @@ tests:
   - name: s4_should_truncate_localtime_27
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #27"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('second', time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -4414,10 +4414,10 @@ tests:
   - name: s4_should_truncate_localtime_28
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #28"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('second', time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -4431,10 +4431,10 @@ tests:
   - name: s4_should_truncate_localtime_29
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #29"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('millisecond', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -4448,10 +4448,10 @@ tests:
   - name: s4_should_truncate_localtime_30
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #30"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('millisecond', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -4465,10 +4465,10 @@ tests:
   - name: s4_should_truncate_localtime_31
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #31"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('millisecond', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -4482,10 +4482,10 @@ tests:
   - name: s4_should_truncate_localtime_32
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #32"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('millisecond', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -4499,10 +4499,10 @@ tests:
   - name: s4_should_truncate_localtime_33
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #33"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('millisecond', localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -4516,10 +4516,10 @@ tests:
   - name: s4_should_truncate_localtime_34
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #34"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('millisecond', localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -4533,10 +4533,10 @@ tests:
   - name: s4_should_truncate_localtime_35
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #35"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('millisecond', time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -4550,10 +4550,10 @@ tests:
   - name: s4_should_truncate_localtime_36
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #36"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('millisecond', time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -4567,10 +4567,10 @@ tests:
   - name: s4_should_truncate_localtime_37
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #37"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('microsecond', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -4584,10 +4584,10 @@ tests:
   - name: s4_should_truncate_localtime_38
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #38"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('microsecond', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -4601,10 +4601,10 @@ tests:
   - name: s4_should_truncate_localtime_39
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #39"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('microsecond', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -4618,10 +4618,10 @@ tests:
   - name: s4_should_truncate_localtime_40
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #40"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('microsecond', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -4635,10 +4635,10 @@ tests:
   - name: s4_should_truncate_localtime_41
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #41"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('microsecond', localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -4652,10 +4652,10 @@ tests:
   - name: s4_should_truncate_localtime_42
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #42"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('microsecond', localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -4669,10 +4669,10 @@ tests:
   - name: s4_should_truncate_localtime_43
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #43"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('microsecond', time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -4686,10 +4686,10 @@ tests:
   - name: s4_should_truncate_localtime_44
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [4] Should truncate localtime #44"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.truncate('microsecond', time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -4703,10 +4703,10 @@ tests:
   - name: s5_should_truncate_time_1
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #1"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('day', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -4720,10 +4720,10 @@ tests:
   - name: s5_should_truncate_time_2
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #2"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('day', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -4737,10 +4737,10 @@ tests:
   - name: s5_should_truncate_time_3
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #3"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('day', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -4754,10 +4754,10 @@ tests:
   - name: s5_should_truncate_time_4
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #4"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('day', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -4771,10 +4771,10 @@ tests:
   - name: s5_should_truncate_time_5
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #5"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('hour', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {nanosecond: 2}) AS result
@@ -4788,10 +4788,10 @@ tests:
   - name: s5_should_truncate_time_6
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #6"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('hour', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {timezone: '+01:00'}) AS result
@@ -4805,10 +4805,10 @@ tests:
   - name: s5_should_truncate_time_7
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #7"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('hour', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {}) AS result
@@ -4822,10 +4822,10 @@ tests:
   - name: s5_should_truncate_time_8
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #8"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('hour', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -4839,10 +4839,10 @@ tests:
   - name: s5_should_truncate_time_9
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #9"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('hour', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {timezone: '+01:00'}) AS result
@@ -4856,10 +4856,10 @@ tests:
   - name: s5_should_truncate_time_10
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #10"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('hour', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -4873,10 +4873,10 @@ tests:
   - name: s5_should_truncate_time_11
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #11"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('hour', localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -4890,10 +4890,10 @@ tests:
   - name: s5_should_truncate_time_12
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #12"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('hour', localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {timezone: '+01:00'}) AS result
@@ -4907,10 +4907,10 @@ tests:
   - name: s5_should_truncate_time_13
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #13"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('hour', localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -4924,10 +4924,10 @@ tests:
   - name: s5_should_truncate_time_14
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #14"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('hour', time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {nanosecond: 2}) AS result
@@ -4941,10 +4941,10 @@ tests:
   - name: s5_should_truncate_time_15
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #15"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('hour', time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {timezone: '+01:00'}) AS result
@@ -4958,10 +4958,10 @@ tests:
   - name: s5_should_truncate_time_16
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #16"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('hour', time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {}) AS result
@@ -4975,10 +4975,10 @@ tests:
   - name: s5_should_truncate_time_17
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #17"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('minute', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {nanosecond: 2}) AS result
@@ -4992,10 +4992,10 @@ tests:
   - name: s5_should_truncate_time_18
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #18"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('minute', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {}) AS result
@@ -5009,10 +5009,10 @@ tests:
   - name: s5_should_truncate_time_19
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #19"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('minute', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -5026,10 +5026,10 @@ tests:
   - name: s5_should_truncate_time_20
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #20"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('minute', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -5043,10 +5043,10 @@ tests:
   - name: s5_should_truncate_time_21
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #21"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('minute', localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -5060,10 +5060,10 @@ tests:
   - name: s5_should_truncate_time_22
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #22"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('minute', localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -5077,10 +5077,10 @@ tests:
   - name: s5_should_truncate_time_23
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #23"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('minute', time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {nanosecond: 2}) AS result
@@ -5094,10 +5094,10 @@ tests:
   - name: s5_should_truncate_time_24
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #24"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('minute', time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '-01:00'}), {}) AS result
@@ -5111,10 +5111,10 @@ tests:
   - name: s5_should_truncate_time_25
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #25"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('second', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -5128,10 +5128,10 @@ tests:
   - name: s5_should_truncate_time_26
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #26"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('second', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -5145,10 +5145,10 @@ tests:
   - name: s5_should_truncate_time_27
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #27"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('second', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -5162,10 +5162,10 @@ tests:
   - name: s5_should_truncate_time_28
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #28"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('second', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -5179,10 +5179,10 @@ tests:
   - name: s5_should_truncate_time_29
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #29"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('second', localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -5196,10 +5196,10 @@ tests:
   - name: s5_should_truncate_time_30
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #30"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('second', localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -5213,10 +5213,10 @@ tests:
   - name: s5_should_truncate_time_31
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #31"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('second', time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -5230,10 +5230,10 @@ tests:
   - name: s5_should_truncate_time_32
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #32"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('second', time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -5247,10 +5247,10 @@ tests:
   - name: s5_should_truncate_time_33
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #33"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('millisecond', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -5264,10 +5264,10 @@ tests:
   - name: s5_should_truncate_time_34
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #34"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('millisecond', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -5281,10 +5281,10 @@ tests:
   - name: s5_should_truncate_time_35
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #35"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('millisecond', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -5298,10 +5298,10 @@ tests:
   - name: s5_should_truncate_time_36
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #36"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('millisecond', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -5315,10 +5315,10 @@ tests:
   - name: s5_should_truncate_time_37
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #37"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('millisecond', localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -5332,10 +5332,10 @@ tests:
   - name: s5_should_truncate_time_38
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #38"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('millisecond', localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -5349,10 +5349,10 @@ tests:
   - name: s5_should_truncate_time_39
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #39"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('millisecond', time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -5366,10 +5366,10 @@ tests:
   - name: s5_should_truncate_time_40
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #40"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('millisecond', time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -5383,10 +5383,10 @@ tests:
   - name: s5_should_truncate_time_41
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #41"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('microsecond', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -5400,10 +5400,10 @@ tests:
   - name: s5_should_truncate_time_42
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #42"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('microsecond', datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result
@@ -5417,10 +5417,10 @@ tests:
   - name: s5_should_truncate_time_43
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #43"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('microsecond', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -5434,10 +5434,10 @@ tests:
   - name: s5_should_truncate_time_44
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #44"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('microsecond', localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -5451,10 +5451,10 @@ tests:
   - name: s5_should_truncate_time_45
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #45"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('microsecond', localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {nanosecond: 2}) AS result
@@ -5468,10 +5468,10 @@ tests:
   - name: s5_should_truncate_time_46
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #46"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('microsecond', localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), {}) AS result
@@ -5485,10 +5485,10 @@ tests:
   - name: s5_should_truncate_time_47
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #47"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('microsecond', time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {nanosecond: 2}) AS result
@@ -5502,10 +5502,10 @@ tests:
   - name: s5_should_truncate_time_48
     xfail:
       spec: "openCypher TCK 2024.3 Temporal9: [5] Should truncate time #48"
-      issue: fix in 0.6.5
+      issue: "#804"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.truncate('microsecond', time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), {}) AS result

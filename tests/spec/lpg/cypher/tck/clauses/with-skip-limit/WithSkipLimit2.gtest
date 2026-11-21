@@ -84,7 +84,7 @@ tests:
   - name: s3_connected_components_succeeding_with_with_limit
     xfail:
       spec: "openCypher TCK 2024.3 WithSkipLimit2: [3] Connected components succeeding WITH with LIMIT"
-      issue: fix in 0.6.5
+      issue: "fix in 0.6.5"
     setup:
       - |
         CREATE (:A)-[:REL]->(:X)

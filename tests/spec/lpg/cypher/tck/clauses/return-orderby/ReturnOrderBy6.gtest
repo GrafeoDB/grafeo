@@ -93,7 +93,7 @@ tests:
   - name: s5_fail_if_more_complex_expressions_even_if_returned_are_used_inside_an_order_by_item_which_contains_an_aggregation_expression
     xfail:
       spec: "openCypher TCK 2024.3 ReturnOrderBy6: [5] Fail if more complex expressions, even if returned, are used inside an order by item which contains an aggregation expression"
-      issue: fix in 0.6.5
+      issue: "#798"
     query: |
       MATCH (me: Person)--(you: Person)
       RETURN me.age + you.age, count(*) AS cnt

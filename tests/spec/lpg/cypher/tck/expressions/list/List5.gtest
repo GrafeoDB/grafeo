@@ -458,7 +458,7 @@ tests:
   - name: s42_failing_when_using_in_on_a_non_list_literal_1
     xfail:
       spec: "openCypher TCK 2024.3 List5: [42] Failing when using IN on a non-list literal #1"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN 1 IN true
     expect:
@@ -470,7 +470,7 @@ tests:
   - name: s42_failing_when_using_in_on_a_non_list_literal_2
     xfail:
       spec: "openCypher TCK 2024.3 List5: [42] Failing when using IN on a non-list literal #2"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN 1 IN 123
     expect:
@@ -482,7 +482,7 @@ tests:
   - name: s42_failing_when_using_in_on_a_non_list_literal_3
     xfail:
       spec: "openCypher TCK 2024.3 List5: [42] Failing when using IN on a non-list literal #3"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN 1 IN 123.4
     expect:
@@ -494,7 +494,7 @@ tests:
   - name: s42_failing_when_using_in_on_a_non_list_literal_4
     xfail:
       spec: "openCypher TCK 2024.3 List5: [42] Failing when using IN on a non-list literal #4"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN 1 IN 'foo'
     expect:
@@ -506,7 +506,7 @@ tests:
   - name: s42_failing_when_using_in_on_a_non_list_literal_5
     xfail:
       spec: "openCypher TCK 2024.3 List5: [42] Failing when using IN on a non-list literal #5"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN 1 IN {x: []}
     expect:

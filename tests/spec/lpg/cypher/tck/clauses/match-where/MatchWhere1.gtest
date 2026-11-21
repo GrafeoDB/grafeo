@@ -259,7 +259,7 @@ tests:
   - name: s14_fail_when_filtering_path_with_property_predicate
     xfail:
       spec: "openCypher TCK 2024.3 MatchWhere1: [14] Fail when filtering path with property predicate"
-      issue: fix in 0.6.5
+      issue: "#795"
     query: |
       MATCH (n)
       MATCH r = (n)-[*]->()

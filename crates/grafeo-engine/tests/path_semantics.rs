@@ -693,19 +693,17 @@ fn any_shortest_from_or_to_an_anonymous_node() {
 }
 
 /// A shortest-path search over two edge patterns searched the first alone
-/// and ignored the node between them; it is an error until it works.
+/// and ignored the node between them; it searches the whole path, whose
+/// length counts the fixed edge. Cypher's `shortestPath` takes one
+/// relationship pattern.
 #[test]
-fn a_shortest_path_over_two_edge_patterns_is_an_error() {
+fn a_shortest_path_over_two_edge_patterns_searches_the_whole_path() {
     let db = people();
-    let error = db
-        .execute(
-            "MATCH p = ANY SHORTEST (a:Person {name: 'Alix'})-[:KNOWS]->(b)-[:KNOWS]->+(c) \
-             RETURN length(p)",
-        )
-        .unwrap_err();
-    assert!(
-        error.to_string().contains("more than one edge pattern"),
-        "{error}"
+    assert_gql(
+        &db,
+        "MATCH p = ANY SHORTEST (a:Person {name: 'Alix'})-[:KNOWS]->(b)-[:KNOWS]->+(c) \
+         RETURN c.name, length(p)",
+        &[&["Vincent", "2"], &["Mia", "2"]],
     );
     #[cfg(feature = "cypher")]
     {

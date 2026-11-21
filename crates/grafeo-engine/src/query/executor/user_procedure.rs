@@ -13,7 +13,7 @@ use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, Result};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{
-    Operator, OperatorError, OperatorResult, ReadCounter, WriteCounter,
+    Operator, OperatorError, OperatorResult, PathExpansions, ReadCounter, WriteCounter,
 };
 
 use crate::database::QueryResult;
@@ -42,6 +42,7 @@ pub(crate) fn bind_body(
     name: &str,
     body: &str,
     params: &HashMap<String, Value>,
+    limits: &grafeo_adapters::query::limits::ParseLimits,
 ) -> Result<LogicalPlan> {
     let in_procedure = |error: Error| match error {
         Error::Query(mut query) => {
@@ -50,7 +51,7 @@ pub(crate) fn bind_body(
         }
         other => other,
     };
-    let mut plan = crate::query::translators::gql::translate(body).map_err(in_procedure)?;
+    let mut plan = crate::query::translators::gql::translate(body, limits).map_err(in_procedure)?;
     if plan.default_params.is_empty() {
         substitute_params(&mut plan, params).map_err(in_procedure)?;
     } else {
@@ -76,6 +77,8 @@ pub struct ProcedureContext {
     pub(crate) write_counter: Arc<WriteCounter>,
     /// The calling statement's read counter: the body's reads count there.
     pub(crate) read_counter: Arc<ReadCounter>,
+    /// The calling statement's path expansions: the body's path searches take theirs there.
+    pub(crate) path_expansions: Arc<PathExpansions>,
 }
 
 /// An operator that executes a user-defined stored procedure.
@@ -98,6 +101,8 @@ pub struct UserProcedureOperator {
     write_counter: Arc<WriteCounter>,
     /// The calling statement's read counter.
     read_counter: Arc<ReadCounter>,
+    /// The calling statement's path expansions.
+    path_expansions: Arc<PathExpansions>,
     /// Buffered result rows from execution.
     result_rows: Option<Vec<Vec<Value>>>,
     /// Current row index into buffered results.
@@ -136,6 +141,7 @@ impl UserProcedureOperator {
             planning: ctx.planning,
             write_counter: ctx.write_counter,
             read_counter: ctx.read_counter,
+            path_expansions: ctx.path_expansions,
             result_rows: None,
             row_index: 0,
             output_columns,
@@ -156,7 +162,8 @@ impl UserProcedureOperator {
             .body_planner()
             .map_err(OperatorError::from)?
             .with_write_counter(Arc::clone(&self.write_counter))
-            .with_read_counter(Arc::clone(&self.read_counter));
+            .with_read_counter(Arc::clone(&self.read_counter))
+            .with_path_expansions(Arc::clone(&self.path_expansions));
 
         // In the calling statement's memory; a call planned outside any
         // statement (a planner of no session) runs its body unbudgeted.

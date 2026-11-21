@@ -240,6 +240,8 @@ impl From<&super::error::Error> for GqlStatus {
                 QueryErrorKind::Optimization => GqlStatus::SYNTAX_ERROR,
                 QueryErrorKind::Execution => GqlStatus::DATA_EXCEPTION,
                 QueryErrorKind::Timeout => GqlStatus::DATA_EXCEPTION,
+                // ISO/IEC 39075 has no class for a program limit.
+                QueryErrorKind::Limit => GqlStatus::DATA_EXCEPTION,
                 QueryErrorKind::NumericOutOfRange => GqlStatus::DATA_NUMERIC_OUT_OF_RANGE,
                 QueryErrorKind::InvalidCharacterValueForCast => {
                     GqlStatus::DATA_INVALID_CHARACTER_VALUE_FOR_CAST
@@ -267,7 +269,7 @@ impl From<&super::error::Error> for GqlStatus {
                 | TransactionError::Conflict
                 | TransactionError::WriteConflict(_) => GqlStatus::TX_ROLLBACK,
                 TransactionError::SerializationFailure(_)
-                | TransactionError::SnapshotExpired { .. } => GqlStatus::TX_ROLLBACK,
+                | TransactionError::SnapshotExpired(_) => GqlStatus::TX_ROLLBACK,
                 TransactionError::Deadlock => GqlStatus::TX_ROLLBACK,
                 TransactionError::Timeout | TransactionError::DatabaseClosed => {
                     GqlStatus::INVALID_TX_STATE
@@ -488,6 +490,7 @@ mod tests {
                 QueryErrorKind::Unsupported => ("42000", ErrorCode::QueryUnsupported),
                 QueryErrorKind::Execution => ("22000", ErrorCode::QueryExecution),
                 QueryErrorKind::Timeout => ("22000", ErrorCode::QueryTimeout),
+                QueryErrorKind::Limit => ("22000", ErrorCode::QueryLimit),
                 QueryErrorKind::NumericOutOfRange => ("22003", ErrorCode::QueryExecution),
                 QueryErrorKind::InvalidCharacterValueForCast => {
                     ("22018", ErrorCode::QueryExecution)
@@ -531,7 +534,8 @@ mod tests {
                 Some(K::ValuesNotComparable) => Some(K::InvalidParameterValue),
                 Some(K::InvalidParameterValue) => Some(K::PermissionDenied),
                 Some(K::PermissionDenied) => Some(K::ExternalAccessDenied),
-                Some(K::ExternalAccessDenied) => None,
+                Some(K::ExternalAccessDenied) => Some(K::Limit),
+                Some(K::Limit) => None,
             }
         }
 
@@ -542,7 +546,7 @@ mod tests {
             kinds.push(kind);
             at = next(Some(kind));
         }
-        assert_eq!(kinds.len(), 19, "{kinds:?}");
+        assert_eq!(kinds.len(), 20, "{kinds:?}");
         for kind in kinds {
             let (status, code) = decided(kind);
             let error = QueryError::new(kind, "message");
@@ -591,13 +595,15 @@ mod tests {
     /// A transaction whose snapshot expired is rolled back (`40000`).
     #[test]
     fn an_expired_snapshot_is_a_transaction_rollback() {
-        use super::super::error::{Error, TransactionError};
+        use super::super::error::{Error, ExpiredSnapshot, TransactionError};
 
         assert_eq!(
-            GqlStatus::from(&Error::Transaction(TransactionError::SnapshotExpired {
-                kept: 2 << 20,
-                limit: 1 << 20,
-            })),
+            GqlStatus::from(&Error::Transaction(TransactionError::SnapshotExpired(
+                Box::new(ExpiredSnapshot {
+                    kept: 2 << 20,
+                    limit: 1 << 20,
+                })
+            ))),
             GqlStatus::TX_ROLLBACK
         );
     }

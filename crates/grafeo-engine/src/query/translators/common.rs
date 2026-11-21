@@ -1649,7 +1649,7 @@ fn collect_filter_reads(op: &LogicalOperator, read: &mut HashSet<String>) {
     match op {
         LogicalOperator::Filter(filter) => collect_expression_variables(&filter.predicate, read),
         LogicalOperator::ShortestPath(path) => {
-            if let Some(condition) = &path.edge_condition {
+            for condition in path.conditions() {
                 collect_expression_variables(&condition.predicate, read);
             }
         }

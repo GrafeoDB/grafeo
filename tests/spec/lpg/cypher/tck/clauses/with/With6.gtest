@@ -169,7 +169,7 @@ tests:
   - name: s9_fail_if_more_complex_expression_even_if_projected_are_used_inside_expression_which_contains_an_aggregation_expression
     xfail:
       spec: "openCypher TCK 2024.3 With6: [9] Fail if more complex expression, even if projected, are used inside expression which contains an aggregation expression"
-      issue: fix in 0.6.5
+      issue: "#798"
     query: |
       MATCH (me: Person)--(you: Person)
       WITH me.age + you.age AS grp, me.age + you.age + count(*) AS agg

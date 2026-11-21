@@ -45,7 +45,7 @@ tests:
   - name: s1_nodes_on_null_path
     xfail:
       spec: "openCypher TCK 2024.3 Path1: [1] `nodes()` on null path"
-      issue: fix in 0.6.5
+      issue: "#797"
     query: |
       WITH null AS a
       OPTIONAL MATCH p = (a)-[r]->()

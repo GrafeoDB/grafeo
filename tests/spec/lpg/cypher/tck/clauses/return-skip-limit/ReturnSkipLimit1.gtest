@@ -93,7 +93,7 @@ tests:
   - name: s3_skip_with_an_expression_that_does_not_depend_on_variables
     xfail:
       spec: "openCypher TCK 2024.3 ReturnSkipLimit1: [3] SKIP with an expression that does not depend on variables"
-      issue: fix in 0.6.5
+      issue: "#797"
     setup:
       - |
         UNWIND range(1, 10) AS i
@@ -186,7 +186,7 @@ tests:
   - name: s9_floating_point_skip_should_fail
     xfail:
       spec: "openCypher TCK 2024.3 ReturnSkipLimit1: [9] Floating point SKIP should fail"
-      issue: fix in 0.6.5
+      issue: "fix in 0.6.5"
     setup:
       - |
         CREATE (s:Person {name: 'Steven'}),

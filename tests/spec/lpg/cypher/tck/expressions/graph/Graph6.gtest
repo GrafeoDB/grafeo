@@ -84,7 +84,7 @@ tests:
   - name: s4_statically_access_a_property_of_a_node_resulting_from_an_expression
     xfail:
       spec: "openCypher TCK 2024.3 Graph6: [4] Statically access a property of a node resulting from an expression"
-      issue: fix in 0.6.5
+      issue: "#800"
     setup:
       - |
         CREATE ({existing: 42, missing: null})
@@ -141,7 +141,7 @@ tests:
   - name: s8_statically_access_a_property_of_a_relationship_resulting_from_an_expression
     xfail:
       spec: "openCypher TCK 2024.3 Graph6: [8] Statically access a property of a relationship resulting from an expression"
-      issue: fix in 0.6.5
+      issue: "#800"
     setup:
       - |
         CREATE ()-[:REL {existing: 42, missing: null}]->()
@@ -160,7 +160,7 @@ tests:
   - name: s9_fail_when_performing_property_access_on_a_non_graph_element_1
     xfail:
       spec: "openCypher TCK 2024.3 Graph6: [9] Fail when performing property access on a non-graph element #1"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       WITH 123 AS nonGraphElement
       RETURN nonGraphElement.num
@@ -173,7 +173,7 @@ tests:
   - name: s9_fail_when_performing_property_access_on_a_non_graph_element_2
     xfail:
       spec: "openCypher TCK 2024.3 Graph6: [9] Fail when performing property access on a non-graph element #2"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       WITH 42.45 AS nonGraphElement
       RETURN nonGraphElement.num
@@ -186,7 +186,7 @@ tests:
   - name: s9_fail_when_performing_property_access_on_a_non_graph_element_3
     xfail:
       spec: "openCypher TCK 2024.3 Graph6: [9] Fail when performing property access on a non-graph element #3"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       WITH true AS nonGraphElement
       RETURN nonGraphElement.num
@@ -199,7 +199,7 @@ tests:
   - name: s9_fail_when_performing_property_access_on_a_non_graph_element_4
     xfail:
       spec: "openCypher TCK 2024.3 Graph6: [9] Fail when performing property access on a non-graph element #4"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       WITH false AS nonGraphElement
       RETURN nonGraphElement.num
@@ -212,7 +212,7 @@ tests:
   - name: s9_fail_when_performing_property_access_on_a_non_graph_element_5
     xfail:
       spec: "openCypher TCK 2024.3 Graph6: [9] Fail when performing property access on a non-graph element #5"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       WITH 'string' AS nonGraphElement
       RETURN nonGraphElement.num
@@ -225,7 +225,7 @@ tests:
   - name: s9_fail_when_performing_property_access_on_a_non_graph_element_6
     xfail:
       spec: "openCypher TCK 2024.3 Graph6: [9] Fail when performing property access on a non-graph element #6"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       WITH [123, true] AS nonGraphElement
       RETURN nonGraphElement.num

@@ -409,6 +409,7 @@ impl StatementPlanning {
         .with_shuffle_unordered(session.plan_options.shuffle_unordered)
         .with_reachability(session.plan_options.rules.has(PlannerRule::Reachability))
         .with_path_search_budget(session.plan_options.path_search_budget)
+        .with_path_expansion_limit(session.plan_options.path_expansion_limit)
         .with_catalog(Arc::clone(&access.catalog))
         .with_session_context(session_context)
         .with_read_only(session.read_only)
@@ -444,6 +445,12 @@ impl StatementPlanning {
 
 #[cfg(stored_procedures)]
 impl SessionPlanning {
+    /// The statement and name lengths the session's parsers accept.
+    #[cfg(stored_procedures)]
+    pub(crate) fn parse_limits(&self) -> grafeo_adapters::query::limits::ParseLimits {
+        self.plan_options.parse_limits
+    }
+
     /// How the body of a stored procedure that a statement in `caller` (the
     /// calling planner's context) calls is planned: on the graph `graph` its
     /// `USE` names, checked as the use graph clause of a statement run

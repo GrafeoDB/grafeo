@@ -45,7 +45,7 @@ tests:
   - name: s1_should_store_date_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({created: date({year: 1984, month: 10, day: 11})})
@@ -59,7 +59,7 @@ tests:
   - name: s1_should_store_date_1_control
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -76,7 +76,7 @@ tests:
   - name: s2_should_store_date_array_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [date({year: 1984, month: 10, day: 12})]})
@@ -90,7 +90,7 @@ tests:
   - name: s2_should_store_date_array_1_control
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -107,7 +107,7 @@ tests:
   - name: s2_should_store_date_array_2
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [date({year: 1984, month: 10, day: 13}), date({year: 1984, month: 10, day: 14}), date({year: 1984, month: 10, day: 15})]})
@@ -121,7 +121,7 @@ tests:
   - name: s2_should_store_date_array_2_control
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -138,7 +138,7 @@ tests:
   - name: s3_should_store_local_time_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({created: localtime({hour: 12})})
@@ -152,10 +152,10 @@ tests:
   - name: s3_should_store_local_time_1_control
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [3] Should store local time #1 (control query)"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -172,7 +172,7 @@ tests:
   - name: s4_should_store_local_time_array_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [localtime({hour: 13})]})
@@ -186,10 +186,10 @@ tests:
   - name: s4_should_store_local_time_array_1_control
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [4] Should store local time array #1 (control query)"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -206,7 +206,7 @@ tests:
   - name: s4_should_store_local_time_array_2
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [localtime({hour: 14}), localtime({hour: 15}), localtime({hour: 16})]})
@@ -220,10 +220,10 @@ tests:
   - name: s4_should_store_local_time_array_2_control
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [4] Should store local time array #2 (control query)"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -240,7 +240,7 @@ tests:
   - name: s5_should_store_time_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({created: time({hour: 12})})
@@ -254,10 +254,10 @@ tests:
   - name: s5_should_store_time_1_control
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [5] Should store time #1 (control query)"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -274,7 +274,7 @@ tests:
   - name: s6_should_store_time_array_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [time({hour: 13})]})
@@ -288,10 +288,10 @@ tests:
   - name: s6_should_store_time_array_1_control
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [6] Should store time array #1 (control query)"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -308,7 +308,7 @@ tests:
   - name: s6_should_store_time_array_2
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [time({hour: 14}), time({hour: 15}), time({hour: 16})]})
@@ -322,10 +322,10 @@ tests:
   - name: s6_should_store_time_array_2_control
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [6] Should store time array #2 (control query)"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -342,7 +342,7 @@ tests:
   - name: s7_should_store_local_date_time_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({created: localdatetime({year: 1912})})
@@ -356,10 +356,10 @@ tests:
   - name: s7_should_store_local_date_time_1_control
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [7] Should store local date time #1 (control query)"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -376,7 +376,7 @@ tests:
   - name: s8_should_store_local_date_time_array_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [localdatetime({year: 1913})]})
@@ -390,10 +390,10 @@ tests:
   - name: s8_should_store_local_date_time_array_1_control
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [8] Should store local date time array #1 (control query)"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -410,7 +410,7 @@ tests:
   - name: s8_should_store_local_date_time_array_2
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [localdatetime({year: 1914}), localdatetime({year: 1915}), localdatetime({year: 1916})]})
@@ -424,10 +424,10 @@ tests:
   - name: s8_should_store_local_date_time_array_2_control
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [8] Should store local date time array #2 (control query)"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -444,7 +444,7 @@ tests:
   - name: s9_should_store_date_time_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({created: datetime({year: 1912})})
@@ -458,10 +458,10 @@ tests:
   - name: s9_should_store_date_time_1_control
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [9] Should store date time #1 (control query)"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -478,7 +478,7 @@ tests:
   - name: s10_should_store_date_time_array_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [datetime({year: 1913})]})
@@ -492,10 +492,10 @@ tests:
   - name: s10_should_store_date_time_array_1_control
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [10] Should store date time array #1 (control query)"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -512,7 +512,7 @@ tests:
   - name: s10_should_store_date_time_array_2
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [datetime({year: 1914}), datetime({year: 1915}), datetime({year: 1916})]})
@@ -526,10 +526,10 @@ tests:
   - name: s10_should_store_date_time_array_2_control
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [10] Should store date time array #2 (control query)"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -546,7 +546,7 @@ tests:
   - name: s11_should_store_duration_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({created: duration({seconds: 12})})
@@ -560,7 +560,7 @@ tests:
   - name: s11_should_store_duration_1_control
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -577,7 +577,7 @@ tests:
   - name: s12_should_store_duration_array_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [duration({seconds: 13})]})
@@ -591,7 +591,7 @@ tests:
   - name: s12_should_store_duration_array_1_control
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -608,7 +608,7 @@ tests:
   - name: s12_should_store_duration_array_2
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       CREATE ({dates: [duration({seconds: 14}), duration({seconds: 15}), duration({seconds: 16})]})
@@ -622,7 +622,7 @@ tests:
   - name: s12_should_store_duration_array_2_control
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     setup:
       - |
@@ -639,7 +639,7 @@ tests:
   - name: s13_should_propagate_null_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date(null) AS t
@@ -653,10 +653,10 @@ tests:
   - name: s13_should_propagate_null_2
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #2"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.transaction(null) AS t
@@ -670,10 +670,10 @@ tests:
   - name: s13_should_propagate_null_3
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #3"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.statement(null) AS t
@@ -687,10 +687,10 @@ tests:
   - name: s13_should_propagate_null_4
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #4"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN date.realtime(null) AS t
@@ -704,7 +704,7 @@ tests:
   - name: s13_should_propagate_null_5
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime(null) AS t
@@ -718,10 +718,10 @@ tests:
   - name: s13_should_propagate_null_6
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #6"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.transaction(null) AS t
@@ -735,10 +735,10 @@ tests:
   - name: s13_should_propagate_null_7
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #7"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.statement(null) AS t
@@ -752,10 +752,10 @@ tests:
   - name: s13_should_propagate_null_8
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #8"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localtime.realtime(null) AS t
@@ -769,7 +769,7 @@ tests:
   - name: s13_should_propagate_null_9
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time(null) AS t
@@ -783,10 +783,10 @@ tests:
   - name: s13_should_propagate_null_10
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #10"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.transaction(null) AS t
@@ -800,10 +800,10 @@ tests:
   - name: s13_should_propagate_null_11
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #11"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.statement(null) AS t
@@ -817,10 +817,10 @@ tests:
   - name: s13_should_propagate_null_12
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #12"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN time.realtime(null) AS t
@@ -834,7 +834,7 @@ tests:
   - name: s13_should_propagate_null_13
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime(null) AS t
@@ -848,10 +848,10 @@ tests:
   - name: s13_should_propagate_null_14
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #14"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.transaction(null) AS t
@@ -865,10 +865,10 @@ tests:
   - name: s13_should_propagate_null_15
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #15"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.statement(null) AS t
@@ -882,10 +882,10 @@ tests:
   - name: s13_should_propagate_null_16
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #16"
-      issue: fix in 0.6.5
+      issue: "#801"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN localdatetime.realtime(null) AS t
@@ -899,7 +899,7 @@ tests:
   - name: s13_should_propagate_null_17
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime(null) AS t
@@ -913,10 +913,10 @@ tests:
   - name: s13_should_propagate_null_18
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #18"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.transaction(null) AS t
@@ -930,10 +930,10 @@ tests:
   - name: s13_should_propagate_null_19
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #19"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.statement(null) AS t
@@ -947,10 +947,10 @@ tests:
   - name: s13_should_propagate_null_20
     xfail:
       spec: "openCypher TCK 2024.3 Temporal4: [13] Should propagate null #20"
-      issue: fix in 0.6.5
+      issue: "#805"
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN datetime.realtime(null) AS t
@@ -964,7 +964,7 @@ tests:
   - name: s13_should_propagate_null_21
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       RETURN duration(null) AS t

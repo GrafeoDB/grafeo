@@ -150,7 +150,7 @@ tests:
   - name: s5_dynamically_access_a_field_is_case_sensitive_6
     xfail:
       spec: "openCypher TCK 2024.3 Map2: [5] Dynamically access a field is case-sensitive #6"
-      issue: fix in 0.6.5
+      issue: "#800"
     query: |
       WITH {null: 'Mats', NULL: 'Pontus'} AS map
       RETURN map['null'] AS result
@@ -164,7 +164,7 @@ tests:
   - name: s5_dynamically_access_a_field_is_case_sensitive_7
     xfail:
       spec: "openCypher TCK 2024.3 Map2: [5] Dynamically access a field is case-sensitive #7"
-      issue: fix in 0.6.5
+      issue: "#800"
     query: |
       WITH {null: 'Mats', NULL: 'Pontus'} AS map
       RETURN map['NULL'] AS result
@@ -179,7 +179,7 @@ tests:
   - name: s6_fail_at_runtime_when_attempting_to_index_with_an_int_into_a_map
     xfail:
       spec: "openCypher TCK 2024.3 Map2: [6] Fail at runtime when attempting to index with an Int into a Map"
-      issue: fix in 0.6.5
+      issue: "#796"
     params:
       expr: {"name": "Apa"}
       idx: 0
@@ -195,7 +195,7 @@ tests:
   - name: s7_fail_at_runtime_when_trying_to_index_into_a_map_with_a_non_string
     xfail:
       spec: "openCypher TCK 2024.3 Map2: [7] Fail at runtime when trying to index into a map with a non-string"
-      issue: fix in 0.6.5
+      issue: "#796"
     params:
       expr: {"name": "Apa"}
       idx: 12.3
@@ -211,7 +211,7 @@ tests:
   - name: s8_fail_at_runtime_when_trying_to_index_something_which_is_not_a_map
     xfail:
       spec: "openCypher TCK 2024.3 Map2: [8] Fail at runtime when trying to index something which is not a map"
-      issue: fix in 0.6.5
+      issue: "#796"
     params:
       expr: 100
       idx: 0

@@ -12,13 +12,13 @@ use super::{
 };
 use super::{CallProcedureOp, StaticResultOperator};
 use crate::query::plan::PatternClaim;
-use crate::query::plan::{Callee, PathMode, PathSelection};
+use crate::query::plan::{Callee, PathMode, PathSelection, ShortestPathCondition};
 use grafeo_common::utils::error::{QueryError, QueryErrorKind};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::merge_claim::{ClaimDirection, ClaimSource};
 use grafeo_core::execution::operators::{BuiltinFunction, FilterExpression, Volatility};
 use grafeo_core::execution::operators::{
-    ExecutionPathMode, ExecutionPathSelection, JoinCondition, JoinedRowCondition,
+    ExecutionPathMode, ExecutionPathSelection, ExecutionPathStep, JoinCondition, JoinedRowCondition,
 };
 
 impl super::Planner {
@@ -866,11 +866,12 @@ impl super::Planner {
         };
 
         // Convert direction
-        let direction = match sp.direction {
+        let direction_of = |direction: ExpandDirection| match direction {
             ExpandDirection::Outgoing => Direction::Outgoing,
             ExpandDirection::Incoming => Direction::Incoming,
             ExpandDirection::Both => Direction::Both,
         };
+        let direction = direction_of(sp.direction);
         // ANY k keeps the k shortest paths, which are k paths of the pair
         let selection = match sp.selection {
             PathSelection::Any(count) | PathSelection::Shortest(count) => {
@@ -912,17 +913,19 @@ impl super::Planner {
             .with_hop_bounds(sp.min_hops, sp.max_hops)
             .with_read_counter(self.read_counter())
             .with_memory_budget(self.path_search_budget)
+            .with_path_expansions(self.path_expansions())
             .with_path_output();
 
-        // The edge condition reads a row of the input columns and the
-        // candidate edge after them
-        if let Some(condition) = &sp.edge_condition {
+        // A condition reads a row of the input columns, the candidate edge
+        // after them, then the candidate node of a node check
+        let input_columns = columns.len();
+        let predicate = |condition: &ShortestPathCondition, column: usize| -> Result<_> {
             let mut variable_columns: HashMap<String, usize> = columns
                 .iter()
                 .enumerate()
                 .map(|(i, name)| (name.clone(), i))
                 .collect();
-            variable_columns.insert(condition.variable.clone(), columns.len());
+            variable_columns.insert(condition.variable.clone(), column);
             let predicate = ExpressionPredicate::new(
                 self.convert_expression(&condition.predicate)?,
                 variable_columns,
@@ -930,7 +933,25 @@ impl super::Planner {
                 self.read_view(),
             )
             .with_session_context(self.session_context.clone());
-            operator = operator.with_edge_condition(Box::new(predicate));
+            Ok(Box::new(predicate))
+        };
+        if let Some(condition) = &sp.edge_condition {
+            operator = operator.with_edge_condition(predicate(condition, input_columns)?);
+        }
+        let mut steps = Vec::with_capacity(sp.steps.len());
+        for step in &sp.steps {
+            let mut planned = ExecutionPathStep::new(
+                self.stored_edge_types(&step.edge_types)?,
+                direction_of(step.direction),
+            )
+            .with_hop_bounds(step.min_hops, step.max_hops);
+            if let Some(condition) = &step.node_condition {
+                planned = planned.with_node_check(predicate(condition, input_columns + 1)?);
+            }
+            if let Some(condition) = &step.edge_condition {
+                planned = planned.with_edge_condition(predicate(condition, input_columns)?);
+            }
+            steps.push(planned);
         }
 
         // The target the search binds comes before the length
@@ -949,10 +970,9 @@ impl super::Planner {
         // The edge variable: the list of the path's edges for a quantified
         // edge pattern (a group variable, as a variable-length expand binds
         // it), the path's one edge otherwise
-        if let Some(edge_variable) = &sp.edge_variable {
-            operator = operator.with_edge_output(sp.quantified);
+        let edge_column = |edge_variable: &String, quantified: bool| {
             let edge_column = self.register_edge_column(&Some(edge_variable.clone()));
-            if sp.quantified {
+            if quantified {
                 self.edge_columns.borrow_mut().remove(&edge_column);
                 self.entity_list_columns
                     .borrow_mut()
@@ -961,7 +981,25 @@ impl super::Planner {
                     .borrow_mut()
                     .insert(edge_column.clone());
             }
-            columns.push(edge_column);
+            edge_column
+        };
+        if let Some(edge_variable) = &sp.edge_variable {
+            operator = operator.with_edge_output(sp.quantified);
+            columns.push(edge_column(edge_variable, sp.quantified));
+        }
+        // The edge patterns after the first: the node each starts at, then its
+        // edges, for those with a variable
+        for (step, mut planned) in sp.steps.iter().zip(steps) {
+            if let Some(node_variable) = &step.node_variable {
+                planned = planned.with_node_output();
+                self.set_column_entity(node_variable, Some(EntityValue::Node));
+                columns.push(node_variable.clone());
+            }
+            if let Some(edge_variable) = &step.edge_variable {
+                planned = planned.with_edge_output(step.quantified);
+                columns.push(edge_column(edge_variable, step.quantified));
+            }
+            operator = operator.with_step(planned);
         }
 
         // The path's nodes, edges and the path itself, as a variable-length
@@ -1304,27 +1342,30 @@ impl super::Planner {
                 .collect::<Vec<_>>()
         });
 
-        let plan = bind_body(&proc_def.name, &proc_def.body, &param_map)?;
+        let session = self.session_planning.as_ref().ok_or_else(|| {
+            Error::from(grafeo_common::utils::error::QueryError::unsupported(
+                format!(
+                    "a stored procedure call needs a session (procedure '{}')",
+                    proc_def.name
+                ),
+            ))
+        })?;
+        // The body is parsed under the limits of the session that calls it.
+        let plan = bind_body(
+            &proc_def.name,
+            &proc_def.body,
+            &param_map,
+            &session.parse_limits(),
+        )?;
         // The body runs as the same statement run directly: on the graph its
         // `USE` names, checked here before anything runs, else on the
         // calling statement's, in its transaction.
-        let planning = self
-            .session_planning
-            .as_ref()
-            .ok_or_else(|| {
-                Error::from(grafeo_common::utils::error::QueryError::unsupported(
-                    format!(
-                        "a stored procedure call needs a session (procedure '{}')",
-                        proc_def.name
-                    ),
-                ))
-            })?
-            .for_body(
-                &proc_def.name,
-                &self.session_context,
-                plan.graph.as_deref(),
-                plan.root.has_mutations(),
-            )?;
+        let planning = session.for_body(
+            &proc_def.name,
+            &self.session_context,
+            plan.graph.as_deref(),
+            plan.root.has_mutations(),
+        )?;
         let operator = Box::new(UserProcedureOperator::new(
             plan,
             return_columns,
@@ -1333,6 +1374,7 @@ impl super::Planner {
                 planning,
                 write_counter: self.write_counter(),
                 read_counter: self.read_counter(),
+                path_expansions: self.path_expansions(),
             },
         ));
 

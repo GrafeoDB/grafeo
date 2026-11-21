@@ -9,7 +9,7 @@
 //! | [`SpillAccount`] | One open's spilled bytes against its cap and the room it keeps |
 //! | [`SpillManager`] | Manages spill file lifecycle with automatic cleanup |
 //! | [`SpillFile`] | Read/write individual spill files |
-//! | [`ExternalSort`] | External merge sort for big ORDER BY |
+//! | [`SortedRuns`], [`RunMerge`] | A spilled ORDER BY's sorted runs, merged a batch at a time within its grant |
 //! | [`PartitionedState`] | Hash partitioning for spillable GROUP BY |
 //!
 //! Async variants (`AsyncSpillManager`, `AsyncSpillFile`) live in
@@ -19,8 +19,6 @@
 //! too); the rest needs the `spill` feature.
 
 mod account;
-#[cfg(feature = "spill")]
-mod external_sort;
 #[cfg(feature = "spill")]
 mod file;
 #[cfg(feature = "spill")]
@@ -37,8 +35,6 @@ mod serializer;
 pub use account::{
     SPILL_PROBE_STEP, SpillAccount, SpillCap, SpillOwner, SpillReservation, SpillRoom,
 };
-#[cfg(feature = "spill")]
-pub use external_sort::{ExternalSort, NullOrder, SortDirection, SortKey};
 #[cfg(feature = "spill")]
 pub use file::{SpillFile, SpillFileReader};
 #[cfg(feature = "spill")]

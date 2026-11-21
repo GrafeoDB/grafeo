@@ -496,9 +496,17 @@ export declare class GrafeoDB {
    * the checkpoint fails, or after `close()`.
    */
   compact(): any
-  /** Enable CDC for all future sessions. */
+  /**
+   * Enable CDC for all future sessions, and store the setting with the
+   * database: a reopen has it on. An in-memory database keeps it while it
+   * is open. Throws when the setting cannot be stored (a read-only open,
+   * a failed checkpoint); it stays as it was.
+   */
   enableCdc(): void
-  /** Disable CDC for all future sessions. */
+  /**
+   * Disable CDC for all future sessions, and store the setting with the
+   * database: a reopen has it off. Throws as `enableCdc` does.
+   */
   disableCdc(): void
   /** Returns whether CDC is currently enabled for new sessions. */
   get isCdcEnabled(): boolean
@@ -986,14 +994,34 @@ export interface CreateOptions {
    */
   queryMemoryLimit?: number
   /**
-   * How many bytes one path search may hold: the paths a variable-length
-   * or shortest-path search keeps at once, or what an RDF property path
-   * search visits (the nodes an `ANY SHORTEST` or `shortestPath` search
-   * visits are not counted yet). By default a quarter of `memoryLimit`, at
+   * How many bytes one path search may hold: everything a variable-length,
+   * shortest-path or RDF property path search holds at once (the nodes it
+   * visits, its queues and the paths it keeps), which counts against
+   * `queryMemoryLimit` too. By default a quarter of `memoryLimit`, at
    * most 256 MiB, and never more than `memoryLimit`. A search over it
    * throws `GRAFEO-S001`. For this open only.
    */
   pathSearchBudget?: number
+  /**
+   * How many path expansions one statement's variable-length and
+   * shortest-path searches may make together: each edge they read to extend
+   * a path, and each node and edge they copy out of a path into a row. 100
+   * million by default; a statement over it throws `GRAFEO-Q009`. For this
+   * open only.
+   */
+  pathExpansionLimit?: number
+  /**
+   * How many bytes a statement's text may have; the values passed as
+   * parameters do not count. 16 MiB by default; a longer statement throws
+   * `GRAFEO-Q002`. For this open only.
+   */
+  maxQueryLength?: number
+  /**
+   * How many bytes one name in a statement may have, as written between its
+   * delimiters (string literals and IRIs are not names). 16 KiB by default; a
+   * statement with a longer name throws `GRAFEO-Q002`. For this open only.
+   */
+  maxIdentifierLength?: number
   /**
    * How many bytes of replaced data an open transaction's snapshot may
    * keep: what the commits since it began replaced that it can still read. By

@@ -6,6 +6,8 @@
 
 use grafeo_common::utils::error::SourceSpan;
 
+use crate::query::limits::NameLimit;
+
 /// A token in the SQL/PGQ language.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
@@ -241,6 +243,8 @@ pub struct Lexer<'a> {
     line: usize,
     /// Column of current line.
     column: usize,
+    /// The identifier length limit, and the first name found over it.
+    names: NameLimit,
 }
 
 impl<'a> Lexer<'a> {
@@ -252,7 +256,35 @@ impl<'a> Lexer<'a> {
             start: 0,
             line: 1,
             column: 1,
+            names: NameLimit::default(),
         }
+    }
+
+    /// Checks each name against a limit of `max` bytes (see
+    /// [`ParseLimits`](crate::query::limits::ParseLimits)).
+    pub(crate) fn with_max_identifier_length(mut self, max: usize) -> Self {
+        self.names = NameLimit::new(max);
+        self
+    }
+
+    /// The identifier length limit, with the first name found over it.
+    pub(crate) fn names(&self) -> NameLimit {
+        self.names
+    }
+
+    /// Records what the lexer of a clause another parser read (the GQL
+    /// `MATCH` of a `GRAPH_TABLE`) found: `names` started from
+    /// [`Self::names`].
+    pub(crate) fn set_names(&mut self, names: NameLimit) {
+        self.names = names;
+    }
+
+    /// The first name over the identifier length limit of `max` bytes in all
+    /// of `source`.
+    pub(crate) fn scan_names(source: &str, max: usize) -> NameLimit {
+        let mut lexer = Lexer::new(source).with_max_identifier_length(max);
+        while lexer.next_token().kind != TokenKind::Eof {}
+        lexer.names
     }
 
     /// Goes on from the start of `at`, on its line and column: after a
@@ -267,11 +299,19 @@ impl<'a> Lexer<'a> {
     /// Returns the next token.
     pub fn next_token(&mut self) -> Token {
         // A loop, not a recursion: a query may hold any number of comments.
-        loop {
+        let token = loop {
             if let Some(token) = self.scan_token() {
-                return token;
+                break token;
             }
-        }
+        };
+        // The bytes of a name between its delimiters.
+        let length = match token.kind {
+            TokenKind::Identifier => token.text.len(),
+            TokenKind::QuotedIdentifier => token.text.len().saturating_sub(2),
+            _ => return token,
+        };
+        self.names.note(token.span, length);
+        token
     }
 
     /// Scans the next token, or skips a `-- ` line comment and returns `None`.

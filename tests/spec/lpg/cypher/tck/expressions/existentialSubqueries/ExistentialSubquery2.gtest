@@ -45,7 +45,7 @@ tests:
   - name: s1_full_existential_subquery
     xfail:
       spec: "openCypher TCK 2024.3 ExistentialSubquery2: [1] Full existential subquery"
-      issue: fix in 0.6.5
+      issue: "fix in 0.6.5"
     setup:
       - |
         CREATE (a:A {prop: 1})-[:R]->(b:B {prop: 1}),
@@ -67,7 +67,7 @@ tests:
   - name: s2_full_existential_subquery_with_aggregation
     xfail:
       spec: "openCypher TCK 2024.3 ExistentialSubquery2: [2] Full existential subquery with aggregation"
-      issue: fix in 0.6.5
+      issue: "fix in 0.6.5"
     setup:
       - |
         CREATE (a:A {prop: 1})-[:R]->(b:B {prop: 1}),

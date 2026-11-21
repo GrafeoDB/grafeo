@@ -17,7 +17,7 @@ use grafeo_common::grafeo_warn;
 use grafeo_common::storage::{ImageId, ImageSource, Section};
 use grafeo_common::testing::child_process;
 use grafeo_common::testing::crash::{maybe_crash, maybe_fail};
-use grafeo_common::utils::error::{Error, Result};
+use grafeo_common::utils::error::{Error, Result, StorageError};
 use grafeo_common::utils::hash::FxHashSet;
 use parking_lot::Mutex;
 
@@ -153,6 +153,11 @@ pub struct GrafeoFileManager {
     /// The free-space probe failed once and said so: later failures skip
     /// the check without another warning.
     space_probe_warned: AtomicBool,
+    /// Why this manager takes no more checkpoints: an earlier one failed
+    /// between the start of its header write and that header's sync, so only
+    /// a reopen knows which image the file holds (see
+    /// [`write_checkpoint`](Self::write_checkpoint)).
+    outcome_unknown: Mutex<Option<(std::io::ErrorKind, String)>>,
     /// Registers the file as open in this process while the manager lives,
     /// so a second open of it can say so (see [`holder`](super::holder)).
     _open_here: OpenHere,
@@ -266,6 +271,7 @@ impl GrafeoFileManager {
             cipher,
             checkpoint_headroom: AtomicU64::new(0),
             space_probe_warned: AtomicBool::new(false),
+            outcome_unknown: Mutex::new(None),
             _open_here: open_here,
         })
     }
@@ -368,6 +374,7 @@ impl GrafeoFileManager {
             cipher,
             checkpoint_headroom: AtomicU64::new(0),
             space_probe_warned: AtomicBool::new(false),
+            outcome_unknown: Mutex::new(None),
             _open_here: open_here,
         })
     }
@@ -424,15 +431,22 @@ impl GrafeoFileManager {
     /// it fails with [`InsufficientSpace`] and writes nothing. A probe that
     /// fails skips the check (it warns once).
     ///
-    /// After a failure before the header write, the file holds no image newer
-    /// than before the call, and it is cut back to its length before the
-    /// call, so a full disk gets back the room the partial image took. After
-    /// a failure at or after the header write, the new header may be on
-    /// disk: [`active_header`](Self::active_header) and
-    /// [`read_image`](Self::read_image) keep serving the previous image,
-    /// while a reopen may find the new one. The next checkpoint spares the
-    /// pages of both. The caller must therefore keep the WAL from the
-    /// previous image's `checkpoint_lsn` until a later checkpoint succeeds.
+    /// The header decides the outcome:
+    /// - A failure before the header write stores nothing: the file holds no
+    ///   image newer than before the call, and it is cut back to its length
+    ///   before the call, so a full disk gets back the room the partial image
+    ///   took.
+    /// - A failure from the header write up to the header's sync leaves the
+    ///   outcome unknown: a reopen finds the new image or the previous one,
+    ///   whole. The error ([`StorageError::CheckpointOutcomeUnknown`],
+    ///   `GRAFEO-S008`) says so, and the manager takes no
+    ///   more checkpoints: every later call fails, naming the first failure,
+    ///   until the file is opened again. [`active_header`](Self::active_header)
+    ///   and [`read_image`](Self::read_image) keep serving the previous image.
+    ///   The caller keeps the WAL from the previous image's `checkpoint_lsn`.
+    /// - Once the header is synced the checkpoint is done: the new image is
+    ///   active, and a failure to cut the file after it only warns (the next
+    ///   checkpoint cuts it).
     pub fn write_checkpoint(
         &self,
         sections: &[&dyn Section],
@@ -463,8 +477,9 @@ impl GrafeoFileManager {
                 "cannot write a checkpoint: the database is open in read-only mode".to_string(),
             ));
         }
-
         let mut file = self.file.lock();
+        // Under the file lock: a checkpoint that poisons holds it.
+        self.check_checkpoint_allowed()?;
         let (iteration, revision, slot, spared, active_root) = {
             let active = self.active.lock();
             (
@@ -571,25 +586,91 @@ impl GrafeoFileManager {
             edge_count: header.edge_count,
             timestamp_ms: now_ms(),
         };
-        write_page(&mut file, slot_offset(next_slot), &next.encode())?;
-        maybe_crash("checkpoint:after_header");
-        maybe_fail("checkpoint:after_header")?;
-        file.sync_all()?;
+        // From the header write to its sync, a failure leaves the outcome to
+        // the reopen: this manager takes no more checkpoints.
+        let header_synced = (|| -> Result<()> {
+            write_page(&mut file, slot_offset(next_slot), &next.encode())?;
+            maybe_crash("checkpoint:after_header");
+            maybe_fail("checkpoint:after_header")?;
+            maybe_fail("checkpoint:header_sync")?;
+            file.sync_all()?;
+            Ok(())
+        })();
+        if let Err(error) = header_synced {
+            let kind = match &error {
+                Error::Io(io) => io.kind(),
+                _ => std::io::ErrorKind::Other,
+            };
+            let reason = error.to_string();
+            *self.outcome_unknown.lock() = Some((kind, reason.clone()));
+            return Err(Error::from(StorageError::CheckpointOutcomeUnknown(
+                format!(
+                    "the checkpoint of {} failed between its header write and the header's sync \
+                 ({reason}): the next open finds the new image or the previous one whole; \
+                 reopen the database",
+                    self.path.display()
+                ),
+            )));
+        }
 
-        // The previous image is no longer reachable: drop the pages after
-        // the new image. A failure of the trim leaves them: the next
-        // checkpoint cuts the file.
-        maybe_crash("checkpoint:before_trim");
-        maybe_fail("checkpoint:before_trim")?;
-        file.set_len(image_end(&runs)?)?;
-
+        // The header is synced: the new image is the active one, and the
+        // previous image, unreachable now, spares no pages.
+        let end = image_end(&runs);
         *self.active.lock() = ActiveImage {
             header: next,
             slot: next_slot,
             runs,
         };
         *self.last_checkpoint.lock() = Some(stats);
+
+        // Drop the pages after the new image. A failed cut leaves them: the
+        // next checkpoint cuts the file.
+        maybe_crash("checkpoint:before_trim");
+        let trimmed = maybe_fail("checkpoint:before_trim")
+            .and_then(|()| maybe_fail("checkpoint:trim"))
+            .and_then(|()| Ok(file.set_len(end?)?));
+        if let Err(error) = trimmed {
+            grafeo_warn!(
+                "the checkpoint of {} is written, but the file could not be cut after it \
+                 ({error}): the next checkpoint cuts it",
+                self.path.display()
+            );
+        }
         Ok(stats)
+    }
+
+    /// Refuses a checkpoint after one whose outcome is unknown (it failed
+    /// between its header write and the header's sync): only a reopen knows
+    /// which image the file holds.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::CheckpointOutcomeUnknown`] naming the earlier failure
+    /// and asking for a reopen.
+    pub fn check_checkpoint_allowed(&self) -> Result<()> {
+        match &*self.outcome_unknown.lock() {
+            Some((_, reason)) => Err(Error::from(StorageError::CheckpointOutcomeUnknown(
+                format!(
+                    "the database file {} takes no more checkpoints after one that failed \
+                 between its header write and the header's sync ({reason}): reopen the \
+                 database",
+                    self.path.display()
+                ),
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// The failure of a checkpoint of this manager between its header write
+    /// and the header's sync, if one failed so, with its kind: the manager
+    /// takes no more (see
+    /// [`check_checkpoint_allowed`](Self::check_checkpoint_allowed)).
+    #[must_use]
+    pub fn outcome_unknown(&self) -> Option<std::io::Error> {
+        self.outcome_unknown
+            .lock()
+            .as_ref()
+            .map(|(kind, reason)| std::io::Error::new(*kind, reason.clone()))
     }
 
     /// Sets the free space, in bytes, a checkpoint leaves for the WAL beyond
@@ -2415,11 +2496,13 @@ mod tests {
         );
     }
 
-    /// An injected failure at each point of `write_checkpoint` returns an
-    /// error naming it, as a real I/O error there would. The manager keeps
-    /// serving the previous image (its header and its sections); a reopen
-    /// finds the previous image before the header write and the new one from
-    /// it on; the next checkpoint of the same manager succeeds.
+    /// An injected failure at each point of `write_checkpoint` before its
+    /// header write returns an error naming it, as a real I/O error there
+    /// would. The manager keeps serving the previous image (its header and
+    /// its sections); a reopen finds the previous image; the next checkpoint
+    /// of the same manager succeeds. (From the header write on, see
+    /// `a_failure_before_the_header_sync_poisons_the_manager` and
+    /// `a_failed_trim_after_the_header_sync_is_a_checkpoint_that_succeeded`.)
     ///
     /// The previous image (3 pages of data) ends after the pages the failing
     /// checkpoint's smaller image uses, so a trim before the failure would cut
@@ -2429,12 +2512,7 @@ mod tests {
     fn a_failed_checkpoint_returns_an_error_and_the_next_one_succeeds() {
         use grafeo_common::testing::crash::with_failure_at;
 
-        const POINTS: [&str; 4] = [
-            "checkpoint:after_chunks",
-            "checkpoint:after_data_sync",
-            "checkpoint:after_header",
-            "checkpoint:before_trim",
-        ];
+        const POINTS: [&str; 2] = ["checkpoint:after_chunks", "checkpoint:after_data_sync"];
         let previous = vec![3u8; 9000];
         for (count, point) in (1..).zip(POINTS) {
             let dir = test_dir();
@@ -2472,19 +2550,13 @@ mod tests {
 
             let copy = dir.path().join("copy.grafeo");
             manager.copy_to(&copy).unwrap();
-            let header_written = count >= 3;
             let found = read(
                 &GrafeoFileManager::open(&copy, None).unwrap(),
                 SectionType::Catalog,
             );
-            let expected = if header_written {
-                b"Gus".to_vec()
-            } else {
-                previous.clone()
-            };
             assert!(
-                found.as_ref() == Some(&expected),
-                "{point}: a reopen finds the new image once its header is written, found {:?} bytes",
+                found.as_ref() == Some(&previous),
+                "{point}: a reopen finds the previous image, found {:?} bytes",
                 found.as_ref().map(Vec::len)
             );
 
@@ -2496,6 +2568,155 @@ mod tests {
                 Some(b"Vincent".to_vec()),
                 "{point}: the checkpoint after the failed one"
             );
+        }
+    }
+
+    /// Whether `error` is the typed outcome-unknown error (GRAFEO-S008).
+    #[cfg(feature = "testing-crash-injection")]
+    fn is_outcome_unknown(error: &Error) -> bool {
+        matches!(error, Error::Storage(storage)
+            if matches!(**storage, StorageError::CheckpointOutcomeUnknown(_)))
+    }
+
+    /// Fails a checkpoint of `image_b` over A (and the image before A, so the file is larger
+    /// than B needs) at the failure point named `point`, found by sweeping the counts. Returns
+    /// the manager, its directory and what the failed call returned.
+    #[cfg(feature = "testing-crash-injection")]
+    fn checkpoint_failing_at(
+        point: &str,
+        image_b: &[Fixed],
+    ) -> (GrafeoFileManager, TempDir, Result<()>) {
+        use grafeo_common::testing::crash::{fired_failure, with_failure_at};
+
+        for count in 1..=16 {
+            let dir = test_dir();
+            let path = dir.path().join("db.grafeo");
+            let manager = GrafeoFileManager::create(&path, None).unwrap();
+            checkpoint(
+                &manager,
+                &[fixed(SectionType::LpgStore, vec![88u8; 100 * 1024])],
+                1,
+            )
+            .unwrap();
+            checkpoint(
+                &manager,
+                &[fixed(SectionType::LpgStore, vec![3u8; 9000])],
+                2,
+            )
+            .unwrap();
+            let result = with_failure_at(count, || checkpoint(&manager, image_b, 3));
+            if fired_failure().as_deref() == Some(point) {
+                return (manager, dir, result);
+            }
+            assert!(fired_failure().is_some(), "no failure landed at {point}");
+        }
+        panic!("no failure landed at {point}")
+    }
+
+    /// A trim that fails once the new header is synced fails no checkpoint: the call returns
+    /// Ok, the manager serves the new image from the new slot, and the next checkpoint writes
+    /// the other slot and cuts the file to its image's end, as a run without the failure does.
+    #[cfg(feature = "testing-crash-injection")]
+    #[test]
+    fn a_failed_trim_after_the_header_sync_is_a_checkpoint_that_succeeded() {
+        let image_b = [fixed(SectionType::LpgStore, "Paris")];
+        let image_c = [fixed(SectionType::LpgStore, "Amsterdam")];
+        for point in ["checkpoint:before_trim", "checkpoint:trim"] {
+            let (manager, dir, result) = checkpoint_failing_at(point, &image_b);
+            result.unwrap_or_else(|error| panic!("{point}: {error}"));
+            let bytes = file_bytes(&manager, &dir);
+            let (slot_b, header_b) = active_slot_of(&bytes);
+            assert_eq!(
+                manager.active_header(),
+                header_b,
+                "{point}: the new image is active"
+            );
+            assert_eq!(header_b.epoch, 3, "{point}");
+            assert_holds(&manager, &image_b, point);
+            let untrimmed = bytes.len();
+
+            checkpoint(&manager, &image_c, 4).unwrap();
+            let bytes = file_bytes(&manager, &dir);
+            let (slot_c, header_c) = active_slot_of(&bytes);
+            assert_eq!(
+                slot_c,
+                1 - slot_b,
+                "{point}: the next checkpoint writes the other slot"
+            );
+            assert_eq!(header_c.epoch, 4, "{point}");
+
+            // The same checkpoints without the failure leave a file of the same length.
+            let clean_dir = test_dir();
+            let clean =
+                GrafeoFileManager::create(clean_dir.path().join("db.grafeo"), None).unwrap();
+            checkpoint(
+                &clean,
+                &[fixed(SectionType::LpgStore, vec![88u8; 100 * 1024])],
+                1,
+            )
+            .unwrap();
+            checkpoint(&clean, &[fixed(SectionType::LpgStore, vec![3u8; 9000])], 2).unwrap();
+            checkpoint(&clean, &image_b, 3).unwrap();
+            checkpoint(&clean, &image_c, 4).unwrap();
+            let clean_length = file_bytes(&clean, &clean_dir).len();
+            assert!(
+                untrimmed > clean_length,
+                "{point}: the failed trim left the old pages"
+            );
+            assert_eq!(
+                bytes.len(),
+                clean_length,
+                "{point}: the next checkpoint cut the file to its image's end"
+            );
+            drop(manager);
+            let reopened = GrafeoFileManager::open(dir.path().join("db.grafeo"), None).unwrap();
+            assert_holds(&reopened, &image_c, point);
+        }
+    }
+
+    /// A failure between the start of the header write and the header's sync leaves the
+    /// outcome unknown: the call returns an I/O error saying so, the manager keeps serving the
+    /// previous image and refuses every later checkpoint until a reopen, and the reopen finds
+    /// one of the two images whole.
+    #[cfg(feature = "testing-crash-injection")]
+    #[test]
+    fn a_failure_before_the_header_sync_poisons_the_manager() {
+        let image_b = [fixed(SectionType::LpgStore, "Paris")];
+        for point in ["checkpoint:after_header", "checkpoint:header_sync"] {
+            let (manager, dir, result) = checkpoint_failing_at(point, &image_b);
+            let error = result.expect_err(point);
+            assert!(is_outcome_unknown(&error), "{point}: {error:?}");
+            assert_eq!(error.error_code().as_str(), "GRAFEO-S008", "{point}");
+            assert!(
+                error.to_string().contains(point),
+                "{point}: names the cause: {error}"
+            );
+            assert!(manager.outcome_unknown().is_some(), "{point}");
+            assert_eq!(
+                manager.active_header().epoch,
+                2,
+                "{point}: the previous image is served"
+            );
+
+            let refused = checkpoint(&manager, &[fixed(SectionType::LpgStore, "Rome")], 4)
+                .expect_err("a later checkpoint is refused");
+            assert!(is_outcome_unknown(&refused), "{point}: {refused:?}");
+            assert!(
+                refused.to_string().contains(point),
+                "{point}: names the cause: {refused}"
+            );
+            assert!(manager.check_checkpoint_allowed().is_err(), "{point}");
+
+            drop(manager);
+            let reopened = GrafeoFileManager::open(dir.path().join("db.grafeo"), None).unwrap();
+            let found = read(&reopened, SectionType::LpgStore);
+            assert!(
+                found.as_deref() == Some(&b"Paris"[..])
+                    || found.as_deref() == Some(&[3u8; 9000][..]),
+                "{point}: one of the two images, whole: {:?} bytes",
+                found.as_ref().map(Vec::len)
+            );
+            checkpoint(&reopened, &[fixed(SectionType::LpgStore, "Rome")], 5).unwrap();
         }
     }
 
@@ -3308,9 +3529,9 @@ mod tests {
     }
 
     /// A checkpoint that reused chunks and failed once its header was
-    /// written leaves pages both images use: the next checkpoint spares them
-    /// once, writes, and both the file it leaves and the one the failure
-    /// left open.
+    /// written leaves pages both images use. The manager takes no more
+    /// checkpoints; the file the failure left opens with the new image whole,
+    /// and the next checkpoint after a reopen reuses its chunks and writes.
     #[cfg(feature = "testing-crash-injection")]
     #[test]
     fn a_failed_checkpoint_that_reused_chunks_leaves_the_next_one_working() {
@@ -3340,6 +3561,12 @@ mod tests {
         assert!(error.contains("checkpoint:after_header"), "{error}");
         let left = dir.path().join("left.grafeo");
         manager.copy_to(&left).unwrap();
+        assert!(
+            write(&manager, &failed).is_err(),
+            "the manager takes no more checkpoints"
+        );
+        drop(manager);
+        let manager = GrafeoFileManager::open(&path, None).unwrap();
         let next = write(
             &manager,
             &Reusing {

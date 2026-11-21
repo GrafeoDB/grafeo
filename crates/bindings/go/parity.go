@@ -286,9 +286,27 @@ func (db *Database) BatchVectorSearch(label, property string, queries [][]float3
 	return results, nil
 }
 
-// SetCDCEnabled turns change data capture on or off for new sessions.
-// After Close it changes nothing, as it has no error to return: check a closed
-// database with a call that returns one, such as Info() (GRAFEO-T007).
+// SetCDC turns change data capture on or off for new sessions and stores the
+// setting with the database, so a reopen has it as it was (an in-memory
+// database keeps it while it is open). It fails when the setting cannot be
+// stored (a read-only open, a failed checkpoint), and the setting stays as it was.
+func (db *Database) SetCDC(enabled bool) error {
+	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		return err
+	}
+	return lockAndCheckStatus(func() C.GrafeoStatus {
+		return C.grafeo_set_cdc(db.handle, C.bool(enabled))
+	})
+}
+
+// SetCDCEnabled turns change data capture on or off for new sessions, for as
+// long as the database is open: nothing is stored. After Close it changes
+// nothing, as it has no error to return: check a closed database with a call
+// that returns one, such as Info() (GRAFEO-T007).
+//
+// Deprecated: use SetCDC, which stores the setting and returns the error;
+// removed in 0.7.0.
 func (db *Database) SetCDCEnabled(enabled bool) {
 	defer runtime.KeepAlive(db)
 	if db.checkOpen() != nil {

@@ -1,6 +1,6 @@
-/// The path search budget through Dart (#492): `GrafeoOptions(pathSearchBudget: ...)`. Zero
-/// fails at the open; the budget binds, with its error code and the setting named in the
-/// message. The snapshot retention limit, `GrafeoOptions(snapshotRetentionLimit: ...)`: below
+/// The query resource limits through Dart (#492): `GrafeoOptions` with `pathSearchBudget`,
+/// `pathExpansionLimit`, `maxQueryLength` and `maxIdentifierLength`. Zero fails at the open;
+/// each setting binds, with its error code and the setting named in the message. The snapshot retention limit, `GrafeoOptions(snapshotRetentionLimit: ...)`: below
 /// 1 MiB fails at the open; past it an open transaction throws `GRAFEO-T012`.
 library;
 
@@ -32,15 +32,48 @@ void _refused(GrafeoDB db, String query, String code, String setting) {
 void main() {
   group('query limits (#492)', () {
     test('zero is refused at the open', () {
-      expect(
-        () => GrafeoDB.openWithOptions(null, GrafeoOptions(pathSearchBudget: 0)),
-        throwsA(isA<GrafeoException>()),
-      );
+      for (final options in [
+        GrafeoOptions(pathSearchBudget: 0),
+        GrafeoOptions(pathExpansionLimit: 0),
+        GrafeoOptions(maxQueryLength: 0),
+        GrafeoOptions(maxIdentifierLength: 0),
+      ]) {
+        expect(
+          () => GrafeoDB.openWithOptions(null, options),
+          throwsA(isA<GrafeoException>()),
+        );
+      }
     });
 
-    test('the path search budget binds', () {
-      final db = _opened(GrafeoOptions(pathSearchBudget: 1));
+    test('each setting binds', () {
+      var db = _opened(GrafeoOptions(pathExpansionLimit: 4));
+      _refused(db, _paths, 'GRAFEO-Q009', 'path_expansion_limit');
+      db.close();
+
+      db = _opened(GrafeoOptions(pathExpansionLimit: 5));
+      expect(db.execute(_paths).rows, hasLength(5));
+      db.close();
+
+      db = _opened(GrafeoOptions(pathSearchBudget: 1));
       _refused(db, _paths, 'GRAFEO-S001', 'path_search_budget');
+      db.close();
+
+      db = _opened(GrafeoOptions(maxQueryLength: 200));
+      expect(db.execute(_paths).rows, hasLength(5));
+      _refused(db, _paths + ' ' * 200, 'GRAFEO-Q002', 'max_query_length');
+      db.close();
+
+      db = _opened(GrafeoOptions(maxIdentifierLength: 8));
+      expect(
+        db.execute('MATCH (abcdefgh:Star) RETURN abcdefgh.n').rows,
+        hasLength(1),
+      );
+      _refused(
+        db,
+        'MATCH (abcdefghi:Star) RETURN 1',
+        'GRAFEO-Q002',
+        'max_identifier_length',
+      );
       db.close();
     });
   });

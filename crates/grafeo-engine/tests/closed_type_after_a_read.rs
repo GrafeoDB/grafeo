@@ -339,21 +339,32 @@ fn an_untyped_graph_beside_it_takes_any_write() {
 
 /// While another session adds and drops a property, a write of it answers by the type at one moment:
 /// each statement either writes or is refused, whichever it sees, and a value that got in keeps the
-/// property from going.
+/// property from going. This race checks that last clause only when a write got in; the test after it
+/// checks it on every run.
 #[test]
 fn a_type_changing_under_writes_gives_one_answer_per_statement() {
     let (db, other) = typed();
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // The writes start once the first ADD has gone through, so the type has changed at least once
+    // before the writes start: on a loaded machine the changer could otherwise get no turn before
+    // they end. A first ADD refused, or a panic, drops the sender and fails the test at once.
+    let (added, first_add) = std::sync::mpsc::channel();
     let changer = {
         let stop = std::sync::Arc::clone(&stop);
         std::thread::spawn(move || {
             let mut changes = 0_u32;
+            let mut added = Some(added);
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                 if other
                     .execute("ALTER NODE TYPE P ADD PROPERTY age INT64")
                     .is_ok()
                 {
                     changes += 1;
+                    if let Some(added) = added.take() {
+                        added.send(()).unwrap();
+                    }
+                } else if added.is_some() {
+                    return changes;
                 }
                 let _ = other.execute("ALTER NODE TYPE P DROP PROPERTY age");
                 std::thread::yield_now();
@@ -362,6 +373,7 @@ fn a_type_changing_under_writes_gives_one_answer_per_statement() {
         })
     };
     let session = on_the_graph(&db);
+    first_add.recv().expect("the first ADD went through");
     let mut written = 0_i64;
     for at in 0..2_000 {
         session.execute("RETURN 1 AS one").unwrap();
@@ -387,6 +399,68 @@ fn a_type_changing_under_writes_gives_one_answer_per_statement() {
                 .execute("ALTER NODE TYPE P DROP PROPERTY age")
                 .is_err(),
             "{written} nodes hold it"
+        );
+    }
+}
+
+/// The pair the race above turns on, every run: a transaction that wrote `age` commits while another
+/// session drops `age`, the two started together, so either may reach the commit lock first. Exactly
+/// one goes through, and a node holds `age` exactly when the commit did.
+#[test]
+fn a_write_of_a_property_and_its_drop_give_one_answer_together() {
+    for round in 0..50 {
+        let (db, other) = typed();
+        other
+            .execute("ALTER NODE TYPE P ADD PROPERTY age INT64")
+            .unwrap();
+        let mut session = on_the_graph(&db);
+        session.begin_transaction().unwrap();
+        session.execute("INSERT (:P {id: 1, age: 1})").unwrap();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let dropper = {
+            let start = std::sync::Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                other
+                    .execute("ALTER NODE TYPE P DROP PROPERTY age")
+                    .map(|_| ())
+            })
+        };
+        start.wait();
+        // Statement work, not a wait: with none the commit tends to win, with one or more the DROP,
+        // so both orders occur across the rounds; the test asserts neither order nor how often.
+        for _ in 0..round % 4 {
+            session.execute("RETURN 1 AS one").unwrap();
+        }
+        let committed = session.commit();
+        let dropped = dropper.join().unwrap();
+        let after = on_the_graph(&db);
+        match (&committed, &dropped) {
+            (Ok(()), Err(_)) => assert!(
+                after
+                    .execute("ALTER NODE TYPE P DROP PROPERTY age")
+                    .is_err(),
+                "round {round}: the held value keeps the property"
+            ),
+            (Err(error), Ok(())) => assert!(
+                error.to_string().contains("GRAFEO-V001"),
+                "round {round}: {error}"
+            ),
+            _ => panic!("round {round}: commit {committed:?}, drop {dropped:?}"),
+        }
+        let held = after
+            .execute("MATCH (n:P) WHERE n.age IS NOT NULL RETURN count(n) AS c")
+            .unwrap();
+        let expected = i64::from(committed.is_ok());
+        assert_eq!(
+            held.rows()[0][0],
+            grafeo_common::types::Value::Int64(expected),
+            "round {round}: a node holds age exactly when the commit went through"
+        );
+        assert_eq!(
+            after.execute("INSERT (:P {id: 2, age: 2})").is_ok(),
+            committed.is_ok(),
+            "round {round}: age is declared exactly when a node holds it"
         );
     }
 }

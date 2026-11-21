@@ -69,7 +69,7 @@ tests:
   - name: s3_using_keys_on_null_map
     xfail:
       spec: "openCypher TCK 2024.3 Map3: [3] Using `keys()` on null map"
-      issue: fix in 0.6.5
+      issue: "#800"
     query: |
       WITH null AS m
       RETURN keys(m), keys(null)

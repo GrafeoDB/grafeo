@@ -106,7 +106,7 @@ tests:
   - name: s6_fail_tofloat_on_invalid_types_example_boolean_1
     xfail:
       spec: "openCypher TCK 2024.3 TypeConversion3: [6] Fail `toFloat()` on invalid types #Example: boolean #1"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()
@@ -122,7 +122,7 @@ tests:
   - name: s6_fail_tofloat_on_invalid_types_example_list_2
     xfail:
       spec: "openCypher TCK 2024.3 TypeConversion3: [6] Fail `toFloat()` on invalid types #Example: list #2"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()
@@ -138,7 +138,7 @@ tests:
   - name: s6_fail_tofloat_on_invalid_types_example_map_3
     xfail:
       spec: "openCypher TCK 2024.3 TypeConversion3: [6] Fail `toFloat()` on invalid types #Example: map #3"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()
@@ -154,7 +154,7 @@ tests:
   - name: s6_fail_tofloat_on_invalid_types_example_node_4
     xfail:
       spec: "openCypher TCK 2024.3 TypeConversion3: [6] Fail `toFloat()` on invalid types #Example: node #4"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()
@@ -170,7 +170,7 @@ tests:
   - name: s6_fail_tofloat_on_invalid_types_example_relationship_5
     xfail:
       spec: "openCypher TCK 2024.3 TypeConversion3: [6] Fail `toFloat()` on invalid types #Example: relationship #5"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()
@@ -186,7 +186,7 @@ tests:
   - name: s6_fail_tofloat_on_invalid_types_example_path_6
     xfail:
       spec: "openCypher TCK 2024.3 TypeConversion3: [6] Fail `toFloat()` on invalid types #Example: path #6"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()

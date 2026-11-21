@@ -498,7 +498,18 @@ mod tests {
             db.wal().unwrap().sync().unwrap();
             db.file_manager().unwrap().copy_to(&crashed).unwrap();
             copy_files(&sidecar, &sidecar_wal(&crashed));
-            db.close().unwrap();
+            // After the header write the outcome is unknown: the close runs
+            // no checkpoint, keeps the WAL and asks for a reopen.
+            match db.close() {
+                Err(error) if point == "checkpoint:after_header" => {
+                    assert_eq!(
+                        error.error_code().as_str(),
+                        "GRAFEO-S008",
+                        "{point}: {error}"
+                    );
+                }
+                closed => closed.unwrap(),
+            }
         }
         assert_every_write_once(&open(&crashed), &format!("{point}, as after a crash"));
         assert_every_write_once(&open(&path), &format!("{point}, after close"));

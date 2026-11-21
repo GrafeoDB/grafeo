@@ -5,11 +5,13 @@ using Grafeo.Native;
 namespace Grafeo;
 
 /// <summary>
-/// The memory and spill settings a database opens with, for
+/// The memory, spill and query limit settings a database opens with, for
 /// <see cref="GrafeoDB.Open(string?, GrafeoOptions?)"/>. Unset means the default: 75% of the
 /// memory the process may use for the memory limit, the memory limit for the query memory
-/// limit, a quarter of the memory limit (at most 256 MiB) for the path search budget, a quarter
-/// of the memory limit (at least 1 MiB) for the snapshot retention limit, half the spill
+/// limit, a quarter of the memory limit (at most 256 MiB) for the path search budget, 100
+/// million for the path expansion limit, 16 MiB for the query length and 16 KiB for the
+/// identifier length, a quarter of the memory limit (at least 1 MiB) for the snapshot retention
+/// limit, half the spill
 /// volume's free space for the spill limit. A write past the memory limit fails with
 /// GRAFEO-S001, and so does a path search over its budget. One object may open several
 /// databases.
@@ -23,6 +25,9 @@ public sealed class GrafeoOptions : IDisposable
     private ulong? _memoryLimit;
     private ulong? _queryMemoryLimit;
     private ulong? _pathSearchBudget;
+    private ulong? _pathExpansionLimit;
+    private ulong? _maxQueryLength;
+    private ulong? _maxIdentifierLength;
     private ulong? _snapshotRetentionLimit;
     private ulong? _historyRetentionLimit;
     private ulong? _spillLimit;
@@ -48,14 +53,48 @@ public sealed class GrafeoOptions : IDisposable
     }
 
     /// <summary>
-    /// How many bytes one path search may hold: the paths a variable-length or shortest-path
-    /// search keeps at once, or what an RDF property path search visits (the nodes an ANY SHORTEST
-    /// or shortestPath search visits are not counted yet). Never more than the memory limit. A
+    /// How many bytes one path search may hold: everything a variable-length, shortest-path or
+    /// RDF property path search holds at once (the nodes it visits, its queues and the paths it
+    /// keeps), which counts against the query memory limit too. Never more than the memory limit. A
     /// search over it fails with GRAFEO-S001. A zero or negative budget fails at the open.
     /// </summary>
     public GrafeoOptions SetPathSearchBudget(long bytes)
     {
         _pathSearchBudget = Bytes(bytes);
+        return this;
+    }
+
+    /// <summary>
+    /// How many path expansions one statement's variable-length and shortest-path searches may
+    /// make together: each edge they read to extend a path, and each node and edge they copy out
+    /// of a path into a row. 100 million by default. A statement over it fails with GRAFEO-Q009.
+    /// A zero or negative limit fails at the open.
+    /// </summary>
+    public GrafeoOptions SetPathExpansionLimit(long expansions)
+    {
+        _pathExpansionLimit = Bytes(expansions);
+        return this;
+    }
+
+    /// <summary>
+    /// How many bytes a statement's text may have; the values passed as parameters do not count.
+    /// 16 MiB by default. A longer statement fails with GRAFEO-Q002. A zero or negative length
+    /// fails at the open.
+    /// </summary>
+    public GrafeoOptions SetMaxQueryLength(long bytes)
+    {
+        _maxQueryLength = Bytes(bytes);
+        return this;
+    }
+
+    /// <summary>
+    /// How many bytes one name in a statement may have, as written between its delimiters
+    /// (string literals and IRIs are not names). 16 KiB by default. A statement with a longer
+    /// name fails with GRAFEO-Q002. A zero or negative length fails at the open.
+    /// </summary>
+    public GrafeoOptions SetMaxIdentifierLength(long bytes)
+    {
+        _maxIdentifierLength = Bytes(bytes);
         return this;
     }
 
@@ -114,6 +153,12 @@ public sealed class GrafeoOptions : IDisposable
             GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_query_memory_limit(native, query));
         if (_pathSearchBudget is { } paths)
             GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_path_search_budget(native, paths));
+        if (_pathExpansionLimit is { } expansions)
+            GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_path_expansion_limit(native, expansions));
+        if (_maxQueryLength is { } queryLength)
+            GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_max_query_length(native, queryLength));
+        if (_maxIdentifierLength is { } identifierLength)
+            GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_max_identifier_length(native, identifierLength));
         if (_snapshotRetentionLimit is { } snapshots)
             GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_snapshot_retention_limit(native, snapshots));
         if (_historyRetentionLimit is { } history)

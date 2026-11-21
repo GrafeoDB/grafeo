@@ -18,6 +18,9 @@ pub struct GrafeoOptions {
     memory_limit: Option<usize>,
     query_memory_limit: Option<usize>,
     path_search_budget: Option<usize>,
+    path_expansion_limit: Option<u64>,
+    max_query_length: Option<usize>,
+    max_identifier_length: Option<usize>,
     snapshot_retention_limit: Option<u64>,
     history_retention_limit: Option<u64>,
     spill_limit: Option<u64>,
@@ -35,6 +38,15 @@ impl GrafeoOptions {
         }
         if let Some(bytes) = self.path_search_budget {
             config = config.with_path_search_budget(bytes);
+        }
+        if let Some(expansions) = self.path_expansion_limit {
+            config = config.with_path_expansion_limit(expansions);
+        }
+        if let Some(bytes) = self.max_query_length {
+            config = config.with_max_query_length(bytes);
+        }
+        if let Some(bytes) = self.max_identifier_length {
+            config = config.with_max_identifier_length(bytes);
         }
         if let Some(bytes) = self.snapshot_retention_limit {
             config = config.with_snapshot_retention_limit(bytes);
@@ -126,9 +138,9 @@ pub extern "C" fn grafeo_options_set_query_memory_limit(
     }
 }
 
-/// Sets the memory one path search may hold, in bytes, above zero: the paths a variable-length or
-/// shortest-path search keeps at once, or what an RDF property path search visits (the nodes an
-/// `ANY SHORTEST` or `shortestPath` search visits are not counted yet). The default is a quarter
+/// Sets the memory one path search may hold, in bytes, above zero: everything a variable-length,
+/// shortest-path or RDF property path search holds at once (the nodes it visits, its queues and the
+/// paths it keeps), which counts against the query memory limit too. The default is a quarter
 /// of the memory limit, at most 256 MiB; never more than the memory limit. A search over it fails
 /// with GRAFEO-S001.
 #[unsafe(no_mangle)]
@@ -138,6 +150,63 @@ pub extern "C" fn grafeo_options_set_path_search_budget(
 ) -> GrafeoStatus {
     match options_mut(options).and_then(|options| {
         options.path_search_budget = Some(positive(bytes, "path_search_budget")?);
+        Ok(())
+    }) {
+        Ok(()) => GrafeoStatus::Ok,
+        Err(status) => status,
+    }
+}
+
+/// Sets how many path expansions one statement's variable-length and shortest-path searches may
+/// make together, above zero: each edge they read to extend a path, and each node and edge they
+/// copy out of a path into a row. The default is 100 million. A statement over it fails with
+/// GRAFEO-Q009.
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_options_set_path_expansion_limit(
+    options: *mut GrafeoOptions,
+    expansions: u64,
+) -> GrafeoStatus {
+    match options_mut(options).and_then(|options| {
+        if expansions == 0 {
+            set_last_error("path_expansion_limit must be greater than zero");
+            return Err(GrafeoStatus::ErrorDatabase);
+        }
+        options.path_expansion_limit = Some(expansions);
+        Ok(())
+    }) {
+        Ok(()) => GrafeoStatus::Ok,
+        Err(status) => status,
+    }
+}
+
+/// Sets how many bytes a statement's text may have, above zero; the values passed as parameters
+/// do not count. The default is 16 MiB. A longer statement fails with GRAFEO-Q002 before it is
+/// read.
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_options_set_max_query_length(
+    options: *mut GrafeoOptions,
+    bytes: u64,
+) -> GrafeoStatus {
+    match options_mut(options).and_then(|options| {
+        options.max_query_length = Some(positive(bytes, "max_query_length")?);
+        Ok(())
+    }) {
+        Ok(()) => GrafeoStatus::Ok,
+        Err(status) => status,
+    }
+}
+
+/// Sets how many bytes one name in a statement may have, as written between its delimiters,
+/// above zero: an identifier, a parameter name, a SPARQL variable or prefixed name. String
+/// literals and IRIs are not names. The default is 16 KiB. A statement with a longer name fails
+/// with GRAFEO-Q002.
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_options_set_max_identifier_length(
+    options: *mut GrafeoOptions,
+    bytes: u64,
+) -> GrafeoStatus {
+    match options_mut(options).and_then(|options| {
+        options.max_identifier_length = Some(positive(bytes, "max_identifier_length")?);
         Ok(())
     }) {
         Ok(()) => GrafeoStatus::Ok,

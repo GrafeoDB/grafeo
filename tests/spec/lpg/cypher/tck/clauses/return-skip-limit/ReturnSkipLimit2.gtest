@@ -125,7 +125,7 @@ tests:
   - name: s6_limit_with_an_expression_that_does_not_depend_on_variables
     xfail:
       spec: "openCypher TCK 2024.3 ReturnSkipLimit2: [6] LIMIT with an expression that does not depend on variables"
-      issue: fix in 0.6.5
+      issue: "#797"
     setup:
       - |
         UNWIND range(1, 3) AS i
@@ -296,7 +296,7 @@ tests:
   - name: s16_fail_when_using_floating_point_in_limit_1
     xfail:
       spec: "openCypher TCK 2024.3 ReturnSkipLimit2: [16] Fail when using floating point in LIMIT 1"
-      issue: fix in 0.6.5
+      issue: "fix in 0.6.5"
     query: |
       MATCH (n)
       RETURN n
@@ -310,7 +310,7 @@ tests:
   - name: s17_fail_when_using_floating_point_in_limit_2
     xfail:
       spec: "openCypher TCK 2024.3 ReturnSkipLimit2: [17] Fail when using floating point in LIMIT 2"
-      issue: fix in 0.6.5
+      issue: "fix in 0.6.5"
     setup:
       - |
         CREATE (s:Person {name: 'Steven'}),

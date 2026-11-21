@@ -511,8 +511,10 @@ impl Open {
         // Reported before the epoch is published, while commits are held
         // off: in epoch order, as a commit reports its changes.
         #[cfg(feature = "cdc")]
-        if self.cdc_active() {
-            self.cdc_log.record_commit(&changes, epoch);
+        if self.cdc_active()
+            && let Some(stamps) = self.cdc_log.reserve_for(&changes)
+        {
+            self.cdc_log.record_commit(&changes, epoch, stamps);
         }
         // What it replaced, in the ledger before its epoch is published, as a commit's is.
         let replaced = changes.superseded_bytes() as u64;
@@ -786,7 +788,11 @@ impl Open {
             // Reported in epoch order, before the epoch is published.
             #[cfg(feature = "cdc")]
             if self.cdc_active() {
-                changes.read(|set| self.cdc_log.record_commit(set, epoch));
+                changes.read(|set| {
+                    if let Some(stamps) = self.cdc_log.reserve_for(set) {
+                        self.cdc_log.record_commit(set, epoch, stamps);
+                    }
+                });
             }
 
             // The database has one epoch: the root store follows every

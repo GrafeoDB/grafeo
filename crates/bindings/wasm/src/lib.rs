@@ -46,10 +46,10 @@ pub(crate) fn js_error(message: &str) -> JsValue {
     JsError::new(message).into()
 }
 
-/// The bytes `options[key]` sets (`memoryLimit`, `pathSearchBudget`, `snapshotRetentionLimit`,
-/// `historyRetentionLimit`):
-/// `None` when the options or the key are left out, an error naming the key for a number that is
-/// not a positive whole number of bytes.
+/// The bytes `options[key]` sets (`memoryLimit`, `pathSearchBudget`, `maxQueryLength`,
+/// `maxIdentifierLength`, `snapshotRetentionLimit`, `historyRetentionLimit`): `None` when the
+/// options or the key are left out, an error naming the key for a number that is not a positive
+/// whole number of bytes.
 fn positive_bytes(options: Option<&js_sys::Object>, key: &str) -> Result<Option<usize>, JsValue> {
     let Some(options) = options else {
         return Ok(None);
@@ -74,9 +74,35 @@ fn positive_bytes(options: Option<&js_sys::Object>, key: &str) -> Result<Option<
     }
 }
 
+/// The count `options[key]` sets (`pathExpansionLimit`): `None` when the options or the key are
+/// left out, an error naming the key for a number that is not a positive whole number.
+fn positive_count(options: Option<&js_sys::Object>, key: &str) -> Result<Option<u64>, JsValue> {
+    let Some(options) = options else {
+        return Ok(None);
+    };
+    let value = js_sys::Reflect::get(options, &JsValue::from_str(key))?;
+    if value.is_undefined() || value.is_null() {
+        return Ok(None);
+    }
+    match value.as_f64() {
+        // Below 2^64, which an f64 holds exactly
+        Some(count)
+            if count >= 1.0 && count.fract() == 0.0 && count < 18_446_744_073_709_551_616.0 =>
+        {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a whole number from 1 to below 2^64, checked above"
+            )]
+            Ok(Some(count as u64))
+        }
+        _ => Err(js_error(&format!("{key} must be a positive whole number"))),
+    }
+}
+
 /// The in-memory configuration `options` set (`historyRetention`, `memoryLimit`,
-/// `pathSearchBudget`, `snapshotRetentionLimit`, `historyRetentionLimit`), the defaults for
-/// `None`.
+/// `pathSearchBudget`, `pathExpansionLimit`, `maxQueryLength`, `maxIdentifierLength`,
+/// `snapshotRetentionLimit`, `historyRetentionLimit`), the defaults for `None`.
 fn in_memory_config(options: Option<&js_sys::Object>) -> Result<grafeo_engine::Config, JsValue> {
     let mut config = grafeo_engine::Config::in_memory();
     if let Some(options) = options
@@ -89,6 +115,15 @@ fn in_memory_config(options: Option<&js_sys::Object>) -> Result<grafeo_engine::C
     }
     if let Some(bytes) = positive_bytes(options, "pathSearchBudget")? {
         config = config.with_path_search_budget(bytes);
+    }
+    if let Some(expansions) = positive_count(options, "pathExpansionLimit")? {
+        config = config.with_path_expansion_limit(expansions);
+    }
+    if let Some(bytes) = positive_bytes(options, "maxQueryLength")? {
+        config = config.with_max_query_length(bytes);
+    }
+    if let Some(bytes) = positive_bytes(options, "maxIdentifierLength")? {
+        config = config.with_max_identifier_length(bytes);
     }
     if let Some(bytes) = positive_bytes(options, "snapshotRetentionLimit")? {
         config = config.with_snapshot_retention_limit(bytes as u64);

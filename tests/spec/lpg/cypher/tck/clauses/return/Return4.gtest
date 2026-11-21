@@ -88,7 +88,7 @@ tests:
   - name: s4_keeping_used_expression_1
     xfail:
       spec: "openCypher TCK 2024.3 Return4: [4] Keeping used expression 1"
-      issue: fix in 0.6.5
+      issue: "#800"
     setup:
       - |
         CREATE ()
@@ -105,7 +105,7 @@ tests:
   - name: s5_keeping_used_expression_2
     xfail:
       spec: "openCypher TCK 2024.3 Return4: [5] Keeping used expression 2"
-      issue: fix in 0.6.5
+      issue: "fix in 0.6.5"
     setup:
       - |
         CREATE ()
@@ -121,7 +121,7 @@ tests:
   - name: s6_keeping_used_expression_3
     xfail:
       spec: "openCypher TCK 2024.3 Return4: [6] Keeping used expression 3"
-      issue: fix in 0.6.5
+      issue: "#800"
     setup:
       - |
         CREATE ()
@@ -138,7 +138,7 @@ tests:
   - name: s7_keeping_used_expression_4
     xfail:
       spec: "openCypher TCK 2024.3 Return4: [7] Keeping used expression 4"
-      issue: fix in 0.6.5
+      issue: "#800"
     setup:
       - |
         CREATE ()

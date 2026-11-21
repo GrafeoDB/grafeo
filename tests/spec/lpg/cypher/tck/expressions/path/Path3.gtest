@@ -62,7 +62,7 @@ tests:
   - name: s2_failing_when_using_length_on_a_node
     xfail:
       spec: "openCypher TCK 2024.3 Path3: [2] Failing when using `length()` on a node"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       MATCH (n)
       RETURN length(n)
@@ -75,7 +75,7 @@ tests:
   - name: s3_failing_when_using_length_on_a_relationship
     xfail:
       spec: "openCypher TCK 2024.3 Path3: [3] Failing when using `length()` on a relationship"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       MATCH ()-[r]->()
       RETURN length(r)

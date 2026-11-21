@@ -81,7 +81,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_1
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #1"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT 0
     expect:
@@ -93,7 +93,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_2
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #2"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT 1
     expect:
@@ -105,7 +105,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_3
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #3"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT 123
     expect:
@@ -117,7 +117,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_4
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #4"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT 123.4
     expect:
@@ -129,7 +129,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_5
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #5"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT ''
     expect:
@@ -141,7 +141,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_6
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #6"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT 'false'
     expect:
@@ -153,7 +153,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_7
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #7"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT 'true'
     expect:
@@ -165,7 +165,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_8
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #8"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT 'foo'
     expect:
@@ -177,7 +177,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_9
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #9"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT []
     expect:
@@ -189,7 +189,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_10
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #10"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT [null]
     expect:
@@ -201,7 +201,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_11
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #11"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT [true]
     expect:
@@ -213,7 +213,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_12
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #12"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT [false]
     expect:
@@ -225,7 +225,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_13
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #13"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT [true, false]
     expect:
@@ -237,7 +237,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_14
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #14"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT [false, true]
     expect:
@@ -249,7 +249,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_15
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #15"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT [0]
     expect:
@@ -261,7 +261,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_16
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #16"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT [1]
     expect:
@@ -273,7 +273,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_17
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #17"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT [1, 2, 3]
     expect:
@@ -285,7 +285,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_18
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #18"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT [0.0]
     expect:
@@ -297,7 +297,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_19
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #19"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT [1.0]
     expect:
@@ -309,7 +309,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_20
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #20"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT [1.0, 2.1]
     expect:
@@ -321,7 +321,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_21
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #21"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT ['']
     expect:
@@ -333,7 +333,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_22
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #22"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT ['', '']
     expect:
@@ -345,7 +345,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_23
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #23"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT ['true']
     expect:
@@ -357,7 +357,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_24
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #24"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT ['false']
     expect:
@@ -369,7 +369,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_25
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #25"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT ['a', 'b']
     expect:
@@ -381,7 +381,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_26
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #26"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {}
     expect:
@@ -393,7 +393,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_27
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #27"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {``: null}
     expect:
@@ -405,7 +405,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_28
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #28"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {a: null}
     expect:
@@ -417,7 +417,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_29
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #29"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {``: true}
     expect:
@@ -429,7 +429,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_30
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #30"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {``: false}
     expect:
@@ -459,7 +459,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_33
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #33"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {bool: true}
     expect:
@@ -471,7 +471,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_34
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #34"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {bool: false}
     expect:
@@ -483,7 +483,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_35
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #35"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {``: 0}
     expect:
@@ -495,7 +495,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_36
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #36"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {``: 1}
     expect:
@@ -507,7 +507,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_37
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #37"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {a: 0}
     expect:
@@ -519,7 +519,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_38
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #38"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {a: 1}
     expect:
@@ -531,7 +531,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_39
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #39"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {a: 1, b: 2}
     expect:
@@ -543,7 +543,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_40
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #40"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {``: 0.0}
     expect:
@@ -555,7 +555,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_41
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #41"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {``: 1.0}
     expect:
@@ -567,7 +567,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_42
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #42"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {a: 0.0}
     expect:
@@ -579,7 +579,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_43
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #43"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {a: 1.0}
     expect:
@@ -591,7 +591,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_44
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #44"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {a: 1.0, b: 2.1}
     expect:
@@ -603,7 +603,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_45
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #45"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {``: ''}
     expect:
@@ -615,7 +615,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_46
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #46"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {a: ''}
     expect:
@@ -627,7 +627,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_47
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #47"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {a: 'a'}
     expect:
@@ -639,7 +639,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_48
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #48"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {a: 'a', b: 'b'}
     expect:
@@ -651,7 +651,7 @@ tests:
   - name: s4_fail_when_using_not_on_a_non_boolean_literal_49
     xfail:
       spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #49"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN NOT {a: 12, b: true}
     expect:

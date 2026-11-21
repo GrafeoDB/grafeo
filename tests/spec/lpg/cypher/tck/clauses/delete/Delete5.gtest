@@ -45,7 +45,7 @@ tests:
   - name: s1_delete_node_from_a_list
     xfail:
       spec: "openCypher TCK 2024.3 Delete5: [1] Delete node from a list"
-      issue: fix in 0.6.5
+      issue: "#797"
     setup:
       - |
         CREATE (u:User)
@@ -69,7 +69,7 @@ tests:
   - name: s2_delete_relationship_from_a_list
     xfail:
       spec: "openCypher TCK 2024.3 Delete5: [2] Delete relationship from a list"
-      issue: fix in 0.6.5
+      issue: "#797"
     setup:
       - |
         CREATE (u:User)
@@ -92,7 +92,7 @@ tests:
   - name: s3_delete_nodes_from_a_map
     xfail:
       spec: "openCypher TCK 2024.3 Delete5: [3] Delete nodes from a map"
-      issue: fix in 0.6.5
+      issue: "#797"
     setup:
       - |
         CREATE (:User), (:User)
@@ -110,7 +110,7 @@ tests:
   - name: s4_delete_relationships_from_a_map
     xfail:
       spec: "openCypher TCK 2024.3 Delete5: [4] Delete relationships from a map"
-      issue: fix in 0.6.5
+      issue: "#797"
     setup:
       - |
         CREATE (a:User), (b:User)
@@ -129,7 +129,7 @@ tests:
   - name: s5_detach_delete_nodes_from_nested_map_list
     xfail:
       spec: "openCypher TCK 2024.3 Delete5: [5] Detach delete nodes from nested map/list"
-      issue: fix in 0.6.5
+      issue: "#797"
     setup:
       - |
         CREATE (a:User), (b:User)
@@ -149,7 +149,7 @@ tests:
   - name: s6_delete_relationships_from_nested_map_list
     xfail:
       spec: "openCypher TCK 2024.3 Delete5: [6] Delete relationships from nested map/list"
-      issue: fix in 0.6.5
+      issue: "#797"
     setup:
       - |
         CREATE (a:User), (b:User)
@@ -168,7 +168,7 @@ tests:
   - name: s7_delete_paths_from_nested_map_list
     xfail:
       spec: "openCypher TCK 2024.3 Delete5: [7] Delete paths from nested map/list"
-      issue: fix in 0.6.5
+      issue: "#797"
     setup:
       - |
         CREATE (a:User), (b:User)

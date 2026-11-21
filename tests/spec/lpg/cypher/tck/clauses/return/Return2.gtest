@@ -139,7 +139,7 @@ tests:
   - name: s8_returning_label_predicate_expression
     xfail:
       spec: "openCypher TCK 2024.3 Return2: [8] Returning label predicate expression"
-      issue: fix in 0.6.5
+      issue: "#800"
     setup:
       - |
         CREATE (), (:Foo)
@@ -225,7 +225,7 @@ tests:
   - name: s14_do_not_fail_when_returning_type_of_deleted_relationships
     xfail:
       spec: "openCypher TCK 2024.3 Return2: [14] Do not fail when returning type of deleted relationships"
-      issue: fix in 0.6.4
+      issue: "#797"
     setup:
       - |
         CREATE ()-[:T]->()
@@ -246,7 +246,7 @@ tests:
   - name: s15_fail_when_returning_properties_of_deleted_nodes
     xfail:
       spec: "openCypher TCK 2024.3 Return2: [15] Fail when returning properties of deleted nodes"
-      issue: fix in 0.6.5
+      issue: "#797"
     setup:
       - |
         CREATE ({num: 0})
@@ -264,7 +264,7 @@ tests:
   - name: s16_fail_when_returning_labels_of_deleted_nodes
     xfail:
       spec: "openCypher TCK 2024.3 Return2: [16] Fail when returning labels of deleted nodes"
-      issue: fix in 0.6.5
+      issue: "#797"
     setup:
       - |
         CREATE (:A)
@@ -282,7 +282,7 @@ tests:
   - name: s17_fail_when_returning_properties_of_deleted_relationships
     xfail:
       spec: "openCypher TCK 2024.3 Return2: [17] Fail when returning properties of deleted relationships"
-      issue: fix in 0.6.5
+      issue: "#797"
     setup:
       - |
         CREATE ()-[:T {num: 0}]->()

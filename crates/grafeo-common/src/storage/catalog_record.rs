@@ -2,8 +2,8 @@
 //!
 //! The catalog section holds the catalog as records of the types below, one
 //! per schema, node type, edge type, graph type, graph type binding, named
-//! constraint, index, index name and procedure, and the database's stored
-//! configuration. They hold no engine types,
+//! constraint, index, index name and procedure, the database's stored
+//! configuration and its change data capture setting. They hold no engine types,
 //! so the WAL can log the same records. Each record is framed:
 //!
 //! | Bytes | Field |
@@ -28,6 +28,7 @@
 //! | 11 | [`LabelIndexRecord`] |
 //! | 12 | [`NodeTypeRecord`] of a standalone type a graph type lists |
 //! | 13 | [`EdgeTypeRecord`] of a standalone type a graph type lists |
+//! | 14 | [`CdcConfigRecord`] |
 //!
 //! Kinds 12 and 13 hold the payload of kinds 2 and 3: they mark a type made on its own
 //! (`CREATE NODE TYPE`, `CREATE EDGE TYPE`) that a graph type lists, which stays a rule by its
@@ -37,9 +38,10 @@
 //! Kind 0 is never written. A reader skips a record of a kind it does not
 //! know when the record's required flag is clear, and refuses the catalog
 //! when it is set, so a later release can add records that older readers may
-//! ignore. Every kind is written required but kind 11: an index only speeds
-//! reads, so a release without the kind opens the file and reads the same rows
-//! with no such index. A kind's payload
+//! ignore. Every kind is written required but kinds 11 and 14: an index only
+//! speeds reads, so a release without the kind opens the file and reads the
+//! same rows with no such index, and a release without kind 14 opens the file
+//! with change data capture off. A kind's payload
 //! never changes: a release that needs other fields adds a kind, and the
 //! enums below only get variants appended (bincode writes a variant as its
 //! index).
@@ -181,6 +183,7 @@ const KIND_STORED_CONFIG: u8 = 10;
 const KIND_LABEL_INDEX: u8 = 11;
 const KIND_STANDALONE_NODE_TYPE: u8 = 12;
 const KIND_STANDALONE_EDGE_TYPE: u8 = 13;
+const KIND_CDC_CONFIG: u8 = 14;
 
 // ── Record types ────────────────────────────────────────────────────
 
@@ -600,6 +603,15 @@ pub struct StoredConfigRecord {
     pub history_retention: HistoryRetentionRecord,
 }
 
+/// Whether the database captures changes (#679): change data capture on or
+/// off, stored with the database (catalog kind 14). Optional: a release
+/// without the kind opens the file with capture off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CdcConfigRecord {
+    /// Change data capture is on.
+    pub enabled: bool,
+}
+
 /// How long a database keeps history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HistoryRetentionRecord {
@@ -928,12 +940,16 @@ pub enum CatalogKey {
         /// The property key.
         key: String,
     },
+    /// The change data capture setting, of which a database has one
+    /// (catalog kind 14).
+    CdcConfig,
 }
 
 impl CatalogKey {
     /// The kind of the catalog records the key identifies, as
-    /// [`CatalogRecord::kind`] numbers them: 1 `Schema` to 11 `LabelIndex`. A
-    /// standalone type's records (kinds 12 and 13) have the key of kinds 2 and 3.
+    /// [`CatalogRecord::kind`] numbers them: 1 `Schema` to 11 `LabelIndex`, and
+    /// 14 `CdcConfig`. A standalone type's records (kinds 12 and 13) have the
+    /// key of kinds 2 and 3.
     #[must_use]
     pub const fn kind(&self) -> u8 {
         match self {
@@ -948,6 +964,7 @@ impl CatalogKey {
             Self::Procedure(_) => KIND_PROCEDURE,
             Self::StoredConfig => KIND_STORED_CONFIG,
             Self::LabelIndex { .. } => KIND_LABEL_INDEX,
+            Self::CdcConfig => KIND_CDC_CONFIG,
         }
     }
 
@@ -955,7 +972,7 @@ impl CatalogKey {
     #[must_use]
     pub const fn flags(&self) -> u8 {
         match self {
-            Self::LabelIndex { .. } => 0,
+            Self::LabelIndex { .. } | Self::CdcConfig => 0,
             _ => RECORD_REQUIRED,
         }
     }
@@ -987,6 +1004,8 @@ pub enum CatalogRecord {
     StoredConfig(StoredConfigRecord),
     /// A property index of a graph on a label.
     LabelIndex(LabelIndexRecord),
+    /// The change data capture setting (kind 14).
+    CdcConfig(CdcConfigRecord),
 }
 
 impl CatalogRecord {
@@ -994,7 +1013,7 @@ impl CatalogRecord {
     /// 2 `NodeType`, 3 `EdgeType`, 4 `GraphType`, 5 `GraphBinding`,
     /// 6 `Constraint`, 7 `Index`, 8 `IndexName`, 9 `Procedure`,
     /// 10 `StoredConfig`, 11 `LabelIndex`; 12 and 13 for a standalone node or
-    /// edge type a graph type lists.
+    /// edge type a graph type lists; 14 `CdcConfig`.
     #[must_use]
     pub const fn kind(&self) -> u8 {
         match self {
@@ -1011,15 +1030,16 @@ impl CatalogRecord {
             Self::Procedure(_) => KIND_PROCEDURE,
             Self::StoredConfig(_) => KIND_STORED_CONFIG,
             Self::LabelIndex(_) => KIND_LABEL_INDEX,
+            Self::CdcConfig(_) => KIND_CDC_CONFIG,
         }
     }
 
-    /// The flags the record is written with: required, but for an index on a label, which a
-    /// release that does not know the kind may skip.
+    /// The flags the record is written with: required, but for an index on a label and the
+    /// change data capture setting, which a release that does not know the kind may skip.
     #[must_use]
     pub const fn flags(&self) -> u8 {
         match self {
-            Self::LabelIndex(_) => 0,
+            Self::LabelIndex(_) | Self::CdcConfig(_) => 0,
             _ => RECORD_REQUIRED,
         }
     }
@@ -1063,6 +1083,7 @@ impl CatalogRecord {
                 label: record.label.clone(),
                 key: record.key.clone(),
             },
+            Self::CdcConfig(_) => CatalogKey::CdcConfig,
         }
     }
 
@@ -1122,6 +1143,7 @@ impl CatalogRecord {
             Self::Procedure(record) => encode_bincode_payload(record, out),
             Self::StoredConfig(record) => encode_bincode_payload(record, out),
             Self::LabelIndex(record) => encode_bincode_payload(record, out),
+            Self::CdcConfig(record) => encode_bincode_payload(record, out),
         }
     }
 
@@ -1138,7 +1160,8 @@ impl CatalogRecord {
             | Self::IndexName(_)
             | Self::Procedure(_)
             | Self::StoredConfig(_)
-            | Self::LabelIndex(_) => &[],
+            | Self::LabelIndex(_)
+            | Self::CdcConfig(_) => &[],
         }
     }
 
@@ -1181,6 +1204,7 @@ impl CatalogRecord {
             KIND_PROCEDURE => Self::Procedure(decode(payload)?),
             KIND_STORED_CONFIG => Self::StoredConfig(decode(payload)?),
             KIND_LABEL_INDEX => Self::LabelIndex(decode(payload)?),
+            KIND_CDC_CONFIG => Self::CdcConfig(decode(payload)?),
             KIND_STANDALONE_NODE_TYPE => Self::NodeType(NodeTypeRecord {
                 standalone: true,
                 ..decode(payload)?
@@ -2268,6 +2292,24 @@ mod tests {
         assert_eq!(read_all(EXPECTED).unwrap(), [record]);
     }
 
+    /// The change data capture setting (#679) is kind 14, written optional (a release without the
+    /// kind opens the file with capture off), its payload the one bool; one per database.
+    #[test]
+    fn the_cdc_setting_is_kind_14_and_optional() {
+        #[rustfmt::skip]
+        const EXPECTED: &[u8] = &[
+            14, 0, 1, 0, 0, 0, // kind 14 (CdcConfig), optional, 1 byte
+            1, // enabled
+        ];
+        let record = CatalogRecord::CdcConfig(CdcConfigRecord { enabled: true });
+        assert_eq!(framed(&record), EXPECTED);
+        assert_eq!(read_all(EXPECTED).unwrap(), std::slice::from_ref(&record));
+        assert_eq!(record.key(), CatalogKey::CdcConfig);
+        assert_eq!((record.key().kind(), record.key().flags()), (14, 0));
+        let off = CatalogRecord::CdcConfig(CdcConfigRecord { enabled: false });
+        assert_eq!(framed(&off), [14, 0, 1, 0, 0, 0, 0]);
+    }
+
     /// A reader that does not know a kind code refuses the record instead of
     /// reading another kind: a name record with kind code 4 does not decode.
     #[test]
@@ -3297,7 +3339,7 @@ mod catalogue {
     catalogue!(
         catalog_record_name,
         CATALOG_RECORD_NAMES,
-        CatalogRecord: Schema, NodeType, EdgeType, GraphType, GraphBinding, Constraint, Index, IndexName, Procedure, StoredConfig, LabelIndex
+        CatalogRecord: Schema, NodeType, EdgeType, GraphType, GraphBinding, Constraint, Index, IndexName, Procedure, StoredConfig, LabelIndex, CdcConfig
     );
 
     #[test]

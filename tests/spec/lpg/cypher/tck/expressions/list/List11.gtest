@@ -461,7 +461,7 @@ tests:
   - name: s4_fail_on_invalid_arguments_for_range_1
     xfail:
       spec: "openCypher TCK 2024.3 List11: [4] Fail on invalid arguments for `range()` #1"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN range(2, 8, 0)
     expect:
@@ -473,7 +473,7 @@ tests:
   - name: s4_fail_on_invalid_arguments_for_range_2
     xfail:
       spec: "openCypher TCK 2024.3 List11: [4] Fail on invalid arguments for `range()` #2"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN range(2, 8, 0)
     expect:
@@ -485,7 +485,7 @@ tests:
   - name: s4_fail_on_invalid_arguments_for_range_3
     xfail:
       spec: "openCypher TCK 2024.3 List11: [4] Fail on invalid arguments for `range()` #3"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN range(2, 8, 0)
     expect:
@@ -497,7 +497,7 @@ tests:
   - name: s4_fail_on_invalid_arguments_for_range_4
     xfail:
       spec: "openCypher TCK 2024.3 List11: [4] Fail on invalid arguments for `range()` #4"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       RETURN range(2, 8, 0)
     expect:
@@ -509,7 +509,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_1
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #1"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range(true, 1, 1)
     expect:
@@ -521,7 +521,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_2
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #2"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range(0, true, 1)
     expect:
@@ -533,7 +533,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_3
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #3"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range(0, 1, true)
     expect:
@@ -545,7 +545,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_4
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #4"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range(-1.1, 1, 1)
     expect:
@@ -557,7 +557,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_5
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #5"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range(-0.0, 1, 1)
     expect:
@@ -569,7 +569,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_6
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #6"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range(0.0, 1, 1)
     expect:
@@ -581,7 +581,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_7
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #7"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range(1.1, 1, 1)
     expect:
@@ -593,7 +593,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_8
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #8"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range(0, -1.1, 1)
     expect:
@@ -605,7 +605,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_9
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #9"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range(0, -0.0, 1)
     expect:
@@ -617,7 +617,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_10
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #10"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range(0, 0.0, 1)
     expect:
@@ -629,7 +629,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_11
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #11"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range(0, 1.1, 1)
     expect:
@@ -641,7 +641,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_12
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #12"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range(0, 1, -1.1)
     expect:
@@ -653,7 +653,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_13
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #13"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range(0, 1, 1.1)
     expect:
@@ -665,7 +665,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_14
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #14"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range('xyz', 1, 1)
     expect:
@@ -677,7 +677,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_15
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #15"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range(0, 'xyz', 1)
     expect:
@@ -689,7 +689,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_16
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #16"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range(0, 1, 'xyz')
     expect:
@@ -701,7 +701,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_17
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #17"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range([0], 1, 1)
     expect:
@@ -713,7 +713,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_18
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #18"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range(0, [1], 1)
     expect:
@@ -725,7 +725,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_19
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #19"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range(0, 1, [1])
     expect:
@@ -737,7 +737,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_20
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #20"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range({start: 0}, 1, 1)
     expect:
@@ -749,7 +749,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_21
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #21"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range(0, {end: 1}, 1)
     expect:
@@ -761,7 +761,7 @@ tests:
   - name: s5_fail_on_invalid_argument_types_for_range_22
     xfail:
       spec: "openCypher TCK 2024.3 List11: [5] Fail on invalid argument types for `range()` #22"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     query: |
       RETURN range(0, 1, {step: 1})
     expect:

@@ -177,7 +177,7 @@ tests:
   - name: s13_fail_when_creating_a_node_that_is_already_bound
     xfail:
       spec: "openCypher TCK 2024.3 Create1: [13] Fail when creating a node that is already bound"
-      issue: fix in 0.6.5
+      issue: "#795"
     query: |
       MATCH (a)
       CREATE (a)
@@ -190,7 +190,7 @@ tests:
   - name: s14_fail_when_creating_a_node_with_properties_that_is_already_bound
     xfail:
       spec: "openCypher TCK 2024.3 Create1: [14] Fail when creating a node with properties that is already bound"
-      issue: fix in 0.6.5
+      issue: "#795"
     query: |
       MATCH (a)
       CREATE (a {name: 'foo'})
@@ -204,7 +204,7 @@ tests:
   - name: s15_fail_when_adding_a_new_label_predicate_on_a_node_that_is_already_bound_1
     xfail:
       spec: "openCypher TCK 2024.3 Create1: [15] Fail when adding a new label predicate on a node that is already bound 1"
-      issue: fix in 0.6.5
+      issue: "#795"
     query: |
       CREATE (n:Foo)-[:T1]->(),
              (n:Bar)-[:T2]->()
@@ -217,7 +217,7 @@ tests:
   - name: s16_fail_when_adding_new_label_predicate_on_a_node_that_is_already_bound_2
     xfail:
       spec: "openCypher TCK 2024.3 Create1: [16] Fail when adding new label predicate on a node that is already bound 2"
-      issue: fix in 0.6.5
+      issue: "#795"
     query: |
       CREATE ()<-[:T2]-(n:Foo),
              (n:Bar)<-[:T1]-()
@@ -230,7 +230,7 @@ tests:
   - name: s17_fail_when_adding_new_label_predicate_on_a_node_that_is_already_bound_3
     xfail:
       spec: "openCypher TCK 2024.3 Create1: [17] Fail when adding new label predicate on a node that is already bound 3"
-      issue: fix in 0.6.5
+      issue: "#795"
     query: |
       CREATE (n:Foo)
       CREATE (n:Bar)-[:OWNS]->(:Dog)
@@ -243,7 +243,7 @@ tests:
   - name: s18_fail_when_adding_new_label_predicate_on_a_node_that_is_already_bound_4
     xfail:
       spec: "openCypher TCK 2024.3 Create1: [18] Fail when adding new label predicate on a node that is already bound 4"
-      issue: fix in 0.6.5
+      issue: "#795"
     query: |
       CREATE (n {})
       CREATE (n:Bar)-[:OWNS]->(:Dog)
@@ -256,7 +256,7 @@ tests:
   - name: s19_fail_when_adding_new_label_predicate_on_a_node_that_is_already_bound_5
     xfail:
       spec: "openCypher TCK 2024.3 Create1: [19] Fail when adding new label predicate on a node that is already bound 5"
-      issue: fix in 0.6.5
+      issue: "#795"
     query: |
       CREATE (n:Foo)
       CREATE (n {})-[:OWNS]->(:Dog)

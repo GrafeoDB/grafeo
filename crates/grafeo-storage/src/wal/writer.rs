@@ -609,6 +609,8 @@ impl Wal {
             let end_lsn = pair[1].0;
             if end_lsn <= lsn && *first_lsn != active {
                 maybe_crash("wal:before_remove_segment");
+                maybe_fail("wal:remove_segment")
+                    .map_err(|error| WalError::injected(path, error))?;
                 std::fs::remove_file(path).map_err(|source| WalError::io(path, source))?;
                 maybe_crash("wal:after_remove_segment");
                 removed += 1;

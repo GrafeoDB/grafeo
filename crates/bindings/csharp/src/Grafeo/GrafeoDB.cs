@@ -965,7 +965,12 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     // Change Data Capture
     // =========================================================================
 
-    /// <summary>Gets or sets whether Change Data Capture is enabled.</summary>
+    /// <summary>
+    /// Gets or sets whether Change Data Capture is enabled. Setting it stores the
+    /// setting with the database, so a reopen has it as it was (an in-memory
+    /// database keeps it while it is open); it throws when the setting cannot be
+    /// stored (a read-only open, a failed checkpoint), and the setting stays as it was.
+    /// </summary>
     public bool CdcEnabled
     {
         get
@@ -976,7 +981,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         set
         {
             ThrowIfDisposed();
-            NativeMethods.grafeo_set_cdc_enabled(Handle, value);
+            GrafeoException.ThrowIfFailed(NativeMethods.grafeo_set_cdc(Handle, value));
         }
     }
 

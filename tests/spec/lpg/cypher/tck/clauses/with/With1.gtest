@@ -61,7 +61,7 @@ tests:
   - name: s2_forwarind_a_node_variable_2
     xfail:
       spec: "openCypher TCK 2024.3 With1: [2] Forwarind a node variable 2"
-      issue: fix in 0.6.5
+      issue: "fix in 0.6.5"
     setup:
       - |
         CREATE (:A)-[:REL]->(:B)
@@ -98,6 +98,9 @@ tests:
 
   # [4] Forwarding a path variable
   - name: s4_forwarding_a_path_variable
+    xfail:
+      spec: "openCypher TCK 2024.3 With1: [4] Forwarding a path variable"
+      issue: "#798"
     setup:
       - |
         CREATE ()

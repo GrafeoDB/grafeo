@@ -151,7 +151,7 @@ tests:
   - name: s5_create_a_pattern_with_multiple_hops_and_varying_directions_control
     xfail:
       spec: "openCypher TCK 2024.3 Create5: [5] Create a pattern with multiple hops and varying directions (control query)"
-      issue: fix in 0.6.5
+      issue: "fix in 0.6.5"
     setup:
       - |
         CREATE (:A)<-[:R1]-(:B)-[:R2]->(:C)

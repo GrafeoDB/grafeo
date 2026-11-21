@@ -251,6 +251,15 @@ impl OperatorMemory {
         self.counted.as_ref().map_or(0, |counted| counted.bytes)
     }
 
+    /// Counts `bytes` in all, no more than it counts now (part of what it held
+    /// is let go): it never needs a grant, so it cannot fail. The grant is kept.
+    pub fn lower(&mut self, bytes: usize) {
+        if let Some(counted) = &mut self.counted {
+            debug_assert!(bytes <= counted.bytes, "lower counts down only");
+            counted.bytes = bytes.min(counted.bytes);
+        }
+    }
+
     /// The operator let go of its rows to start over (a reset): it counts 0
     /// again and keeps its grant, so a rerun (a correlated subquery per outer
     /// row) grows within it with a compare instead of taking it again. The
@@ -267,6 +276,17 @@ impl OperatorMemory {
         if let Some(counted) = &mut self.counted {
             counted.bytes = 0;
             counted.ctx.release(&mut counted.grant);
+        }
+    }
+
+    /// Gives back the grant above what it counts or `at_least`, whichever is
+    /// more (kept to a whole step), so the operators after it can take that
+    /// room: a merge between batches, whose rows went on to them, keeping the
+    /// room its plan promised. It never grows the grant.
+    pub fn trim_to(&mut self, at_least: usize) {
+        if let Some(counted) = &mut self.counted {
+            let keep = counted.bytes.max(at_least);
+            counted.ctx.shrink(&mut counted.grant, keep);
         }
     }
 
@@ -414,6 +434,25 @@ impl OperatorMemoryContext {
         grant.held += granted;
         grant.query.get_or_insert_with(|| Arc::clone(&self.query));
         Ok(())
+    }
+
+    /// Gives back what `grant` holds above `keep` bytes, rounded up to the
+    /// step its grants grow by, to the statement's cap and the buffer manager.
+    pub fn shrink(&self, grant: &mut OperatorGrant, keep: usize) {
+        let keep = keep
+            .checked_next_multiple_of(self.query.step)
+            .unwrap_or(keep);
+        let extra = grant.held.saturating_sub(keep);
+        if extra == 0 {
+            return;
+        }
+        if let Some(held) = &mut grant.grant {
+            held.shrink(extra);
+        }
+        if let Some(query) = &grant.query {
+            query.give_back(extra);
+        }
+        grant.held -= extra;
     }
 
     /// Gives back what `grant` holds, to the statement's cap and the buffer

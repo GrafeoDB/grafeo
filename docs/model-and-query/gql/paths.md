@@ -142,6 +142,8 @@ Use path modes to control traversal behavior in cyclic graphs. `ACYCLIC` prevent
 
 An unbounded `WALK` (`-[:KNOWS*]->` without a path mode or selector) is refused with `42001` before it runs: around a cycle its walks never end, so ISO GQL requires an upper bound, a path mode such as `TRAIL` or `ACYCLIC`, or a selector such as `ANY SHORTEST` (see [Unbounded quantifiers](patterns.md#unbounded-quantifiers-need-a-mode-or-a-selector)). A bounded walk (`-[:KNOWS*1..5]->`) returns every walk within its bounds.
 
+Two limits end a path search that grows too large, and each error names its setting (see [Query limits](../../get-started/configuration.md#query-limits)): the memory one search may hold at once (the path search budget, `GRAFEO-S001`), and the work all the path searches of one statement may do together (the path expansion limit, 100 million by default: each edge a search reads to extend a path, and each node and edge it copies out of a path into a row, `GRAFEO-Q009`). A search for `DISTINCT` targets visits each node once and is not counted.
+
 ### Path Mode Inside Parenthesized Patterns (G049)
 
 Path modes can also be placed inside a parenthesized quantified pattern, overriding any outer mode:
@@ -219,7 +221,7 @@ The path mode of a search prefix restricts the paths it selects among: with a mi
 
 Shortest-path searches (these prefixes and `shortestPath`) only return paths that fit the edge's quantifier: `->+` or `-[:KNOWS*]->` is one or more hops, `->{1,3}` at most three, `->*` also pairs a node with itself (length 0), and an edge without a quantifier is a single hop. A pair of nodes without such a path has no row; use `OPTIONAL MATCH` to keep it with a null path.
 
-The path variable holds the path found, with `nodes(path)` and `edges(path)`, and the variable of a quantified edge is the list of the path's edges. A property map or `WHERE` on the edge holds for every edge of the path: the search only takes such edges, so the shortest path is picked among the paths that meet it. A `WHERE` or `FILTER` after the pattern is checked on the path found instead. A search runs over one edge pattern between two node patterns.
+The path variable holds the path found, with `nodes(path)` and `edges(path)`, and the variable of a quantified edge is the list of the path's edges. A property map or `WHERE` on the edge holds for every edge of the path: the search only takes such edges, so the shortest path is picked among the paths that meet it. A `WHERE` or `FILTER` after the pattern is checked on the path found instead. A search runs over a chain of edge patterns, fixed and quantified (`(m)-[:REPLY_OF]->*(p:Post)<-[:CONTAINER_OF]-(f:Forum)`): the length counts every edge, the node patterns between them filter at their place, and each of their variables binds, the variable of a quantified edge pattern to that edge pattern's edges. GQL's `shortestPath(...)` and `allShortestPaths(...)` forms, Grafeo's extension forms of `ANY SHORTEST` and `ALL SHORTEST`, take any chain those prefixes take and answer as they do (Cypher's take one relationship pattern, as in openCypher). Not supported in a selective pattern: a parenthesized or alternated pattern, a questioned edge pattern (`->?`), a variable bound at two places of the pattern, and an element `WHERE` that reads another element of the same path.
 
 ```sql
 -- The shortest route that takes roads only

@@ -402,12 +402,9 @@ fn test_gc_cleans_up_completed_transactions() {
     // All transactions are completed
     assert_eq!(tx_manager.active_count(), 0, "No active transactions");
 
-    // GC should clean them up
+    // Publish and abort removed them already (#673 A3): GC finds nothing.
     let cleaned = tx_manager.gc();
-    assert_eq!(
-        cleaned, 8,
-        "GC should clean up all 8 completed transactions"
-    );
+    assert_eq!(cleaned, 0, "the 8 completed transactions left at their end");
 }
 
 // ============================================================================
@@ -498,12 +495,13 @@ fn test_transaction_state_transitions() {
     let tx = tx_manager.begin();
     assert_eq!(tx_manager.state(tx), Some(TransactionState::Active));
 
+    // A finished transaction leaves the manager at once (#673 A3).
     tx_manager.commit(tx).unwrap();
-    assert_eq!(tx_manager.state(tx), Some(TransactionState::Committed));
+    assert_eq!(tx_manager.state(tx), None);
 
     let tx2 = tx_manager.begin();
     tx_manager.abort(tx2).unwrap();
-    assert_eq!(tx_manager.state(tx2), Some(TransactionState::Aborted));
+    assert_eq!(tx_manager.state(tx2), None);
 }
 
 #[test]
@@ -575,9 +573,9 @@ fn test_many_concurrent_transactions() {
         "No active transactions after completion"
     );
 
-    // GC
+    // GC: each left at its commit or abort (#673 A3)
     let cleaned = tx_manager.gc();
-    assert_eq!(cleaned, 100, "GC should clean up all 100 transactions");
+    assert_eq!(cleaned, 0, "the 100 transactions left at their end");
 }
 
 // ============================================================================

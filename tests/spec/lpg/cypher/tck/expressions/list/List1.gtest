@@ -107,7 +107,7 @@ tests:
   - name: s6_fail_when_indexing_a_non_list_example_boolean_1
     xfail:
       spec: "openCypher TCK 2024.3 List1: [6] Fail when indexing a non-list #Example: boolean #1"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       WITH true AS list, 0 AS idx
       RETURN list[idx]
@@ -120,7 +120,7 @@ tests:
   - name: s6_fail_when_indexing_a_non_list_example_integer_2
     xfail:
       spec: "openCypher TCK 2024.3 List1: [6] Fail when indexing a non-list #Example: integer #2"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       WITH 123 AS list, 0 AS idx
       RETURN list[idx]
@@ -133,7 +133,7 @@ tests:
   - name: s6_fail_when_indexing_a_non_list_example_float_3
     xfail:
       spec: "openCypher TCK 2024.3 List1: [6] Fail when indexing a non-list #Example: float #3"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       WITH 4.7 AS list, 0 AS idx
       RETURN list[idx]
@@ -146,7 +146,7 @@ tests:
   - name: s6_fail_when_indexing_a_non_list_example_string_4
     xfail:
       spec: "openCypher TCK 2024.3 List1: [6] Fail when indexing a non-list #Example: string #4"
-      issue: fix in 0.6.5
+      issue: "#796"
     query: |
       WITH '1' AS list, 0 AS idx
       RETURN list[idx]
@@ -159,7 +159,7 @@ tests:
   - name: s7_fail_when_indexing_a_non_list_given_by_a_parameter_example_boolean_1
     xfail:
       spec: "openCypher TCK 2024.3 List1: [7] Fail when indexing a non-list given by a parameter #Example: boolean #1"
-      issue: fix in 0.6.5
+      issue: "#796"
     params:
       expr: true
       idx: 0
@@ -175,7 +175,7 @@ tests:
   - name: s7_fail_when_indexing_a_non_list_given_by_a_parameter_example_integer_2
     xfail:
       spec: "openCypher TCK 2024.3 List1: [7] Fail when indexing a non-list given by a parameter #Example: integer #2"
-      issue: fix in 0.6.5
+      issue: "#796"
     params:
       expr: 123
       idx: 0
@@ -191,7 +191,7 @@ tests:
   - name: s7_fail_when_indexing_a_non_list_given_by_a_parameter_example_float_3
     xfail:
       spec: "openCypher TCK 2024.3 List1: [7] Fail when indexing a non-list given by a parameter #Example: float #3"
-      issue: fix in 0.6.5
+      issue: "#796"
     params:
       expr: 4.7
       idx: 0
@@ -207,7 +207,7 @@ tests:
   - name: s7_fail_when_indexing_a_non_list_given_by_a_parameter_example_string_4
     xfail:
       spec: "openCypher TCK 2024.3 List1: [7] Fail when indexing a non-list given by a parameter #Example: string #4"
-      issue: fix in 0.6.5
+      issue: "#796"
     params:
       expr: "1"
       idx: 0

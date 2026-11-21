@@ -4,6 +4,8 @@
 
 use grafeo_common::utils::error::SourceSpan;
 
+use crate::query::limits::NameLimit;
+
 /// A token in the Cypher language.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
@@ -212,6 +214,8 @@ pub struct Lexer<'a> {
     line: usize,
     /// Column of current line.
     column: usize,
+    /// The identifier length limit, and the first name found over it.
+    names: NameLimit,
 }
 
 impl<'a> Lexer<'a> {
@@ -223,11 +227,46 @@ impl<'a> Lexer<'a> {
             start: 0,
             line: 1,
             column: 1,
+            names: NameLimit::default(),
         }
+    }
+
+    /// Checks each name against a limit of `max` bytes (see
+    /// [`ParseLimits`](crate::query::limits::ParseLimits)).
+    pub(crate) fn with_max_identifier_length(mut self, max: usize) -> Self {
+        self.names = NameLimit::new(max);
+        self
+    }
+
+    /// The identifier length limit, with the first name found over it.
+    pub(crate) fn names(&self) -> NameLimit {
+        self.names
+    }
+
+    /// The first name over the identifier length limit of `max` bytes in all
+    /// of `source`.
+    pub(crate) fn scan_names(source: &str, max: usize) -> NameLimit {
+        let mut lexer = Lexer::new(source).with_max_identifier_length(max);
+        while lexer.next_token().kind != TokenKind::Eof {}
+        lexer.names
     }
 
     /// Returns the next token.
     pub fn next_token(&mut self) -> Token {
+        let token = self.scan_token();
+        // The bytes of a name between its delimiters; a parameter's name is
+        // an identifier after its `$`.
+        let length = match token.kind {
+            TokenKind::Identifier => token.text.len(),
+            TokenKind::QuotedIdentifier => token.text.len().saturating_sub(2),
+            _ => return token,
+        };
+        self.names.note(token.span, length);
+        token
+    }
+
+    /// Reads the next token.
+    fn scan_token(&mut self) -> Token {
         self.skip_whitespace_and_comments();
 
         self.start = self.pos;

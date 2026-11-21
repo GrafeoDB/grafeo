@@ -19,7 +19,7 @@ use crate::query::plan::{
     JoinCondition, JoinOp, JoinType, ListPredicateKind, LoadDataFormat, LoadDataOp,
     LogicalExpression, LogicalOperator, LogicalPlan, MapProjectionEntry, MergeOp, NodeScanOp,
     OtherwiseOp, ParameterScanOp, PathMode, PathSelection, ProcedureYield, ProjectOp, Projection,
-    RemoveLabelOp, ReturnItem, ReturnOp, SetPropertyOp, ShortestPathEdgeCondition, ShortestPathOp,
+    RemoveLabelOp, ReturnItem, ReturnOp, SetPropertyOp, ShortestPathCondition, ShortestPathOp,
     SortKey, SortOrder, UnaryOp, UnionOp, UnwindOp,
 };
 use grafeo_adapters::query::cypher::{self, ast};
@@ -56,8 +56,11 @@ pub enum CypherTranslationResult {
 ///
 /// Returns an error if parsing fails or the query is a schema command
 /// that cannot be represented as a logical plan.
-pub fn translate(query: &str) -> Result<LogicalPlan> {
-    match translate_full(query)? {
+pub fn translate(
+    query: &str,
+    limits: &grafeo_adapters::query::limits::ParseLimits,
+) -> Result<LogicalPlan> {
+    match translate_full(query, limits)? {
         CypherTranslationResult::Plan(plan) => Ok(plan),
         _ => Err(Error::from(QueryError::new(
             QueryErrorKind::Unsupported,
@@ -71,8 +74,11 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
 /// # Errors
 ///
 /// Returns an error if parsing fails or the AST contains unsupported constructs.
-pub fn translate_full(query: &str) -> Result<CypherTranslationResult> {
-    let statement = cypher::parse(query)?;
+pub fn translate_full(
+    query: &str,
+    limits: &grafeo_adapters::query::limits::ParseLimits,
+) -> Result<CypherTranslationResult> {
+    let statement = cypher::parse_with(query, limits)?;
     let translator = CypherTranslator::new(query);
     match translator.translate_statement_full(&statement)? {
         CypherTranslationResult::Plan(plan) => Ok(CypherTranslationResult::Plan(
@@ -1192,7 +1198,7 @@ impl CypherTranslator {
                 op: BinaryOp::And,
                 right: Box::new(right),
             })
-            .map(|predicate| ShortestPathEdgeCondition {
+            .map(|predicate| ShortestPathCondition {
                 variable: candidate,
                 predicate,
             });
@@ -1231,6 +1237,7 @@ impl CypherTranslator {
             edge_variable,
             quantified,
             edge_condition,
+            steps: Vec::new(),
         });
 
         Ok(plan)
@@ -4500,6 +4507,14 @@ fn project_columns(input: LogicalOperator, columns: Vec<String>) -> LogicalOpera
 mod tests {
     use super::*;
     use crate::query::plan::{FilterOp, LimitOp, SkipOp, SortOp};
+
+    /// [`super::translate`] under the default parse limits.
+    fn translate(query: &str) -> Result<LogicalPlan> {
+        super::translate(
+            query,
+            &grafeo_adapters::query::limits::ParseLimits::default(),
+        )
+    }
 
     /// The plan of a query that ends with an update, under the `RETURN` of
     /// no items that gives it no result.

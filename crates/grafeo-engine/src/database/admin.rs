@@ -768,6 +768,125 @@ impl super::Open {
     }
 
     #[cfg(feature = "cdc")]
+    pub(crate) fn set_cdc(&self, enabled: bool) -> Result<()> {
+        let _open = self.hold_open()?;
+        if self.read_only {
+            return Err(grafeo_common::utils::error::Error::from(
+                grafeo_common::utils::error::QueryError::unsupported(
+                    "a database opened read-only cannot change its change data capture setting",
+                ),
+            ));
+        }
+        if self.root_store().is_none() {
+            return Err(super::config_error(
+                crate::config::ConfigError::CdcWithoutFile,
+            ));
+        }
+        #[cfg(feature = "grafeo-file")]
+        if let Some(fm) = self.file_manager.as_ref() {
+            // A stored feed is durable only through the WAL: without one,
+            // commits would leave a gap in it.
+            #[cfg(feature = "wal")]
+            let without_wal = self.wal.is_none();
+            #[cfg(not(feature = "wal"))]
+            let without_wal = true;
+            if enabled && without_wal {
+                return Err(super::config_error(
+                    crate::config::ConfigError::CdcWithoutWal,
+                ));
+            }
+            let sources = self.checkpoint_sources()?;
+            // Commits are held from the change to its checkpoint at log
+            // position L: every group after L was written after the change,
+            // so the cursor at L misses nothing and holds nothing from before.
+            let _checkpoint = fm.checkpoint_guard();
+            // After a checkpoint whose outcome is unknown nothing more is
+            // stored: refused before anything changes.
+            fm.check_checkpoint_allowed()?;
+            let commits = self.transaction_manager.hold_commits()?;
+            // Turning it on writes the cursor first, at L: the WAL's end while
+            // commits are held, where the checkpoint starts its new segment.
+            // A cursor that fails to be written leaves everything as it was.
+            // One that is there while the setting is stored on stays where it
+            // is: it holds the changes its consumer has not read yet.
+            #[cfg(feature = "wal")]
+            let wrote_cursor = match self.wal.as_ref() {
+                Some(wal)
+                    if enabled
+                        && !(self
+                            .catalog
+                            .cdc_config()
+                            .is_some_and(|record| record.enabled)
+                            && super::cdc_cursor::default_exists(wal.dir())) =>
+                {
+                    super::cdc_cursor::write_default(wal.dir(), wal.end_lsn())?;
+                    true
+                }
+                _ => false,
+            };
+            let record = grafeo_common::storage::catalog_record::CdcConfigRecord { enabled };
+            let previous_record = self.catalog.set_cdc_config(Some(record));
+            // Capture goes on at once, and off only once the setting is
+            // stored: the commits the checkpoint lets go on while it writes
+            // are captured whichever way it ends.
+            let previous = if enabled {
+                self.cdc_enabled
+                    .swap(true, std::sync::atomic::Ordering::Relaxed)
+            } else {
+                self.cdc_enabled.load(std::sync::atomic::Ordering::Relaxed)
+            };
+            if let Err(error) = super::flush::flush_held(fm, &sources, None, commits) {
+                // A checkpoint whose outcome is unknown may have stored it:
+                // the new setting stays, the side that keeps the WAL (on
+                // keeps its cursor; off removes none), as a reopen may find it.
+                if super::flush::is_outcome_unknown(&error) {
+                    self.cdc_enabled
+                        .store(enabled, std::sync::atomic::Ordering::Relaxed);
+                    return Err(error);
+                }
+                // Nothing was stored: the setting goes back to what the file
+                // holds, and the cursor written for it goes too (one left
+                // behind is removed at the next open).
+                self.catalog.set_cdc_config(previous_record);
+                self.cdc_enabled
+                    .store(previous, std::sync::atomic::Ordering::Relaxed);
+                #[cfg(feature = "wal")]
+                if wrote_cursor
+                    && let Some(wal) = self.wal.as_ref()
+                    && let Err(cursor_error) = super::cdc_cursor::remove_default(wal.dir())
+                {
+                    grafeo_common::grafeo_warn!(
+                        "the CDC cursor of a change that was not stored stays until the next \
+                         open: {cursor_error}"
+                    );
+                }
+                return Err(error);
+            }
+            self.cdc_enabled
+                .store(enabled, std::sync::atomic::Ordering::Relaxed);
+            grafeo_common::testing::crash::maybe_crash("cdc:after_toggle_checkpoint");
+            // Turning it off removes the cursor once the setting is stored
+            // (again when it is off: a removal that failed before is retried).
+            // Turning it on has no step after the checkpoint: its cursor was
+            // written first.
+            #[cfg(feature = "wal")]
+            if !enabled && let Some(wal) = self.wal.as_ref() {
+                super::cdc_cursor::remove_default(wal.dir()).map_err(|error| {
+                    grafeo_common::utils::error::Error::from(
+                        grafeo_common::utils::error::StorageError::CdcCursorPending(
+                            error.to_string(),
+                        ),
+                    )
+                })?;
+            }
+            return Ok(());
+        }
+        // An in-memory database has nothing to reopen: the setting lasts while it is open.
+        self.set_cdc_enabled(enabled);
+        Ok(())
+    }
+
+    #[cfg(feature = "cdc")]
     pub(crate) fn history(
         &self,
         entity_id: impl Into<crate::cdc::EntityId>,
@@ -1021,6 +1140,10 @@ impl super::GrafeoDB {
     /// complete (see [`TransactionManager`](crate::transaction::TransactionManager)),
     /// and the database-closed error after `close()`
     /// (its file is released: another handle may have written it since).
+    /// A checkpoint that fails between writing its header and syncing it
+    /// returns `GRAFEO-S008`: its outcome is unknown, the next open finds the
+    /// new image or the previous one, and until then every checkpoint is
+    /// refused with the same error (reopen the database).
     pub fn wal_checkpoint(&self) -> Result<()> {
         self.live()?.wal_checkpoint()
     }
@@ -1049,11 +1172,56 @@ impl super::GrafeoDB {
             .map_or_else(Default::default, |open| open.is_cdc_enabled())
     }
 
-    /// Sets whether CDC is enabled by default for new sessions. After `close()` it does nothing; it
-    /// returns a `Result` from 0.7.0.
+    /// Turns change data capture on or off for new sessions and stores the
+    /// setting with the database, so a reopen has it as it was: the setting
+    /// changes, then a checkpoint writes it. An in-memory database has
+    /// nothing to reopen: it changes the setting for as long as it is open.
+    ///
+    /// Does not affect sessions that were already created.
+    /// [`Config::with_cdc`](crate::Config::with_cdc) turns capture on for one
+    /// open only; this stores it.
+    ///
+    /// # Errors
+    ///
+    /// A database opened read-only refuses the change. A database on a store
+    /// of its own ([`with_store`](Self::with_store)) has no file to store it
+    /// in, and an open without the WAL cannot keep the WAL from the cursor
+    /// (below): both refuse it
+    /// (turning capture on, for the second) with a configuration error
+    /// (`GRAFEO-V001`) that names the remedy. While capture is stored on, a
+    /// writable open without the WAL is refused the same way. A checkpoint
+    /// that fails (no room on the disk, an I/O error) leaves the setting and
+    /// the stored record as they were. After a checkpoint whose outcome is
+    /// unknown (`GRAFEO-S008`: it failed between writing its header and
+    /// syncing it), the setting keeps its new value, as the next open may
+    /// find it, and the call is refused until a reopen. The database-closed
+    /// error after `close()`.
+    ///
+    /// While the setting is stored on, the database keeps a cursor in its
+    /// WAL directory, and checkpoints and `close()` keep the WAL from it, up
+    /// to [`Config::with_wal_retention_limit`](crate::Config::with_wal_retention_limit):
+    /// `<path>.wal` stays after `close()`. Turning it off removes the cursor
+    /// once the setting is stored:
+    /// when that removal fails, the error is `GRAFEO-S007`
+    /// ([`StorageError::CdcCursorPending`](grafeo_common::utils::error::StorageError::CdcCursorPending)).
+    /// The setting is then stored off and the cursor keeps no log; the next
+    /// open, or `set_cdc(false)` again, removes it.
+    #[cfg(feature = "cdc")]
+    pub fn set_cdc(&self, enabled: bool) -> Result<()> {
+        self.live()?.set_cdc(enabled)
+    }
+
+    /// Sets whether CDC is enabled by default for new sessions, for as long
+    /// as the database is open: nothing is stored. After `close()` it does
+    /// nothing.
     ///
     /// Does not affect sessions that were already created.
     #[cfg(feature = "cdc")]
+    #[deprecated(
+        since = "0.6.4",
+        note = "use `set_cdc` for a database with a file, which stores the setting and reports a \
+                failure, or `Config::with_cdc()` for one without; removed in 0.7.0"
+    )]
     pub fn set_cdc_enabled(&self, enabled: bool) {
         if let Some(open) = self.live_if() {
             open.set_cdc_enabled(enabled);

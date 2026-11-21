@@ -13,6 +13,33 @@ There are two levels of control:
 2. **Per-session override**: each session can opt in or out regardless of the
    database default.
 
+Turning CDC on or off at runtime stores the setting with the database file, so
+a reopen has it as it was (an in-memory database keeps it while it is open).
+The call checkpoints, and fails on a read-only open or when the checkpoint
+fails, leaving the setting as it was. A database on a store of its own
+(`GrafeoDB::with_store`) has no file to store it in, so the call is refused
+there. While the setting is stored on, the database keeps its write-ahead log
+from a cursor (see below), so turning CDC on for an open without the WAL is
+refused, and while it is stored on, a writable open without the WAL is refused
+too (open it with the WAL, open it read-only, or turn CDC off from an open with
+the WAL). Both refusals are configuration errors
+(`GRAFEO-V001`). `Config::with_cdc()` (Python `GrafeoDB(cdc=True)`) turns CDC
+on for that open only and stores nothing; the open logs a warning when the
+file's stored setting is off.
+
+With the setting stored on, the database keeps a cursor in its write-ahead log
+directory (`cdc_cursor_default.json`), and every checkpoint, and `close()`,
+keeps the log from that cursor on, as they keep it for a backup cursor: at most
+`Config::with_wal_retention_limit` beyond the last checkpoint (1 GiB by
+default). Past the limit a checkpoint removes the oldest part and logs a warning
+once. So while the setting is stored on, `<path>.wal` stays after `close()`.
+Turning the setting on while it is on leaves the cursor where it is (and writes
+it if it is missing). Turning the setting off removes the cursor, and the next
+checkpoint releases the log it kept. When the setting is stored off but
+the cursor cannot be removed, the call fails with
+[`GRAFEO-S007`](error-codes.md#storage-s): the cursor then keeps no log, and
+the next open, or turning the setting off again, removes it.
+
 ### Rust
 
 ```rust
@@ -21,8 +48,8 @@ use grafeo_engine::{Config, GrafeoDB};
 // Enable CDC for all sessions via config
 let db = GrafeoDB::with_config(Config::in_memory().with_cdc())?;
 
-// Or toggle at runtime (affects future sessions only)
-db.set_cdc_enabled(true);
+// Or toggle at runtime (affects future sessions only), stored with the file
+db.set_cdc(true)?;
 
 // Per-session override
 let tracked   = db.session_with_cdc(true);   // CDC on for this session
@@ -63,7 +90,7 @@ db.disableCdc();
 #include "grafeo.h"
 
 GrafeoDatabase* db = grafeo_open_memory();
-grafeo_set_cdc_enabled(db, true);
+GrafeoStatus status = grafeo_set_cdc(db, true);
 bool enabled = grafeo_is_cdc_enabled(db);
 ```
 
@@ -73,7 +100,7 @@ Once CDC is enabled, every mutation records a `ChangeEvent` with:
 
 | Field           | Description                                                                 |
 |-----------------|-----------------------------------------------------------------------------|
-| `entity_id`     | Node or edge ID                                                             |
+| `entity_id`     | Node or edge ID; for an RDF triple, a 64-bit hash of its terms and its graph (see below) |
 | `graph`         | The graph the entity is in: its name (`schema/name` inside a schema, and `schema/__default__` for a schema's default graph); `None` for the default graph |
 | `kind`          | `Create`, `Update`, or `Delete`                                             |
 | `epoch`         | Commit epoch (monotonically increasing)                                     |
@@ -109,6 +136,18 @@ Node and edge IDs repeat across named graphs, so an ID names an entity only
 together with its graph. `history` on the database reads the default graph, and
 on a session the session's current graph; `changes_between` returns the events
 of every graph, each with its `graph`.
+
+An RDF triple's ID is the first 8 bytes of SHA-256 over its terms and its graph, the
+same in every process and release. It is unique in practice but not guaranteed: a
+consumer that must never take two triples for one keys on the terms the event carries
+(`triple_subject`, `triple_predicate`, `triple_object`, `triple_graph`).
+
+The Rust helpers `CdcLog::record_triple_insert` and `record_triple_delete` take
+N-Triples terms and a graph IRI without angle brackets (`None` for the default
+graph), and record the event a commit of that triple records: the same ID and the
+normalised terms. Terms that are not one triple (a blank argument included), or a
+build without the triple store, record nothing. Such a call logs a warning in a
+build with the `tracing` feature, and is always counted in `CdcLog::dropped_lines()`.
 
 ### Per-entity history
 
@@ -165,7 +204,8 @@ wrapping occurs.
 
 When enabled, each mutation incurs:
 
-- One HLC timestamp generation (`SystemTime::now()` syscall + atomic CAS)
+- One HLC timestamp reservation per commit (`SystemTime::now()` syscall + atomic CAS):
+  a commit's events carry consecutive timestamps, in the order its writes were applied
 - One event buffer push (mutex-protected `Vec`)
 - Property snapshot allocations for before/after state
 

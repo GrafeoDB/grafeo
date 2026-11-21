@@ -2593,8 +2593,9 @@ for case_id, query, languages in [
 # DK: a WHERE inside a GQL quantified pattern holds per step (#678 item 2; 0.6.0 checked it
 #     once over the edge list, and a node condition was an undefined variable): an edge
 #     condition (DK1), a node condition (DK2); a two-edge quantified pattern repeats within
-#     its bounds (DK3, DK4; 0.6.0 took the segment once); an unbounded walk has no hop cap
-#     (DK5, DK6; 0.6.0 stopped after min + 100 hops)
+#     its bounds (DK3, DK4; 0.6.0 took the segment once); an unbounded walk over a chain
+#     (DK5, DK6; 0.6.0 stopped after min + 100 hops; since 0.6.4 GQL refuses an unbounded
+#     quantifier without a path mode or a selector with 42001)
 for case_id, query, fixture in [
     ("DK1", "MATCH (s:Person {name: 'Alix'})((a)-[e:KNOWS]->(b) WHERE e.w > 1){1,3}(t) RETURN t.name AS t, [x IN e | x.w] AS ws", "social"),
     ("DK2", "MATCH (s:Person {name: 'Alix'})((a)-[e:KNOWS]->(b) WHERE a.age < b.age){1,3}(t) RETURN t.name AS t", "social"),
@@ -3684,9 +3685,15 @@ for case_id, query in [
     case(case_id, query, GQL, "listed_type")
 # An unbounded quantifier needs a path mode or a selector in GQL (0.6.4, ISO/IEC 39075 16.4 SR 14):
 #     with TRAIL, Cypher's semantics, GQL answers as Cypher's BJ3 does (EP26); without one GQL
-#     refuses it with 42001 before it runs (EP27; 0.6.3 walked, and ran to its timeout on a cycle)
+#     refuses it with 42001 before it runs (EP27; 0.6.3 walked, and failed with GRAFEO-S001 at
+#     the path search budget)
 case("EP26", "MATCH TRAIL (g:Person {name: 'Gus'})-[:KNOWS*]->(c) RETURN c.name AS c", GQL, "social")
 case("EP27", "MATCH (g:Person {name: 'Gus'})-[:KNOWS*]->(c) RETURN c.name AS c", GQL, "social")
+# ANY SHORTEST and shortestPath count the nodes they visit against the path search budget (0.6.4):
+#     over it they fail with GRAFEO-S001 naming the budget (EP28, EP29; 0.6.3 counted only the
+#     paths they kept, and answered)
+case("EP28", "MATCH p = ANY SHORTEST (s:Star)-[:E]->+(t:Leaf {n: 3}) RETURN length(p) AS l", GQL, "path_budget")
+case("EP29", "MATCH p = shortestPath((s:Star)-[:E*]->(t:Leaf {n: 3})) RETURN length(p) AS l", CYPHER, "path_budget")
 
 # EQ: CREATE OR REPLACE GRAPH (ISO 12.4) replaces a graph in one change (it was a syntax error):
 #     the replaced graph is empty (EQ5); EQ6 is cleanup, returning the session to the default graph
@@ -3766,7 +3773,7 @@ case("EV5", "UNWIND [1, 2, 3] AS i CALL nothing() RETURN count(i) AS c", CYPHER,
 # EW: the WHERE of a Cypher WITH reads the variables bound before the WITH (0.6.4; it failed with an
 #     undefined variable), also beside an ORDER BY (EW3) and after an OPTIONAL MATCH (EW4); a
 #     parameter may be named by a number (EW5); a pattern comprehension in the WHERE reads the row's
-#     variable (EW6, and EW8 inside a list predicate), and in a CALL body the WITH keeps the imports
+#     variable (EW6), an EXISTS inside a list predicate does too (EW8), and in a CALL body the WITH keeps the imports
 #     (EW7)
 case("EW1", "MATCH (a:Person) WITH a.name AS name WHERE a.age > 30 RETURN name", CYPHER)
 case("EW2", "MATCH (a:Person) WITH a.name AS name WHERE name = 'Mia' OR a.age = 40 RETURN name", CYPHER)
@@ -3803,5 +3810,19 @@ case("FA2", "MATCH (r:Robot {name: 'R1'}) SET r = 'x' RETURN r.name AS n", GQL, 
 case("FB1", "MATCH (p:Person) RETURN p.name AS k, CASE WHEN p.age > 30 THEN p ELSE p.age END AS v", BOTH)
 case("FB2", "MATCH (p:Person) OPTIONAL MATCH (p)-[:LIVES_IN]->(c) RETURN p.name AS k, coalesce(c, p.age) AS v", BOTH)
 case("FB3", "MATCH (p:Person) RETURN p.name AS k, [p, p.age][p.age % 2] AS v", BOTH)
+
+# FC: a LIMIT before another stage keeps the rows it stopped with (0.6.4; in GQL a LIMIT that
+#     reached its count in the same chunk handed on nothing, so a DISTINCT (FC1, FC2), a grouping
+#     with a key (FC3), a WHERE (FC4) or an ORDER BY (FC5) after it saw no rows)
+case("FC1", "MATCH (n:Person) WITH n.age > 0 AS adult LIMIT 3 RETURN DISTINCT adult", BOTH)
+case("FC2", "MATCH (n:Person) WITH n.age AS a LIMIT 3 RETURN DISTINCT a", BOTH)
+case("FC3", "MATCH (n:Person) WITH n.age AS a LIMIT 3 RETURN a, count(*) AS c", BOTH)
+case("FC4", "MATCH (n:Person) WITH n.age AS a LIMIT 3 WHERE a >= 0 RETURN a", BOTH)
+ordered("FC5", "MATCH (n:Person) WITH n.age AS a LIMIT 3 RETURN a ORDER BY a", BOTH)
+
+# FD: a selective path pattern over several edge patterns selects whole paths per pair of
+#     endpoints, fixed edges counted in the length (0.6.4; it was refused, GRAFEO-Q004)
+case("FD1", "MATCH p = ANY SHORTEST (a:Person {name: 'Vincent'})-[:KNOWS]->*(b:Person)-[:LIVES_IN]->(c:City) RETURN b.name AS b, c.name AS c, length(p) AS len", GQL)
+case("FD2", "MATCH p = ALL SHORTEST (a:Person)-[:KNOWS]->{1,2}(b)-[l:LIVES_IN]->(c) RETURN a.name AS a, c.name AS c, l.years AS y, length(p) AS len", GQL)
 
 # fmt: on

@@ -25,8 +25,8 @@ use crate::query::plan::{
     JoinType, LeftJoinOp, LoadDataFormat, LoadDataOp, LogicalExpression, LogicalOperator,
     LogicalPlan, MapProjectionEntry, MergeOp, NodeScanOp, NullsOrdering, OtherwiseOp,
     ParameterScanOp, PathMode, ProcedureYield, ProjectOp, Projection, RemoveLabelOp, ReturnItem,
-    ReturnOp, SetPropertyOp, ShortestPathEdgeCondition, ShortestPathOp, SortKey, SortOrder,
-    UnaryOp, UnionOp, UnwindOp,
+    ReturnOp, SetPropertyOp, ShortestPathCondition, ShortestPathOp, ShortestPathStep, SortKey,
+    SortOrder, UnaryOp, UnionOp, UnwindOp,
 };
 #[cfg(test)]
 use crate::query::plan::{FilterOp, LimitOp, SkipOp};
@@ -55,8 +55,11 @@ pub enum GqlTranslationResult {
 /// # Errors
 ///
 /// Returns an error if the query cannot be parsed or translated.
-pub fn translate(query: &str) -> Result<LogicalPlan> {
-    match translate_full(query)? {
+pub fn translate(
+    query: &str,
+    limits: &grafeo_adapters::query::limits::ParseLimits,
+) -> Result<LogicalPlan> {
+    match translate_full(query, limits)? {
         GqlTranslationResult::Plan(plan) => Ok(plan),
         GqlTranslationResult::SessionCommand(_) => Err(Error::from(QueryError::new(
             QueryErrorKind::Unsupported,
@@ -74,8 +77,11 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
 /// # Errors
 ///
 /// Returns an error if the query cannot be parsed or translated.
-pub fn translate_full(query: &str) -> Result<GqlTranslationResult> {
-    let statement = gql::parse(query)?;
+pub fn translate_full(
+    query: &str,
+    limits: &grafeo_adapters::query::limits::ParseLimits,
+) -> Result<GqlTranslationResult> {
+    let statement = gql::parse_with(query, limits)?;
     // The graph a `USE g` focuses the statement on, which it reads and
     // writes in place of the session's current graph.
     let graph = focus::statement_graph(&statement)?;
@@ -96,9 +102,10 @@ pub fn translate_full(query: &str) -> Result<GqlTranslationResult> {
 struct GqlTranslator {
     /// Edge variables from variable-length expand patterns (group-list variables),
     /// each bound to the list of its path's edges, with the path alias of the
-    /// pattern. An aggregate over one is computed per row
+    /// pattern: `None` for one edge pattern of several of a path search, whose
+    /// run has no path of its own. An aggregate over one is computed per row
     /// (see `take_horizontal_aggregates`).
-    group_list_variables: std::cell::RefCell<HashMap<String, String>>,
+    group_list_variables: std::cell::RefCell<HashMap<String, Option<String>>>,
     /// A reserved lexical temporary, stable when a group key is translated again.
     let_values_name: std::cell::OnceCell<String>,
     /// The variables of the row the `CALL` subquery being translated runs
@@ -1609,9 +1616,10 @@ impl GqlTranslator {
             let selection = selection_of(aliased_pattern);
             let path_mode = path_mode_of(aliased_pattern);
 
-            // A path search through an edge bound before is limited to that
-            // edge, so it goes on from the rows that bind it: searched on its
-            // own and joined after, it would pick its paths without it.
+            // A path search through an edge, or a node between its edge
+            // patterns, bound before is limited to it, so it goes on from the
+            // rows that bind it: searched on its own and joined after, it would
+            // pick its paths without it.
             let earlier: HashSet<String> = bound_vars.union(&input_vars).cloned().collect();
             if selection.is_some()
                 && let ast::Pattern::Path(path) = &aliased_pattern.pattern
@@ -1619,6 +1627,13 @@ impl GqlTranslator {
                     .edges
                     .iter()
                     .filter_map(|edge| edge.variable.as_ref())
+                    .chain(
+                        path.edges
+                            .iter()
+                            .rev()
+                            .skip(1)
+                            .filter_map(|edge| edge.target.variable.as_ref()),
+                    )
                     .any(|name| earlier.contains(name))
             {
                 shared.clear();
@@ -2146,8 +2161,11 @@ impl GqlTranslator {
     /// Translates a selective path pattern (a path search prefix other than
     /// `ALL`, or `shortestPath`) into a path search: for each input row and
     /// each pair of endpoints, the paths of `search.selection` among those
-    /// of `search.path_mode` (ISO/IEC 39075:2024 16.6). The edge pattern's
-    /// own conditions hold during the search, before the selection.
+    /// of `search.path_mode` (ISO/IEC 39075:2024 16.6). The path pattern is
+    /// a chain of edge patterns, fixed and quantified: a path's length counts
+    /// the edges of all of them. The conditions of its edge patterns, and of
+    /// the node patterns between them, hold during the search, before the
+    /// selection.
     ///
     /// `ANY` searches from the source to every node it reaches, unless the
     /// target is bound already (by the input rows, or as the source): one
@@ -2160,44 +2178,46 @@ impl GqlTranslator {
         input: Option<LogicalOperator>,
         bound: &HashSet<String>,
     ) -> Result<LogicalOperator> {
-        // One edge pattern between two node patterns
+        // A chain of edge patterns between node patterns
         let any = matches!(search.selection, plan::PathSelection::Any(_));
         let what = if any { "an ANY" } else { "a shortest" };
-        let ast::Pattern::Path(path) = pattern else {
+        let unsupported =
+            |message: String| Error::from(QueryError::new(QueryErrorKind::Unsupported, message));
+        let path = match pattern {
+            ast::Pattern::Path(path) => path,
+            // `shortestPath((a))`: a prefix over a lone node does not search
+            ast::Pattern::Node(_) => {
+                return Err(unsupported(format!(
+                    "{what} path search over a lone node pattern is not supported"
+                )));
+            }
+            _ => {
+                return Err(unsupported(format!(
+                    "{what} path search over a parenthesized or alternated path pattern is \
+                     not supported"
+                )));
+            }
+        };
+        let (Some(edge), Some(last)) = (path.edges.first(), path.edges.last()) else {
             return Err(Error::from(QueryError::new(
-                QueryErrorKind::Unsupported,
-                format!(
-                    "{what} path search over a parenthesized, alternated or node-only path \
-                     pattern is not supported: it runs over one edge pattern between two nodes"
-                ),
+                QueryErrorKind::Semantic,
+                format!("{what} path search needs an edge pattern between two nodes"),
             )));
         };
-        let edge = match path.edges.as_slice() {
-            [edge] => edge,
-            [] => {
-                return Err(Error::from(QueryError::new(
-                    QueryErrorKind::Semantic,
-                    format!("{what} path search needs an edge pattern between two nodes"),
-                )));
-            }
-            // Only the first edge pattern would be searched, and the nodes
-            // between the edge patterns ignored
-            _ => {
-                return Err(Error::from(QueryError::new(
-                    QueryErrorKind::Unsupported,
-                    format!("{what} path search over more than one edge pattern is not supported"),
-                )));
-            }
-        };
-        let direction = match edge.direction {
-            ast::EdgeDirection::Outgoing => ExpandDirection::Outgoing,
-            ast::EdgeDirection::Incoming => ExpandDirection::Incoming,
-            ast::EdgeDirection::Undirected => ExpandDirection::Both,
-        };
-        // The path must fit the edge's quantifier: `->+` needs at least
-        // one hop, and an edge without one is a single hop.
-        let (min_hops, max_hops) = pattern::edge_hop_bounds(edge);
-        let quantified = edge.min_hops.is_some() || edge.max_hops.is_some();
+        // The search counts the edge patterns of its states in 16 bits
+        if path.edges.len() > usize::from(u16::MAX) {
+            return Err(unsupported(format!(
+                "{what} path search over more than {} edge patterns is not supported",
+                u16::MAX
+            )));
+        }
+        // `->?` takes zero or one edge, which the search does not read: it
+        // would take exactly one and leave out the paths without it
+        if path.edges.iter().any(|edge| edge.questioned) {
+            return Err(unsupported(format!(
+                "{what} path search over a questioned edge pattern (`?`) is not supported"
+            )));
+        }
 
         // The search finds the paths between the endpoints, so they are not
         // expanded between: the source is scanned, and the target too unless
@@ -2208,9 +2228,160 @@ impl GqlTranslator {
             node.variable.get_or_insert_with(|| self.anonymous_name());
             node
         };
-        let (source_node, target_node) = (named(&path.source), named(&edge.target));
+        let (source_node, target_node) = (named(&path.source), named(&last.target));
         let source_var = source_node.variable.clone().unwrap_or_default();
         let target_var = target_node.variable.clone().unwrap_or_default();
+
+        // The variables the search binds for each path inside it: of the
+        // nodes between the edge patterns and of the edges. Each binds once
+        // per path, so a name twice among them would need the search to
+        // compare two places of one path, and a condition that reads one
+        // reads a place of a path not found yet.
+        let ends: HashSet<&String> = [&source_var, &target_var].into_iter().collect();
+        let inner_nodes = path.edges[..path.edges.len() - 1]
+            .iter()
+            .filter_map(|edge| edge.target.variable.as_ref())
+            .filter(|name| !bound.contains(*name) && !ends.contains(name));
+        let inner_edges = path
+            .edges
+            .iter()
+            .filter_map(|edge| edge.variable.as_ref())
+            .filter(|name| !bound.contains(*name));
+        let mut inner: HashSet<&String> = HashSet::new();
+        for name in inner_nodes.chain(inner_edges) {
+            if !inner.insert(name) {
+                return Err(unsupported(format!(
+                    "{what} path search that binds '{name}' at two places of its path pattern \
+                     is not supported"
+                )));
+            }
+        }
+
+        let first = self.path_search_edge(edge, bound)?;
+        let mut steps = Vec::with_capacity(path.edges.len() - 1);
+        for (before, edge) in path.edges.iter().zip(&path.edges[1..]) {
+            let (node_variable, node_condition) =
+                self.path_search_node(&before.target, bound, &ends)?;
+            let step = self.path_search_edge(edge, bound)?;
+            steps.push(ShortestPathStep {
+                node_variable,
+                node_condition,
+                edge_types: edge.types.clone(),
+                direction: step.direction,
+                min_hops: step.min_hops,
+                max_hops: step.max_hops,
+                edge_variable: step.edge_variable,
+                quantified: step.quantified,
+                edge_condition: step.condition,
+            });
+        }
+
+        // A condition reads its own candidate and the input row, not another
+        // place of the path. ANY searches to every node, unless the target is
+        // bound (by the input rows or as the source), a node between the edge
+        // patterns is the target, or a condition reads it, which the search to
+        // every node has not bound yet
+        let mut reads_target = false;
+        let conditions = first.condition.iter().chain(
+            steps
+                .iter()
+                .flat_map(|step| step.node_condition.iter().chain(&step.edge_condition)),
+        );
+        for condition in conditions {
+            let mut read = HashSet::new();
+            collect_expression_variables(&condition.predicate, &mut read);
+            reads_target |= read.contains(&target_var);
+            if let Some(name) = read
+                .iter()
+                .find(|name| **name != condition.variable && inner.contains(name))
+            {
+                return Err(unsupported(format!(
+                    "{what} path search with an element pattern that reads '{name}', another \
+                     element of its path pattern, is not supported"
+                )));
+            }
+        }
+        let target_inside = path.edges[..path.edges.len() - 1]
+            .iter()
+            .any(|edge| edge.target.variable.as_ref() == Some(&target_var));
+        let binds_target = any
+            && target_var != source_var
+            && !(input.is_some() && bound.contains(&target_var))
+            && !reads_target
+            && !target_inside;
+        let source_plan = self.translate_node_pattern(&source_node, input)?;
+        let search_input = if binds_target {
+            source_plan
+        } else {
+            self.translate_node_pattern(&target_node, Some(source_plan))?
+        };
+
+        let path_alias = alias.map_or_else(|| self.names.next("_anon_path_"), String::from);
+        // A sum over the edges of a quantified edge pattern (`sum(e.w)`) reads
+        // its edge column; the path is the edge's own only when it is the one
+        // edge pattern
+        let own_path = steps.is_empty().then(|| path_alias.clone());
+        let groups = std::iter::once((first.quantified, &first.edge_variable)).chain(
+            steps
+                .iter()
+                .map(|step| (step.quantified, &step.edge_variable)),
+        );
+        for (quantified, name) in groups {
+            if quantified && let Some(name) = name {
+                self.group_list_variables
+                    .borrow_mut()
+                    .insert(name.clone(), own_path.clone());
+            }
+        }
+
+        let search = LogicalOperator::ShortestPath(ShortestPathOp {
+            input: Box::new(search_input),
+            source_var,
+            target_var,
+            edge_types: edge.types.clone(),
+            direction: first.direction,
+            path_alias,
+            selection: search.selection,
+            path_mode: search.path_mode,
+            binds_target,
+            min_hops: first.min_hops,
+            max_hops: first.max_hops,
+            edge_variable: first.edge_variable,
+            quantified: first.quantified,
+            edge_condition: first.condition,
+            steps,
+        });
+        // The target's labels, properties and WHERE hold for each node the
+        // search binds: they read the target alone, so they keep or drop
+        // whole partitions, after the selection as before it
+        let target_conditions = !target_node.labels.is_empty()
+            || target_node.label_expression.is_some()
+            || !target_node.properties.is_empty()
+            || target_node.where_clause.is_some();
+        if binds_target && target_conditions {
+            return self.translate_node_pattern(&target_node, Some(search));
+        }
+        Ok(search)
+    }
+
+    /// An edge pattern of a path search (see
+    /// [`translate_path_search`](Self::translate_path_search)): its
+    /// direction, its quantifier, the variable that binds its edges, and the
+    /// condition each of its edges meets.
+    fn path_search_edge(
+        &self,
+        edge: &ast::EdgePattern,
+        bound: &HashSet<String>,
+    ) -> Result<PathSearchEdge> {
+        let direction = match edge.direction {
+            ast::EdgeDirection::Outgoing => ExpandDirection::Outgoing,
+            ast::EdgeDirection::Incoming => ExpandDirection::Incoming,
+            ast::EdgeDirection::Undirected => ExpandDirection::Both,
+        };
+        // The path must fit the edge's quantifier: `->+` needs at least
+        // one hop, and an edge without one is a single hop.
+        let (min_hops, max_hops) = pattern::edge_hop_bounds(edge);
+        let quantified = edge.min_hops.is_some() || edge.max_hops.is_some();
 
         // The edge variable binds the edges of each path, unless a pattern
         // before bound it: the path then takes that edge, which the search
@@ -2243,67 +2414,66 @@ impl GqlTranslator {
         if let Some(where_expr) = &edge.where_clause {
             conditions.push(self.translate_expression(where_expr)?);
         }
-        let edge_condition =
-            join_and_conjuncts(conditions).map(|predicate| ShortestPathEdgeCondition {
-                variable: candidate,
-                predicate,
-            });
-
-        // ANY searches to every node, unless the target is bound (by the
-        // input rows or as the source) or the edge condition reads it, which
-        // the search to every node has not bound yet
-        let reads_target = edge_condition.as_ref().is_some_and(|condition| {
-            let mut read = HashSet::new();
-            collect_expression_variables(&condition.predicate, &mut read);
-            read.contains(&target_var)
-        });
-        let binds_target = any
-            && target_var != source_var
-            && !(input.is_some() && bound.contains(&target_var))
-            && !reads_target;
-        let source_plan = self.translate_node_pattern(&source_node, input)?;
-        let search_input = if binds_target {
-            source_plan
-        } else {
-            self.translate_node_pattern(&target_node, Some(source_plan))?
-        };
-
-        let path_alias = alias.map_or_else(|| self.names.next("_anon_path_"), String::from);
-        let edge_variable = edge.variable.clone().filter(|_| bound_edge.is_none());
-        // A sum over the edges of the path (`sum(e.w)`) reads its edge column
-        if quantified && let Some(name) = &edge_variable {
-            self.group_list_variables
-                .borrow_mut()
-                .insert(name.clone(), path_alias.clone());
-        }
-
-        let search = LogicalOperator::ShortestPath(ShortestPathOp {
-            input: Box::new(search_input),
-            source_var,
-            target_var,
-            edge_types: edge.types.clone(),
+        Ok(PathSearchEdge {
             direction,
-            path_alias,
-            selection: search.selection,
-            path_mode: search.path_mode,
-            binds_target,
             min_hops,
             max_hops,
-            edge_variable,
             quantified,
-            edge_condition,
-        });
-        // The target's labels, properties and WHERE hold for each node the
-        // search binds: they read the target alone, so they keep or drop
-        // whole partitions, after the selection as before it
-        let target_conditions = !target_node.labels.is_empty()
-            || target_node.label_expression.is_some()
-            || !target_node.properties.is_empty()
-            || target_node.where_clause.is_some();
-        if binds_target && target_conditions {
-            return self.translate_node_pattern(&target_node, Some(search));
+            edge_variable: edge.variable.clone().filter(|_| bound_edge.is_none()),
+            condition: join_and_conjuncts(conditions).map(|predicate| ShortestPathCondition {
+                variable: candidate,
+                predicate,
+            }),
+        })
+    }
+
+    /// A node pattern between two edge patterns of a path search: the
+    /// variable that binds its node, unless one of `bound` or `ends` (the
+    /// search's endpoints) has it, and its labels, property map and `WHERE`
+    /// as the condition its node meets, with the equality to the node of a
+    /// variable bound before.
+    fn path_search_node(
+        &self,
+        node: &ast::NodePattern,
+        bound: &HashSet<String>,
+        ends: &HashSet<&String>,
+    ) -> Result<(Option<String>, Option<ShortestPathCondition>)> {
+        let bound_node = node
+            .variable
+            .as_ref()
+            .filter(|name| bound.contains(*name) || ends.contains(name));
+        let candidate = match (&node.variable, bound_node) {
+            (Some(name), None) => name.clone(),
+            _ => self.anonymous_name(),
+        };
+        let mut conditions = Vec::new();
+        if let Some(name) = bound_node {
+            conditions.push(LogicalExpression::Binary {
+                left: Box::new(LogicalExpression::Id(candidate.clone())),
+                op: BinaryOp::Eq,
+                right: Box::new(LogicalExpression::Id(name.clone())),
+            });
         }
-        Ok(search)
+        conditions.extend(has_all_labels(&candidate, &node.labels));
+        if let Some(label_expression) = &node.label_expression {
+            conditions.push(Self::translate_label_expression(
+                &candidate,
+                label_expression,
+            ));
+        }
+        if !node.properties.is_empty() {
+            conditions.push(self.build_property_predicate(&candidate, &node.properties)?);
+        }
+        if let Some(where_expr) = &node.where_clause {
+            conditions.push(self.translate_expression(where_expr)?);
+        }
+        Ok((
+            node.variable.clone().filter(|_| bound_node.is_none()),
+            join_and_conjuncts(conditions).map(|predicate| ShortestPathCondition {
+                variable: candidate,
+                predicate,
+            }),
+        ))
     }
 
     /// The most repetitions a quantified path pattern of more than one edge
@@ -3080,6 +3250,19 @@ struct PathSearch {
     path_mode: PathMode,
 }
 
+/// An edge pattern of a path search, as its search reads it (see
+/// `GqlTranslator::path_search_edge`).
+struct PathSearchEdge {
+    direction: ExpandDirection,
+    min_hops: u32,
+    max_hops: Option<u32>,
+    quantified: bool,
+    /// The variable that binds the edges of each path, unless one bound
+    /// before has it.
+    edge_variable: Option<String>,
+    condition: Option<ShortestPathCondition>,
+}
+
 use aggregate::contains_aggregate;
 
 /// The repeated part of a quantified path pattern of more than one edge,
@@ -3198,6 +3381,22 @@ fn bound_as(names: Vec<(String, String)>, predicate: LogicalExpression) -> Logic
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`super::translate`] under the default parse limits.
+    fn translate(query: &str) -> Result<LogicalPlan> {
+        super::translate(
+            query,
+            &grafeo_adapters::query::limits::ParseLimits::default(),
+        )
+    }
+
+    /// [`super::translate_full`] under the default parse limits.
+    fn translate_full(query: &str) -> Result<GqlTranslationResult> {
+        super::translate_full(
+            query,
+            &grafeo_adapters::query::limits::ParseLimits::default(),
+        )
+    }
 
     // === Basic MATCH Tests ===
 

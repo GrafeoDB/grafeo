@@ -118,7 +118,7 @@ tests:
   - name: s6_handle_aggregates_inside_non_aggregate_expressions
     xfail:
       spec: "openCypher TCK 2024.3 Return6: [6] Handle aggregates inside non-aggregate expressions"
-      issue: fix in 0.6.5
+      issue: "#798"
     query: |
       MATCH (a {name: 'Andres'})<-[:FATHER]-(child)
       RETURN a.name, {foo: a.name='Andres', kids: collect(child.name)}
@@ -252,7 +252,7 @@ tests:
   - name: s15_using_rand_in_aggregations
     xfail:
       spec: "openCypher TCK 2024.3 Return6: [15] Using `rand()` in aggregations"
-      issue: fix in 0.6.5
+      issue: "#798"
     query: |
       RETURN count(rand())
     expect:
@@ -294,7 +294,7 @@ tests:
   - name: s17_handle_constants_and_parameters_inside_an_expression_which_contains_an_aggregation_expression
     xfail:
       spec: "openCypher TCK 2024.3 Return6: [17] Handle constants and parameters inside an expression which contains an aggregation expression"
-      issue: fix in 0.6.5
+      issue: "#800"
     params:
       age: 38
     query: |
@@ -342,7 +342,7 @@ tests:
   - name: s21_fail_if_more_complex_expressions_even_if_returned_are_used_inside_expression_which_contains_an_aggregation_expression
     xfail:
       spec: "openCypher TCK 2024.3 Return6: [21] Fail if more complex expressions, even if returned, are used inside expression which contains an aggregation expression"
-      issue: fix in 0.6.5
+      issue: "#798"
     query: |
       MATCH (me: Person)--(you: Person)
       RETURN me.age + you.age, me.age + you.age + count(*)

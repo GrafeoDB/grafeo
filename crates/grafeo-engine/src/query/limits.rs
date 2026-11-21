@@ -195,9 +195,8 @@ fn operator_expressions<'a>(
         LogicalOperator::Bind(op) => visit(&op.expression),
         LogicalOperator::Unwind(op) => visit(&op.expression),
         LogicalOperator::ShortestPath(op) => {
-            if let Some(condition) = &op.edge_condition {
-                visit(&condition.predicate);
-            }
+            op.conditions()
+                .for_each(|condition| visit(&condition.predicate));
         }
         LogicalOperator::VectorScan(op) => visit(&op.query_vector),
         LogicalOperator::VectorJoin(op) => visit(&op.query_vector),
@@ -396,9 +395,8 @@ fn take_operator_expressions(op: &mut LogicalOperator, out: &mut Vec<LogicalExpr
         LogicalOperator::Bind(op) => take(&mut op.expression),
         LogicalOperator::Unwind(op) => take(&mut op.expression),
         LogicalOperator::ShortestPath(op) => {
-            if let Some(condition) = &mut op.edge_condition {
-                take(&mut condition.predicate);
-            }
+            op.conditions_mut()
+                .for_each(|condition| take(&mut condition.predicate));
         }
         LogicalOperator::VectorScan(op) => take(&mut op.query_vector),
         LogicalOperator::VectorJoin(op) => take(&mut op.query_vector),

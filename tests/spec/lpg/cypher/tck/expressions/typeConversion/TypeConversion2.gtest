@@ -129,7 +129,7 @@ tests:
   - name: s8_fail_tointeger_on_invalid_types_example_list_1
     xfail:
       spec: "openCypher TCK 2024.3 TypeConversion2: [8] Fail `toInteger()` on invalid types #Example: list #1"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()
@@ -145,7 +145,7 @@ tests:
   - name: s8_fail_tointeger_on_invalid_types_example_map_2
     xfail:
       spec: "openCypher TCK 2024.3 TypeConversion2: [8] Fail `toInteger()` on invalid types #Example: map #2"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()
@@ -161,7 +161,7 @@ tests:
   - name: s8_fail_tointeger_on_invalid_types_example_node_3
     xfail:
       spec: "openCypher TCK 2024.3 TypeConversion2: [8] Fail `toInteger()` on invalid types #Example: node #3"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()
@@ -177,7 +177,7 @@ tests:
   - name: s8_fail_tointeger_on_invalid_types_example_relationship_4
     xfail:
       spec: "openCypher TCK 2024.3 TypeConversion2: [8] Fail `toInteger()` on invalid types #Example: relationship #4"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()
@@ -193,7 +193,7 @@ tests:
   - name: s8_fail_tointeger_on_invalid_types_example_path_5
     xfail:
       spec: "openCypher TCK 2024.3 TypeConversion2: [8] Fail `toInteger()` on invalid types #Example: path #5"
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
     setup:
       - |
         CREATE ()-[:T]->()

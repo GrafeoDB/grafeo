@@ -120,6 +120,7 @@ func TestEveryMethodOfAClosedDatabaseFailsWithT007(t *testing.T) {
 		"EdgeHistory":      func() error { _, err := db.EdgeHistory(0); return err },
 		"NodeHistorySince": func() error { _, err := db.NodeHistorySince(0, 0); return err },
 		"ChangesBetween":   func() error { _, err := db.ChangesBetween(0, 1); return err },
+		"SetCDC":           func() error { return db.SetCDC(true) },
 		"UpsertNodes": func() error {
 			_, err := db.UpsertNodes([]string{"Person"}, []map[string]any{{"id": 1}}, nil)
 			return err

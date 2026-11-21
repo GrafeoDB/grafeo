@@ -5,7 +5,7 @@
 #[allow(clippy::wildcard_imports)]
 use super::ast::*;
 use super::lexer::{Lexer, Token, TokenKind};
-use crate::query::limits::{Nesting, nesting_error_message};
+use crate::query::limits::{NameLimit, Nesting, nesting_error_message};
 use grafeo_common::utils::error::{Error, Result};
 
 /// GraphQL parser.
@@ -29,6 +29,17 @@ impl<'a> Parser<'a> {
             source,
             nesting: Nesting::default(),
         }
+    }
+
+    /// The first name longer than `max` bytes in the source: an name.
+    pub(crate) fn names(&self, max: usize) -> NameLimit {
+        let mut names = NameLimit::new(max);
+        for token in &self.tokens {
+            if let TokenKind::Name(name) = &token.kind {
+                names.note(token.span, name.len());
+            }
+        }
+        names
     }
 
     /// Parses the document.

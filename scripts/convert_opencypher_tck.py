@@ -329,7 +329,7 @@ def yaml_lines(case: Case) -> list[str]:
         lines += [
             "    xfail:",
             f"      spec: {json.dumps(spec, ensure_ascii=False)}",
-            f"      issue: {issue}",
+            f"      issue: {json.dumps(issue)}",
         ]
         if passes_in:
             lines.append(f"      passes_in: [{', '.join(passes_in)}]")
@@ -338,7 +338,7 @@ def yaml_lines(case: Case) -> list[str]:
         lines += [
             "    runner_gap:",
             f"      runners: [{', '.join(gap['runners'])}]",
-            f"      issue: {gap['issue']}",
+            f"      issue: {json.dumps(gap['issue'])}",
             f"      reason: {json.dumps(gap['reason'])}",
         ]
     if case.setup_gql:

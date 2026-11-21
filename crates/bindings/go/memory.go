@@ -11,11 +11,12 @@ import (
 	"unsafe"
 )
 
-// Options are the memory and spill settings a database opens with (see OpenWithOptions). A nil
-// field is the default: 75% of the memory the process may use for MemoryLimit, MemoryLimit for
-// QueryMemoryLimit, a quarter of MemoryLimit (at most 256 MiB) for PathSearchBudget, a quarter
-// of MemoryLimit (at least 1 MiB) for SnapshotRetentionLimit, half the spill volume's free space
-// for SpillLimit. A write past the memory limit fails with
+// Options are the memory, spill and query limit settings a database opens with (see
+// OpenWithOptions). A nil field is the default: 75% of the memory the process may use for
+// MemoryLimit, MemoryLimit for QueryMemoryLimit, a quarter of MemoryLimit (at most 256 MiB) for
+// PathSearchBudget, 100 million for PathExpansionLimit, 16 MiB for MaxQueryLength, 16 KiB for
+// MaxIdentifierLength, a quarter of MemoryLimit (at least 1 MiB) for SnapshotRetentionLimit,
+// half the spill volume's free space for SpillLimit. A write past the memory limit fails with
 // GRAFEO-S001, and so does a path search over its budget. One Options value may open several
 // databases.
 type Options struct {
@@ -24,11 +25,24 @@ type Options struct {
 	// QueryMemoryLimit is how many bytes one statement's sorts, joins and aggregates may hold,
 	// never more than MemoryLimit; zero fails at the open.
 	QueryMemoryLimit *uint64
-	// PathSearchBudget is how many bytes one path search may hold: the paths a variable-length or
-	// shortest-path search keeps at once, or what an RDF property path search visits (the nodes an
-	// ANY SHORTEST or shortestPath search visits are not counted yet). Never more than
+	// PathSearchBudget is how many bytes one path search may hold: everything a variable-length,
+	// shortest-path or RDF property path search holds at once (the nodes it visits, its queues and
+	// the paths it keeps), which counts against QueryMemoryLimit too. Never more than
 	// MemoryLimit; zero fails at the open.
 	PathSearchBudget *uint64
+	// PathExpansionLimit is how many path expansions one statement's variable-length and
+	// shortest-path searches may make together: each edge they read to extend a path, and each
+	// node and edge they copy out of a path into a row. 100 million by default; a statement over
+	// it fails with GRAFEO-Q009. Zero fails at the open.
+	PathExpansionLimit *uint64
+	// MaxQueryLength is how many bytes a statement's text may have; the values passed as
+	// parameters do not count. 16 MiB by default; a longer statement fails with GRAFEO-Q002.
+	// Zero fails at the open.
+	MaxQueryLength *uint64
+	// MaxIdentifierLength is how many bytes one name in a statement may have, as written between
+	// its delimiters (string literals and IRIs are not names). 16 KiB by default; a statement
+	// with a longer name fails with GRAFEO-Q002. Zero fails at the open.
+	MaxIdentifierLength *uint64
 	// SnapshotRetentionLimit is how many bytes of replaced data an open transaction's snapshot may
 	// keep: what the commits since it began replaced that it can still read. Past it the
 	// transaction's next call fails with the retryable GRAFEO-T012 and rolls it back. Below 1 MiB
@@ -61,6 +75,21 @@ func (o *Options) apply(native *C.GrafeoOptions) error {
 	}
 	if o.PathSearchBudget != nil {
 		if err := statusToError(C.grafeo_options_set_path_search_budget(native, C.uint64_t(*o.PathSearchBudget))); err != nil {
+			return err
+		}
+	}
+	if o.PathExpansionLimit != nil {
+		if err := statusToError(C.grafeo_options_set_path_expansion_limit(native, C.uint64_t(*o.PathExpansionLimit))); err != nil {
+			return err
+		}
+	}
+	if o.MaxQueryLength != nil {
+		if err := statusToError(C.grafeo_options_set_max_query_length(native, C.uint64_t(*o.MaxQueryLength))); err != nil {
+			return err
+		}
+	}
+	if o.MaxIdentifierLength != nil {
+		if err := statusToError(C.grafeo_options_set_max_identifier_length(native, C.uint64_t(*o.MaxIdentifierLength))); err != nil {
 			return err
 		}
 	}

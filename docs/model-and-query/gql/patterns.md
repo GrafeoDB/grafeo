@@ -267,7 +267,7 @@ MATCH p = ANY 2 ACYCLIC PATHS (a:Person {name: 'Alix'})-[:KNOWS]-{1,4}(b)
 RETURN b.name, length(p)
 ```
 
-A prefix after the path variable (`p = ANY SHORTEST (...)`), or before a later pattern of the MATCH, holds for that pattern; one right after `MATCH` holds for every pattern of the clause without its own. The conditions of the edge pattern (its property map and `WHERE`) hold for every edge before the selection, while a `WHERE` after the pattern is checked on the paths selected. A selective search runs over one edge pattern between two node patterns.
+A prefix after the path variable (`p = ANY SHORTEST (...)`), or before a later pattern of the MATCH, holds for that pattern; one right after `MATCH` holds for every pattern of the clause without its own. The conditions of the edge pattern (its property map and `WHERE`) hold for every edge before the selection, while a `WHERE` after the pattern is checked on the paths selected. A selective search runs over a chain of edge patterns, fixed and quantified, and selects whole paths per pair of endpoints. Not supported in a selective pattern: a parenthesized or alternated pattern, a questioned edge pattern (`->?`), a variable bound at two places of the pattern, and an element `WHERE` that reads another element of the same path.
 
 ## Path Modes
 

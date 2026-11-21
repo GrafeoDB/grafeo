@@ -45,7 +45,7 @@ tests:
   - name: s1_should_compare_dates_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH date({year: 1980, month: 12, day: 24}) AS x, date({year: 1984, month: 10, day: 11}) AS d
@@ -60,7 +60,7 @@ tests:
   - name: s1_should_compare_dates_2
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH date({year: 1984, month: 10, day: 11}) AS x, date({year: 1984, month: 10, day: 11}) AS d
@@ -75,7 +75,7 @@ tests:
   - name: s2_should_compare_local_times_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH localtime({hour: 10, minute: 35}) AS x, localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS d
@@ -90,7 +90,7 @@ tests:
   - name: s2_should_compare_local_times_2
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS x, localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS d
@@ -105,7 +105,7 @@ tests:
   - name: s3_should_compare_times_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH time({hour: 10, minute: 0, timezone: '+01:00'}) AS x, time({hour: 9, minute: 35, second: 14, nanosecond: 645876123, timezone: '+00:00'}) AS d
@@ -120,7 +120,7 @@ tests:
   - name: s3_should_compare_times_2
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH time({hour: 9, minute: 35, second: 14, nanosecond: 645876123, timezone: '+00:00'}) AS x, time({hour: 9, minute: 35, second: 14, nanosecond: 645876123, timezone: '+00:00'}) AS d
@@ -135,7 +135,7 @@ tests:
   - name: s4_should_compare_local_date_times_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH localdatetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14}) AS x, localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS d
@@ -150,7 +150,7 @@ tests:
   - name: s4_should_compare_local_date_times_2
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS x, localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS d
@@ -165,7 +165,7 @@ tests:
   - name: s5_should_compare_date_times_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH datetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14, timezone: '+00:00'}) AS x, datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, timezone: '+05:00'}) AS d
@@ -180,7 +180,7 @@ tests:
   - name: s5_should_compare_date_times_2
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, timezone: '+05:00'}) AS x, datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, timezone: '+05:00'}) AS d
@@ -195,7 +195,7 @@ tests:
   - name: s6_should_compare_durations_for_equality_1
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70}) AS x, date({year: 1984, month: 10, day: 11}) AS d
@@ -210,7 +210,7 @@ tests:
   - name: s6_should_compare_durations_for_equality_2
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70}) AS x, localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS d
@@ -225,7 +225,7 @@ tests:
   - name: s6_should_compare_durations_for_equality_3
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70}) AS x, time({hour: 9, minute: 35, second: 14, nanosecond: 645876123, timezone: '+00:00'}) AS d
@@ -240,7 +240,7 @@ tests:
   - name: s6_should_compare_durations_for_equality_4
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70}) AS x, localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}) AS d
@@ -255,7 +255,7 @@ tests:
   - name: s6_should_compare_durations_for_equality_5
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70}) AS x, datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, timezone: '+05:00'}) AS d
@@ -270,7 +270,7 @@ tests:
   - name: s6_should_compare_durations_for_equality_6
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70}) AS x, duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70}) AS d
@@ -285,7 +285,7 @@ tests:
   - name: s6_should_compare_durations_for_equality_7
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70}) AS x, duration({years: 12, months: 5, days: 14, hours: 16, minutes: 13, seconds: 10}) AS d
@@ -300,7 +300,7 @@ tests:
   - name: s6_should_compare_durations_for_equality_8
     runner_gap:
       runners: [wasm]
-      issue: fix in 0.7.0
+      issue: "fix in 0.7.0"
       reason: "temporals come back from this binding as text, which passed back is a string"
     query: |
       WITH duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70}) AS x, duration({years: 12, months: 5, days: 13, hours: 40, minutes: 13, seconds: 10}) AS d

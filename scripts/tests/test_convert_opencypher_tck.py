@@ -229,14 +229,22 @@ def test_a_file_keeps_the_licence_and_names_what_it_left_out(tmp_path):
 
 def test_a_known_failure_with_an_issue_is_a_strict_xfail(tmp_path):
     text = convert(tmp_path, {"s1_first": {"issue": "fix in 0.6.4"}})
-    xfail = '    xfail:\n      spec: "openCypher TCK 2024.3 Fixture1: [1] First"\n      issue: fix in 0.6.4\n'
+    xfail = '    xfail:\n      spec: "openCypher TCK 2024.3 Fixture1: [1] First"\n      issue: "fix in 0.6.4"\n'
     assert "  - name: s1_first\n" + xfail in text
+
+
+def test_an_issue_number_reads_back_as_itself(tmp_path):
+    # Unquoted, `#795` would start a YAML comment and the case would name no issue.
+    yaml = pytest.importorskip("yaml")
+    text = convert(tmp_path, {"s1_first": {"issue": "#795"}})
+    cases = {case["name"]: case for case in yaml.safe_load(text)["tests"]}
+    assert cases["s1_first"]["xfail"]["issue"] == "#795"
 
 
 def test_a_known_failure_can_pass_in_runners_that_cannot_see_it(tmp_path):
     known = {"s1_first": {"issue": "fix in 0.6.4", "passes_in": ["node", "wasm"]}}
     text = convert(tmp_path, known)
-    assert "      issue: fix in 0.6.4\n      passes_in: [node, wasm]\n" in text
+    assert '      issue: "fix in 0.6.4"\n      passes_in: [node, wasm]\n' in text
 
 
 def test_stale_or_incomplete_known_failures_stop_the_conversion(tmp_path):
@@ -293,7 +301,9 @@ def test_a_gql_class_replaces_the_tck_class_and_records_the_disagreement(tmp_pat
 def test_a_gql_class_can_still_be_a_known_failure(tmp_path):
     known = {"s1_first": {"gql_class": "22", "note": "why", "issue": "fix in 0.6.5"}}
     text = convert(tmp_path, known, ERROR_FEATURE)
-    assert '      gql_status: "22"\n' in text and "      issue: fix in 0.6.5\n" in text
+    assert (
+        '      gql_status: "22"\n' in text and '      issue: "fix in 0.6.5"\n' in text
+    )
 
 
 def test_a_gql_class_needs_an_error_case_and_a_note(tmp_path):

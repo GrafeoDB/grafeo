@@ -64,7 +64,7 @@ pub fn error_message(err: &Error) -> String {
 #[cfg(test)]
 mod tests {
     use grafeo_common::utils::error::{
-        Error, QueryError, QueryErrorKind, StorageError, TransactionError,
+        Error, ExpiredSnapshot, QueryError, QueryErrorKind, StorageError, TransactionError,
     };
 
     use super::*;
@@ -104,10 +104,12 @@ mod tests {
     /// An expired snapshot is a transaction error a retry fixes, with its own code.
     #[test]
     fn classifies_an_expired_snapshot_as_a_retryable_transaction_error() {
-        let err = Error::Transaction(TransactionError::SnapshotExpired {
-            kept: 2 << 20,
-            limit: 1 << 20,
-        });
+        let err = Error::Transaction(TransactionError::SnapshotExpired(Box::new(
+            ExpiredSnapshot {
+                kept: 2 << 20,
+                limit: 1 << 20,
+            },
+        )));
         assert_eq!(classify_error(&err), ErrorCategory::Transaction);
         assert_eq!(err.error_code().as_str(), "GRAFEO-T012");
         assert!(err.error_code().is_retryable());

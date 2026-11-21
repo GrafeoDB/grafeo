@@ -557,17 +557,26 @@ pub enum TransactionError {
     /// written, and nothing commits until the database is reopened.
     LogUnavailable(String),
 
-    /// The transaction's snapshot expired: the commits since it began replaced `kept` bytes of
-    /// data it could still read, past the snapshot retention limit (`limit` bytes), so the
-    /// database stopped holding them for it. Roll it back and run it again: a new transaction
-    /// reads a new snapshot.
-    SnapshotExpired {
-        /// The bytes the commits since the snapshot replaced when it expired.
-        kept: u64,
-        /// The snapshot retention limit, in bytes.
-        limit: u64,
-    },
+    /// The transaction's snapshot expired: the commits since it began replaced
+    /// [`kept`](ExpiredSnapshot::kept) bytes of data it could still read, past the snapshot
+    /// retention limit, so the database stopped holding them for it. Roll it back and run it
+    /// again: a new transaction reads a new snapshot.
+    SnapshotExpired(Box<ExpiredSnapshot>),
 }
+
+/// What an expired snapshot held (see [`TransactionError::SnapshotExpired`]), boxed so that
+/// error stays as small as the others on 32-bit targets such as WebAssembly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpiredSnapshot {
+    /// The bytes the commits since the snapshot replaced when it expired.
+    pub kept: u64,
+    /// The snapshot retention limit, in bytes.
+    pub limit: u64,
+}
+
+// Every `Result` of the engine carries an `Error`, and so a `TransactionError`: a variant larger
+// than a `String` makes every error path copy more on 32-bit targets (the WebAssembly build).
+const _: () = assert!(size_of::<TransactionError>() <= size_of::<String>() + size_of::<usize>());
 
 impl TransactionError {
     /// Returns the machine-readable error code for this transaction error.
@@ -589,7 +598,7 @@ impl TransactionError {
             Self::LogWriteFailed(_) => ErrorCode::LogWriteFailed,
             Self::CommitOutcomeUnknown(_) => ErrorCode::CommitOutcomeUnknown,
             Self::LogUnavailable(_) => ErrorCode::LogUnavailable,
-            Self::SnapshotExpired { .. } => ErrorCode::SnapshotExpired,
+            Self::SnapshotExpired(_) => ErrorCode::SnapshotExpired,
         }
     }
 }
@@ -633,11 +642,12 @@ impl fmt::Display for TransactionError {
                 "the write-ahead log takes no more writes, so nothing was written and nothing \
                  commits until the database is reopened: {reason}"
             ),
-            TransactionError::SnapshotExpired { kept, limit } => write!(
+            TransactionError::SnapshotExpired(expired) => write!(
                 f,
-                "the transaction's snapshot expired: commits since it began replaced {kept} \
-                 bytes it could still read, past the snapshot retention limit of {limit} bytes; \
-                 roll it back and run it again"
+                "the transaction's snapshot expired: commits since it began replaced {} \
+                 bytes it could still read, past the snapshot retention limit of {} bytes; \
+                 roll it back and run it again",
+                expired.kept, expired.limit
             ),
         }
     }

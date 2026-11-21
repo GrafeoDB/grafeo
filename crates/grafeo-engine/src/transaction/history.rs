@@ -131,18 +131,21 @@ impl History {
     /// replacing epoch, see `RowGroupStore::kept_superseded`) into the time index: each commit's
     /// total holds what the epochs up to it replaced, so the window's byte start reads the loaded
     /// and replayed history as the commits that made it would have left it.
-    pub(crate) fn count_kept(&self, mut kept: Vec<(u64, usize)>) {
-        kept.sort_unstable_by_key(|(epoch, _)| *epoch);
+    pub(crate) fn count_kept(&self, kept: Vec<(u64, usize)>) {
         let mut times = self.times.lock();
-        let mut kept = kept.into_iter().peekable();
+        // The bytes each commit adds, those of the epochs after the commit before it up to it
+        // (the times are in epoch order); the last slot holds the epochs after every commit.
+        let mut added = vec![0u64; times.len() + 1];
+        for (at, bytes) in kept {
+            let index = times.partition_point(|(epoch, _, _)| *epoch < at);
+            added[index] = added[index].saturating_add(bytes as u64);
+        }
         let mut counted = 0u64;
-        for (epoch, _, replaced) in times.iter_mut() {
-            while let Some((_, bytes)) = kept.next_if(|(at, _)| at <= epoch) {
-                counted = counted.saturating_add(bytes as u64);
-            }
+        for ((_, _, replaced), add) in times.iter_mut().zip(&added) {
+            counted = counted.saturating_add(*add);
             *replaced = replaced.saturating_add(counted);
         }
-        counted = counted.saturating_add(kept.map(|(_, bytes)| bytes as u64).sum::<u64>());
+        counted = counted.saturating_add(added[added.len() - 1]);
         self.replaced.fetch_add(counted, Ordering::AcqRel);
     }
 

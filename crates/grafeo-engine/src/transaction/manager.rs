@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use grafeo_common::types::{EdgeId, EpochId, HashableValue, NodeId, Timestamp, TransactionId};
-use grafeo_common::utils::error::{Error, Result, TransactionError};
+use grafeo_common::utils::error::{Error, ExpiredSnapshot, Result, TransactionError};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::execution::operators::WriteInProgress;
 use parking_lot::{Condvar, Mutex, MutexGuard, RwLock, RwLockWriteGuard};
@@ -929,10 +929,10 @@ impl SnapshotReader {
 
     /// [`expired_error`](Self::expired_error) as the transaction error.
     fn expired_transaction_error(&self) -> TransactionError {
-        TransactionError::SnapshotExpired {
+        TransactionError::SnapshotExpired(Box::new(ExpiredSnapshot {
             kept: self.kept.load(Ordering::Acquire),
             limit: self.limit.load(Ordering::Acquire),
-        }
+        }))
     }
 
     /// A read ended: the last read of an expired snapshot releases its count (exactly one of
@@ -3552,8 +3552,8 @@ mod tests {
 
     fn expired(result: Result<Option<SnapshotRead>>) -> (u64, u64) {
         match result {
-            Err(Error::Transaction(TransactionError::SnapshotExpired { kept, limit })) => {
-                (kept, limit)
+            Err(Error::Transaction(TransactionError::SnapshotExpired(expired))) => {
+                (expired.kept, expired.limit)
             }
             other => panic!("expected the snapshot to expire, got {other:?}"),
         }

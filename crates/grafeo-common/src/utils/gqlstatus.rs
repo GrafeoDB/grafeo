@@ -267,7 +267,7 @@ impl From<&super::error::Error> for GqlStatus {
                 | TransactionError::Conflict
                 | TransactionError::WriteConflict(_) => GqlStatus::TX_ROLLBACK,
                 TransactionError::SerializationFailure(_)
-                | TransactionError::SnapshotExpired { .. } => GqlStatus::TX_ROLLBACK,
+                | TransactionError::SnapshotExpired(_) => GqlStatus::TX_ROLLBACK,
                 TransactionError::Deadlock => GqlStatus::TX_ROLLBACK,
                 TransactionError::Timeout | TransactionError::DatabaseClosed => {
                     GqlStatus::INVALID_TX_STATE
@@ -591,13 +591,15 @@ mod tests {
     /// A transaction whose snapshot expired is rolled back (`40000`).
     #[test]
     fn an_expired_snapshot_is_a_transaction_rollback() {
-        use super::super::error::{Error, TransactionError};
+        use super::super::error::{Error, ExpiredSnapshot, TransactionError};
 
         assert_eq!(
-            GqlStatus::from(&Error::Transaction(TransactionError::SnapshotExpired {
-                kept: 2 << 20,
-                limit: 1 << 20,
-            })),
+            GqlStatus::from(&Error::Transaction(TransactionError::SnapshotExpired(
+                Box::new(ExpiredSnapshot {
+                    kept: 2 << 20,
+                    limit: 1 << 20,
+                })
+            ))),
             GqlStatus::TX_ROLLBACK
         );
     }

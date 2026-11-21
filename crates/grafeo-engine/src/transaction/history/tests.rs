@@ -366,3 +366,43 @@ fn the_image_keeps_epochs_and_times_only() {
         history.times()
     );
 }
+
+/// What an open counts in are the bytes per replacing epoch, in any order: each commit's total
+/// grows by what the epochs up to it replaced, and the history's total by all of it, epochs
+/// after the newest commit included.
+#[test]
+fn the_kept_bytes_count_into_the_commits_at_or_after_their_epochs_in_any_order() {
+    let (history, now) = history_at(0);
+    history.set_retention(HistoryRetention::Forever, 0);
+    for epoch in [2, 4, 6] {
+        commit(&history, &now, epoch..=epoch, 100);
+    }
+    let before = history.totals();
+    let kept = vec![
+        (5, 10),
+        (1, 1),
+        (7, 100),
+        (4, 3),
+        (2, 20),
+        (6, 1_000),
+        (0, 7),
+    ];
+    // The oracle: the bytes of the epochs up to each commit, summed.
+    let expected: Vec<(u64, u64)> = before
+        .iter()
+        .map(|&(epoch, replaced)| {
+            let up_to = kept.iter().filter(|(at, _)| *at <= epoch);
+            (
+                epoch,
+                replaced + up_to.map(|(_, bytes)| *bytes as u64).sum::<u64>(),
+            )
+        })
+        .collect();
+    let total = before.last().map_or(0, |(_, replaced)| *replaced) + 1_141;
+    history.count_kept(kept);
+    assert_eq!(history.totals(), expected);
+    now.fetch_add(100, Ordering::SeqCst);
+    let time = history.commit_time().expect("history is on");
+    history.record_replacing(EpochId::new(8), time, 0);
+    assert_eq!(history.totals().last(), Some(&(8, total)));
+}

@@ -607,7 +607,14 @@ fn open_step(
             let Some(filled) = with_the_calls_key(filter, ctx.values)? else {
                 return Ok(None);
             };
-            planner.try_plan_filter_with_property_index(&filled)
+            let Some(super::filter::FilterRoute::PropertyIndex {
+                checked,
+                conditions,
+            }) = planner.property_index_route(&filled)
+            else {
+                return Ok(None);
+            };
+            planner.plan_filter_with_property_index(&filled, &checked, &conditions)
         }
         (Step::NodeScan, LogicalOperator::NodeScan(scan)) => planner.plan_node_scan(scan).map(Some),
         (Step::Sort(input), LogicalOperator::Sort(sort)) => {

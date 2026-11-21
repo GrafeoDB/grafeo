@@ -664,3 +664,526 @@ mod tests {
         }
     }
 }
+
+/// The route each filter of a statement takes in the planner, as the planner records it: one
+/// statement per route, the builds that decline and the next route they hand the filter to,
+/// and the guards that keep a route out. Each statement also answers as without the planner's
+/// rules.
+#[cfg(all(
+    test,
+    feature = "gql",
+    feature = "cypher",
+    feature = "sql-pgq",
+    feature = "vector-index",
+    feature = "text-index"
+))]
+mod filter_route_tests {
+    use crate::query::optimizer::PlannerRules;
+    use crate::query::processor::QueryLanguage;
+
+    /// People `k` 1 to 4 with names, bios and embeddings, a chain of `R` steps with weights,
+    /// things `Q` whose `k` matches some people's, `S` nodes whose indexed `name` holds a
+    /// string and an integer, and twelve `Z` nodes; a property index on `P.name` and
+    /// `S.name`, a text index on `bio` and a vector index on `embedding`.
+    fn graph() -> crate::GrafeoDB {
+        let db = crate::GrafeoDB::new_in_memory();
+        db.execute(
+            "INSERT (a:P {name: 'Alix', k: 1, t: 1, bio: 'graph canals', embedding: [1.0, 0.0]}), \
+                    (g:P {name: 'Gus', k: 2, t: 1, bio: 'canals', embedding: [0.0, 1.0]}), \
+                    (v:P {name: 'Vincent', k: 3, t: 1, bio: 'bikes', embedding: [1.0, 1.0]}), \
+                    (j:P {name: 'Jules', k: 4, t: 1, bio: 'graph', embedding: [0.5, 0.5]}), \
+                    (a)-[:R {w: 1}]->(g), (g)-[:R {w: 2}]->(v), (v)-[:R {w: 3}]->(a), (g)-[:R {w: 4}]->(j), \
+                    (:Q {k: 2, name: 'Gus'}), (:Q {k: 4, name: 'Jules'}), (:Q {k: 9, name: 'Mia'}), \
+                    (:S {name: 'Gus', k: 1}), (:S {name: 'Mia', k: 2}), (:S {name: 7, k: 3}), \
+                    (:Z), (:Z), (:Z), (:Z), (:Z), (:Z), (:Z), (:Z), (:Z), (:Z), (:Z), (:Z)",
+        )
+        .unwrap();
+        for ddl in [
+            "CREATE INDEX p_name FOR (p:P) ON (p.name)",
+            "CREATE INDEX s_name FOR (s:S) ON (s.name)",
+            "CREATE INDEX p_bio FOR (p:P) ON (p.bio) USING TEXT",
+            "CREATE VECTOR INDEX p_embedding ON :P(embedding) DIMENSION 2 METRIC 'cosine'",
+        ] {
+            db.execute(ddl).unwrap();
+        }
+        db
+    }
+
+    /// How a case's session is set up.
+    #[derive(Clone, Copy)]
+    enum Setup {
+        /// Every rule on.
+        Usual,
+        /// No rule on (`PlannerRules::plain`).
+        Plain,
+        /// A session time zone: a local time equals zoned ones at any offset.
+        TimeZone,
+        /// Every rule but `SoughtEnd`: a pattern starts where it is written.
+        WrittenStart,
+    }
+
+    /// A session of `db` set up as `setup` says.
+    fn session(db: &crate::GrafeoDB, setup: Setup) -> super::super::Session {
+        let mut session = db.session();
+        match setup {
+            Setup::Usual => {}
+            Setup::Plain => session.set_planner_rules(PlannerRules::plain()),
+            Setup::TimeZone => session.set_time_zone("+01:00").unwrap(),
+            Setup::WrittenStart => session.set_planner_rules(
+                PlannerRules::all().with(crate::query::optimizer::PlannerRule::SoughtEnd, false),
+            ),
+        }
+        session
+    }
+
+    /// The routes the filters of `query` in `language` take: its optimized plan, planned by a
+    /// new planner of `session`, as the session plans a statement.
+    fn routes_of(session: &mut super::super::Session, language: &str, query: &str) -> Vec<String> {
+        use crate::query::translators::{cypher, gql, sql_pgq};
+
+        let (plan, language) = match language {
+            "gql" => match gql::translate_full(query).unwrap() {
+                gql::GqlTranslationResult::Plan(plan) => (plan, QueryLanguage::Gql),
+                _ => panic!("{query} is no query"),
+            },
+            "cypher" => match cypher::translate_full(query).unwrap() {
+                cypher::CypherTranslationResult::Plan(plan) => (plan, QueryLanguage::Cypher),
+                _ => panic!("{query} is no query"),
+            },
+            _ => (sql_pgq::translate(query).unwrap(), QueryLanguage::SqlPgq),
+        };
+        let plan = session.translated(plan).unwrap();
+        crate::query::binder::Binder::new().bind(&plan).unwrap();
+        let active = session.active_store();
+        let plan = session
+            .optimizer_for(&active, language)
+            .optimize(plan)
+            .unwrap();
+        // A write is planned in a transaction, which nothing runs and which rolls back.
+        let read_only = !session.plan_writes(&plan.root);
+        if !read_only {
+            session.begin_transaction().unwrap();
+        }
+        let routes = {
+            let _memory = session.enter_statement_memory();
+            let (epoch, transaction, _pin) = session.get_transaction_context().unwrap();
+            let planner = session
+                .create_planner_for_store_with_read_only(
+                    active,
+                    epoch,
+                    transaction,
+                    read_only,
+                    language.statement_language(),
+                )
+                .unwrap();
+            planner.plan(&plan).unwrap();
+            planner.filter_routes_taken.take()
+        };
+        if !read_only {
+            session.rollback().unwrap();
+        }
+        routes
+    }
+
+    /// The rows of `query` in `language` on a new graph, in a session set up as `setup`,
+    /// sorted.
+    fn rows_of(setup: Setup, language: &str, query: &str) -> Result<Vec<String>, String> {
+        let db = graph();
+        let result = session(&db, setup)
+            .execute_language(query, language, None)
+            .map_err(|error| error.to_string())?;
+        let mut rows: Vec<String> = result.rows().iter().map(|row| format!("{row:?}")).collect();
+        rows.sort();
+        Ok(rows)
+    }
+
+    /// A statement, the session it runs in, and the routes its filters take, in the order the
+    /// planner builds them (a filter planned inside another's build after it).
+    struct Case {
+        name: &'static str,
+        setup: Setup,
+        language: &'static str,
+        query: &'static str,
+        routes: &'static [&'static str],
+    }
+
+    const CASES: &[Case] = &[
+        Case {
+            name: "exists as a semi join",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P) WHERE EXISTS { MATCH (b:P)-[:R]->(a) } RETURN a.name AS name",
+            routes: &["ExistsJoin"],
+        },
+        Case {
+            name: "exists as a semi join, the rest of the predicate planned again",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P) WHERE a.k > 1 AND EXISTS { MATCH (b:P)-[:R]->(a)-[:R]->(c) } RETURN a.name AS name",
+            routes: &[
+                "ExistsJoin",
+                "ZoneMapEmpty",
+                "ZoneMapEmpty declined",
+                "RangeIndex",
+            ],
+        },
+        Case {
+            name: "exists checked inline",
+            setup: Setup::Usual,
+            language: "cypher",
+            query: "MATCH (a:P) WHERE EXISTS { MATCH (a)-[:R]->(b)-[:R]->(c) } RETURN a.name AS name",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "Generic"],
+        },
+        Case {
+            name: "subquery per row",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P) WHERE COUNT { MATCH (a)-[:R]->(b)-[:R]->(c) } > 1 RETURN a.name AS name",
+            routes: &["LiftedSubqueries"],
+        },
+        Case {
+            name: "subquery sharing no variable",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P) WHERE COUNT { MATCH (b:Q) } > 1 RETURN a.name AS name",
+            routes: &["LiftedSubqueries"],
+        },
+        Case {
+            name: "intersection closing",
+            setup: Setup::Usual,
+            language: "cypher",
+            query: "MATCH (a:P {k: 1})-[:R]-(b:P)-[:R]-(c:P)-[:R]-(a) RETURN count(*) AS n",
+            routes: &[
+                "ZoneMapEmpty",
+                "ZoneMapEmpty declined",
+                "Generic",
+                "ZoneMapEmpty",
+                "ZoneMapEmpty declined",
+                "Generic",
+                "hop target",
+                "IntersectionClosing",
+                "ZoneMapEmpty",
+                "ZoneMapEmpty declined",
+                "Generic",
+                "ZoneMapEmpty",
+                "ZoneMapEmpty declined",
+                "PropertyIndex",
+            ],
+        },
+        Case {
+            name: "zone map excludes",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P)-[:R]->(b) WHERE b.k > 100 RETURN a.name AS name",
+            routes: &["ZoneMapEmpty"],
+        },
+        Case {
+            name: "zone map keeps",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P)-[:R]->(b) WHERE b.k > 2 RETURN a.name AS name",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "Generic"],
+        },
+        Case {
+            name: "edge condition into a path",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH p = (a:P {k: 1})-[:R]->{1,3}(b) WHERE all(e IN edges(p) WHERE e.w > 0) RETURN b.name AS name",
+            routes: &[
+                "ZoneMapEmpty",
+                "ZoneMapEmpty declined",
+                "EdgeConditionIntoPath",
+                "ZoneMapEmpty",
+                "ZoneMapEmpty declined",
+                "PropertyIndex",
+            ],
+        },
+        Case {
+            name: "seek by an indexed key",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (q:Q) MATCH (a:P) WHERE a.name = q.name RETURN a.k AS k",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "NodeSeek"],
+        },
+        Case {
+            name: "seek by an id",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P)-[:R]->(b) MATCH (c:P) WHERE id(c) = id(b) RETURN c.name AS name",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "NodeSeek"],
+        },
+        Case {
+            name: "seek of a variable the input binds",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P) CALL { WITH a MATCH (a:P) WHERE a.name = 'Gus' RETURN a.k AS k2 } RETURN a.k AS k",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "NodeSeek"],
+        },
+        Case {
+            name: "key without an index per row joins",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (q:Q) MATCH (a:P) WHERE a.k = q.k RETURN a.name AS name",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "ValueJoin"],
+        },
+        Case {
+            name: "value join",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (q:Q), (a:P) WHERE a.k = q.k RETURN a.name AS name",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "ValueJoin"],
+        },
+        Case {
+            name: "property index",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P) WHERE a.name = 'Gus' RETURN a.k AS k",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "PropertyIndex"],
+        },
+        Case {
+            name: "property index, nothing",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P) WHERE a.name = 'Nobody' RETURN a.k AS k",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "PropertyIndex"],
+        },
+        Case {
+            name: "key column read",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P) WHERE a.k = 2 RETURN a.name AS name",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "PropertyIndex"],
+        },
+        Case {
+            name: "property index declines, in-list",
+            setup: Setup::Usual,
+            language: "sql",
+            query: "SELECT * FROM GRAPH_TABLE (MATCH (s:S) WHERE s.k IN [1, 2] AND s.name = 'Gus' COLUMNS (s.k AS k))",
+            routes: &[
+                "ZoneMapEmpty",
+                "ZoneMapEmpty declined",
+                "PropertyIndex",
+                "PropertyIndex declined",
+                "InListIndex",
+            ],
+        },
+        Case {
+            name: "in-list index",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P) WHERE a.name IN ['Gus', 'Jules'] RETURN a.k AS k",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "InListIndex"],
+        },
+        Case {
+            name: "in-list index, empty",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P) WHERE a.name IN [] RETURN a.k AS k",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "InListIndex"],
+        },
+        Case {
+            name: "in-list column read",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P) WHERE a.k IN [1, 2] RETURN a.name AS name",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "InListIndex"],
+        },
+        Case {
+            name: "in-list column read declines, as long as the nodes",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P) WHERE a.k IN [1, 2, 3, 4] RETURN a.name AS name",
+            routes: &[
+                "ZoneMapEmpty",
+                "ZoneMapEmpty declined",
+                "InListIndex",
+                "InListIndex declined",
+                "Generic",
+            ],
+        },
+        Case {
+            name: "range index",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P) WHERE a.k > 2 RETURN a.name AS name",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "RangeIndex"],
+        },
+        Case {
+            name: "range index under a limit",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P) WHERE a.k > 2 RETURN a.name AS name LIMIT 5",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "RangeIndex"],
+        },
+        Case {
+            name: "compound hybrid",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P) WHERE text_score(a.bio, 'graph') > 0.0 AND cosine_similarity(a.embedding, [1.0, 0.0]) > 0.5 RETURN a.name AS name",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "CompoundHybrid"],
+        },
+        Case {
+            name: "vector index",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P) WHERE cosine_similarity(a.embedding, [1.0, 0.0]) > 0.5 RETURN a.name AS name",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "VectorIndex"],
+        },
+        Case {
+            name: "text index",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P) WHERE text_score(a.bio, 'canals') > 0.0 RETURN a.name AS name",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "TextIndex"],
+        },
+        Case {
+            name: "label union",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (n) WHERE n:P OR n:Q RETURN n.k AS k",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "LabelUnion"],
+        },
+        Case {
+            name: "generic",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P)-[:R]->(b) WHERE b.k < a.k RETURN a.name AS name",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "Generic"],
+        },
+        Case {
+            name: "a local time, indexed equality",
+            setup: Setup::TimeZone,
+            language: "gql",
+            query: "MATCH (a:P) WHERE a.name = TIME '10:00:00' RETURN a.k AS k",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "Generic"],
+        },
+        Case {
+            name: "a local time, column equality",
+            setup: Setup::TimeZone,
+            language: "gql",
+            query: "MATCH (a:P) WHERE a.t = TIME '10:00:00' RETURN a.k AS k",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "Generic"],
+        },
+        Case {
+            name: "a local time, in-list column read",
+            setup: Setup::TimeZone,
+            language: "gql",
+            query: "MATCH (a:P) WHERE a.k IN [TIME '10:00:00'] RETURN a.name AS name",
+            routes: &["ZoneMapEmpty", "ZoneMapEmpty declined", "Generic"],
+        },
+        Case {
+            name: "a local time, in-list index declines",
+            setup: Setup::TimeZone,
+            language: "gql",
+            query: "MATCH (a:P) WHERE a.name IN [TIME '10:00:00'] RETURN a.k AS k",
+            routes: &[
+                "ZoneMapEmpty",
+                "ZoneMapEmpty declined",
+                "InListIndex",
+                "InListIndex declined",
+                "Generic",
+            ],
+        },
+        Case {
+            name: "after a write in the input",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (q:Q) SET q.k = 1 WITH q MATCH (a:P) WHERE a.name = 'Gus' RETURN a.k AS k",
+            routes: &["Generic"],
+        },
+        Case {
+            name: "after a write, a key seeks",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (q:Q {name: 'Mia'}) SET q.k = 1 WITH q OPTIONAL MATCH (a:P) WHERE a.name = 'Gus' RETURN a.k AS k",
+            routes: &[
+                "ZoneMapEmpty",
+                "ZoneMapEmpty declined",
+                "PropertyIndex",
+                "NodeSeek",
+            ],
+        },
+        Case {
+            name: "after a write, a key column read",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (q:Q {name: 'Mia'}) SET q.k = 1 WITH q OPTIONAL MATCH (a:P) WHERE a.k = 2 RETURN a.name AS name",
+            routes: &[
+                "ZoneMapEmpty",
+                "ZoneMapEmpty declined",
+                "PropertyIndex",
+                "PropertyIndex",
+            ],
+        },
+        Case {
+            name: "after a write, no zone map",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (q:Q {name: 'Mia'}) SET q.k = 1 WITH q OPTIONAL MATCH (a:P)-[:R]->(b) WHERE b.k > 100 RETURN a.name AS name",
+            routes: &[
+                "ZoneMapEmpty",
+                "ZoneMapEmpty declined",
+                "PropertyIndex",
+                "Generic",
+            ],
+        },
+        Case {
+            name: "rules off",
+            setup: Setup::Plain,
+            language: "gql",
+            query: "MATCH (a:P) WHERE a.name = 'Gus' RETURN a.k AS k",
+            routes: &["Generic"],
+        },
+        Case {
+            name: "hop target, a key",
+            setup: Setup::Usual,
+            language: "gql",
+            query: "MATCH (a:P {k: 1})-[:R]->(b:P) WHERE b.name = 'Gus' RETURN a.name AS name",
+            routes: &[
+                "ZoneMapEmpty",
+                "ZoneMapEmpty declined",
+                "Generic",
+                "hop target",
+                "ZoneMapEmpty",
+                "ZoneMapEmpty declined",
+                "Generic",
+                "ZoneMapEmpty",
+                "ZoneMapEmpty declined",
+                "PropertyIndex",
+            ],
+        },
+        Case {
+            name: "hop target, a key from the written start",
+            setup: Setup::WrittenStart,
+            language: "gql",
+            query: "MATCH (a:P)-[:R]->(b:P) WHERE b.name = 'Gus' RETURN a.name AS name",
+            routes: &[
+                "ZoneMapEmpty",
+                "ZoneMapEmpty declined",
+                "Generic",
+                "hop target",
+                "ZoneMapEmpty",
+                "ZoneMapEmpty declined",
+                "Generic",
+            ],
+        },
+    ];
+
+    /// Each statement's filters take the routes pinned for it, and it answers as without the
+    /// planner's rules.
+    #[test]
+    fn each_filter_records_its_route() {
+        for case in CASES {
+            let db = graph();
+            let routes = routes_of(&mut session(&db, case.setup), case.language, case.query);
+            assert_eq!(routes, case.routes, "{}: {}", case.name, case.query);
+            assert_eq!(
+                rows_of(case.setup, case.language, case.query),
+                rows_of(Setup::Plain, case.language, case.query),
+                "{}: {}",
+                case.name,
+                case.query
+            );
+        }
+    }
+}

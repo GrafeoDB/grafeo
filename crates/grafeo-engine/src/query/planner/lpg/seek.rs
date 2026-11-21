@@ -9,6 +9,7 @@ use grafeo_core::execution::operators::{
 };
 use grafeo_core::graph::GraphStore;
 
+use super::filter::FilterRoute;
 use super::{Arc, HashMap, Result};
 use crate::query::optimizer::movable_variables;
 use crate::query::plan::BuiltinFunction;
@@ -646,18 +647,10 @@ fn collect_value_variables(expr: &LogicalExpression, out: &mut HashSet<String>) 
 }
 
 impl super::Planner {
-    /// Plans a filter over a node scan (see [`checked_scan`]) as a seek when
-    /// [`chain_seek`] finds one: the scan's input rows, each joined with the
-    /// nodes its key selects, and a filter on top, which still decides every
-    /// row with the checks between the filter and the scan, then the filter's
-    /// own predicate.
-    pub(super) fn try_plan_filter_with_node_seek(
-        &self,
-        filter: &FilterOp,
-    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
-        let Some(below) = checked_scan(filter) else {
-            return Ok(None);
-        };
+    /// [`FilterRoute::NodeSeek`] for a filter over a node scan (see [`checked_scan`]) when
+    /// [`chain_seek`] finds a seek.
+    pub(super) fn node_seek_route<'a>(&self, filter: &'a FilterOp) -> Option<FilterRoute<'a>> {
+        let below = checked_scan(filter)?;
         let scan = below.scan;
         // A seek looks a key up when its input row arrives: after a write in
         // the input it would miss what the input writes for later rows (the
@@ -667,14 +660,14 @@ impl super::Planner {
             .as_deref()
             .is_some_and(LogicalOperator::has_mutations)
         {
-            return Ok(None);
+            return None;
         }
         // A property index looks values up at the query's view; an ID is no
         // index.
         let after_a_write = !self.reads_the_store_as_planned();
         let labels = LookupLabels::of(filter, &scan.variable);
         // Many rows against a small label join faster than they seek.
-        let Some(seek) = chain_seek(
+        let seek = chain_seek(
             filter,
             &below,
             &labels,
@@ -684,11 +677,28 @@ impl super::Planner {
             self.statement_writes
                 .get()
                 .is_none_or(|writes| writes.per_row),
-        ) else {
-            return Ok(None);
-        };
+        )?;
+        Some(FilterRoute::NodeSeek {
+            below,
+            labels,
+            seek,
+        })
+    }
+
+    /// Plans [`FilterRoute::NodeSeek`] as a seek: the scan's input rows, each joined with the
+    /// nodes its key selects, and a filter on top, which still decides every row with the
+    /// checks between the filter and the scan, then the filter's own predicate.
+    pub(super) fn plan_filter_with_node_seek(
+        &self,
+        filter: &FilterOp,
+        below: CheckedScan<'_>,
+        labels: &LookupLabels<'_>,
+        seek: SeekChoice<'_>,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let CheckedScan {
-            operator, checks, ..
+            scan,
+            operator,
+            checks,
         } = below;
 
         let (input, mut columns) = match &scan.input {
@@ -743,10 +753,10 @@ impl super::Planner {
                 )
             });
             let predicate = expression(&checked(label), &columns)?;
-            return Ok(Some((
+            return Ok((
                 Box::new(FilterOperator::new(input, Box::new(predicate))),
                 columns,
-            )));
+            ));
         }
 
         let key = expression(seek.value, &columns)?;
@@ -770,10 +780,10 @@ impl super::Planner {
         }
         columns.push(scan.variable.clone());
         let predicate = expression(&checked(None), &columns)?;
-        Ok(Some((
+        Ok((
             Box::new(FilterOperator::new(Box::new(rows), Box::new(predicate))),
             columns,
-        )))
+        ))
     }
 }
 

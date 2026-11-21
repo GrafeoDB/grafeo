@@ -216,8 +216,12 @@ pub struct Planner {
     pub(super) plan_names: std::cell::RefCell<std::collections::HashSet<String>>,
     /// Edge conditions a filter hands to the variable-length expand that
     /// binds their path, to check during its search (see
-    /// `try_plan_filter_into_variable_length_expand`).
+    /// `plan_filter_into_variable_length_expand`).
     pub(super) pending_edge_conditions: std::cell::RefCell<Vec<expand::PendingEdgeCondition>>,
+    /// The routes `plan_filter` builds and the builds that decline, in the order they run (see
+    /// [`FilterRoute::name`](filter::FilterRoute::name)), for a test to pin.
+    #[cfg(test)]
+    pub(crate) filter_routes_taken: std::cell::RefCell<Vec<String>>,
     /// Counter for the column names of subqueries planned per row.
     pub(super) subquery_counter: std::cell::Cell<u32>,
     /// Whether to use factorized execution for multi-hop queries.
@@ -349,6 +353,8 @@ impl Planner {
             anon_edge_counter: std::cell::Cell::new(0),
             plan_names: std::cell::RefCell::new(std::collections::HashSet::new()),
             pending_edge_conditions: std::cell::RefCell::new(Vec::new()),
+            #[cfg(test)]
+            filter_routes_taken: std::cell::RefCell::new(Vec::new()),
             subquery_counter: std::cell::Cell::new(0),
             factorized_execution: true,
             rules: crate::query::optimizer::PlannerRules::all(),
@@ -416,6 +422,8 @@ impl Planner {
             anon_edge_counter: std::cell::Cell::new(0),
             plan_names: std::cell::RefCell::new(std::collections::HashSet::new()),
             pending_edge_conditions: std::cell::RefCell::new(Vec::new()),
+            #[cfg(test)]
+            filter_routes_taken: std::cell::RefCell::new(Vec::new()),
             subquery_counter: std::cell::Cell::new(0),
             factorized_execution: true,
             rules: crate::query::optimizer::PlannerRules::all(),

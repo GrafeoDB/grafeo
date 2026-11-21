@@ -156,6 +156,7 @@ mod far_end_turn;
 mod filter_planner_branches;
 mod filter_pushdown;
 mod filter_pushdown_sides;
+mod filter_routes;
 mod filters_reach_their_scans;
 mod foreach_rows;
 mod format_limits;

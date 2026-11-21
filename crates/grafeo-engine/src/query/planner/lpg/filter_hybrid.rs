@@ -13,6 +13,8 @@ use super::{
 #[cfg(all(feature = "vector-index", feature = "text-index"))]
 use super::{FilterOp, HashJoinOperator, PhysicalJoinType};
 #[cfg(feature = "text-index")]
+use super::{NodeScanOp, filter::FilterRoute};
+#[cfg(feature = "text-index")]
 use crate::query::plan::{BuiltinFunction, Callee};
 
 // ============================================================================
@@ -33,54 +35,63 @@ pub(super) struct ExtractedTextPredicate {
 
 #[cfg(feature = "text-index")]
 impl super::Planner {
-    /// Tries to push a text search predicate down into a `TextScan` operator.
+    /// [`FilterRoute::TextIndex`] for a text search predicate that a `TextScan` operator can
+    /// take.
     ///
     /// Recognizes patterns like:
     /// - `text_score(n.body, "search terms") > 0.5`
     /// - `text_match(n.body, "search terms")`  (standalone boolean)
     ///
-    /// Falls through to per-row evaluation when the text index is absent (D1).
-    ///
-    /// Returns `Ok(Some(...))` if rewritten, `Ok(None)` to fall through.
-    pub(super) fn try_plan_filter_with_text_index(
+    /// `None` falls through to per-row evaluation, also when the text index is absent (D1).
+    pub(super) fn text_index_route<'a>(
         &self,
-        filter: &super::FilterOp,
-    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        filter: &'a super::FilterOp,
+    ) -> Option<FilterRoute<'a>> {
         // Only push down when input is a full label scan (no nested input):
         // the search finds the nodes alone, so a scan per input row (a later
         // MATCH, an UNWIND) checks the predicate per row instead.
         let LogicalOperator::NodeScan(scan) = filter.input.as_ref() else {
-            return Ok(None);
+            return None;
         };
         if scan.input.is_some() {
-            return Ok(None);
+            return None;
         }
-        let Some(ref label) = scan.label else {
-            return Ok(None);
-        };
+        let label = scan.label.as_deref()?;
 
         // Extract a text predicate from the filter expression
-        let Some(extracted) = self.extract_text_predicate(&filter.predicate) else {
-            return Ok(None);
-        };
+        let extracted = self.extract_text_predicate(&filter.predicate)?;
 
         // Ensure the predicate references the same variable as the scan being planned
         if extracted.variable != scan.variable {
-            return Ok(None);
+            return None;
         }
 
         // No text index: fall through to per-row evaluation, same as vector behavior.
         // text_score returns 0.0 and text_match returns false for every row.
         if !self.store.has_text_index(label, &extracted.property) {
-            return Ok(None);
+            return None;
         }
+        Some(FilterRoute::TextIndex {
+            scan,
+            label,
+            extracted,
+        })
+    }
 
+    /// Plans [`FilterRoute::TextIndex`]: a `TextScan` of the nodes of `label` in place of
+    /// `scan`, and a filter of the predicates `extracted` leaves above it.
+    pub(super) fn plan_filter_with_text_index(
+        &self,
+        scan: &NodeScanOp,
+        label: &str,
+        extracted: &ExtractedTextPredicate,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // Build TextScanOp. Always project the score column so downstream
         // RETURN/ORDER BY expressions can reference it instead of recomputing.
         let text_scan = super::TextScanOp {
             variable: scan.variable.clone(),
             property: extracted.property.clone(),
-            label: label.clone(),
+            label: label.to_string(),
             query: extracted.query_expr.clone(),
             k: None,
             threshold: Some(extracted.threshold),
@@ -97,9 +108,9 @@ impl super::Planner {
         // If there are remaining predicates (AND with non-text conditions), wrap in filter
         if let Some(remaining) = &extracted.remaining {
             let filter_op = self.wrap_with_remaining_filter(scan_op, &scan_columns, remaining)?;
-            Ok(Some((filter_op, scan_columns)))
+            Ok((filter_op, scan_columns))
         } else {
-            Ok(Some((scan_op, scan_columns)))
+            Ok((scan_op, scan_columns))
         }
     }
 
@@ -227,32 +238,27 @@ impl super::Planner {
 
 #[cfg(all(feature = "vector-index", feature = "text-index"))]
 impl super::Planner {
-    /// Tries to plan a filter that contains BOTH a vector predicate and a text predicate.
-    ///
-    /// When both predicates are present, runs both index scans independently and
-    /// hash-joins the results: intersect (Inner join) for AND, union (Full join) for OR.
-    /// Both scores are projected as columns for downstream use.
+    /// [`FilterRoute::CompoundHybrid`] for a filter that contains BOTH a vector predicate and a
+    /// text predicate.
     ///
     /// For AND: extractors recurse into the AND tree (finding vector/text anywhere).
     /// For OR: extracts from each OR operand independently, requiring each side
     /// to be a pure vector or text predicate (no mixed scalar conditions).
     ///
     /// Falls through when only one predicate is present or an index is missing (D1).
-    pub(super) fn try_plan_filter_compound_hybrid(
+    pub(super) fn compound_hybrid_route<'a>(
         &self,
-        filter: &FilterOp,
-    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        filter: &'a FilterOp,
+    ) -> Option<FilterRoute<'a>> {
         // A full label scan only: a scan per input row checks the predicate
-        // per row (see `try_plan_filter_with_text_index`).
+        // per row (see `text_index_route`).
         let LogicalOperator::NodeScan(scan) = filter.input.as_ref() else {
-            return Ok(None);
+            return None;
         };
         if scan.input.is_some() {
-            return Ok(None);
+            return None;
         }
-        let Some(ref label) = scan.label else {
-            return Ok(None);
-        };
+        let label = scan.label.as_deref()?;
 
         // Extract vector and text predicates. Strategy depends on AND vs OR.
         let (vector_pred, text_pred, is_or) = if let LogicalExpression::Binary {
@@ -263,16 +269,13 @@ impl super::Planner {
         {
             // OR: extract from each operand independently.
             // Try vector-left + text-right, then vector-right + text-left.
-            let result = self
+            let (v, t) = self
                 .extract_vector_predicate(left)
                 .zip(self.extract_text_predicate(right))
                 .or_else(|| {
                     self.extract_vector_predicate(right)
                         .zip(self.extract_text_predicate(left))
-                });
-            let Some((v, t)) = result else {
-                return Ok(None);
-            };
+                })?;
             (v, t, true)
         } else {
             // AND: extractors recurse into the AND tree (existing behavior).
@@ -280,21 +283,21 @@ impl super::Planner {
             let text = self.extract_text_predicate(&filter.predicate);
             match (vector, text) {
                 (Some(v), Some(t)) => (v, t, false),
-                _ => return Ok(None),
+                _ => return None,
             }
         };
 
         // Validate both reference the scan variable
         if vector_pred.variable != scan.variable || text_pred.variable != scan.variable {
-            return Ok(None);
+            return None;
         }
 
         // If either index is missing, fall through to per-row evaluation (D1).
         if !self.store.has_vector_index(label, &vector_pred.property) {
-            return Ok(None);
+            return None;
         }
         if !self.store.has_text_index(label, &text_pred.property) {
-            return Ok(None);
+            return None;
         }
 
         // Pushdown needs a resolvable query vector. Fall through otherwise.
@@ -302,15 +305,36 @@ impl super::Planner {
             .resolve_vector_literal(&vector_pred.query_vector)
             .is_err()
         {
-            return Ok(None);
+            return None;
         }
+        Some(FilterRoute::CompoundHybrid {
+            scan,
+            label,
+            vector: vector_pred,
+            text: text_pred,
+            is_or,
+        })
+    }
 
+    /// Plans [`FilterRoute::CompoundHybrid`]: runs both index scans of the nodes of `label`
+    /// independently, in place of `scan`, and hash-joins the results: intersect (Inner join)
+    /// for AND, union (Full join) for `is_or`. Both scores are projected as columns for
+    /// downstream use.
+    pub(super) fn plan_filter_compound_hybrid(
+        &self,
+        filter: &FilterOp,
+        scan: &NodeScanOp,
+        label: &str,
+        vector_pred: &super::filter::ExtractedVectorPredicate,
+        text_pred: &ExtractedTextPredicate,
+        is_or: bool,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // Build VectorScanOp (threshold mode, return all candidates above threshold).
         let vector_scan_op = LogicalOperator::VectorScan(super::VectorScanOp {
             variable: scan.variable.clone(),
             index_name: Some(format!("{}:{}", label, vector_pred.property)),
             property: vector_pred.property.clone(),
-            label: Some(label.clone()),
+            label: Some(label.to_string()),
             query_vector: vector_pred.query_vector.clone(),
             k: None, // threshold mode
             metric: Some(vector_pred.metric),
@@ -323,7 +347,7 @@ impl super::Planner {
         let text_scan_op = LogicalOperator::TextScan(super::TextScanOp {
             variable: scan.variable.clone(),
             property: text_pred.property.clone(),
-            label: label.clone(),
+            label: label.to_string(),
             query: text_pred.query_expr.clone(),
             k: None,
             threshold: Some(text_pred.threshold),
@@ -442,9 +466,9 @@ impl super::Planner {
         let scalar_remaining = self.extract_scalar_remaining(&filter.predicate);
         if let Some(remaining) = scalar_remaining {
             let filter_op = self.wrap_with_remaining_filter(proj_op, &output_cols, &remaining)?;
-            Ok(Some((filter_op, output_cols)))
+            Ok((filter_op, output_cols))
         } else {
-            Ok(Some((proj_op, output_cols)))
+            Ok((proj_op, output_cols))
         }
     }
 
@@ -511,7 +535,7 @@ impl super::Planner {
 // that are difficult to reach through GQL queries alone: arity and type guards
 // inside `try_extract_text_fn`, the multi-AND accumulator path inside
 // `extract_text_predicate`, the scan-variable and label early returns of
-// `try_plan_filter_with_text_index`, and the leaf/combine arms of
+// `text_index_route`, and the leaf/combine arms of
 // `extract_scalar_remaining`. End-to-end pushdown is covered separately by
 // `tests/hybrid_pushdown_coverage.rs` and `tests/hybrid_query.rs`.
 // ============================================================================
@@ -776,14 +800,14 @@ mod text_extract_tests {
     }
 
     // ------------------------------------------------------------------
-    // try_plan_filter_with_text_index early returns
+    // text_index_route early returns
     // ------------------------------------------------------------------
 
     #[test]
-    fn try_plan_filter_with_text_index_rejects_non_nodescan_input() {
+    fn text_index_route_rejects_non_nodescan_input() {
         // Filter input is a nested NodeScan wrapped in a Filter rather than a
-        // plain NodeScan. The outer try_plan_filter_with_text_index sees a
-        // non-NodeScan input and returns Ok(None) without extracting anything.
+        // plain NodeScan. The outer text_index_route sees a
+        // non-NodeScan input and returns None without extracting anything.
         let planner = test_planner();
         let inner_filter = FilterOp {
             predicate: LogicalExpression::Literal(Value::Bool(true)),
@@ -803,14 +827,12 @@ mod text_extract_tests {
             input: Box::new(LogicalOperator::Filter(inner_filter)),
             pushdown_hint: None,
         };
-        let planned = planner
-            .try_plan_filter_with_text_index(&outer_filter)
-            .unwrap();
+        let planned = planner.text_index_route(&outer_filter);
         assert!(planned.is_none());
     }
 
     #[test]
-    fn try_plan_filter_with_text_index_rejects_label_less_scan() {
+    fn text_index_route_rejects_label_less_scan() {
         // A NodeScan without a label cannot pushdown: the early return on
         // `scan.label` being None fires.
         let planner = test_planner();
@@ -827,12 +849,12 @@ mod text_extract_tests {
             })),
             pushdown_hint: None,
         };
-        let planned = planner.try_plan_filter_with_text_index(&filter).unwrap();
+        let planned = planner.text_index_route(&filter);
         assert!(planned.is_none());
     }
 
     #[test]
-    fn try_plan_filter_with_text_index_rejects_variable_mismatch() {
+    fn text_index_route_rejects_variable_mismatch() {
         // Predicate references a variable `m` while the NodeScan binds `doc`.
         // The variable guard rejects the pushdown.
         let planner = test_planner();
@@ -849,12 +871,12 @@ mod text_extract_tests {
             })),
             pushdown_hint: None,
         };
-        let planned = planner.try_plan_filter_with_text_index(&filter).unwrap();
+        let planned = planner.text_index_route(&filter);
         assert!(planned.is_none());
     }
 
     #[test]
-    fn try_plan_filter_with_text_index_rejects_missing_index() {
+    fn text_index_route_rejects_missing_index() {
         // An Article store without a text index on `body`: the planner must
         // fall through (per-row evaluation handles text_score/text_match).
         let planner = test_planner();
@@ -871,12 +893,12 @@ mod text_extract_tests {
             })),
             pushdown_hint: None,
         };
-        let planned = planner.try_plan_filter_with_text_index(&filter).unwrap();
+        let planned = planner.text_index_route(&filter);
         assert!(planned.is_none());
     }
 
     #[test]
-    fn try_plan_filter_with_text_index_rejects_no_text_predicate() {
+    fn text_index_route_rejects_no_text_predicate() {
         // Filter that is a pure scalar (no text_score / text_match) returns
         // None after extract_text_predicate yields nothing.
         let planner = test_planner();
@@ -893,7 +915,7 @@ mod text_extract_tests {
             })),
             pushdown_hint: None,
         };
-        let planned = planner.try_plan_filter_with_text_index(&filter).unwrap();
+        let planned = planner.text_index_route(&filter);
         assert!(planned.is_none());
     }
 }
@@ -986,7 +1008,7 @@ mod compound_hybrid_tests {
     }
 
     // ------------------------------------------------------------------
-    // try_plan_filter_compound_hybrid early returns
+    // compound_hybrid_route early returns
     // ------------------------------------------------------------------
 
     #[test]
@@ -1007,7 +1029,7 @@ mod compound_hybrid_tests {
             })),
             pushdown_hint: None,
         };
-        let planned = planner.try_plan_filter_compound_hybrid(&filter).unwrap();
+        let planned = planner.compound_hybrid_route(&filter);
         assert!(planned.is_none());
     }
 
@@ -1024,7 +1046,7 @@ mod compound_hybrid_tests {
             })),
             pushdown_hint: None,
         };
-        let planned = planner.try_plan_filter_compound_hybrid(&filter).unwrap();
+        let planned = planner.compound_hybrid_route(&filter);
         assert!(planned.is_none());
     }
 
@@ -1055,7 +1077,7 @@ mod compound_hybrid_tests {
             })),
             pushdown_hint: None,
         };
-        let planned = planner.try_plan_filter_compound_hybrid(&filter).unwrap();
+        let planned = planner.compound_hybrid_route(&filter);
         assert!(planned.is_none());
     }
 
@@ -1087,7 +1109,7 @@ mod compound_hybrid_tests {
             })),
             pushdown_hint: None,
         };
-        let planned = planner.try_plan_filter_compound_hybrid(&filter).unwrap();
+        let planned = planner.compound_hybrid_route(&filter);
         assert!(planned.is_none());
     }
 
@@ -1115,7 +1137,7 @@ mod compound_hybrid_tests {
             })),
             pushdown_hint: None,
         };
-        let planned = planner.try_plan_filter_compound_hybrid(&filter).unwrap();
+        let planned = planner.compound_hybrid_route(&filter);
         assert!(planned.is_none());
     }
 
@@ -1133,7 +1155,7 @@ mod compound_hybrid_tests {
             })),
             pushdown_hint: None,
         };
-        let planned = planner.try_plan_filter_compound_hybrid(&filter).unwrap();
+        let planned = planner.compound_hybrid_route(&filter);
         assert!(planned.is_none());
     }
 

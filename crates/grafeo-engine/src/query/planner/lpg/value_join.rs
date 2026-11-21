@@ -15,6 +15,7 @@ use grafeo_core::execution::operators::{
 };
 use grafeo_core::graph::GraphStore;
 
+use super::filter::FilterRoute;
 use super::seek::{CheckedScan, checked_scan, split_conjuncts, value_variables};
 use super::{Arc, HashMap, Result};
 use crate::query::optimizer::movable_variables;
@@ -292,6 +293,24 @@ fn reads_property(expr: &LogicalExpression) -> bool {
 }
 
 impl super::Planner {
+    /// [`FilterRoute::ValueJoin`] for a filter that runs as a value join (see [`value_join`]),
+    /// when the rules allow one.
+    pub(super) fn value_join_route<'a>(&self, filter: &'a FilterOp) -> Option<FilterRoute<'a>> {
+        if !self
+            .rules
+            .has(crate::query::optimizer::PlannerRule::ValueJoin)
+        {
+            return None;
+        }
+        value_join(
+            filter,
+            self.statement_writes
+                .get()
+                .is_none_or(|writes| writes.per_row),
+        )
+        .map(FilterRoute::ValueJoin)
+    }
+
     /// Plans a filter that runs as a value join (see [`value_join`]): the
     /// nodes of the scan that pass the checks, each with the scanned values
     /// of the keys, are hashed on them; the input's rows, each with the row
@@ -299,17 +318,12 @@ impl super::Planner {
     /// [`HashJoinOperator::with_value_equality_keys`]), in the order of the
     /// scan. Without the key columns, the rows are those of the scan per row
     /// that may pass, in its order, and the filter on top decides each.
-    pub(super) fn try_plan_filter_with_value_join(
+    pub(super) fn plan_filter_with_value_join(
         &self,
         filter: &FilterOp,
-    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
-        if !self
-            .rules
-            .has(crate::query::optimizer::PlannerRule::ValueJoin)
-        {
-            return Ok(None);
-        }
-        let Some(ValueJoin {
+        join: ValueJoin<'_>,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let ValueJoin {
             checked:
                 CheckedScan {
                     scan,
@@ -318,15 +332,7 @@ impl super::Planner {
                 },
             input,
             keys,
-        }) = value_join(
-            filter,
-            self.statement_writes
-                .get()
-                .is_none_or(|writes| writes.per_row),
-        )
-        else {
-            return Ok(None);
-        };
+        } = join;
 
         let (probe, input_columns) = self.plan_operator(input)?;
         // PROFILE entries for the scan and the checks the join absorbs, in
@@ -382,10 +388,10 @@ impl super::Planner {
         let mut columns = input_columns;
         columns.push(scan.variable.clone());
         let predicate = self.value_join_predicate(filter.predicate.clone(), &columns)?;
-        Ok(Some((
+        Ok((
             Box::new(FilterOperator::new(Box::new(rows), Box::new(predicate))),
             columns,
-        )))
+        ))
     }
 
     /// `input` with a column per key value, appended to its `columns`, each

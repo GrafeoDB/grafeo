@@ -753,4 +753,131 @@ mod tests {
             "SPARQL errors should propagate as ShaclError"
         );
     }
+
+    /// `ex:a` has the `ex:p` values `ex:v1`, of class `ex:Good`, and `ex:v2`, of class `ex:Bad`.
+    const VALUES: &str = r"
+        @prefix ex: <urn:ex:> .
+        @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+        ex:a ex:p ex:v1 , ex:v2 .
+        ex:v1 rdf:type ex:Good .
+        ex:v2 rdf:type ex:Bad .
+    ";
+
+    /// The focus node and value of each result of validating [`VALUES`] against `shapes`, a
+    /// Turtle body after the shared prefixes and the member shapes `ex:IsGood` (class
+    /// `ex:Good`), `ex:IsBad` (class `ex:Bad`) and `ex:IsIri` (an IRI), sorted.
+    fn focus_and_values(shapes: &str) -> Vec<(String, Option<String>)> {
+        let data = RdfStore::new();
+        data.load_turtle(VALUES).unwrap();
+        let shape_store = RdfStore::new();
+        shape_store
+            .load_turtle(&format!(
+                "@prefix ex: <urn:ex:> .
+                 @prefix sh: <http://www.w3.org/ns/shacl#> .
+                 ex:IsGood sh:class ex:Good .
+                 ex:IsBad sh:class ex:Bad .
+                 ex:IsIri sh:nodeKind sh:IRI .
+                 {shapes}"
+            ))
+            .unwrap();
+        let report = validate(data.at(&LATEST), shape_store.at(&LATEST), None).unwrap();
+        let mut found: Vec<(String, Option<String>)> = report
+            .results
+            .iter()
+            .map(|result| {
+                (
+                    result.focus_node.to_string(),
+                    result.value.as_ref().map(ToString::to_string),
+                )
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// A logical constraint in a property shape on `ex:p` with focus node `ex:a`.
+    fn on_values(constraint: &str) -> Vec<(String, Option<String>)> {
+        focus_and_values(&format!(
+            "ex:S a sh:NodeShape ; sh:targetNode ex:a ;
+               sh:property [ sh:path ex:p ; {constraint} ] ."
+        ))
+    }
+
+    fn of_a(value: &str) -> (String, Option<String>) {
+        ("<urn:ex:a>".to_string(), Some(format!("<urn:ex:{value}>")))
+    }
+
+    /// In a property shape, `sh:not`, `sh:and`, `sh:or` and `sh:xone` test each value node
+    /// (SHACL 1.0 sections 4.6.1 to 4.6.4), and each result names the value node that fails.
+    #[test]
+    fn logical_constraints_in_a_property_shape_test_each_value_node() {
+        assert_eq!(on_values("sh:not ex:IsBad"), vec![of_a("v2")]);
+        assert_eq!(on_values("sh:not ex:IsIri"), vec![of_a("v1"), of_a("v2")]);
+        assert_eq!(on_values("sh:or ( ex:IsGood ex:IsBad )"), vec![]);
+        assert_eq!(on_values("sh:or ( ex:IsGood )"), vec![of_a("v2")]);
+        assert_eq!(on_values("sh:and ( ex:IsGood ex:IsIri )"), vec![of_a("v2")]);
+        assert_eq!(
+            on_values("sh:and ( ex:IsGood ex:IsBad )"),
+            vec![of_a("v1"), of_a("v2")]
+        );
+        assert_eq!(on_values("sh:xone ( ex:IsGood ex:IsBad )"), vec![]);
+        assert_eq!(
+            on_values("sh:xone ( ex:IsGood ex:IsIri )"),
+            vec![of_a("v1")]
+        );
+        assert_eq!(on_values("sh:xone ( ex:IsBad )"), vec![of_a("v1")]);
+    }
+
+    /// A path that reaches no value leaves the logical constraints nothing to test.
+    #[test]
+    fn logical_constraints_over_no_value_report_nothing() {
+        for constraint in [
+            "sh:not ex:IsIri",
+            "sh:and ( ex:IsBad )",
+            "sh:or ( ex:IsBad )",
+            "sh:xone ( ex:IsBad )",
+        ] {
+            let found = focus_and_values(&format!(
+                "ex:S a sh:NodeShape ; sh:targetNode ex:a ;
+                   sh:property [ sh:path ex:none ; {constraint} ] ."
+            ));
+            assert_eq!(found, vec![], "{constraint}");
+        }
+    }
+
+    /// A logical constraint in a node shape that a property shape reaches through `sh:node`
+    /// tests each value as its own focus node, and fails the same values as the constraint
+    /// written in the property shape.
+    #[test]
+    fn logical_constraints_through_sh_node_fail_the_same_values() {
+        for constraint in [
+            "sh:not ex:IsBad",
+            "sh:or ( ex:IsGood )",
+            "sh:and ( ex:IsGood ex:IsIri )",
+            "sh:xone ( ex:IsGood ex:IsIri )",
+        ] {
+            let through_node = focus_and_values(&format!(
+                "ex:S a sh:NodeShape ; sh:targetNode ex:a ;
+                   sh:property [ sh:path ex:p ; sh:node [ {constraint} ] ] ."
+            ));
+            assert_eq!(through_node, on_values(constraint), "{constraint}");
+        }
+    }
+
+    /// In a node shape the value node is the focus node, and a logical constraint's result
+    /// names it as its value.
+    #[test]
+    fn logical_constraints_in_a_node_shape_report_the_focus_node_as_the_value() {
+        let on_v2 = |constraint: &str| {
+            focus_and_values(&format!(
+                "ex:N a sh:NodeShape ; sh:targetNode ex:v2 ; {constraint} ."
+            ))
+        };
+        let v2 = ("<urn:ex:v2>".to_string(), Some("<urn:ex:v2>".to_string()));
+        assert_eq!(on_v2("sh:not ex:IsBad"), vec![v2.clone()]);
+        assert_eq!(on_v2("sh:and ( ex:IsGood )"), vec![v2.clone()]);
+        assert_eq!(on_v2("sh:or ( ex:IsGood )"), vec![v2.clone()]);
+        assert_eq!(on_v2("sh:xone ( ex:IsBad ex:IsIri )"), vec![v2]);
+        assert_eq!(on_v2("sh:or ( ex:IsGood ex:IsBad )"), vec![]);
+    }
 }

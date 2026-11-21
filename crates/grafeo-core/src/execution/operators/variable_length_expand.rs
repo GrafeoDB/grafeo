@@ -151,6 +151,9 @@ pub struct VariableLengthExpandOperator {
     reads: Option<Arc<ReadCounter>>,
     /// Materialized input rows.
     input_rows: Option<Vec<InputRow>>,
+    /// The input's column types, which its columns keep in the output: a list of edges stays
+    /// one, not a list of plain values.
+    input_types: Vec<LogicalType>,
     /// The next input row to search from.
     current_input_idx: usize,
     /// The search from the input row whose paths are being emitted, when
@@ -418,6 +421,7 @@ impl VariableLengthExpandOperator {
             view,
             reads: None,
             input_rows: None,
+            input_types: Vec::new(),
             current_input_idx: 0,
             search: None,
             budget: DEFAULT_PATH_SEARCH_BUDGET,
@@ -580,6 +584,13 @@ impl VariableLengthExpandOperator {
         while let Some(mut chunk) = self.input.next()? {
             // Flatten to handle selection vectors
             chunk.flatten();
+            if self.input_types.is_empty() {
+                self.input_types = chunk
+                    .columns()
+                    .iter()
+                    .map(|column| column.data_type().clone())
+                    .collect();
+            }
             // Sort by source node ID for cache locality during adjacency lookups
             if chunk.len() > LOCALITY_SORT_THRESHOLD {
                 chunk = chunk.sort_by_column(self.source_column);
@@ -1074,16 +1085,9 @@ impl Operator for VariableLengthExpandOperator {
         let extra_cols =
             2 + usize::from(self.output_path_length) + usize::from(self.output_path_detail) * 3;
         let mut schema: Vec<LogicalType> = Vec::with_capacity(num_input_cols + extra_cols);
-        if let Some(first_row) = input_rows.first() {
-            for col_val in &first_row.columns {
-                let ty = match col_val {
-                    ColumnValue::NodeId(_) => LogicalType::Node,
-                    ColumnValue::EdgeId(_) => LogicalType::Edge,
-                    ColumnValue::Value(_) => LogicalType::Any,
-                };
-                schema.push(ty);
-            }
-        }
+        // Each input column keeps its own type: a column of values typed by the first row's value
+        // lost what a list column holds (a group variable's edges read as plain integers).
+        schema.extend(self.input_types.iter().take(num_input_cols).cloned());
         schema.push(if self.output_edge_list {
             LogicalType::List(Box::new(LogicalType::Edge))
         } else {
@@ -1238,6 +1242,7 @@ impl Operator for VariableLengthExpandOperator {
     fn reset(&mut self) {
         self.input.reset();
         self.input_rows = None;
+        self.input_types.clear();
         self.current_input_idx = 0;
         self.search = None;
         self.output_buffer.clear();

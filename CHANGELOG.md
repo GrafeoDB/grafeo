@@ -33,6 +33,7 @@ Performance and memory release, in progress: this section lists what has landed 
 
 ### Fixed
 
+- **A group variable keeps its edges through a second quantified edge pattern**: in `MATCH (a)-[x:R]->{0,10}(m)-[y:S]->{1,10}(c)`, the edges of `x` were read as the nodes with the same ids, so `[e IN x | e.k]` and `x[0].k` gave that node's property, or null; `x` now holds its edges, as `y` does. `size(x)` and the rows were already right.
 - **PROFILE shows the top-k that runs**: an `ORDER BY ... LIMIT` is one `TopK` line naming its sort, where PROFILE showed a full sort the statement does not run.
 
 ## [0.6.3] - 2026-11-15

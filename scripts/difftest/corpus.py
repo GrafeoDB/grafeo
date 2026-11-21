@@ -1113,6 +1113,8 @@ for case_id, query in [
     ("O11", "MATCH ()-[r:KNOWS {w: 5}]->() WITH collect(r) AS rs RETURN rs[0].w AS w, rs[-1].since AS since"),
     # An UNWIND after WITH ... WHERE unwinds the rows the filter kept (0.5.44 read the first rows of the chunk)
     ("O12", "MATCH (a:Person) WITH a.name AS n, a.age AS age, [a.age, a.age + 1] AS l WHERE age >= 30 UNWIND l AS v RETURN n, v"),
+    # A group list of edges keeps its edges through a second variable-length pattern (0.6.3 read their properties as null)
+    ("O13", "MATCH (:Person {name: 'Alix'})-[x:KNOWS*0..1]->(m)-[y:KNOWS*1..2]->(c) RETURN m.name AS m, [e IN x | e.w] AS xs, [e IN y | e.w] AS ys, c.name AS c"),
 ]:
     case(case_id, query)
 

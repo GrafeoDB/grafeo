@@ -967,6 +967,9 @@ case("J11", "UNWIND [2.5, 3.5] AS x RETURN 0 AS g, collect(x) AS xs, sum(x) AS t
 case("J12", "MATCH (a:Person) WITH a.name AS name, a.age AS age WITH age % 2 AS odd, collect(name) AS names RETURN odd, names")
 case("J13", "MATCH (a:Person)-[r:KNOWS]->(b) RETURN a.age % 2 AS odd, collect(r) AS rs, collect(b) AS bs, sum(r.w * 2) AS doubled")
 case("J14", "MATCH p = (a:Person)-[:KNOWS]->(b) RETURN a.age % 2 AS odd, collect(p) AS ps")
+# J15: a count of a variable from before a chain of two hops counts its values, skipping nulls
+# (it counted the chain's paths, so an OPTIONAL MATCH's nulls too)
+case("J15", "MATCH (p:Person) OPTIONAL MATCH (p)-[:LIVES_IN]->(t:City) MATCH (p)-[:KNOWS]->(f)-[:KNOWS]->(g) RETURN count(t) AS n")
 
 # K: variables bound before a later pattern, and values through a later MATCH
 for case_id, query, languages in [

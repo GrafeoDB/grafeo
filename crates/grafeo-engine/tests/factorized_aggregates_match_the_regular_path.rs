@@ -754,3 +754,48 @@ fn profile_of_a_factorized_count_names_the_expands_it_absorbs() {
         );
     }
 }
+
+/// A count of a variable bound below the chain counts that variable's values, not the chain's
+/// paths: from an `OPTIONAL MATCH` it is null on some rows, from a `MATCH` or a cross product on
+/// none. Checked in GQL and Cypher against factorized execution off, and Alix's city pinned:
+/// with an edge from Jules to Alix, Alix starts 4 paths of two hops, Jules 2 and Gus 1, and only
+/// Alix lives in a city, so `count(t)` is 4 of the 7 paths.
+#[test]
+fn a_count_of_a_variable_from_below_the_chain_skips_its_nulls() {
+    let setup = |config: Config| {
+        let db = database(config);
+        db.execute(
+            "MATCH (j:P {name: 'Jules'}), (a:P {name: 'Alix'}) \
+             INSERT (j)-[:R {w: 7}]->(a), (a)-[:LIVES_IN]->(:City {name: 'Amsterdam'})",
+        )
+        .unwrap();
+        db
+    };
+    let factorized = setup(Config::in_memory());
+    let regular = setup(Config::in_memory().without_factorized_execution());
+    let optional = "MATCH (p:P) OPTIONAL MATCH (p)-[:LIVES_IN]->(t:City) \
+                    MATCH (p)-[:R]->(b)-[:R]->(c) RETURN count(t) AS n";
+    let queries = [
+        optional.to_string(),
+        optional.replace("MATCH (p)-[:R]", "WITH p, t MATCH (p)-[:R]"),
+        "MATCH (p:P)-[:LIVES_IN]->(t:City) MATCH (p)-[:R]->(b)-[:R]->(c) RETURN count(t) AS n"
+            .to_string(),
+        "MATCH (t:City), (p:P)-[:R]->(b)-[:R]->(c) RETURN count(t) AS n".to_string(),
+    ];
+    for query in &queries {
+        assert_eq!(
+            rows(&factorized, query),
+            rows(&regular, query),
+            "GQL {query}"
+        );
+        #[cfg(feature = "cypher")]
+        {
+            let cypher = |db: &GrafeoDB| match db.execute_cypher(query) {
+                Ok(result) => format!("{:?}", result.rows()),
+                Err(error) => format!("error: {error}"),
+            };
+            assert_eq!(cypher(&factorized), cypher(&regular), "Cypher {query}");
+        }
+    }
+    assert_eq!(rows(&factorized, optional), "[[Int64(4)]]");
+}

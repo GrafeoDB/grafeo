@@ -867,22 +867,19 @@ impl super::Planner {
     }
 
     /// Whether every aggregate of `agg` gives on the factorized chain what it
-    /// gives on the flat rows: a `COUNT(*)` or a `COUNT(variable)` without
-    /// `DISTINCT`. The factorized aggregate reads the chain's last column, and
-    /// a variable of a chain of expands is never null, so a count of one
-    /// counts the paths; any other aggregate (or `DISTINCT`) reads that
-    /// column whatever it names, and runs on the flat rows.
+    /// gives on the flat rows: a count of the chain's rows ([`counts_chain_rows`]).
+    /// The factorized aggregate reads the chain's last column, which is never
+    /// null, so it counts the paths: a count of a variable the chain binds, or
+    /// of its start, is that; a count of a variable bound below the start may
+    /// skip nulls, and any other aggregate (or `DISTINCT`) reads a column the
+    /// chain does not hold, so both run on the flat rows.
     pub(super) fn is_simple_aggregate(&self, agg: &AggregateOp) -> bool {
-        agg.aggregates.iter().all(|agg_expr| {
-            !agg_expr.distinct
-                && matches!(
-                    agg_expr.function,
-                    LogicalAggregateFunction::Count | LogicalAggregateFunction::CountNonNull
-                )
-                && matches!(
-                    &agg_expr.expression,
-                    None | Some(LogicalExpression::Variable(_))
-                )
+        let chain = Self::collect_expand_chain(&agg.input);
+        let Some(first) = chain.first() else {
+            return false;
+        };
+        agg.aggregates.iter().all(|aggregate| {
+            counts_chain_rows(aggregate, &first.from_variable, chain.iter().copied())
         })
     }
 
@@ -1147,19 +1144,11 @@ impl<'a> EdgeCountShape<'a> {
             }
         }
         let counts_rows = |aggregate: &AggregateExpr| {
-            !aggregate.distinct
-                && aggregate.expression2.is_none()
-                && match (aggregate.function, &aggregate.expression) {
-                    (LogicalAggregateFunction::Count, None) => true,
-                    (
-                        LogicalAggregateFunction::Count | LogicalAggregateFunction::CountNonNull,
-                        Some(LogicalExpression::Variable(variable)),
-                    ) => {
-                        *variable == first.expand.from_variable
-                            || hops.iter().any(|hop| binds(hop, variable))
-                    }
-                    _ => false,
-                }
+            counts_chain_rows(
+                aggregate,
+                &first.expand.from_variable,
+                hops.iter().map(|hop| hop.expand),
+            )
         };
         if agg.aggregates.is_empty() || !agg.aggregates.iter().all(counts_rows) {
             return None;
@@ -1180,6 +1169,34 @@ impl<'a> EdgeCountShape<'a> {
         }
         Some(Self { hops, different })
     }
+}
+
+/// Whether `aggregate` counts the rows of a chain of `expands` from `start`: a `count(*)`, or a
+/// `count(x)` without `DISTINCT` of the chain's start or of an edge or far end of its hops,
+/// which are never null on its rows. A count of any other variable, one bound below the chain's
+/// start, counts that variable's values, which may be null (an `OPTIONAL MATCH`), so it is not a
+/// count of the rows. The edge count and the factorized aggregate both count rows.
+fn counts_chain_rows<'e>(
+    aggregate: &AggregateExpr,
+    start: &str,
+    mut expands: impl Iterator<Item = &'e ExpandOp>,
+) -> bool {
+    !aggregate.distinct
+        && aggregate.expression2.is_none()
+        && match (aggregate.function, &aggregate.expression) {
+            (LogicalAggregateFunction::Count, None) => true,
+            (
+                LogicalAggregateFunction::Count | LogicalAggregateFunction::CountNonNull,
+                Some(LogicalExpression::Variable(variable)),
+            ) => {
+                variable == start
+                    || expands.any(|expand| {
+                        expand.to_variable == *variable
+                            || expand.edge_variable.as_deref() == Some(variable.as_str())
+                    })
+            }
+            _ => false,
+        }
 }
 
 /// The labels `checks` require of `far`, adding the pairs of edges they require to

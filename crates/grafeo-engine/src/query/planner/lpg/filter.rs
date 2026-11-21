@@ -74,6 +74,10 @@ impl super::Planner {
         &self,
         filter: &FilterOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // A LIMIT directly above this filter cuts the range scan this filter becomes, and no
+        // other: a scan below another operator under it (an expand, a second filter) feeds rows
+        // that may still be dropped, so it reads them all.
+        let limit = self.limit_hint.take();
         // Check for complex EXISTS/NOT EXISTS patterns and rewrite as semi/anti join.
         // Simple single-hop EXISTS patterns from a node of the row are handled
         // by the fast path in convert_expression() -> extract_exists_pattern().
@@ -179,7 +183,7 @@ impl super::Planner {
         }
 
         // Try to use range optimization for range predicates (>, <, >=, <=)
-        if let Some(result) = self.try_plan_filter_with_range_index(filter)? {
+        if let Some(result) = self.try_plan_filter_with_range_index(filter, limit)? {
             return Ok(result);
         }
 
@@ -1220,12 +1224,14 @@ impl super::Planner {
     /// - The same variable and property are being filtered.
     ///
     /// Handles both simple range predicates (`n.age > 30`) and `BETWEEN`
-    /// patterns (`n.age >= 30 AND n.age <= 50`). Returns
+    /// patterns (`n.age >= 30 AND n.age <= 50`). `limit` is the count of a
+    /// LIMIT directly above `filter`, which the scan may stop at. Returns
     /// `Ok(Some((operator, columns)))` when applied, `Ok(None)` when not
     /// applicable, or `Err` on error.
     pub(super) fn try_plan_filter_with_range_index(
         &self,
         filter: &FilterOp,
+        limit: Option<usize>,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
         if !self
             .rules
@@ -1246,7 +1252,7 @@ impl super::Planner {
             return Ok(None);
         };
         self.record_absorbed_scan_entry("NodeScan", &filter.input);
-        self.plan_range_filter(&scan_variable, &scan_label, &property, range)
+        self.plan_range_filter(&scan_variable, &scan_label, &property, range, limit)
     }
 
     /// The property a filter over a scan of `scan_variable` bounds, and the
@@ -1537,8 +1543,8 @@ impl super::Planner {
     /// the label post-filter that the eager `NodeListOperator` path used to
     /// apply manually.
     ///
-    /// Phase 4e: when an outer `plan_limit` set `self.limit_hint`, the
-    /// hint is forwarded to the operator via `with_limit(n)` so the
+    /// Phase 4e: `limit`, the count of a LIMIT directly above the filter
+    /// this scan stands for, is forwarded via `with_limit(n)` so the
     /// materialization step terminates after `n` matches. The outer
     /// `LimitOperator` still wraps the result; the hint is a pure
     /// optimization.
@@ -1548,6 +1554,7 @@ impl super::Planner {
         scan_label: &Option<String>,
         property: &str,
         range: grafeo_core::graph::ValueRange,
+        limit: Option<usize>,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
         let mut op = RangeScanOperator::new(
             Arc::clone(&self.store),
@@ -1562,8 +1569,8 @@ impl super::Planner {
             op = op.with_label_filter(label.clone());
         }
 
-        if let Some(hint) = self.limit_hint.get() {
-            op = op.with_limit(hint);
+        if let Some(limit) = limit {
+            op = op.with_limit(limit);
         }
 
         let columns = vec![scan_variable.to_string()];

@@ -214,6 +214,7 @@ mod large_database;
 mod later_match_comma_patterns;
 mod leapfrog_integration;
 mod legacy_vector_topology;
+mod limit_after_a_range_scan;
 mod limit_zero_after_a_write;
 mod list_concatenation;
 mod listed_standalone_types;

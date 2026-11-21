@@ -728,7 +728,8 @@ impl super::Planner {
     }
 
     /// `plan_input`, the planning of `limit`'s input, with the limit's `count` as a hint to
-    /// its scans.
+    /// the range scan its input filter becomes: the filter takes the hint (`plan_filter`), so no
+    /// scan further down sees it.
     ///
     /// Phase 4e LIMIT pushdown: when this LIMIT sits directly above a
     /// Filter, push the count as a hint into leaf scan operators

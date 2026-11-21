@@ -33,6 +33,7 @@ Performance and memory release, in progress: this section lists what has landed 
 
 ### Fixed
 
+- **A Gremlin `.limit()` after a range `has` and a traversal keeps every row it should**: in `g.V().has('k', gt(0)).out('KNOWS').has('k', gt(900)).limit(3)`, the scan of `k` was cut to 3 nodes before the traversal and the second `has`, so the limit returned fewer rows than it should, often none; it now returns as many as the traversal without the limit, up to 3.
 - **A group variable keeps its edges through a second quantified edge pattern**: in `MATCH (a)-[x:R]->{0,10}(m)-[y:S]->{1,10}(c)`, the edges of `x` were read as the nodes with the same ids, so `[e IN x | e.k]` and `x[0].k` gave that node's property, or null; `x` now holds its edges, as `y` does. `size(x)` and the rows were already right.
 - **PROFILE shows the top-k that runs**: an `ORDER BY ... LIMIT` is one `TopK` line naming its sort, where PROFILE showed a full sort the statement does not run.
 

@@ -690,6 +690,28 @@ def listed_type(grafeo):
     return db
 
 
+def string_id_square(grafeo):
+    """Section FD's square: 200 people (`id` and `n` their number), each who knows 4 and
+    follows 12 others, drawn as `early_checks.rs` draws them, and an odd person with the
+    string id 'x' and no `n`, who knows person 3 and follows no one, so lies on no square."""
+    db = grafeo.GrafeoDB()
+    db.execute("UNWIND range(0, 199) AS i INSERT (:Person {id: i, n: i})")
+    state = 17
+    edges = {"KNOWS": [], "FOLLOWS": []}
+    for i in range(200):
+        for kind, count in (("KNOWS", 4), ("FOLLOWS", 12)):
+            for _ in range(count):
+                state = (state * 6364136223846793005 + 1442695040888963407) % (1 << 64)
+                edges[kind].append([i, (state >> 33) % 200])
+    for kind, pairs in edges.items():
+        db.execute(
+            f"UNWIND {pairs} AS p MATCH (a:Person {{n: p[0]}}), (b:Person {{n: p[1]}}) "
+            f"INSERT (a)-[:{kind}]->(b)"
+        )
+    db.execute("MATCH (a:Person {n: 3}) INSERT (:Person {id: 'x'})-[:KNOWS]->(a)")
+    return db
+
+
 FIXTURES = {
     "rdf": rdf,
     "rdf_writes": rdf_writes,
@@ -741,6 +763,7 @@ FIXTURES = {
     "rdf_sort_limit": rdf_sort_limit,
     "index_graphs": index_graphs,
     "listed_type": listed_type,
+    "string_id_square": string_id_square,
 }
 
 CASES: list[Case] = []
@@ -3676,5 +3699,12 @@ for case_id, query in [
     ("EP25", "MATCH (n:A) RETURN n.k AS k, n.h AS h"),
 ]:
     case(case_id, query, GQL, "listed_type")
+
+# FD: a SQL/PGQ comparison of two values of two kinds raises 22G04, so the optimizer moves
+#     none to rows the written statement never compares. The odd person 'x' knows person 3
+#     and lies on no square: FD1 gives the rows its GQL twin FD2 gives, where moving
+#     `b.id < d.id` under the intersection met 'x' and raised (0.6.4 development builds).
+case("FD1", "SELECT * FROM GRAPH_TABLE (MATCH (a:Person {n: 3})-[:KNOWS]-(b:Person)-[:FOLLOWS]-(c:Person)-[:FOLLOWS]-(d:Person)-[:KNOWS]-(a) WHERE b.id < d.id AND c.n <> 3 COLUMNS (b.id AS b, c.id AS c, d.id AS d))", SQL, "string_id_square")
+case("FD2", "MATCH (a:Person {n: 3})-[:KNOWS]-(b:Person)-[:FOLLOWS]-(c:Person)-[:FOLLOWS]-(d:Person)-[:KNOWS]-(a) WHERE b.id < d.id AND c.n <> 3 RETURN b.id AS b, c.id AS c, d.id AS d", GQL, "string_id_square")
 
 # fmt: on

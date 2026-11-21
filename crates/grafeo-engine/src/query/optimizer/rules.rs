@@ -78,11 +78,14 @@ pub enum PlannerRule {
     /// raise (properties of what the pattern binds, literals, parameters) after it, for the rows
     /// the limit keeps; off, every item is computed for every row.
     ProjectAfterTopK,
+    /// A check over several relations of a pattern that cannot raise runs where the
+    /// relations it reads are joined; off, it runs above the whole join.
+    EarlyChecks,
 }
 
 impl PlannerRule {
     /// Every rule.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::JoinOrder,
         Self::SoughtEnd,
         Self::FactorizedExecution,
@@ -102,6 +105,7 @@ impl PlannerRule {
         Self::KeyColumnLookup,
         Self::ExistsRunOnce,
         Self::ProjectAfterTopK,
+        Self::EarlyChecks,
     ];
 
     /// The rule's bit in a [`PlannerRules`].

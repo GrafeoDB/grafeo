@@ -21,7 +21,11 @@ use std::collections::{HashMap, HashSet};
 use super::closing_hops::compared_variables;
 use super::cost::measured;
 use super::cycles::{FreshNames, same};
-use super::{IncomingEdges, Optimizer, PlannerRule, any_operator, cannot_raise, movable_variables};
+use super::{
+    IncomingEdges, Optimizer, PlannerRule, any_operator, cannot_raise, cannot_raise_in,
+    movable_variables,
+};
+use grafeo_core::execution::operators::value_utils::EqualAcrossKinds;
 use grafeo_core::graph::Direction;
 
 use crate::query::plan::{
@@ -176,6 +180,7 @@ pub(super) fn best_order(
     stops_early: bool,
 ) -> Option<LogicalOperator> {
     let closing_names = plan_names.closing;
+    let kinds = optimizer.equal_across_kinds;
     if stops_early && holds_raising_filter(op, closing_names) {
         return None;
     }
@@ -290,28 +295,164 @@ pub(super) fn best_order(
     memo[full]?;
 
     let tree = search.build(&memo, full);
-    let ordered = match LogicalExpression::conjunction(lifted) {
-        None => tree,
-        // A selective filter may now run late: the written tree may be cheaper.
-        Some(predicate) => {
-            let lifted_tree = LogicalOperator::Filter(FilterOp {
-                predicate,
-                pushdown_hint: None,
-                input: Box::new(tree),
-            });
-            let cost = |plan: &LogicalOperator| {
-                optimizer
-                    .cost_model
-                    .estimate_tree(plan, &optimizer.card_estimator)
-                    .total()
-            };
-            if cost(&lifted_tree) >= cost(op) {
-                return None;
-            }
-            lifted_tree
-        }
+    if lifted.is_empty() {
+        return Some(tree);
+    }
+    // The checks run where they are bound, or above the tree, so a selective one may
+    // now run late: the written tree may be cheaper.
+    let ordered = if optimizer.rules.has(PlannerRule::EarlyChecks) {
+        early_checks(tree, lifted, plan_names.fresh.borrow().made(), kinds)
+    } else {
+        filtered(tree, lifted)
     };
+    let cost = |plan: &LogicalOperator| {
+        optimizer
+            .cost_model
+            .estimate_tree(plan, &optimizer.card_estimator)
+            .total()
+    };
+    if cost(&ordered) >= cost(op) {
+        return None;
+    }
     Some(ordered)
+}
+
+/// `tree` under `checks`, which read several of its relations, in written order:
+/// each that cannot raise runs where every variable it reads is bound, the others
+/// above the tree. In a tree of anything but scans, single hops, inner joins and
+/// filters, every check stays above it.
+fn early_checks(
+    mut tree: LogicalOperator,
+    checks: Vec<LogicalExpression>,
+    fresh: &HashSet<String>,
+    kinds: EqualAcrossKinds,
+) -> LogicalOperator {
+    let moves = only_steps(&tree);
+    let mut above = Vec::new();
+    for check in checks {
+        let reads = movable_variables(&check).filter(|_| moves && cannot_raise_in(&check, kinds));
+        let Some(reads) = reads else {
+            above.push(check);
+            continue;
+        };
+        let mut check = Some(check);
+        tree = sunk(tree, &mut check, &reads, fresh);
+        above.extend(check);
+    }
+    filtered(tree, above)
+}
+
+/// Whether `op` holds nothing but scans, single hops, inner joins and filters.
+fn only_steps(op: &LogicalOperator) -> bool {
+    !any_operator(op, &|op| match op {
+        LogicalOperator::NodeScan(_) | LogicalOperator::Filter(_) => false,
+        LogicalOperator::Expand(expand) => {
+            expand.is_variable_length() || expand.quantified || expand.path_alias.is_some()
+        }
+        LogicalOperator::Join(join) => join.join_type != JoinType::Inner,
+        _ => true,
+    })
+}
+
+/// `op` with `check` over the lowest part that binds every variable in `reads`: in
+/// the filter right over that part, after its own checks, or in a filter of its own.
+/// `check` is left in place when it runs above `op`. A hop that closes on a fresh name
+/// (in `fresh`) and the hop it closes over may run as one intersection: the check goes
+/// below both, or above them.
+fn sunk(
+    op: LogicalOperator,
+    check: &mut Option<LogicalExpression>,
+    reads: &HashSet<String>,
+    fresh: &HashSet<String>,
+) -> LogicalOperator {
+    let binds = |op: &LogicalOperator| {
+        super::bound_columns(op).is_some_and(|bound| reads.iter().all(|name| bound.contains(name)))
+    };
+    // `check` over `input`, which binds what it reads: as low as it goes, or right over it.
+    let over = |input: LogicalOperator, check: &mut Option<LogicalExpression>| {
+        let input = sunk(input, check, reads, fresh);
+        filtered(input, check.take().into_iter().collect())
+    };
+    match op {
+        LogicalOperator::Filter(mut filter)
+            if !closes(&filter.input, fresh)
+                || binds_below_closing(&filter.input, &binds, fresh) =>
+        {
+            filter.input = Box::new(sunk(*filter.input, check, reads, fresh));
+            if filter.pushdown_hint.is_none()
+                && let Some(placed) = check.take()
+            {
+                filter.predicate = LogicalExpression::conjunction([filter.predicate, placed])
+                    .expect("a conjunction of two");
+            }
+            LogicalOperator::Filter(filter)
+        }
+        LogicalOperator::Expand(mut expand) if binds(&expand.input) => {
+            let input = if fresh.contains(&expand.to_variable) {
+                below_the_closed_hop(&mut expand.input, fresh)
+            } else {
+                Some(expand.input.as_mut())
+            };
+            if let Some(input) = input.filter(|input| binds(input)) {
+                let taken = std::mem::replace(input, LogicalOperator::Empty);
+                *input = over(taken, check);
+            }
+            LogicalOperator::Expand(expand)
+        }
+        LogicalOperator::Join(mut join) if join.join_type == JoinType::Inner => {
+            if binds(&join.left) {
+                join.left = Box::new(over(*join.left, check));
+            } else if binds(&join.right) {
+                join.right = Box::new(over(*join.right, check));
+            }
+            LogicalOperator::Join(join)
+        }
+        other => other,
+    }
+}
+
+/// Whether `op` is a hop that closes on a fresh name.
+fn closes(op: &LogicalOperator, fresh: &HashSet<String>) -> bool {
+    matches!(op, LogicalOperator::Expand(expand) if fresh.contains(&expand.to_variable))
+}
+
+/// Whether below the closing hop `op`, and below the hop it closes over, the rows bind
+/// what `binds` asks for.
+fn binds_below_closing(
+    op: &LogicalOperator,
+    binds: &impl Fn(&LogicalOperator) -> bool,
+    fresh: &HashSet<String>,
+) -> bool {
+    let LogicalOperator::Expand(closing) = op else {
+        return false;
+    };
+    let mut below = closing.input.as_ref();
+    loop {
+        match below {
+            LogicalOperator::Filter(filter) => below = &filter.input,
+            LogicalOperator::Expand(near) if fresh.contains(&near.to_variable) => return false,
+            LogicalOperator::Expand(near) => return binds(&near.input),
+            other => return binds(other),
+        }
+    }
+}
+
+/// Where a check may go below a closing hop whose input is `input`: under the hop it
+/// closes over, past the filters between them, or `input` itself when no hop is there;
+/// `None` over another closing hop.
+fn below_the_closed_hop<'a>(
+    input: &'a mut LogicalOperator,
+    fresh: &HashSet<String>,
+) -> Option<&'a mut LogicalOperator> {
+    let mut below = input;
+    loop {
+        match below {
+            LogicalOperator::Filter(filter) => below = filter.input.as_mut(),
+            LogicalOperator::Expand(near) if fresh.contains(&near.to_variable) => return None,
+            LogicalOperator::Expand(near) => return Some(near.input.as_mut()),
+            other => return Some(other),
+        }
+    }
 }
 
 /// The second stage's reads for the hops of `relations`, in written order, each with each

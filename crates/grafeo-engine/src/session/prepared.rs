@@ -127,7 +127,7 @@ impl Session {
                 let prepared =
                     self.plan_cache()
                         .put(key.prepared(), Stage::Optimized, prepared, generation);
-                return Self::fill_prepared(prepared, Some(params));
+                return self.fill_prepared(key, prepared, Some(params));
             }
             self.plan_cache()
                 .put(key.clone(), Stage::Parsed, plan, generation);
@@ -143,6 +143,8 @@ impl Session {
     ///
     /// As [`fill_values`].
     pub(super) fn fill_prepared(
+        &self,
+        key: &CacheKey,
         plan: std::sync::Arc<CachedPlan>,
         params: Option<&HashMap<String, Value>>,
     ) -> Result<RunPlan> {
@@ -153,7 +155,7 @@ impl Session {
         // no copy of the logical plan; EXPLAIN and PROFILE show the plan filled, as before.
         if !plan.plan().explain
             && !plan.plan().profile
-            && let Ok(recipe) = plan.recipe()
+            && let Ok(recipe) = plan.recipe(|| self.route_inputs(key))
             && let Some(values) = recipe.values_of(plan.plan(), params)
         {
             return Ok(RunPlan::Prepared(plan, values));
@@ -166,6 +168,21 @@ impl Session {
 }
 
 impl Session {
+    /// What the route of an aggregate in a statement with cache key `key` reads besides the
+    /// plan, as this session's planner reads it: the key's language and rules, factorized
+    /// execution, and the backward adjacency of the store the statement reads.
+    pub(super) fn route_inputs(
+        &self,
+        key: &CacheKey,
+    ) -> crate::query::planner::lpg::aggregate::RouteInputs {
+        crate::query::planner::lpg::aggregate::RouteInputs {
+            language: key.language().statement_language(),
+            rules: key.rules(),
+            factorized_execution: self.plan_options.factorized_execution_under(key.rules()),
+            backward_adjacency: self.active_store().has_backward_adjacency(),
+        }
+    }
+
     /// The physical plan of `run` from `planner`: a prepared plan's recipe opened with the
     /// call's values, or, when the recipe sends this call back (a key of another kind), the
     /// plan filled with them and planned, as every other plan is.
@@ -182,7 +199,7 @@ impl Session {
         let RunPlan::Prepared(cached, values) = run else {
             return planner.plan(run);
         };
-        if let Ok(recipe) = cached.recipe()
+        if let Ok(recipe) = cached.recipe(|| planner.route_inputs())
             && let Some(opened) = recipe.open(cached.plan(), &OpenContext { planner, values })?
         {
             return Ok(opened);
@@ -242,6 +259,13 @@ mod tests {
         assert!(!cached(&usual));
     }
 
+    /// The route inputs of a GQL statement in a session of an in-memory database.
+    fn inputs() -> crate::query::planner::lpg::aggregate::RouteInputs {
+        let db = crate::GrafeoDB::new_in_memory();
+        let session = db.session();
+        session.route_inputs(&session.plan_cache_key("", QueryLanguage::Gql))
+    }
+
     /// The prepared plan the first call of `query` with `params` caches, with its
     /// parameters still in: the plan every later call fills.
     fn prepared_plan(
@@ -277,9 +301,10 @@ mod tests {
             "MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(m:Message) RETURN m.id AS messageId, m.creationDate AS created ORDER BY created DESC, messageId ASC LIMIT 10",
             "MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(m:Message) RETURN m.id AS messageId ORDER BY m.creationDate DESC",
             "MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(m:Message) RETURN m.id AS messageId SKIP 1 LIMIT 2",
+            "MATCH (p:Person {id: $personId}) RETURN count(p) AS n",
         ] {
             let plan = prepared_plan(query, &params);
-            assert!(recipe_of(plan.plan()).is_ok(), "{query}");
+            assert!(recipe_of(plan.plan(), inputs()).is_ok(), "{query}");
         }
     }
 
@@ -305,8 +330,16 @@ mod tests {
                 "ReturnItems",
             ),
             (
-                "MATCH (n:Person {id: $personId})-[:KNOWS]-(f:Person) RETURN count(f) AS friends",
-                "Aggregate",
+                "MATCH (n:Person) WHERE n.id > $personId RETURN count(*) AS c",
+                "RangeFold",
+            ),
+            (
+                "MATCH (n:Person {id: $personId})-[:KNOWS]-(f:Person) RETURN f.id AS id GROUP BY id HAVING count(*) > 1",
+                "Having",
+            ),
+            (
+                "MATCH (n:Person {id: $personId})-[:KNOWS]-(f:Person) RETURN sum(f.id * 2) AS s",
+                "AggregateItems",
             ),
             (
                 "MATCH (n:Person {id: $personId})-[:KNOWS]-{1,2}(f:Person) RETURN f.id AS id",
@@ -314,7 +347,7 @@ mod tests {
             ),
         ] {
             let plan = prepared_plan(query, &params);
-            match recipe_of(plan.plan()) {
+            match recipe_of(plan.plan(), inputs()) {
                 Err(uncovered) => assert_eq!(uncovered.kind, kind, "{query}"),
                 Ok(_) => panic!("{query} must not make a recipe"),
             }
@@ -335,9 +368,10 @@ mod tests {
             "MATCH (n:Person {id: $personId})-[:LIVES_IN]->(c:City) RETURN n.firstName AS firstName, c.id AS cityId",
             "MATCH (n:Person)-[:LIVES_IN]->(c:City) RETURN c.id AS cityId",
             "MATCH (n:Person)-[:LIVES_IN]->(c:City) RETURN c.id AS cityId ORDER BY cityId SKIP 1 LIMIT 2",
+            "MATCH (n:Person {id: $personId})-[:KNOWS]-(f:Person) RETURN count(f) AS friends",
         ]
         .into_iter()
-        .flat_map(|query| recipe_of(prepared_plan(query, &params).plan()).unwrap().kinds())
+        .flat_map(|query| recipe_of(prepared_plan(query, &params).plan(), inputs()).unwrap().kinds())
         .collect();
         kinds.sort_unstable();
         kinds.dedup();
@@ -356,11 +390,11 @@ mod tests {
 
         let db = crate::GrafeoDB::new_in_memory();
         db.execute(
-            "INSERT (:Person {id: 1, firstName: 'Alix'})-[:LIVES_IN]->(:City {id: 10}),              (:Person {id: 2, firstName: 'Gus'})-[:LIVES_IN]->(:City {id: 20}),              (:Person {id: 3, firstName: 'Vincent'})",
+            "INSERT (:Person {id: 1, firstName: 'Alix'})-[:LIVES_IN]->(:City {id: 10}), (:Person {id: 2, firstName: 'Gus'})-[:LIVES_IN]->(:City {id: 20}), (:Person {id: 3, firstName: 'Vincent'})",
         )
         .unwrap();
         let session = db.session();
-        let query = "MATCH (n:Person {id: $personId})-[:LIVES_IN]->(c:City)                      RETURN n.firstName AS firstName, c.id AS cityId";
+        let query = "MATCH (n:Person {id: $personId})-[:LIVES_IN]->(c:City) RETURN n.firstName AS firstName, c.id AS cityId";
         let values = |id: i64| HashMap::from([("personId".to_string(), Value::Int64(id))]);
         session.execute_with_params(query, values(1)).unwrap();
         let key = session.plan_cache_key(query, QueryLanguage::Gql);
@@ -368,7 +402,7 @@ mod tests {
             .plan_cache()
             .get(&key.prepared(), crate::query::cache::Stage::Optimized)
             .unwrap();
-        let recipe = recipe_of(cached.plan()).unwrap();
+        let recipe = recipe_of(cached.plan(), session.route_inputs(&key)).unwrap();
         let rows = |mut plan: crate::query::planner::PhysicalPlan| {
             let result = crate::query::executor::Executor::with_columns(plan.columns.clone())
                 .execute(plan.operator.as_mut())
@@ -422,11 +456,11 @@ mod tests {
 
         let db = crate::GrafeoDB::new_in_memory();
         db.execute(
-            "INSERT (alix:Person {id: 1}), (:Message {id: 101, at: 2})-[:HAS_CREATOR]->(alix),              (:Message {id: 102, at: 1})-[:HAS_CREATOR]->(alix)",
+            "INSERT (alix:Person {id: 1}), (:Message {id: 101, at: 2})-[:HAS_CREATOR]->(alix), (:Message {id: 102, at: 1})-[:HAS_CREATOR]->(alix)",
         )
         .unwrap();
         let session = db.session();
-        let query = "MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(m:Message)                      RETURN m.id AS id ORDER BY m.at LIMIT $n";
+        let query = "MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(m:Message) RETURN m.id AS id ORDER BY m.at LIMIT $n";
         let values = |count: i64| {
             HashMap::from([
                 ("personId".to_string(), Value::Int64(1)),
@@ -439,7 +473,7 @@ mod tests {
             .plan_cache()
             .get(&key.prepared(), crate::query::cache::Stage::Optimized)
             .unwrap();
-        let recipe = recipe_of(cached.plan()).unwrap();
+        let recipe = recipe_of(cached.plan(), session.route_inputs(&key)).unwrap();
         for count in [0, 1, 3] {
             let _memory = session.enter_statement_memory();
             let planner = || {
@@ -472,6 +506,161 @@ mod tests {
                 today.operator.name(),
                 "LIMIT {count}"
             );
+        }
+    }
+
+    /// The aggregate at the top of `plan`, under its RETURN.
+    fn aggregate_of(plan: &crate::query::plan::LogicalPlan) -> &crate::query::plan::AggregateOp {
+        let crate::query::plan::LogicalOperator::Return(ret) = &plan.root else {
+            panic!("expected a RETURN: {:?}", plan.root);
+        };
+        let crate::query::plan::LogicalOperator::Aggregate(agg) = ret.input.as_ref() else {
+            panic!("expected an aggregate: {:?}", ret.input);
+        };
+        agg
+    }
+
+    /// The route a recipe decides from its inputs alone is the route the planner of a call
+    /// takes on the plan filled with the call's values, for each route and both settings of
+    /// factorized execution; a range fold whose bound is a parameter has no recipe route.
+    #[test]
+    fn the_recipe_route_is_the_planners() {
+        use crate::query::planner::lpg::recipe::recipe_route;
+        use grafeo_common::types::{StatementLanguage, Value};
+
+        let db = crate::GrafeoDB::new_in_memory();
+        db.execute(
+            "INSERT (:Person {id: 1})-[:KNOWS]->(:Person {id: 2})-[:KNOWS]->(:Person {id: 3})",
+        )
+        .unwrap();
+        let session = db.session();
+        let params = std::collections::HashMap::from([("personId".to_string(), Value::Int64(1))]);
+        for query in [
+            "MATCH (n:Person {id: $personId})-[:KNOWS]-(f:Person) RETURN count(f) AS friends",
+            "MATCH (n:Person {id: $personId})-[:KNOWS]-(f:Person) RETURN count(f.id) AS ids",
+            "MATCH (a:Person)-[:KNOWS]->(m:Person)-[:KNOWS]->(b:Person) RETURN count(*) AS paths",
+            "MATCH (n:Person) RETURN count(n) AS people",
+            "MATCH (n:Person) WHERE n.id > 1 RETURN count(*) AS later",
+            "MATCH (n:Person) WHERE n.id > TIME('10:00:00') RETURN count(*) AS later",
+        ] {
+            session.execute_with_params(query, params.clone()).unwrap();
+            let key = session.plan_cache_key(query, QueryLanguage::Gql);
+            let cached = session
+                .plan_cache()
+                .get(&key.prepared(), crate::query::cache::Stage::Optimized)
+                .unwrap();
+            let inputs = session.route_inputs(&key);
+            let mut filled = cached.plan().clone();
+            crate::query::processor::substitute_params(&mut filled, &params).unwrap();
+            for factorized in [true, false] {
+                let inputs = crate::query::planner::lpg::aggregate::RouteInputs {
+                    factorized_execution: factorized,
+                    ..inputs
+                };
+                let (epoch, transaction, _pin) = session.get_transaction_context().unwrap();
+                let planner = session
+                    .create_planner_for_store_with_read_only(
+                        session.active_store(),
+                        epoch,
+                        transaction,
+                        true,
+                        StatementLanguage::Gql,
+                    )
+                    .unwrap()
+                    .with_factorized_execution(factorized);
+                assert_eq!(
+                    recipe_route(inputs, aggregate_of(cached.plan())),
+                    Some(planner.route_kind_of(aggregate_of(&filled))),
+                    "{query}, factorized {factorized}"
+                );
+            }
+        }
+        let query = "MATCH (n:Person) WHERE n.id > $personId RETURN count(*) AS later";
+        session.execute_with_params(query, params.clone()).unwrap();
+        let key = session.plan_cache_key(query, QueryLanguage::Gql);
+        let cached = session
+            .plan_cache()
+            .get(&key.prepared(), crate::query::cache::Stage::Optimized)
+            .unwrap();
+        assert_eq!(
+            recipe_route(session.route_inputs(&key), aggregate_of(cached.plan())),
+            None
+        );
+    }
+
+    /// Statements in SQL/PGQ, whose parser the build may leave out.
+    #[cfg(feature = "sql-pgq")]
+    mod sql {
+        use super::*;
+
+        /// A SQL/PGQ statement that names its own graph has no recipe (the route's inputs are the
+        /// session graph's), and a SQL/PGQ range fold answers that it is not covered.
+        #[test]
+        fn sql_statements_answer_uncovered() {
+            use crate::query::planner::lpg::recipe::recipe_of;
+            use grafeo_common::types::Value;
+
+            let db = crate::GrafeoDB::new_in_memory();
+            db.execute("CREATE GRAPH g").unwrap();
+            db.execute("INSERT (:Person {id: 1}), (:Person {id: 2})")
+                .unwrap();
+            let session = db.session();
+            let params =
+                std::collections::HashMap::from([("personId".to_string(), Value::Int64(1))]);
+            for (query, kind) in [
+                (
+                    "SELECT count(*) AS c FROM GRAPH_TABLE (g MATCH (n:Person) COLUMNS (n.id AS id))",
+                    "PlanGraph",
+                ),
+                (
+                    "SELECT count(*) AS c FROM GRAPH_TABLE (MATCH (n:Person) WHERE n.id > 1 COLUMNS (n.id AS id))",
+                    "RangeFold",
+                ),
+            ] {
+                session
+                    .execute_sql_with_params(query, params.clone())
+                    .unwrap();
+                let key = session.plan_cache_key(query, QueryLanguage::SqlPgq);
+                let cached = session
+                    .plan_cache()
+                    .get(&key.prepared(), crate::query::cache::Stage::Optimized)
+                    .expect("the call caches its prepared plan");
+                match recipe_of(cached.plan(), session.route_inputs(&key)) {
+                    Err(uncovered) => assert_eq!(uncovered.kind, kind, "{query}"),
+                    Ok(recipe) => panic!("{query} made a recipe: {:?}", recipe.kinds()),
+                }
+            }
+        }
+    }
+
+    /// The factorized aggregate's only reachable input, a procedure call without YIELD, is no
+    /// recipe's: the aggregate answers that its route is not covered.
+    #[test]
+    fn a_factorized_count_answers_uncovered() {
+        use crate::query::planner::lpg::recipe::recipe_of;
+        use grafeo_common::types::Value;
+
+        let db = crate::GrafeoDB::new_in_memory();
+        db.execute(
+            "INSERT (a:P {name: 'Alix'})-[:R]->(g:P {name: 'Gus'}), (g)-[:R]->(v:P {name: 'Vincent'}), (v)-[:R]->(a)",
+        )
+        .unwrap();
+        let session = db.session();
+        let query = "CALL grafeo.procedures() MATCH (p:P)-[:R]->(b)-[:R]->(c) RETURN count(*) AS n";
+        session
+            .execute_with_params(
+                query,
+                std::collections::HashMap::from([("unused".to_string(), Value::Int64(1))]),
+            )
+            .unwrap();
+        let key = session.plan_cache_key(query, QueryLanguage::Gql);
+        let cached = session
+            .plan_cache()
+            .get(&key.prepared(), crate::query::cache::Stage::Optimized)
+            .unwrap();
+        match recipe_of(cached.plan(), session.route_inputs(&key)) {
+            Err(uncovered) => assert_eq!(uncovered.kind, "Factorized"),
+            Ok(recipe) => panic!("a recipe: {:?}", recipe.kinds()),
         }
     }
 }

@@ -10,16 +10,181 @@ use super::{
     PhysicalAggregateExpr, ProjectExpr, ProjectOperator, Result, SimpleAggregateOperator,
     convert_aggregate_function, expression_to_string, resolved_column_name,
 };
-use crate::query::plan::AggregateExpr;
+use crate::query::optimizer::{PlannerRule, PlannerRules};
+use crate::query::plan::{AggregateExpr, RangeFoldShape};
+use grafeo_common::types::StatementLanguage;
+
+type Built = (Box<dyn Operator>, Vec<String>);
+
+/// What a range fold reads: the property and its range.
+pub(super) type RangeRead = (String, grafeo_core::graph::ValueRange);
+
+/// Everything the route of an aggregate reads besides the plan, fixed for a cache key and a
+/// database, so a prepared plan's recipe decides it without a planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RouteInputs {
+    /// The statement's language: in SQL/PGQ a range fold reads the column's kinds.
+    pub(crate) language: StatementLanguage,
+    /// The planner rules.
+    pub(crate) rules: PlannerRules,
+    /// Factorized execution: the database's setting and its rule.
+    pub(crate) factorized_execution: bool,
+    /// Whether the store keeps backward adjacency, which the middle sum reads.
+    pub(crate) backward_adjacency: bool,
+}
+
+/// A route with what its builder reads.
+pub(super) enum Route<'a, T> {
+    MiddleSum(EdgeCountShape<'a>, Vec<String>),
+    EdgeCount(EdgeCountShape<'a>),
+    Factorized,
+    LabelCount(&'a str),
+    RangeFold(RangeFoldShape<'a>, T),
+    Regular,
+}
+
+impl<'a, T> Route<'a, T> {
+    /// The operator the route's builder reads its rows from, `None` for one that reads the
+    /// store itself.
+    ///
+    /// # Errors
+    ///
+    /// A shape the route does not hold, which [`route`] never gives.
+    pub(super) fn input(&self, agg: &'a AggregateOp) -> Result<Option<&'a LogicalOperator>> {
+        Ok(match self {
+            Self::EdgeCount(shape) => Some(edge_count_input(shape)?),
+            Self::Factorized => Some(factorized_base(agg)?),
+            Self::Regular => Some(agg.input.as_ref()),
+            Self::MiddleSum(..) | Self::LabelCount(_) | Self::RangeFold(..) => None,
+        })
+    }
+}
+
+/// The route `agg` is built by: the first whose conditions hold, in the order of [`Route`]'s
+/// variants. It reads the plan and `inputs`, and gives a range fold's filter to `range`, which
+/// answers what the fold reads, `None` when the filter reads no range.
+pub(super) fn route<'a, T>(
+    inputs: RouteInputs,
+    agg: &'a AggregateOp,
+    range: impl FnOnce(&RangeFoldShape<'a>) -> Option<T>,
+) -> Route<'a, T> {
+    if inputs.factorized_execution
+        && let Some(shape) = EdgeCountShape::of(agg)
+    {
+        // A count of the last hop's edges, also over a chain of expands that the factorized
+        // aggregate would count too: counting each row's edges from the adjacency, without
+        // listing them, takes about half the time of the factorized chain, which lists the
+        // edges of its last level.
+        return match middle_sum_first_labels(inputs, agg, &shape) {
+            Some(first_labels) => Route::MiddleSum(shape, first_labels),
+            None => Route::EdgeCount(shape),
+        };
+    }
+    // Factorized aggregation, over a chain of two or more expands without GROUP BY, of counts
+    // of the chain's rows. Not after a write (the regular path reads the writing input whole
+    // first, see `after_write`). A `count(*)` or an aggregated variable reads nothing itself,
+    // and the chain reads its whole source before its first expand (the lazy chain collects
+    // every batch, and the node scan of a MATCH from a bound node reads a writing input whole,
+    // see `plan_node_scan`): the count over the chain counts what the whole write left.
+    if inputs.factorized_execution
+        && agg.group_by.is_empty()
+        && !(super::after_write::aggregate_reads(agg)
+            && super::after_write::writes_pending(&agg.input))
+        && super::Planner::count_expand_chain(&agg.input).0 >= 2
+        && super::Planner::is_simple_aggregate(agg)
+    {
+        return Route::Factorized;
+    }
+    if let Some(label) = agg.counted_label() {
+        return Route::LabelCount(label);
+    }
+    if inputs.rules.has(PlannerRule::RangeFold)
+        && inputs.rules.has(PlannerRule::IndexRange)
+        && let Some(shape) = agg.range_fold_shape()
+        && let Some(read) = range(&shape)
+    {
+        return Route::RangeFold(shape, read);
+    }
+    Route::Regular
+}
 
 impl super::Planner {
-    /// Plans an AGGREGATE operator.
+    /// The inputs of the route this planner takes ([`RouteInputs`]).
+    pub(crate) fn route_inputs(&self) -> RouteInputs {
+        RouteInputs {
+            language: self.session_context.language,
+            rules: self.rules,
+            factorized_execution: self.factorized_execution,
+            backward_adjacency: self.store.has_backward_adjacency(),
+        }
+    }
+
+    /// The route `agg` is built by ([`route`]), with what its builder reads.
+    pub(super) fn aggregate_route<'a>(&self, agg: &'a AggregateOp) -> Route<'a, RangeRead> {
+        route(self.route_inputs(), agg, |shape| {
+            self.filter_range(&shape.filter.predicate, shape.variable)
+        })
+    }
+
+    /// Plans an AGGREGATE operator by its route ([`route`]).
+    pub(super) fn plan_aggregate(&self, agg: &AggregateOp) -> Result<Built> {
+        let route = self.aggregate_route(agg);
+        let input = match (&route, route.input(agg)?) {
+            // An aggregate that comes first (`RETURN count(*)`) aggregates the one empty row.
+            (Route::Regular, Some(input)) => Some(self.plan_input(input)?),
+            (_, Some(input)) => Some(self.plan_operator(input)?),
+            (_, None) => None,
+        };
+        self.build_route(agg, route, input)
+    }
+
+    /// The operators of `agg` by `route`, over `input`, the plan of the route's
+    /// [`input`](Route::input).
+    ///
+    /// # Errors
+    ///
+    /// The errors of building the operators, and a missing input the route reads.
+    pub(super) fn build_route(
+        &self,
+        agg: &AggregateOp,
+        route: Route<'_, RangeRead>,
+        input: Option<Built>,
+    ) -> Result<Built> {
+        let input = || input.ok_or_else(|| Error::Internal("the route reads an input".to_string()));
+        match route {
+            Route::MiddleSum(shape, first_labels) => {
+                let (counts, columns) = self.middle_sum_of(&shape, first_labels)?;
+                self.finish_edge_count(agg, &shape, counts, columns)
+            }
+            Route::EdgeCount(shape) => {
+                let (input_op, columns) = input()?;
+                self.edge_count_over(agg, &shape, input_op, columns)
+            }
+            Route::Factorized => {
+                let (base_op, base_columns) = input()?;
+                self.factorized_over(agg, base_op, base_columns)
+            }
+            Route::LabelCount(label) => Ok(self.plan_label_count(agg, label)),
+            Route::RangeFold(shape, (property, range)) => {
+                Ok(self.plan_range_fold(agg, &shape, property, range))
+            }
+            Route::Regular => {
+                let (mut input_op, input_columns) = input()?;
+                // Values that read the graph after a write (`... SET h.c = i RETURN
+                // sum(h.c)`) read what the whole write left (see `after_write`).
+                if super::after_write::aggregate_reads(agg) {
+                    input_op = super::mutation::read_first_after_a_write(input_op, &agg.input);
+                }
+                self.aggregate_over(agg, input_op, input_columns)
+            }
+        }
+    }
+
     /// `count(*)` and `count(n)` of a scan of one label and nothing else
     /// (`MATCH (n:Graph) RETURN count(*)`): the store's count of the label's
     /// nodes, read when the query runs (see `LabelCountOperator`), without
-    /// a scan. `None` for any other aggregate.
-    fn plan_label_count(&self, agg: &AggregateOp) -> Option<(Box<dyn Operator>, Vec<String>)> {
-        let label = agg.counted_label()?;
+    /// a scan, of `label` ([`AggregateOp::counted_label`]).
+    fn plan_label_count(&self, agg: &AggregateOp, label: &str) -> (Box<dyn Operator>, Vec<String>) {
         let columns: Vec<String> = agg
             .aggregates
             .iter()
@@ -41,7 +206,7 @@ impl super::Planner {
             columns.len(),
         )
         .with_read_counter(self.read_counter());
-        Some((Box::new(operator), columns))
+        (Box::new(operator), columns)
     }
 
     /// `count(*)`, `count(n)`, and `count`, `sum`, `avg`, `min` and `max` of
@@ -50,16 +215,15 @@ impl super::Planner {
     /// RETURN count(*), avg(n.k)`), also through a projection that only names
     /// properties of `n` (SQL/PGQ's `COLUMNS (n.k AS len)`): the range's
     /// values folded in one store call (see `RangeFoldOperator`), without the
-    /// range scan's node list or a second read of each value. `None` for any
-    /// other aggregate, or with the rule (or the range scan's) off.
-    fn plan_range_fold(&self, agg: &AggregateOp) -> Option<(Box<dyn Operator>, Vec<String>)> {
-        use crate::query::optimizer::PlannerRule;
-        if !(self.rules.has(PlannerRule::RangeFold) && self.rules.has(PlannerRule::IndexRange)) {
-            return None;
-        }
-        let shape = agg.range_fold_shape()?;
-        let (property, range) = self.filter_range(&shape.filter.predicate, shape.variable)?;
-
+    /// range scan's node list or a second read of each value, of the `shape`,
+    /// `property` and `range` its route found ([`route`]).
+    fn plan_range_fold(
+        &self,
+        agg: &AggregateOp,
+        shape: &RangeFoldShape<'_>,
+        property: String,
+        range: grafeo_core::graph::ValueRange,
+    ) -> (Box<dyn Operator>, Vec<String>) {
         let mut read: Vec<String> = Vec::new();
         let aggregates: Vec<PhysicalAggregateExpr> = agg
             .aggregates
@@ -130,70 +294,7 @@ impl super::Planner {
             self.read_view(),
         )
         .with_read_counter(self.read_counter());
-        Some((Box::new(operator), columns))
-    }
-
-    pub(super) fn plan_aggregate(
-        &self,
-        agg: &AggregateOp,
-    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        // A count of the last hop's edges, also over a chain of expands
-        // that the factorized aggregate below would count too: counting
-        // each row's edges from the adjacency, without listing them, takes
-        // about half the time of the factorized chain, which lists the
-        // edges of its last level.
-        if let Some(counted) = self.plan_edge_count(agg)? {
-            return Ok(counted);
-        }
-
-        // Check if we can use factorized aggregation for speedup
-        // Conditions:
-        // 1. Factorized execution is enabled
-        // 2. Input is an expand chain (multi-hop)
-        // 3. No GROUP BY
-        // 4. All aggregates are simple (COUNT, SUM, AVG, MIN, MAX)
-        // 5. It does not read after a write (the regular path reads the
-        //    writing input whole first, see `after_write`). A `count(*)` or
-        //    an aggregated variable reads nothing itself, and the chain
-        //    reads its whole source before its first expand (the lazy chain
-        //    collects every batch, and the node scan of a MATCH from a bound
-        //    node reads a writing input whole, see `plan_node_scan`): the
-        //    count over the chain counts what the whole write left.
-        if self.factorized_execution
-            && agg.group_by.is_empty()
-            && !(super::after_write::aggregate_reads(agg)
-                && super::after_write::writes_pending(&agg.input))
-            && Self::count_expand_chain(&agg.input).0 >= 2
-            && self.is_simple_aggregate(agg)
-        {
-            // The profile entries the attempt recorded go with it when it
-            // fails: the regular path below plans the input again and
-            // records its own, and a second set would shift every later
-            // entry onto the wrong operator.
-            let recorded = self.profile_entries.borrow().len();
-            match self.plan_factorized_aggregate(agg) {
-                Ok(planned) => return Ok(planned),
-                Err(_) => self.profile_entries.borrow_mut().truncate(recorded),
-            }
-        }
-        // Fall through to regular aggregate if factorized planning fails
-
-        if let Some(counted) = self.plan_label_count(agg) {
-            return Ok(counted);
-        }
-        if let Some(folded) = self.plan_range_fold(agg) {
-            return Ok(folded);
-        }
-
-        // An aggregate that comes first (`RETURN count(*)`) aggregates the
-        // one empty row.
-        let (mut input_op, input_columns) = self.plan_input(&agg.input)?;
-        // Values that read the graph after a write (`... SET h.c = i RETURN
-        // sum(h.c)`) read what the whole write left (see `after_write`).
-        if super::after_write::aggregate_reads(agg) {
-            input_op = super::mutation::read_first_after_a_write(input_op, &agg.input);
-        }
-        self.aggregate_over(agg, input_op, input_columns)
+        (Box::new(operator), columns)
     }
 
     /// A count over one expand that reads neither the edge nor its far end
@@ -204,26 +305,19 @@ impl super::Planner {
     /// every edge for the aggregate to count. Labels on the far end stay a
     /// check of each counted edge, as the store keeps no count of the edges
     /// to a label. Over a chain of expands the last one is counted, for
-    /// each row of the others. `None` for any other aggregate (see
-    /// [`EdgeCountShape::of`]).
-    fn plan_edge_count(
+    /// each row of the others, `shape` ([`EdgeCountShape::of`]), over `input_op`, the plan of
+    /// [`edge_count_input`].
+    fn edge_count_over(
         &self,
         agg: &AggregateOp,
-    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
-        if !self.factorized_execution {
-            return Ok(None);
-        }
-        let Some(shape) = EdgeCountShape::of(agg) else {
-            return Ok(None);
-        };
-        if let Some(sum) = self.middle_sum_of(agg, &shape)? {
-            return self.finish_edge_count(agg, &shape, sum.0, sum.1).map(Some);
-        }
+        shape: &EdgeCountShape<'_>,
+        input_op: Box<dyn Operator>,
+        columns: Vec<String>,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let Some(first) = shape.hops.last() else {
-            return Ok(None);
+            return Err(Error::Internal("an edge count without a hop".to_string()));
         };
         let expand = first.expand;
-        let (input_op, columns) = self.plan_operator(&expand.input)?;
         let source_column = columns
             .iter()
             .position(|c| c == &expand.from_variable)
@@ -271,54 +365,21 @@ impl super::Planner {
         } else {
             counts
         };
-        self.finish_edge_count(agg, &shape, counts, columns)
-            .map(Some)
+        self.finish_edge_count(agg, shape, counts, columns)
     }
 
-    /// The count of a whole-graph path of two hops by its middle nodes: a scan of
-    /// them, each counting its two degrees. Only where nothing but labels narrows
-    /// the first node, nothing is grouped, and the store keeps what a hop read from
-    /// its middle needs. Cypher's different edges need both hops to read an edge the
-    /// same way: then only a self-loop can serve both. `None` otherwise: the chain's
-    /// walk from each first node holds for every other shape.
+    /// The middle sum of `shape`, a two-hop count whose first node has `first_labels`
+    /// ([`Self::middle_sum_first_labels`]).
     fn middle_sum_of(
         &self,
-        agg: &AggregateOp,
         shape: &EdgeCountShape<'_>,
-    ) -> Result<Option<PlannedCount>> {
+        first_labels: Vec<String>,
+    ) -> Result<PlannedCount> {
         let [on, near] = shape.hops.as_slice() else {
-            return Ok(None);
+            return Err(Error::Internal(
+                "a middle sum of other than two hops".to_string(),
+            ));
         };
-        if !agg.group_by.is_empty() || !self.store.has_backward_adjacency() {
-            return Ok(None);
-        }
-        let mut below = near.expand.input.as_ref();
-        let mut first_labels: Vec<String> = Vec::new();
-        while let LogicalOperator::Filter(filter) = below {
-            let mut conjuncts = Vec::new();
-            conjuncts_of(&filter.predicate, &mut conjuncts);
-            for conjunct in conjuncts {
-                let Some(label) = super::scan::label_check(conjunct, &near.expand.from_variable)
-                else {
-                    return Ok(None);
-                };
-                first_labels.push(label.to_string());
-            }
-            below = &filter.input;
-        }
-        let LogicalOperator::NodeScan(scan) = below else {
-            return Ok(None);
-        };
-        if scan.input.is_some() || scan.variable != near.expand.from_variable {
-            return Ok(None);
-        }
-        first_labels.extend(scan.label.clone());
-        let same_way = near.expand.direction == on.expand.direction
-            && near.expand.direction != ExpandDirection::Both
-            && near.expand.edge_types == on.expand.edge_types;
-        if !shape.different.is_empty() && !same_way {
-            return Ok(None);
-        }
         let direction_of = |direction: ExpandDirection| match direction {
             ExpandDirection::Outgoing => Direction::Outgoing,
             ExpandDirection::Incoming => Direction::Incoming,
@@ -371,7 +432,7 @@ impl super::Planner {
         )
         .with_read_counter(self.read_counter())
         .with_middle_sum(sum);
-        Ok(Some((counts, columns)))
+        Ok((counts, columns))
     }
 
     /// The plan of `counts` over `columns`, with the aggregate it stands in for:
@@ -873,7 +934,7 @@ impl super::Planner {
     /// of its start, is that; a count of a variable bound below the start may
     /// skip nulls, and any other aggregate (or `DISTINCT`) reads a column the
     /// chain does not hold, so both run on the flat rows.
-    pub(super) fn is_simple_aggregate(&self, agg: &AggregateOp) -> bool {
+    pub(super) fn is_simple_aggregate(agg: &AggregateOp) -> bool {
         let chain = Self::collect_expand_chain(&agg.input);
         let Some(first) = chain.first() else {
             return false;
@@ -883,30 +944,33 @@ impl super::Planner {
         })
     }
 
-    /// Plans a factorized aggregate that operates directly on factorized data.
-    ///
-    /// This avoids the quadratic cost of flattening before aggregation.
-    pub(super) fn plan_factorized_aggregate(
+    /// The factorized aggregate of `agg` over `base_op`, the plan of [`factorized_base`].
+    pub(super) fn factorized_over(
         &self,
         agg: &AggregateOp,
+        base_op: Box<dyn Operator>,
+        base_columns: Vec<String>,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // Build the expand chain - this returns a LazyFactorizedChainOperator
         let expands = Self::collect_expand_chain(&agg.input);
-        if expands.is_empty() {
+        // The route takes a chain of two or more.
+        debug_assert!(expands.len() >= 2, "a factorized aggregate over no chain");
+        if expands.len() < 2 {
             return Err(Error::Internal(
                 "Expected expand chain for factorized aggregate".to_string(),
             ));
         }
-
-        // Get the base operator (before first expand)
-        let first_expand = expands[0];
-        let (base_op, base_columns) = self.plan_operator(&first_expand.input)?;
         // The expands run inside the chain, with no operator of their own:
         // PROFILE names each in the aggregate's detail, from the innermost
         // up, as the post-order walk of the plan meets them.
         let mut expand_nodes = Vec::with_capacity(expands.len());
         let mut node = agg.input.as_ref();
         while expand_nodes.len() < expands.len() {
+            // `collect_expand_chain` walked these same expands down from the input.
+            debug_assert!(
+                matches!(node, LogicalOperator::Expand(_)),
+                "the factorized chain is not the aggregate's input"
+            );
             let LogicalOperator::Expand(expand) = node else {
                 return Err(Error::Internal(
                     "the factorized chain is not the aggregate's input".to_string(),
@@ -931,7 +995,7 @@ impl super::Planner {
                     .position(|c| c == &expand.from_variable)
                     .ok_or_else(|| {
                         Error::Internal(format!(
-                            "Source variable '{}' not found in base columns",
+                            "Source variable '{}' not found in input columns",
                             expand.from_variable
                         ))
                     })?
@@ -1033,8 +1097,8 @@ type PlannedCount = (
 );
 
 /// A grouped count over one expand that its edge counts answer (see
-/// `plan_edge_count`).
-struct EdgeCountShape<'a> {
+/// `edge_count_over`).
+pub(super) struct EdgeCountShape<'a> {
     /// The expands whose paths are counted, the last hop of the path first.
     hops: Vec<CountedExpand<'a>>,
     /// Pairs of positions on the path, the first hop at 0, whose edges must
@@ -1043,7 +1107,7 @@ struct EdgeCountShape<'a> {
 }
 
 /// One expand of a counted chain.
-struct CountedExpand<'a> {
+pub(super) struct CountedExpand<'a> {
     /// The expand.
     expand: &'a ExpandOp,
     /// The expand as a plan operator.
@@ -1074,7 +1138,7 @@ impl<'a> EdgeCountShape<'a> {
     /// - whose group keys are the same for each path of a row (no subquery, no
     ///   volatile call);
     /// - and reads no write (the input writes nothing).
-    fn of(agg: &'a AggregateOp) -> Option<Self> {
+    pub(super) fn of(agg: &'a AggregateOp) -> Option<Self> {
         if agg.input.has_mutations() {
             return None;
         }
@@ -1169,6 +1233,82 @@ impl<'a> EdgeCountShape<'a> {
         }
         Some(Self { hops, different })
     }
+}
+
+/// The count of a whole-graph path of two hops by its middle nodes: a scan of
+/// them, each counting its two degrees. Only where nothing but labels narrows
+/// the first node, nothing is grouped, and the store keeps what a hop read from
+/// its middle needs. Cypher's different edges need both hops to read an edge the
+/// same way: then only a self-loop can serve both. The labels of the first node
+/// when it applies, `None` otherwise: the chain's walk from each first node holds for
+/// every other shape.
+pub(super) fn middle_sum_first_labels(
+    inputs: RouteInputs,
+    agg: &AggregateOp,
+    shape: &EdgeCountShape<'_>,
+) -> Option<Vec<String>> {
+    let [on, near] = shape.hops.as_slice() else {
+        return None;
+    };
+    if !agg.group_by.is_empty() || !inputs.backward_adjacency {
+        return None;
+    }
+    let mut below = near.expand.input.as_ref();
+    let mut first_labels: Vec<String> = Vec::new();
+    while let LogicalOperator::Filter(filter) = below {
+        let mut conjuncts = Vec::new();
+        conjuncts_of(&filter.predicate, &mut conjuncts);
+        for conjunct in conjuncts {
+            let label = super::scan::label_check(conjunct, &near.expand.from_variable)?;
+            first_labels.push(label.to_string());
+        }
+        below = &filter.input;
+    }
+    let LogicalOperator::NodeScan(scan) = below else {
+        return None;
+    };
+    if scan.input.is_some() || scan.variable != near.expand.from_variable {
+        return None;
+    }
+    first_labels.extend(scan.label.clone());
+    let same_way = near.expand.direction == on.expand.direction
+        && near.expand.direction != ExpandDirection::Both
+        && near.expand.edge_types == on.expand.edge_types;
+    if !shape.different.is_empty() && !same_way {
+        return None;
+    }
+    Some(first_labels)
+}
+
+/// The operator an edge count of `shape` is built over: the input of its chain's first hop.
+///
+/// # Errors
+///
+/// A shape without a hop, which [`EdgeCountShape::of`] never finds.
+pub(super) fn edge_count_input<'a>(shape: &EdgeCountShape<'a>) -> Result<&'a LogicalOperator> {
+    // `EdgeCountShape::of` finds a shape only with a hop.
+    debug_assert!(!shape.hops.is_empty(), "an edge count without a hop");
+    shape
+        .hops
+        .last()
+        .map(|first| first.expand.input.as_ref())
+        .ok_or_else(|| Error::Internal("an edge count without a hop".to_string()))
+}
+
+/// The operator a factorized aggregate of `agg` is built over: the input of its chain's first
+/// expand.
+///
+/// # Errors
+///
+/// An aggregate over no chain, which the route never takes factorized.
+pub(super) fn factorized_base(agg: &AggregateOp) -> Result<&LogicalOperator> {
+    super::Planner::collect_expand_chain(&agg.input)
+        .into_iter()
+        .next()
+        .map(|first| first.input.as_ref())
+        .ok_or_else(|| {
+            Error::Internal("Expected expand chain for factorized aggregate".to_string())
+        })
 }
 
 /// Whether `aggregate` counts the rows of a chain of `expands` from `start`: a `count(*)`, or a

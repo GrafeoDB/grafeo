@@ -1265,29 +1265,57 @@ impl super::Planner {
         predicate: &LogicalExpression,
         scan_variable: &str,
     ) -> Option<(String, grafeo_core::graph::ValueRange)> {
-        if let Some((variable, property, min, max, min_inc, max_inc)) =
+        let bounds = Self::range_bounds(predicate, scan_variable)?;
+        for value in [&bounds.min, &bounds.max].into_iter().flatten() {
+            if !self.store_column_orders_like_query(true, &bounds.property, value) {
+                return None;
+            }
+        }
+        let range = self.value_range(
+            bounds.min.as_ref(),
+            bounds.max.as_ref(),
+            bounds.min_inclusive,
+            bounds.max_inclusive,
+        );
+        Some((bounds.property, range))
+    }
+
+    /// The bounds `predicate` puts on a property of `scan_variable`: a `BETWEEN` pattern
+    /// (`n.age >= 30 AND n.age <= 50`) or one comparison with a literal (`n.age > 30`).
+    pub(super) fn range_bounds(
+        predicate: &LogicalExpression,
+        scan_variable: &str,
+    ) -> Option<RangeBounds> {
+        if let Some((variable, property, min, max, min_inclusive, max_inclusive)) =
             Self::extract_between_predicate(predicate)
             && variable == scan_variable
-            && self.store_column_orders_like_query(true, &property, &min)
-            && self.store_column_orders_like_query(true, &property, &max)
         {
-            let range = self.value_range(Some(&min), Some(&max), min_inc, max_inc);
-            return Some((property, range));
+            return Some(RangeBounds {
+                property,
+                min: Some(min),
+                max: Some(max),
+                min_inclusive,
+                max_inclusive,
+            });
         }
         let (variable, property, op, value) = Self::extract_range_predicate(predicate)?;
-        if variable != scan_variable
-            || !self.store_column_orders_like_query(true, &property, &value)
-        {
+        if variable != scan_variable {
             return None;
         }
-        let range = match op {
-            BinaryOp::Lt => self.value_range(None, Some(&value), false, false),
-            BinaryOp::Le => self.value_range(None, Some(&value), false, true),
-            BinaryOp::Gt => self.value_range(Some(&value), None, false, false),
-            BinaryOp::Ge => self.value_range(Some(&value), None, true, false),
+        let (min, max, min_inclusive, max_inclusive) = match op {
+            BinaryOp::Lt => (None, Some(value), false, false),
+            BinaryOp::Le => (None, Some(value), false, true),
+            BinaryOp::Gt => (Some(value), None, false, false),
+            BinaryOp::Ge => (Some(value), None, true, false),
             _ => return None,
         };
-        Some((property, range))
+        Some(RangeBounds {
+            property,
+            min,
+            max,
+            min_inclusive,
+            max_inclusive,
+        })
     }
 
     /// The range between `min` and `max` under the statement's rule for two
@@ -1516,22 +1544,37 @@ impl super::Planner {
     /// [`store_orders_like_query`](Self::store_orders_like_query) for
     /// `value` and every value it holds.
     fn store_orders_elements_like_query(&self, value: &Value) -> bool {
-        match value {
-            Value::Time(_) => false,
-            Value::Timestamp(_) | Value::ZonedDatetime(_) => {
-                self.session_context.temporal_comparison == TemporalComparison::default()
+        Self::elements_order_like_query(value, Some(self.session_context.temporal_comparison))
+            .unwrap_or(false)
+    }
+
+    /// [`store_orders_elements_like_query`](Self::store_orders_elements_like_query) under the
+    /// session's temporal rule `temporal`: `None` when the answer depends on that rule and none
+    /// is given (a timestamp or zoned datetime, which a time does not settle first).
+    pub(super) fn elements_order_like_query(
+        value: &Value,
+        temporal: Option<TemporalComparison>,
+    ) -> Option<bool> {
+        let all = |values: &mut dyn Iterator<Item = &Value>| {
+            let mut known = true;
+            for value in values {
+                match Self::elements_order_like_query(value, temporal) {
+                    Some(true) => {}
+                    Some(false) => return Some(false),
+                    None => known = false,
+                }
             }
-            Value::List(items) => items
-                .iter()
-                .all(|item| self.store_orders_elements_like_query(item)),
-            Value::Map(entries) => entries
-                .values()
-                .all(|entry| self.store_orders_elements_like_query(entry)),
-            Value::Path { nodes, edges } => nodes
-                .iter()
-                .chain(edges.iter())
-                .all(|element| self.store_orders_elements_like_query(element)),
-            _ => true,
+            known.then_some(true)
+        };
+        match value {
+            Value::Time(_) => Some(false),
+            Value::Timestamp(_) | Value::ZonedDatetime(_) => {
+                temporal.map(|temporal| temporal == TemporalComparison::default())
+            }
+            Value::List(items) => all(&mut items.iter()),
+            Value::Map(entries) => all(&mut entries.values()),
+            Value::Path { nodes, edges } => all(&mut nodes.iter().chain(edges.iter())),
+            _ => Some(true),
         }
     }
 
@@ -2321,4 +2364,18 @@ fn equality_probes(value: &Value, comparison: TemporalComparison) -> Option<Vec<
         Value::Time(_) => None,
         _ => Some(vec![value.clone()]),
     }
+}
+
+/// The bounds a range predicate puts on a property ([`Planner::range_bounds`](super::Planner)).
+pub(super) struct RangeBounds {
+    /// The bounded property.
+    pub(super) property: String,
+    /// The lower bound, if any.
+    pub(super) min: Option<Value>,
+    /// The upper bound, if any.
+    pub(super) max: Option<Value>,
+    /// Whether the lower bound is included.
+    pub(super) min_inclusive: bool,
+    /// Whether the upper bound is included.
+    pub(super) max_inclusive: bool,
 }

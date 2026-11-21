@@ -22,15 +22,15 @@ const IS3: &str = "MATCH (n:Person {id: $personId})-[k:KNOWS]-(friend:Person) \
                    RETURN friend.id AS friendId, k.creationDate AS since";
 
 /// IS3 with its sort: a person's friends, the most recent friendship first.
-const IS3_ORDERED: &str = "MATCH (n:Person {id: $personId})-[k:KNOWS]-(friend:Person)                            RETURN friend.id AS friendId, k.creationDate AS since                            ORDER BY since DESC, friendId ASC";
+const IS3_ORDERED: &str = "MATCH (n:Person {id: $personId})-[k:KNOWS]-(friend:Person) RETURN friend.id AS friendId, k.creationDate AS since ORDER BY since DESC, friendId ASC";
 
 /// IS2's shape: a person's latest messages, as one top-k.
-const IS2: &str = "MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(m:Message)                    RETURN m.id AS messageId, m.creationDate AS created                    ORDER BY created DESC, messageId ASC LIMIT 3";
+const IS2: &str = "MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(m:Message) RETURN m.id AS messageId, m.creationDate AS created ORDER BY created DESC, messageId ASC LIMIT 3";
 
 /// The ordered shapes: IS3 sorted, IS2 at several limits, a sort by a property the RETURN
 /// drops, SKIP with LIMIT and alone, and a LIMIT with no sort. Every sort key leaves no ties.
 fn ordered_shapes() -> Vec<String> {
-    let dropped = "MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(m:Message)                    RETURN m.id AS messageId ORDER BY m.creationDate DESC";
+    let dropped = "MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(m:Message) RETURN m.id AS messageId ORDER BY m.creationDate DESC";
     vec![
         IS3_ORDERED.to_string(),
         IS2.to_string(),
@@ -41,7 +41,7 @@ fn ordered_shapes() -> Vec<String> {
         IS2.replace("LIMIT 3", "SKIP 2"),
         dropped.to_string(),
         format!("{dropped} LIMIT 2"),
-        "MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(m:Message)          RETURN m.id AS messageId LIMIT 2"
+        "MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(m:Message) RETURN m.id AS messageId LIMIT 2"
             .to_string(),
     ]
 }
@@ -56,7 +56,7 @@ fn people(config: Config) -> GrafeoDB {
                 (vincent:Person {id: 3, firstName: 'Vincent'}), \
                 (mia:Person:Admin {id: 'm', firstName: 'Mia'})-[:LIVES_IN]->(:City {id: 30}), \
                 (alix)-[:KNOWS {creationDate: 5}]->(gus), (gus)-[:KNOWS {creationDate: 7}]->(vincent), \
-                (mia)-[:KNOWS {creationDate: 9}]->(alix),                 (:Message {id: 101, creationDate: 14})-[:HAS_CREATOR]->(alix),                 (:Message {id: 102, creationDate: 12})-[:HAS_CREATOR]->(alix),                 (:Message {id: 103, creationDate: 15})-[:HAS_CREATOR]->(alix),                 (:Message {id: 104, creationDate: 11})-[:HAS_CREATOR]->(alix),                 (:Message {id: 105, creationDate: 13})-[:HAS_CREATOR]->(alix),                 (:Message {id: 201, creationDate: 21})-[:HAS_CREATOR]->(gus),                 (:Message {id: 202, creationDate: 22})-[:HAS_CREATOR]->(gus)",
+                (mia)-[:KNOWS {creationDate: 9}]->(alix), (:Message {id: 101, creationDate: 14})-[:HAS_CREATOR]->(alix), (:Message {id: 102, creationDate: 12})-[:HAS_CREATOR]->(alix), (:Message {id: 103, creationDate: 15})-[:HAS_CREATOR]->(alix), (:Message {id: 104, creationDate: 11})-[:HAS_CREATOR]->(alix), (:Message {id: 105, creationDate: 13})-[:HAS_CREATOR]->(alix), (:Message {id: 201, creationDate: 21})-[:HAS_CREATOR]->(gus), (:Message {id: 202, creationDate: 22})-[:HAS_CREATOR]->(gus)",
     )
     .unwrap();
     db
@@ -392,7 +392,7 @@ fn a_zoned_datetime_key_answers_as_today() {
 #[test]
 fn a_label_check_over_the_pinned_start_gives_todays_rows() {
     let db = people(Config::in_memory());
-    let query = "MATCH (n:Person {id: $personId})-[:LIVES_IN]->(c:City) WHERE n:Admin                  RETURN n.firstName AS firstName, c.id AS cityId";
+    let query = "MATCH (n:Person {id: $personId})-[:LIVES_IN]->(c:City) WHERE n:Admin RETURN n.firstName AS firstName, c.id AS cityId";
     for cypher in [false, true] {
         for id in keys() {
             assert_eq!(
@@ -619,4 +619,182 @@ fn a_bad_count_on_a_dropped_graph_fails_as_today() {
         answers[1],
         "GRAFEO-Q006: negative limit value: SKIP/LIMIT must be non-negative, got -1"
     );
+}
+
+/// Aggregates the recipe builds by their route: the edge count over a pinned start (also
+/// grouped), the aggregate over the rows (of a property), the two-hop count by the middle nodes,
+/// a label's count, and a range's fold with a literal bound.
+fn covered_aggregates() -> Vec<&'static str> {
+    vec![
+        "MATCH (n:Person {id: $personId})-[:KNOWS]-(f:Person) RETURN count(f) AS friends",
+        "MATCH (n:Person {id: $personId})-[:KNOWS]-(f:Person) \
+         RETURN f.firstName AS name, count(*) AS n",
+        "MATCH (n:Person {id: $personId})-[:KNOWS]-(f:Person) \
+         RETURN count(f.firstName) AS named, max(f.firstName) AS last",
+        "MATCH (a:Person)-[:KNOWS]->(m:Person)-[:KNOWS]->(b:Person) RETURN count(*) AS paths",
+        "MATCH (n:Person) RETURN count(n) AS people",
+        "MATCH (m:Message) WHERE m.creationDate > 12 \
+         RETURN count(*) AS later, avg(m.creationDate) AS mean",
+    ]
+}
+
+/// Each covered aggregate gives today's rows for every key, in GQL and Cypher, and (with work
+/// counters) no call plans. With factorized execution off the rows are today's too; there a
+/// count over a chain runs over its rows, and Cypher's check that the chain's edges differ is a
+/// filter no recipe covers, so that statement alone plans each call.
+#[test]
+fn aggregates_give_todays_rows() {
+    let db = people(Config::in_memory());
+    for cypher in [false, true] {
+        for query in covered_aggregates() {
+            same_as_today(&db, cypher, query, &keys());
+        }
+    }
+    let plain = people(Config::in_memory().without_factorized_execution());
+    for cypher in [false, true] {
+        for query in covered_aggregates() {
+            // Cypher's chain of two hops checks that its edges differ, a filter no recipe covers.
+            let opens = !(cypher && query.contains("(m:Person)-[:KNOWS]->(b:Person)"));
+            for id in keys() {
+                #[cfg(grafeo_work_counters)]
+                let _ = grafeo_common::work::take();
+                let rows = run(&plain, cypher, query, with(id.clone()));
+                #[cfg(grafeo_work_counters)]
+                if matches!(id, Value::Int64(_) | Value::String(_)) {
+                    let built =
+                        grafeo_common::work::take().get(grafeo_common::work::Work::PlanBuilt);
+                    assert_eq!(built == 0, opens, "{query} with {id:?}, cypher {cypher}");
+                }
+                assert_eq!(
+                    rows,
+                    today(&plain, cypher, query, &id),
+                    "{query} with {id:?}, cypher {cypher}, factorized off, opens {opens}"
+                );
+            }
+        }
+    }
+}
+
+/// A range fold whose bound is a parameter is planned per call, with today's rows.
+#[test]
+fn a_range_fold_over_a_parameter_gives_todays_rows() {
+    let db = people(Config::in_memory());
+    let query = "MATCH (m:Message) WHERE m.creationDate > $personId \
+                 RETURN count(*) AS later, avg(m.creationDate) AS mean";
+    for cypher in [false, true] {
+        for bound in [0, 12, 14, 30] {
+            let bound = Value::Int64(bound);
+            assert_eq!(
+                run(&db, cypher, query, with(bound.clone())),
+                today(&db, cypher, query, &bound),
+                "bound {bound:?}, cypher {cypher}"
+            );
+        }
+    }
+}
+
+/// A second session opens the recipe the first one made, with its own values: each call's
+/// rows are today's.
+#[test]
+fn a_second_session_opens_the_same_aggregate_recipe() {
+    let db = people(Config::in_memory());
+    let query = covered_aggregates()[0];
+    let first = db.session();
+    let second = db.session();
+    for (call, id) in [1, 2, 3, 1, 2].into_iter().enumerate() {
+        let session = if call % 2 == 0 { &first } else { &second };
+        let rows = session
+            .execute_with_params(query, with(Value::Int64(id)))
+            .map(sorted)
+            .map_err(|error| error.to_string());
+        assert_eq!(
+            rows,
+            today(&db, false, query, &Value::Int64(id)),
+            "call {call}"
+        );
+    }
+}
+
+/// A range fold over a temporal literal follows each session's time zone: two sessions in
+/// other zones, one without a zone, and one that changes its zone between calls, each give the
+/// rows of their own run
+/// of the statement without values. The bound is the filter's only condition, so it is a range
+/// fold's: over a zoned or a local datetime the session's temporal rule orders the values, so the
+/// call is planned per call (with work counters: it plans); over a date the recipe opens.
+#[test]
+fn a_range_fold_over_a_temporal_literal_follows_each_sessions_time_zone() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute(
+        "INSERT (:Event {day: DATE '2024-01-01', at: DATETIME '2024-01-02T10:00:00'}), (:Event {day: DATE '2024-01-02', at: DATETIME '2024-01-02T12:00:00'}), (:Event {day: DATE '2024-01-03', at: ZONED DATETIME '2024-01-02T11:00:00+02:00'})",
+    )
+    .unwrap();
+    let in_zone = |zone: &str| {
+        let session = db.session();
+        session
+            .execute(&format!("SESSION SET TIME ZONE '{zone}'"))
+            .unwrap();
+        session
+    };
+    let rows = |session: &grafeo_engine::session::Session, query: &str, values| {
+        let result = if values {
+            session.execute_with_params(query, with(Value::Int64(0)))
+        } else {
+            session.execute(query)
+        };
+        result.map(sorted).map_err(|error| error.to_string())
+    };
+    let amsterdam = in_zone("+01:00");
+    let tokyo = in_zone("+09:00");
+    // A session without a time zone reads datetimes by the default rule, where the planner folds
+    // them; the recipe still leaves them to each call.
+    let plain = db.session();
+    for (bound, opens) in [
+        ("e.at > ZONED DATETIME '2024-01-02T10:30:00+01:00'", false),
+        ("e.at > DATETIME '2024-01-02T10:30:00'", false),
+        ("e.day > DATE '2024-01-01'", true),
+    ] {
+        let query = format!("MATCH (e:Event) WHERE {bound} RETURN count(*) AS later");
+        let calls = [&amsterdam, &tokyo, &plain, &amsterdam];
+        for (call, session) in calls.into_iter().enumerate() {
+            #[cfg(grafeo_work_counters)]
+            let _ = grafeo_common::work::take();
+            let prepared = rows(session, &query, true);
+            #[cfg(grafeo_work_counters)]
+            if call > 0 {
+                let built = grafeo_common::work::take().get(grafeo_common::work::Work::PlanBuilt);
+                assert_eq!(built == 0, opens, "{bound} call {call}: planned {built}");
+            }
+            assert_eq!(
+                prepared,
+                rows(session, &query, false),
+                "{bound} call {call}, opens {opens}"
+            );
+        }
+        amsterdam.execute("SESSION SET TIME ZONE '-05:00'").unwrap();
+        assert_eq!(
+            rows(&amsterdam, &query, true),
+            rows(&amsterdam, &query, false),
+            "{bound} after a zone change"
+        );
+        amsterdam.execute("SESSION SET TIME ZONE '+01:00'").unwrap();
+    }
+}
+
+/// A SQL/PGQ range fold, which no recipe covers, gives the rows of its statement without values.
+#[cfg(feature = "sql-pgq")]
+#[test]
+fn a_sql_range_fold_gives_todays_rows() {
+    let db = people(Config::in_memory());
+    let query = "SELECT count(*) AS later FROM GRAPH_TABLE (MATCH (m:Message) WHERE m.creationDate > 12 COLUMNS (m.id AS id))";
+    for id in keys() {
+        let prepared = db
+            .execute_sql_with_params(query, with(id.clone()))
+            .map(sorted)
+            .map_err(|error| error.to_string());
+        let plain = db
+            .execute_sql(query)
+            .map(sorted)
+            .map_err(|error| error.to_string());
+        assert_eq!(prepared, plain, "{id:?}");
+    }
 }

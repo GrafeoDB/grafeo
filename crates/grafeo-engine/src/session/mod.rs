@@ -382,6 +382,19 @@ pub(crate) struct PlanOptions {
     pub path_search_budget: usize,
 }
 
+#[cfg(lpg_language)]
+impl PlanOptions {
+    /// Whether the planner executes factorized under `rules`: the database's setting and the
+    /// rule.
+    pub(crate) fn factorized_execution_under(
+        &self,
+        rules: crate::query::optimizer::PlannerRules,
+    ) -> bool {
+        self.factorized_execution
+            && rules.has(crate::query::optimizer::PlannerRule::FactorizedExecution)
+    }
+}
+
 /// Runtime configuration for creating a new session.
 ///
 /// Groups the shared parameters passed to all session constructors, keeping
@@ -4414,7 +4427,7 @@ impl Session {
             self.check_external_access(&plan)?;
             _focus = self.focus_statement(plan.graph.as_deref())?;
             check_writes(&plan)?;
-            Self::fill_prepared(plan, fill)?
+            self.fill_prepared(&cache_key, plan, fill)?
         } else {
             // A statement with values that binds by value keeps its parsed
             // plan, which each call fills, binds and optimizes with its values
@@ -4924,7 +4937,7 @@ impl Session {
         let cached = self.cached_plan(&cache_key, params);
         let optimized_plan = if let Some((plan, fill)) = cached {
             self.check_external_access(&plan)?;
-            Self::fill_prepared(plan, fill)?
+            self.fill_prepared(&cache_key, plan, fill)?
         } else {
             // A statement that binds by value keeps its parsed plan (see
             // execute_gql).
@@ -5430,7 +5443,7 @@ impl Session {
         let cached = self.cached_plan(&cache_key, params);
         let optimized_plan = if let Some((plan, fill)) = cached {
             self.check_external_access(&plan)?;
-            Self::fill_prepared(plan, fill)?
+            self.fill_prepared(&cache_key, plan, fill)?
         } else {
             // A statement that binds by value keeps its parsed plan (see
             // execute_gql).

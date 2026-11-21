@@ -22,6 +22,7 @@
 mod agent_memory_migration;
 mod aggregate_calls;
 mod aggregate_computed_columns;
+mod aggregate_routes;
 mod aggregate_semantics;
 mod algorithms_read_visible_graph;
 mod all_different_values;

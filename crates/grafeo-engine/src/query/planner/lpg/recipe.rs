@@ -13,17 +13,29 @@ use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, Result};
 
 use super::Planner;
+use super::aggregate::{self, EdgeCountShape, RangeRead, Route, RouteInputs, route};
 use super::project::{limit_over, sort_input, takes_top_k};
+use crate::query::optimizer::PlannerRule;
+use crate::query::plan::{AggregateOp, RangeFoldShape};
 use crate::query::plan::{
     BinaryOp, BuiltinFunction, Callee, CountClauses, CountExpr, FilterOp, LimitOp,
     LogicalExpression, LogicalOperator, LogicalPlan, SkipOp,
 };
 use crate::query::planner::PhysicalPlan;
+use grafeo_common::types::StatementLanguage;
 
 /// The kinds a recipe covers, by name: the set a test pins, so it grows only on purpose.
 #[cfg(test)]
-pub(crate) const COVERED: [&str; 8] = [
-    "Return", "Expand", "Filter", "Seek", "NodeScan", "Sort", "Limit", "Skip",
+pub(crate) const COVERED: [&str; 9] = [
+    "Return",
+    "Expand",
+    "Filter",
+    "Seek",
+    "NodeScan",
+    "Sort",
+    "Limit",
+    "Skip",
+    "Aggregate",
 ];
 
 /// A prepared plan's recipe: what the physical planner builds for each operator, and the
@@ -36,6 +48,9 @@ pub(crate) struct Recipe {
     parameters: Vec<String>,
     /// The parameters of its LIMIT and SKIP counts, which a call checks before it opens.
     counts: Vec<String>,
+    /// What the routes of its aggregates read besides the plan, which every call's planner
+    /// reads alike (a debug build checks it at each open).
+    inputs: RouteInputs,
 }
 
 /// What the physical planner builds for one operator of a prepared plan, in the plan's order.
@@ -60,6 +75,12 @@ enum Step {
     Limit(Box<Step>),
     /// A SKIP over its input.
     Skip(Box<Step>),
+    /// An aggregate by its route, over the step of the operator the route reads its rows from
+    /// (none for a route that reads the store itself).
+    Aggregate {
+        route: AggregateRoute,
+        input: Option<Box<Step>>,
+    },
 }
 
 impl Step {
@@ -75,6 +96,7 @@ impl Step {
             Self::Sort(_) => "Sort",
             Self::Limit(_) => "Limit",
             Self::Skip(_) => "Skip",
+            Self::Aggregate { .. } => "Aggregate",
         }
     }
 
@@ -87,7 +109,10 @@ impl Step {
         | Self::Filter(input)
         | Self::Sort(input)
         | Self::Limit(input)
-        | Self::Skip(input) = self
+        | Self::Skip(input)
+        | Self::Aggregate {
+            input: Some(input), ..
+        } = self
         {
             input.kinds(into);
         }
@@ -110,9 +135,158 @@ pub(crate) struct OpenContext<'a> {
     pub(crate) values: &'a HashMap<String, Value>,
 }
 
-/// The recipe of `plan`, or the first kind it holds that no recipe covers.
-pub(crate) fn recipe_of(plan: &LogicalPlan) -> std::result::Result<Recipe, Uncovered> {
-    let root = step_of(&plan.root)?;
+/// The way an aggregate is built ([`aggregate::route`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AggregateRoute {
+    /// The two-hop count summed over the middle nodes' degrees.
+    MiddleSum,
+    /// The count of each row's edges along a chain.
+    EdgeCount,
+    /// The count over the factorized chain.
+    Factorized,
+    /// The store's count of a label's nodes.
+    LabelCount,
+    /// The fold of a range's values.
+    RangeFold,
+    /// The aggregate over the input's rows.
+    Regular,
+}
+
+/// The kind of `route`.
+fn route_kind<T>(route: &Route<'_, T>) -> AggregateRoute {
+    match route {
+        Route::MiddleSum(..) => AggregateRoute::MiddleSum,
+        Route::EdgeCount(_) => AggregateRoute::EdgeCount,
+        Route::Factorized => AggregateRoute::Factorized,
+        Route::LabelCount(_) => AggregateRoute::LabelCount,
+        Route::RangeFold(..) => AggregateRoute::RangeFold,
+        Route::Regular => AggregateRoute::Regular,
+    }
+}
+
+/// The route of `agg` that a prepared plan's recipe takes, from `inputs` alone: `None` where
+/// the route would read a session or the data, which is a range fold in SQL/PGQ (the column's
+/// kinds), over a parameter, or over a value the session's temporal rule orders.
+pub(crate) fn recipe_route(inputs: RouteInputs, agg: &AggregateOp) -> Option<AggregateRoute> {
+    // A range-fold shape is never an edge count's, a factorized chain's or a label count's, so
+    // a fold the recipe cannot read takes no earlier route's place.
+    if inputs.rules.has(PlannerRule::RangeFold)
+        && inputs.rules.has(PlannerRule::IndexRange)
+        && let Some(shape) = agg.range_fold_shape()
+    {
+        if inputs.language == StatementLanguage::SqlPgq
+            || range_reads_a_parameter(&shape.filter.predicate)
+        {
+            return None;
+        }
+        if let Some(bounds) = Planner::range_bounds(&shape.filter.predicate, shape.variable) {
+            for value in [&bounds.min, &bounds.max].into_iter().flatten() {
+                Planner::elements_order_like_query(value, None)?;
+            }
+        }
+    }
+    let read = |shape: &RangeFoldShape<'_>| {
+        let bounds = Planner::range_bounds(&shape.filter.predicate, shape.variable)?;
+        [&bounds.min, &bounds.max]
+            .into_iter()
+            .flatten()
+            .all(|value| Planner::elements_order_like_query(value, None) == Some(true))
+            .then_some(())
+    };
+    Some(route_kind(&route(inputs, agg, read)))
+}
+
+/// The operator an aggregate of `agg` by route `kind` reads its rows from, `None` for a route
+/// that reads the store itself (see [`Route::input`]).
+pub(super) fn route_input_of(agg: &AggregateOp, kind: AggregateRoute) -> Option<&LogicalOperator> {
+    match kind {
+        AggregateRoute::EdgeCount => {
+            let shape = EdgeCountShape::of(agg)?;
+            aggregate::edge_count_input(&shape).ok()
+        }
+        AggregateRoute::Factorized => aggregate::factorized_base(agg).ok(),
+        AggregateRoute::Regular => Some(agg.input.as_ref()),
+        AggregateRoute::MiddleSum | AggregateRoute::LabelCount | AggregateRoute::RangeFold => None,
+    }
+}
+
+/// Whether a range comparison in `predicate` (one, or two joined by AND, as
+/// [`Planner::range_bounds`] reads them) compares with a value computed from a parameter: a fold
+/// the call's value decides. A parameter elsewhere (an equality's key) decides no range.
+fn range_reads_a_parameter(predicate: &LogicalExpression) -> bool {
+    match predicate {
+        LogicalExpression::Binary {
+            left,
+            op: BinaryOp::And,
+            right,
+        } => range_reads_a_parameter(left) || range_reads_a_parameter(right),
+        LogicalExpression::Binary {
+            left,
+            op: BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge,
+            right,
+        } => mentions_a_parameter(left) || mentions_a_parameter(right),
+        _ => false,
+    }
+}
+
+/// Whether `expression` reads a parameter, in a comparison's operands and what they compute.
+fn mentions_a_parameter(expression: &LogicalExpression) -> bool {
+    match expression {
+        LogicalExpression::Parameter(_) => true,
+        LogicalExpression::Binary { left, right, .. } => {
+            mentions_a_parameter(left) || mentions_a_parameter(right)
+        }
+        LogicalExpression::Unary { operand, .. } => mentions_a_parameter(operand),
+        LogicalExpression::FunctionCall { args, .. } => args.iter().any(mentions_a_parameter),
+        _ => false,
+    }
+}
+
+impl Planner {
+    /// The kind of route this planner builds `agg` by, for tests that compare it with a recipe's.
+    #[cfg(test)]
+    pub(crate) fn route_kind_of(&self, agg: &AggregateOp) -> AggregateRoute {
+        route_kind(&self.aggregate_route(agg))
+    }
+
+    /// The route of kind `kind` for `agg`, with what its builder reads for this call: the route
+    /// a recipe decided. `None` when `agg` does not have its shape.
+    fn route_of_kind<'a>(
+        &self,
+        agg: &'a AggregateOp,
+        kind: AggregateRoute,
+    ) -> Option<Route<'a, RangeRead>> {
+        Some(match kind {
+            AggregateRoute::MiddleSum => {
+                let shape = EdgeCountShape::of(agg)?;
+                let first_labels =
+                    aggregate::middle_sum_first_labels(self.route_inputs(), agg, &shape)?;
+                Route::MiddleSum(shape, first_labels)
+            }
+            AggregateRoute::EdgeCount => Route::EdgeCount(EdgeCountShape::of(agg)?),
+            AggregateRoute::Factorized => Route::Factorized,
+            AggregateRoute::LabelCount => Route::LabelCount(agg.counted_label()?),
+            AggregateRoute::RangeFold => {
+                let shape = agg.range_fold_shape()?;
+                let read = self.filter_range(&shape.filter.predicate, shape.variable)?;
+                Route::RangeFold(shape, read)
+            }
+            AggregateRoute::Regular => Route::Regular,
+        })
+    }
+}
+
+/// The recipe of `plan`, with its aggregates' routes from `inputs`, or the first kind it holds
+/// that no recipe covers. A plan that names its own graph (SQL/PGQ's `GRAPH_TABLE (g ...)`) has
+/// none: `inputs` are those of the session's graph.
+pub(crate) fn recipe_of(
+    plan: &LogicalPlan,
+    inputs: RouteInputs,
+) -> std::result::Result<Recipe, Uncovered> {
+    if plan.graph.is_some() {
+        return Err(Uncovered { kind: "PlanGraph" });
+    }
+    let root = step_of(&plan.root, inputs)?;
     let mut names = HashSet::new();
     crate::query::optimizer::plan_names(&plan.root, &mut names);
     let mut parameters = Vec::new();
@@ -123,6 +297,7 @@ pub(crate) fn recipe_of(plan: &LogicalPlan) -> std::result::Result<Recipe, Uncov
         names,
         parameters,
         counts,
+        inputs,
     })
 }
 
@@ -157,8 +332,8 @@ fn parameters_of(op: &LogicalOperator, parameters: &mut Vec<String>, counts: &mu
     }
 }
 
-fn step_of(op: &LogicalOperator) -> std::result::Result<Step, Uncovered> {
-    let below = |input: &LogicalOperator| step_of(input).map(Box::new);
+fn step_of(op: &LogicalOperator, inputs: RouteInputs) -> std::result::Result<Step, Uncovered> {
+    let below = |input: &LogicalOperator| step_of(input, inputs).map(Box::new);
     let uncovered = |kind| Err(Uncovered { kind });
     match op {
         LogicalOperator::Return(ret) => {
@@ -182,6 +357,33 @@ fn step_of(op: &LogicalOperator) -> std::result::Result<Step, Uncovered> {
         }
         LogicalOperator::Limit(limit) => Ok(Step::Limit(below(&limit.input)?)),
         LogicalOperator::Skip(skip) => Ok(Step::Skip(below(&skip.input)?)),
+        LogicalOperator::Aggregate(agg) => {
+            if agg.having.is_some() {
+                return uncovered("Having");
+            }
+            // No value inside the aggregate: its keys and arguments are properties and variables.
+            let plain_aggregate = |aggregate: &crate::query::plan::AggregateExpr| {
+                aggregate.expression.as_ref().is_none_or(is_plain)
+                    && aggregate.expression2.is_none()
+                    && aggregate.percentile.is_none()
+                    && aggregate.separator.is_none()
+            };
+            if !agg.group_by.iter().all(is_plain) || !agg.aggregates.iter().all(plain_aggregate) {
+                return uncovered("AggregateItems");
+            }
+            let Some(route) = recipe_route(inputs, agg) else {
+                return uncovered("RangeFold");
+            };
+            // Its only input a recipe reaches is a procedure without YIELD, which none covers.
+            if route == AggregateRoute::Factorized {
+                return uncovered("Factorized");
+            }
+            let input = match route_input_of(agg, route) {
+                Some(input) => Some(below(input)?),
+                None => None,
+            };
+            Ok(Step::Aggregate { route, input })
+        }
         LogicalOperator::Expand(expand) => {
             if expand.is_variable_length() {
                 return uncovered("VariableLengthExpand");
@@ -340,6 +542,11 @@ impl Recipe {
         let _statement =
             super::value_join::StatementScope::enter(&planner.statement_writes, &plan.root);
         planner.check_statement_scope();
+        debug_assert_eq!(
+            planner.route_inputs(),
+            self.inputs,
+            "a recipe opened by a planner that reads other route inputs than it was made with"
+        );
         planner.plan_names.borrow_mut().clone_from(&self.names);
         planner.session_context.warnings.raise_all(plan.warnings);
         let Some((operator, columns)) = open_step(&self.root, &plan.root, plan.count_clauses, ctx)?
@@ -424,6 +631,24 @@ fn open_step(
             }
             let opened = planner.below_limit(limit, count, || open(input, &limit.input))?;
             Ok(opened.map(|(input_op, columns)| limit_over(limit, count, input_op, columns)))
+        }
+        (Step::Aggregate { route, input }, LogicalOperator::Aggregate(agg)) => {
+            // The route's data for this call (its shape, labels or range). Without it the
+            // call's planner reads other inputs than the recipe was made with: today's path.
+            let Some(route) = planner.route_of_kind(agg, *route) else {
+                return Ok(None);
+            };
+            let built = match (input, route.input(agg)?) {
+                (Some(step), Some(input_op)) => {
+                    let Some(built) = open(step, input_op)? else {
+                        return Ok(None);
+                    };
+                    Some(built)
+                }
+                (None, None) => None,
+                _ => return Err(mismatch()),
+            };
+            planner.build_route(agg, route, built).map(Some)
         }
         (Step::Skip(input), LogicalOperator::Skip(skip)) => {
             let Some((input_op, columns)) = open(input, &skip.input)? else {

@@ -25,10 +25,10 @@
 //! legal, not just which is faster. Each rewrite lives in the submodule
 //! that owns the corresponding logical operator.
 //!
-//! 1. **Factorized counts** (`aggregate::plan_factorized_aggregate`): a bare
+//! 1. **Factorized counts** (`aggregate::factorized_over`): a bare
 //!    `COUNT` over two or more consecutive `Expand`s counts the paths level
 //!    by level, without flattening them, unless the degree count
-//!    (`aggregate::plan_edge_count`) counts the last hop's edges of each row
+//!    (`aggregate::edge_count_over`) counts the last hop's edges of each row
 //!    from the adjacency, which is faster. Any other chain of expands streams
 //!    hop by hop, which stops early under a LIMIT and holds one chunk (a
 //!    flattened factorized chain built the whole product first). Disabled
@@ -93,7 +93,7 @@
 //! at every hop. See [`crate::transaction`] for the epoch/visibility rules.
 
 pub(crate) mod after_write;
-mod aggregate;
+pub(crate) mod aggregate;
 mod expand;
 mod expression;
 pub(crate) mod filter;

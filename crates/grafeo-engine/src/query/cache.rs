@@ -141,6 +141,12 @@ impl CacheKey {
     pub fn language(&self) -> QueryLanguage {
         self.language
     }
+
+    /// The planner rules the plan is made with.
+    #[must_use]
+    pub fn rules(&self) -> crate::query::optimizer::PlannerRules {
+        self.rules
+    }
 }
 
 /// The text a statement is cached by: the whole text but the whitespace
@@ -210,16 +216,18 @@ impl CachedPlan {
     }
 
     /// The recipe the calls of this prepared plan open, or the kind it holds that no recipe
-    /// covers: made on first use, then shared by every call and session.
+    /// covers: made on first use from `inputs`, which every call of one cache key and database
+    /// gives alike (read only then), then shared by every call and session.
     #[cfg(prepared_plans)]
     pub(crate) fn recipe(
         &self,
+        inputs: impl FnOnce() -> crate::query::planner::lpg::aggregate::RouteInputs,
     ) -> &std::result::Result<
         crate::query::planner::lpg::recipe::Recipe,
         crate::query::planner::lpg::recipe::Uncovered,
     > {
         self.recipe
-            .get_or_init(|| crate::query::planner::lpg::recipe::recipe_of(&self.plan))
+            .get_or_init(|| crate::query::planner::lpg::recipe::recipe_of(&self.plan, inputs()))
     }
 
     /// What the cache charges the entry, in bytes.

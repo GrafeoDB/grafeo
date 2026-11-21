@@ -201,7 +201,11 @@ impl<'s> ResultStream<'s> {
                 self.exhausted = true;
                 Ok(None)
             }
-            Err(err) => Err(super::convert_operator_error(err)),
+            Err(err) => {
+                // A failed statement returns no more rows
+                self.exhausted = true;
+                Err(super::convert_operator_error(err))
+            }
         }
     }
 
@@ -430,7 +434,13 @@ impl OwnedResultStream {
                 self._guard = None;
                 Ok(None)
             }
-            Err(err) => Err(super::convert_operator_error(err)),
+            Err(err) => {
+                // A failed statement returns no more rows, and reads the
+                // transaction no more.
+                self.exhausted = true;
+                self._guard = None;
+                Err(super::convert_operator_error(err))
+            }
         }
     }
 

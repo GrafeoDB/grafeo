@@ -89,6 +89,7 @@ Performance and memory release, in progress: this section lists what has landed 
 - **EXPLAIN and PROFILE of a SPARQL query on the Ring's leapfrog join answer**: they failed with an internal error, while the query itself ran; the plan now shows the leapfrog join with the triple scans it absorbed.
 - **A GQL `LIMIT` keeps its rows before a `DISTINCT`, a grouping, a `WHERE` or an `ORDER BY`**: `MATCH (n:Person) WITH n.age AS a LIMIT 10 RETURN DISTINCT a`, and the same with a grouping key, a `WHERE` or an `ORDER BY` after the `LIMIT`, returned no rows (also in 0.6.3); Cypher was not affected.
 - **A spilled sort holds the memory limit to the end**: a GQL sort that spilled past the query memory limit read every run back at once to finish; it now merges its runs a chunk at a time within the limit, and a limit too small for that merge (under 16 KiB) is refused with `GRAFEO-S001`.
+- **A stream ends at its first error**: `ResultStream::next_chunk` and `OwnedResultStream::next_chunk` return no more rows after a statement failed partway, where a later read went on with the rows its operators still held or could still compute (904 more after a division by zero in one case). The Python, Node.js and C streams already stopped at the error.
 
 ## [0.6.3] - 2026-11-15
 

@@ -40,10 +40,11 @@ class GrafeoOptions {
   /// never more than [memoryLimit]; zero fails at the open.
   final int? queryMemoryLimit;
 
-  /// How many bytes one path search may hold: the paths a variable-length or
-  /// shortest-path search keeps at once, or what an RDF property path search
-  /// visits (the nodes an ANY SHORTEST or shortestPath search visits are not
-  /// counted yet). Never more than [memoryLimit]; zero fails at the open.
+  /// How many bytes one path search may hold: everything a variable-length,
+  /// shortest-path or RDF property path search holds at once (the nodes it
+  /// visits, its queues and the paths it keeps), which counts against
+  /// [queryMemoryLimit] too. Never more than [memoryLimit]; zero fails at the
+  /// open.
   final int? pathSearchBudget;
 
   /// How many path expansions one statement's variable-length and

@@ -118,9 +118,9 @@ export interface DatabaseOptions {
    */
   memoryLimit?: number;
   /**
-   * How many bytes one path search may hold, a positive whole number: the paths a variable-length
-   * or shortest-path search keeps at once, or what an RDF property path search visits (the nodes an
-   * `ANY SHORTEST` or `shortestPath` search visits are not counted yet). A quarter of `memoryLimit`
+   * How many bytes one path search may hold, a positive whole number: everything a variable-length,
+   * shortest-path or RDF property path search holds at once (the nodes it visits, its queues and the
+   * paths it keeps), which counts against the memory limit too. A quarter of `memoryLimit`
    * by default, at most 256 MiB, never more than `memoryLimit`.
    * A search over it throws `GRAFEO-S001`.
    */

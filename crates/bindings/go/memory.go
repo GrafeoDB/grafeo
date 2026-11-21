@@ -25,9 +25,9 @@ type Options struct {
 	// QueryMemoryLimit is how many bytes one statement's sorts, joins and aggregates may hold,
 	// never more than MemoryLimit; zero fails at the open.
 	QueryMemoryLimit *uint64
-	// PathSearchBudget is how many bytes one path search may hold: the paths a variable-length or
-	// shortest-path search keeps at once, or what an RDF property path search visits (the nodes an
-	// ANY SHORTEST or shortestPath search visits are not counted yet). Never more than
+	// PathSearchBudget is how many bytes one path search may hold: everything a variable-length,
+	// shortest-path or RDF property path search holds at once (the nodes it visits, its queues and
+	// the paths it keeps), which counts against QueryMemoryLimit too. Never more than
 	// MemoryLimit; zero fails at the open.
 	PathSearchBudget *uint64
 	// PathExpansionLimit is how many path expansions one statement's variable-length and

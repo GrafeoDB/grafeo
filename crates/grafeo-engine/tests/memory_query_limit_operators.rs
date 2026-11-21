@@ -376,6 +376,110 @@ fn collect_refuses_at_the_query_limit() {
     }
 }
 
+/// A variable-length pattern's search holds its open paths in a grant of the
+/// statement's memory: the 137,256 walks of up to six edges over a clique of
+/// eight pass a 1 MiB cap long before the path search budget, the refused
+/// statement gives its memory back, and a large cap counts every walk.
+#[test]
+fn a_variable_length_search_refuses_at_the_query_limit() {
+    let query = "MATCH (a:P {k: 1})-[:R]->{1,6}(b) RETURN count(b) AS n";
+    for (limit, refused) in [(MIB, true), (512 * MIB, false)] {
+        let db = capped(limit);
+        db.execute("UNWIND range(1, 8) AS i INSERT (:P {k: i})")
+            .unwrap();
+        db.execute("MATCH (a:P), (b:P) WHERE a.k <> b.k INSERT (a)-[:R]->(b)")
+            .unwrap();
+        let execution = |db: &GrafeoDB| db.memory_usage().buffer_manager.execution_buffers_bytes;
+        let before = execution(&db);
+        let walks = db.execute(query);
+        if refused {
+            assert_refused(walks);
+        } else {
+            assert_eq!(walks.unwrap().rows()[0][0].as_int64(), Some(137_256));
+        }
+        assert_eq!(execution(&db), before, "the statement's memory came back");
+    }
+}
+
+/// Path searches that run at once share the memory limit: each holds its open
+/// paths as a grant of its statement's memory, so N searches cannot each pass
+/// the limit by a path search budget. Streams over one variable-length search
+/// (walks of up to four edges over a clique of 32: some 61,000 open paths when
+/// the first chunk of 2,048 rows is out, about 2 MB) each pull a chunk, so all
+/// hold their grants at once; the path search budget is the whole limit. As
+/// many fit as the limit has room for after the first, measured, and the next
+/// is refused naming the memory limit. Once all drop, the statements hold
+/// nothing.
+#[test]
+fn concurrent_path_searches_refuse_at_the_memory_limit() {
+    use grafeo_common::utils::error::{LimitBound, LimitRefusal};
+
+    const LIMIT: usize = 7 * MIB;
+    let db = GrafeoDB::with_config(
+        Config::in_memory()
+            .with_memory_limit(LIMIT)
+            .with_path_search_budget(LIMIT),
+    )
+    .unwrap();
+    db.execute("UNWIND range(1, 32) AS i INSERT (:P {k: i})")
+        .unwrap();
+    db.execute("MATCH (a:P), (b:P) WHERE a.k <> b.k INSERT (a)-[:R]->(b)")
+        .unwrap();
+    let execution = |db: &GrafeoDB| db.memory_usage().buffer_manager.execution_buffers_bytes;
+    assert_eq!(execution(&db), 0, "no statement holds memory yet");
+    let query = "MATCH (a:P {k: 1})-[:R]->{1,4}(b) RETURN b";
+    let open = || {
+        let mut stream = db.execute_streaming(query).unwrap();
+        let chunk = stream.next_chunk();
+        (stream, chunk)
+    };
+
+    let (first, chunk) = open();
+    assert!(chunk.unwrap().is_some(), "the first stream's first chunk");
+    let held = execution(&db);
+    let manager = db.memory_usage().buffer_manager;
+    let room = manager.hard_limit_bytes - manager.allocated_bytes;
+    // A grant grows by the statement's step, a sixty-fourth of the limit: a
+    // stream refused takes at least its peak less a step
+    let step = LIMIT / 64;
+    let fit = room / held;
+    assert!(
+        (1..=6).contains(&fit) && room - fit * held + step < held,
+        "the fixture: {held} bytes a stream, {room} bytes of room after the first"
+    );
+
+    let mut streams = vec![first];
+    for index in 0..fit {
+        let (stream, chunk) = open();
+        assert!(
+            chunk
+                .unwrap_or_else(|error| panic!("stream {}: {error}", index + 2))
+                .is_some(),
+            "stream {} fits",
+            index + 2
+        );
+        streams.push(stream);
+    }
+    assert_eq!(
+        execution(&db),
+        (fit + 1) * held,
+        "each holds the same grant"
+    );
+    let (refused, chunk) = open();
+    let Err(error) = chunk else {
+        panic!("stream {} passes the memory limit", fit + 2);
+    };
+    assert_eq!(error.error_code().as_str(), "GRAFEO-S001", "{error}");
+    assert_eq!(
+        error.limit_refusal().map(LimitRefusal::bound),
+        Some(LimitBound::MemoryLimit),
+        "{error}"
+    );
+    drop(refused);
+    drop(streams);
+    assert_eq!(execution(&db), 0, "every stream's memory came back");
+}
+
 /// A write above an expand reads its input whole first (an eager buffer, a
 /// step of the physical plan that `EXPLAIN` does not show): that buffer
 /// counts, and a write it refuses changes nothing. The same read without the

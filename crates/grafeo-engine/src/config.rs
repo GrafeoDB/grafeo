@@ -1229,10 +1229,11 @@ impl Config {
         self
     }
 
-    /// Sets the bytes one path search may hold: the paths a variable-length or
-    /// shortest-path search keeps at once, or what an RDF property path visits. A search that
-    /// would hold more fails with `GRAFEO-S001` naming the path search budget, and changes
-    /// nothing. Never above the memory limit when one is set. Without it, a quarter of the
+    /// Sets the bytes one path search may hold: everything a variable-length, shortest-path or
+    /// RDF property path search holds at once (the nodes it visits, its queues and the paths it
+    /// keeps). A search that would hold more fails with `GRAFEO-S001` naming the path search
+    /// budget, and changes nothing. The same bytes count against
+    /// [`with_query_memory_limit`](Self::with_query_memory_limit) and the memory limit. Never above the memory limit when one is set. Without it, a quarter of the
     /// memory limit, at most 256 MiB, or 256 MiB without a memory limit
     /// ([`path_search_budget`](Self::path_search_budget)). Per open, never stored; 0 fails
     /// [`validate`](Self::validate).
@@ -1242,9 +1243,9 @@ impl Config {
         self
     }
 
-    /// The bytes one path search of a query may hold (the paths a
-    /// variable-length or shortest-path search keeps at once, what an RDF
-    /// property path visits): the [`with_path_search_budget`](Self::with_path_search_budget)
+    /// The bytes one path search of a query may hold (everything a
+    /// variable-length, shortest-path or RDF property path search holds at
+    /// once): the [`with_path_search_budget`](Self::with_path_search_budget)
     /// setting, at most the memory limit; without it a quarter of
     /// [`memory_limit`](Self::memory_limit), at most 256 MiB, or 256 MiB
     /// without a memory limit. A search that would hold more fails with
@@ -1508,7 +1509,7 @@ impl Config {
     /// memory limit. Per open, never stored; 0 fails
     /// [`validate`](Self::validate). It applies in every build; without
     /// spilling (the `spill` feature) nothing spills, so a sort refuses at the
-    /// cap too. Path searches keep their own budget
+    /// cap too. Path searches count against it too, within their own budget
     /// ([`with_path_search_budget`](Self::with_path_search_budget)).
     #[must_use]
     pub fn with_query_memory_limit(mut self, bytes: usize) -> Self {

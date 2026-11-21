@@ -251,6 +251,15 @@ impl OperatorMemory {
         self.counted.as_ref().map_or(0, |counted| counted.bytes)
     }
 
+    /// Counts `bytes` in all, no more than it counts now (part of what it held
+    /// is let go): it never needs a grant, so it cannot fail. The grant is kept.
+    pub fn lower(&mut self, bytes: usize) {
+        if let Some(counted) = &mut self.counted {
+            debug_assert!(bytes <= counted.bytes, "lower counts down only");
+            counted.bytes = bytes.min(counted.bytes);
+        }
+    }
+
     /// The operator let go of its rows to start over (a reset): it counts 0
     /// again and keeps its grant, so a rerun (a correlated subquery per outer
     /// row) grows within it with a compare instead of taking it again. The

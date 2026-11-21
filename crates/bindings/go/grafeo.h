@@ -139,10 +139,10 @@ const char*     grafeo_version(void);
      - grafeo_options_new returns an object to free with grafeo_options_free
        (NULL is ignored); it may open several databases and be freed once the
        open returns.
-     - The path search budget counts the paths a variable-length or
-       shortest-path search keeps at once, or what an RDF property path
-       search visits; the nodes an ANY SHORTEST or shortestPath search
-       visits are not counted yet.
+     - The path search budget counts everything one path search holds at
+       once (a variable-length, shortest-path or RDF property path search):
+       the nodes it visits, its queues and the paths it keeps. The same
+       bytes count against the query memory limit and the memory limit.
      - The snapshot retention limit is how many bytes of replaced data an
        open transaction's snapshot may keep; past it the transaction's next
        call fails with the retryable GRAFEO-T012 and rolls it back. Below

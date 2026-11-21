@@ -153,12 +153,12 @@ pub use top_k::TopKOperator;
 pub use union::UnionOperator;
 pub use unwind::UnwindOperator;
 pub use variable_length_expand::{
-    DEFAULT_PATH_SEARCH_BUDGET, PathMode as ExecutionPathMode, VariableLengthExpandOperator,
+    DEFAULT_PATH_SEARCH_BUDGET, PATH_QUEUE_ENTRY_BYTES, PathMode as ExecutionPathMode,
+    SEGMENT_BYTES as PATH_SEGMENT_BYTES, VariableLengthExpandOperator,
 };
-// The RDF path budget refuses as the LPG path searches do.
-#[cfg(all(test, feature = "triple-store"))]
+// Every path search's budget refuses as the LPG path searches do.
+#[cfg(test)]
 pub(crate) use variable_length_expand::path_budget_message;
-#[cfg(feature = "triple-store")]
 pub(crate) use variable_length_expand::{budget_text, path_search_refused};
 pub use vector_join::VectorJoinOperator;
 pub use writer::{GraphWriter, MAP_ASSIGNMENT, NewEdge, Recording, WriteCounter, WriteCounters};

@@ -138,9 +138,9 @@ pub extern "C" fn grafeo_options_set_query_memory_limit(
     }
 }
 
-/// Sets the memory one path search may hold, in bytes, above zero: the paths a variable-length or
-/// shortest-path search keeps at once, or what an RDF property path search visits (the nodes an
-/// `ANY SHORTEST` or `shortestPath` search visits are not counted yet). The default is a quarter
+/// Sets the memory one path search may hold, in bytes, above zero: everything a variable-length,
+/// shortest-path or RDF property path search holds at once (the nodes it visits, its queues and the
+/// paths it keeps), which counts against the query memory limit too. The default is a quarter
 /// of the memory limit, at most 256 MiB; never more than the memory limit. A search over it fails
 /// with GRAFEO-S001.
 #[unsafe(no_mangle)]

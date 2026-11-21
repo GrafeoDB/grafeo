@@ -388,6 +388,7 @@ mod session_wal_durability;
 mod set_properties_from_an_entity;
 mod set_property_rollback;
 mod shacl_validation_tests;
+mod shortest_path_grants;
 mod signed_values_after_reopen;
 mod small_api_results;
 mod snapshot;

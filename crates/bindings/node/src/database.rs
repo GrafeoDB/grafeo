@@ -273,10 +273,10 @@ pub struct CreateOptions {
     /// disk where they can, else the statement throws `GRAFEO-S001`. For
     /// this open only.
     pub query_memory_limit: Option<i64>,
-    /// How many bytes one path search may hold: the paths a variable-length
-    /// or shortest-path search keeps at once, or what an RDF property path
-    /// search visits (the nodes an `ANY SHORTEST` or `shortestPath` search
-    /// visits are not counted yet). By default a quarter of `memoryLimit`, at
+    /// How many bytes one path search may hold: everything a variable-length,
+    /// shortest-path or RDF property path search holds at once (the nodes it
+    /// visits, its queues and the paths it keeps), which counts against
+    /// `queryMemoryLimit` too. By default a quarter of `memoryLimit`, at
     /// most 256 MiB, and never more than `memoryLimit`. A search over it
     /// throws `GRAFEO-S001`. For this open only.
     pub path_search_budget: Option<i64>,

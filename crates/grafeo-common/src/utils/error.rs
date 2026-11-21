@@ -1117,13 +1117,14 @@ impl fmt::Display for QueryError {
                 write!(f, "\n {} | {}", span.line, line)?;
                 write!(f, "\n   | ")?;
 
-                // Add caret markers
-                for _ in 0..span.column.saturating_sub(1) {
-                    write!(f, " ")?;
-                }
-                for _ in span.start..span.end {
-                    write!(f, "^")?;
-                }
+                // Caret markers, never past the shown line: the span's offsets
+                // run over the whole query.
+                let width = line.chars().count();
+                let pad = usize::try_from(span.column.saturating_sub(1))
+                    .unwrap_or(usize::MAX)
+                    .min(width);
+                let carets = span.end.saturating_sub(span.start).min(width - pad);
+                write!(f, "{:pad$}{:^<carets$}", "", "")?;
             }
         }
 
@@ -1297,6 +1298,54 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The caret line under the shown query line, for `span` over `query`.
+    fn caret_line(query: &str, span: SourceSpan) -> String {
+        let rendered = QueryError::new(QueryErrorKind::Syntax, "bad IRI")
+            .with_span(span)
+            .with_source(query)
+            .to_string();
+        let lines: Vec<&str> = rendered.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| line.ends_with(query))
+            .expect("the query line is shown");
+        lines[at + 1].trim_start_matches("   | ").to_string()
+    }
+
+    #[test]
+    fn the_caret_line_stays_within_the_shown_line() {
+        let query = "SELECT ?s WHERE { <an> ?p ?s }";
+        // A span that runs past its line: the carets stop at the line's end.
+        assert_eq!(
+            caret_line(query, SourceSpan::new(18, 1_000_000, 1, 19)),
+            format!("{}{}", " ".repeat(18), "^".repeat(query.len() - 18))
+        );
+        // A column past the line: no carets, and the pad stops at the line's end.
+        assert_eq!(
+            caret_line(query, SourceSpan::new(18, 22, 1, u32::MAX)),
+            " ".repeat(query.len())
+        );
+        // A span inside the line is drawn as before.
+        assert_eq!(
+            caret_line(query, SourceSpan::new(18, 22, 1, 19)),
+            format!("{}^^^^", " ".repeat(18))
+        );
+    }
+
+    #[test]
+    fn a_query_error_with_the_widest_span_renders_in_bounded_size() {
+        let query = "SELECT ?s WHERE { <an> ?p ?s }";
+        let rendered = QueryError::new(QueryErrorKind::Syntax, "bad IRI")
+            .with_span(SourceSpan::new(18, usize::MAX, 1, u32::MAX))
+            .with_source(query)
+            .to_string();
+        assert!(
+            rendered.len() < 4 * query.len() + 200,
+            "{} bytes rendered",
+            rendered.len()
+        );
+    }
 
     #[test]
     fn test_error_display() {

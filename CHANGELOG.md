@@ -59,6 +59,7 @@ Performance and memory release, in progress: this section lists what has landed 
 
 ### Fixed
 
+- **A query error's markers stay on its line**: the carets under the shown query line stop at the line's end, and rendering an error takes room in proportion to that line.
 - **An open transaction no longer slows every commit** ([#673](https://github.com/GrafeoDB/grafeo/issues/673)): with a reader or a long transaction open, a commit's conflict check looks up only its own claims instead of scanning every commit since that transaction began. With 20,000 commits behind an open reader, an update took 374,834 instructions and now takes 61,243, as many as with none behind.
 - **Deleted values leave memory at `compact()`**: a column's zone map no longer keeps a copy of a deleted, overwritten or rolled-back value, so after `compact()` no deleted text, list or map stays in memory in the scenario #712 reported. A range filter on a column whose greatest or least value was lowered or removed reads that column's rows in full until the next garbage collection.
 - **A quantized vector index trains on live vectors only**: with scalar or product quantization, a vector deleted or replaced before the quantizer is trained no longer trains it or stays in memory until training; training waits until the configured number of live vectors is reached.

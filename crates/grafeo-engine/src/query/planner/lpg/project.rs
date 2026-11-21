@@ -706,7 +706,7 @@ impl super::Planner {
                 return Ok(result);
             }
             if let crate::query::plan::CountExpr::Literal(k) = limit.count
-                && k > 0
+                && takes_top_k(k)
             {
                 let planned = self.plan_sort(sort, Some(k))?;
                 if self.profiling.get() {
@@ -721,42 +721,39 @@ impl super::Planner {
             }
         }
 
-        // Phase 4e LIMIT pushdown: when this LIMIT sits directly above a
-        // Filter, push the count as a hint into leaf scan operators
-        // (currently `RangeScanOperator`). The outer `LimitOperator`
-        // wrapper still enforces correctness; the hint is purely an
-        // optimization that bounds the inner materialization step.
-        //
-        // Only fires when the input is `Filter` directly: any
-        // intermediate operator (Sort, Skip, Project, Distinct) needs
-        // full materialization and would produce wrong results if its
-        // child were truncated. Save-and-restore via `Cell::replace` so
-        // nested LIMITs don't leak hints across scopes.
-        let saved_hint = if matches!(limit.input.as_ref(), LogicalOperator::Filter(_)) {
-            Some(self.limit_hint.replace(Some(limit.count.value())))
-        } else {
-            None
-        };
+        let count = limit.count.value();
+        let (input_op, columns) =
+            self.below_limit(limit, count, || self.plan_operator(&limit.input))?;
+        Ok(limit_over(limit, count, input_op, columns))
+    }
 
-        let plan_result = self.plan_operator(&limit.input);
-
-        if let Some(prev) = saved_hint {
-            self.limit_hint.set(prev);
+    /// `plan_input`, the planning of `limit`'s input, with the limit's `count` as a hint to
+    /// its scans.
+    ///
+    /// Phase 4e LIMIT pushdown: when this LIMIT sits directly above a
+    /// Filter, push the count as a hint into leaf scan operators
+    /// (currently `RangeScanOperator`). The outer `LimitOperator`
+    /// wrapper still enforces correctness; the hint is purely an
+    /// optimization that bounds the inner materialization step.
+    ///
+    /// Only fires when the input is `Filter` directly: any
+    /// intermediate operator (Sort, Skip, Project, Distinct) needs
+    /// full materialization and would produce wrong results if its
+    /// child were truncated. Save-and-restore via `Cell::replace` so
+    /// nested LIMITs don't leak hints across scopes.
+    pub(super) fn below_limit<T>(
+        &self,
+        limit: &LimitOp,
+        count: usize,
+        plan_input: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let saved_hint = matches!(limit.input.as_ref(), LogicalOperator::Filter(_))
+            .then(|| self.limit_hint.replace(Some(count)));
+        let planned = plan_input();
+        if let Some(previous) = saved_hint {
+            self.limit_hint.set(previous);
         }
-
-        let (input_op, columns) = plan_result?;
-        // After a write the LIMIT cuts the rows, not the write: the whole
-        // input is read first, so the rows after the limit are written too
-        // (see `after_write`). A LIMIT over any write reads its input to the
-        // end, also a `LIMIT 0` (GQL's `FINISH`), which would otherwise read
-        // none of it.
-        let input_op = super::mutation::read_first_after_a_write(input_op, &limit.input);
-        if limit.input.has_mutations() {
-            let operator =
-                LimitOperator::new(input_op, limit.count.value()).running_its_input_to_the_end();
-            return Ok((Box::new(operator), columns));
-        }
-        Ok(common::build_limit(input_op, columns, limit.count.value()))
+        planned
     }
 
     /// Plans a SKIP operator.
@@ -783,6 +780,19 @@ impl super::Planner {
         sort: &SortOp,
         top_k: Option<usize>,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let (input_op, input_columns) = self.plan_operator(sort_input(sort))?;
+        self.sort_over(sort, top_k, input_op, input_columns)
+    }
+
+    /// The operators of `sort` over `inner_op`, which is [`sort_input`]'s plan: the RETURN's
+    /// input when the sort adds its keys to that RETURN, the sort's input otherwise.
+    pub(super) fn sort_over(
+        &self,
+        sort: &SortOp,
+        top_k: Option<usize>,
+        inner_op: Box<dyn Operator>,
+        inner_columns: Vec<String>,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // Check if we need pre-Return property/entity projections. This is
         // necessary when ORDER BY references a variable (e.g. p.age, labels(n))
         // that is not included in the RETURN clause.
@@ -792,12 +802,11 @@ impl super::Planner {
         let mut sort_extra_count: usize = 0;
 
         let (mut input_op, input_columns) = if needs_pre_return {
-            // Plan the Return's input, then build a combined projection that
+            // The Return's input is planned; build a combined projection that
             // outputs both RETURN items and ORDER BY sort-key properties.
             let LogicalOperator::Return(ret) = sort.input.as_ref() else {
                 unreachable!()
             };
-            let (inner_op, inner_columns) = self.plan_operator(&ret.input)?;
             let inner_vars: HashMap<String, usize> = inner_columns
                 .iter()
                 .enumerate()
@@ -904,7 +913,7 @@ impl super::Planner {
             sort_extra_count = extra_columns.len();
             (op, columns)
         } else {
-            let (op, columns) = self.plan_operator(&sort.input)?;
+            let (op, columns) = (inner_op, inner_columns);
             // Sort keys that read the graph after a write (`... SET h.c = i
             // WITH h ORDER BY h.c`) read what the whole write left (see
             // `after_write`); the augmented RETURN above reads its input
@@ -1579,6 +1588,41 @@ pub(super) fn collect_vars(expr: &LogicalExpression, out: &mut Vec<String>) {
             out.push(OPAQUE_SUBQUERY_VARIABLE.to_string());
         }
         LogicalExpression::Literal(_) | LogicalExpression::Parameter(_) => {}
+    }
+}
+
+/// Whether a LIMIT of `count` over an ORDER BY runs as one top-k; `LIMIT 0` keeps the sort and
+/// an empty limit.
+pub(super) fn takes_top_k(count: usize) -> bool {
+    count > 0
+}
+
+/// The operators of `limit`, cutting its input at `count` rows, over `input_op`, its input's
+/// plan.
+///
+/// After a write the LIMIT cuts the rows, not the write: the whole input is read first, so the
+/// rows after the limit are written too (see `after_write`). A LIMIT over any write reads its
+/// input to the end, also a `LIMIT 0` (GQL's `FINISH`), which would otherwise read none of it.
+pub(super) fn limit_over(
+    limit: &LimitOp,
+    count: usize,
+    input_op: Box<dyn Operator>,
+    columns: Vec<String>,
+) -> (Box<dyn Operator>, Vec<String>) {
+    let input_op = super::mutation::read_first_after_a_write(input_op, &limit.input);
+    if limit.input.has_mutations() {
+        let operator = LimitOperator::new(input_op, count).running_its_input_to_the_end();
+        return (Box::new(operator), columns);
+    }
+    common::build_limit(input_op, columns, count)
+}
+
+/// The operator a sort's operators are built over: the RETURN's input when the sort adds its
+/// keys to that RETURN ([`sort_needs_augmenting_projection`]), the sort's input otherwise.
+pub(super) fn sort_input(sort: &SortOp) -> &LogicalOperator {
+    match sort.input.as_ref() {
+        LogicalOperator::Return(ret) if sort_needs_augmenting_projection(sort) => &ret.input,
+        input => input,
     }
 }
 

@@ -21,8 +21,33 @@ const IS1: &str = "MATCH (n:Person {id: $personId})-[:LIVES_IN]->(c:City) \
 const IS3: &str = "MATCH (n:Person {id: $personId})-[k:KNOWS]-(friend:Person) \
                    RETURN friend.id AS friendId, k.creationDate AS since";
 
-/// Alix (1), Gus (2), Vincent (3, no city) and Mia ('m', a string id) with their cities and
-/// friendships.
+/// IS3 with its sort: a person's friends, the most recent friendship first.
+const IS3_ORDERED: &str = "MATCH (n:Person {id: $personId})-[k:KNOWS]-(friend:Person)                            RETURN friend.id AS friendId, k.creationDate AS since                            ORDER BY since DESC, friendId ASC";
+
+/// IS2's shape: a person's latest messages, as one top-k.
+const IS2: &str = "MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(m:Message)                    RETURN m.id AS messageId, m.creationDate AS created                    ORDER BY created DESC, messageId ASC LIMIT 3";
+
+/// The ordered shapes: IS3 sorted, IS2 at several limits, a sort by a property the RETURN
+/// drops, SKIP with LIMIT and alone, and a LIMIT with no sort. Every sort key leaves no ties.
+fn ordered_shapes() -> Vec<String> {
+    let dropped = "MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(m:Message)                    RETURN m.id AS messageId ORDER BY m.creationDate DESC";
+    vec![
+        IS3_ORDERED.to_string(),
+        IS2.to_string(),
+        IS2.replace("LIMIT 3", "LIMIT 10"),
+        IS2.replace("LIMIT 3", "LIMIT 1"),
+        IS2.replace("LIMIT 3", "LIMIT 0"),
+        IS2.replace("LIMIT 3", "SKIP 1 LIMIT 2"),
+        IS2.replace("LIMIT 3", "SKIP 2"),
+        dropped.to_string(),
+        format!("{dropped} LIMIT 2"),
+        "MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(m:Message)          RETURN m.id AS messageId LIMIT 2"
+            .to_string(),
+    ]
+}
+
+/// Alix (1), Gus (2), Vincent (3, no city) and Mia ('m', a string id) with their cities,
+/// friendships and messages (Alix five, Gus two, each at its own time).
 fn people(config: Config) -> GrafeoDB {
     let db = GrafeoDB::with_config(config).unwrap();
     db.execute(
@@ -31,7 +56,7 @@ fn people(config: Config) -> GrafeoDB {
                 (vincent:Person {id: 3, firstName: 'Vincent'}), \
                 (mia:Person:Admin {id: 'm', firstName: 'Mia'})-[:LIVES_IN]->(:City {id: 30}), \
                 (alix)-[:KNOWS {creationDate: 5}]->(gus), (gus)-[:KNOWS {creationDate: 7}]->(vincent), \
-                (mia)-[:KNOWS {creationDate: 9}]->(alix)",
+                (mia)-[:KNOWS {creationDate: 9}]->(alix),                 (:Message {id: 101, creationDate: 14})-[:HAS_CREATOR]->(alix),                 (:Message {id: 102, creationDate: 12})-[:HAS_CREATOR]->(alix),                 (:Message {id: 103, creationDate: 15})-[:HAS_CREATOR]->(alix),                 (:Message {id: 104, creationDate: 11})-[:HAS_CREATOR]->(alix),                 (:Message {id: 105, creationDate: 13})-[:HAS_CREATOR]->(alix),                 (:Message {id: 201, creationDate: 21})-[:HAS_CREATOR]->(gus),                 (:Message {id: 202, creationDate: 22})-[:HAS_CREATOR]->(gus)",
     )
     .unwrap();
     db
@@ -62,6 +87,41 @@ fn sorted(result: grafeo_engine::database::QueryResult) -> Vec<String> {
     let mut rows: Vec<String> = result.rows().iter().map(|row| format!("{row:?}")).collect();
     rows.sort();
     rows
+}
+
+/// The rows of `query` with `values`, in the order the statement gives them.
+fn run_ordered(
+    db: &GrafeoDB,
+    cypher: bool,
+    query: &str,
+    values: HashMap<String, Value>,
+) -> Result<Vec<String>, String> {
+    let result = if cypher {
+        db.execute_cypher_with_params(query, values)
+    } else {
+        db.execute_with_params(query, values)
+    };
+    result
+        .map(|result| result.rows().iter().map(|row| format!("{row:?}")).collect())
+        .map_err(|error| error.to_string())
+}
+
+/// Today's path for `query` with `values`: each value written as a literal, planned in full,
+/// its rows in the statement's order.
+fn today_ordered(
+    db: &GrafeoDB,
+    cypher: bool,
+    query: &str,
+    values: &HashMap<String, Value>,
+) -> Result<Vec<String>, String> {
+    let mut names: Vec<&String> = values.keys().collect();
+    // The longest name first, so `$n` does not replace the start of `$name`.
+    names.sort_by_key(|name| std::cmp::Reverse(name.len()));
+    let mut text = query.to_string();
+    for name in names {
+        text = text.replace(&format!("${name}"), &literal(&values[name]));
+    }
+    run_ordered(db, cypher, &text, HashMap::new())
 }
 
 fn run(
@@ -133,21 +193,74 @@ fn keys() -> Vec<Value> {
 fn a_prepared_statement_plans_once() {
     use grafeo_common::work::Work;
     let db = people(Config::in_memory());
-    for (call, id) in [1, 2, 3, 1].into_iter().enumerate() {
-        let _ = grafeo_common::work::take();
-        let rows = run(&db, true, IS1, with(Value::Int64(id)));
-        let work = grafeo_common::work::take();
+    for query in [IS1, IS2] {
+        for (call, id) in [1, 2, 3, 1].into_iter().enumerate() {
+            let _ = grafeo_common::work::take();
+            let rows = run(&db, true, query, with(Value::Int64(id)));
+            let work = grafeo_common::work::take();
+            assert_eq!(
+                work.get(Work::PlanBuilt),
+                0,
+                "{query} call {call}: {}",
+                work.describe()
+            );
+            assert_eq!(
+                rows,
+                today(&db, true, query, &Value::Int64(id)),
+                "{query} call {call}"
+            );
+        }
+    }
+}
+
+/// The ordered shapes give today's rows in today's order, in GQL and Cypher, call after call
+/// on one cached plan.
+#[test]
+fn the_ordered_rows_are_todays() {
+    let db = people(Config::in_memory());
+    for cypher in [false, true] {
+        for query in ordered_shapes() {
+            let _ = run_ordered(&db, cypher, &query, with(Value::Int64(2)));
+            for id in keys() {
+                #[cfg(grafeo_work_counters)]
+                let _ = grafeo_common::work::take();
+                let rows = run_ordered(&db, cypher, &query, with(id.clone()));
+                #[cfg(grafeo_work_counters)]
+                if matches!(id, Value::Int64(_) | Value::String(_)) {
+                    let work = grafeo_common::work::take();
+                    assert_eq!(
+                        work.get(grafeo_common::work::Work::PlanBuilt),
+                        0,
+                        "{query} with {id:?}: {}",
+                        work.describe()
+                    );
+                }
+                assert_eq!(
+                    rows,
+                    today_ordered(&db, cypher, &query, &with(id.clone())),
+                    "{query} with {id:?}, cypher {cypher}"
+                );
+            }
+        }
+    }
+}
+
+/// Many distinct literal LIMIT counts, each its own text and so its own cache entry, keep the
+/// plan cache within its byte bound, and each call gives the rows of its literal text.
+#[test]
+fn distinct_literal_limits_keep_the_cache_within_its_bound() {
+    const LIMIT: usize = 64 << 10;
+    let db = people(Config::in_memory().with_plan_cache_limit(LIMIT));
+    for count in 0..400 {
+        let query = IS2.replace("LIMIT 3", &format!("LIMIT {count}"));
         assert_eq!(
-            work.get(Work::PlanBuilt),
-            0,
-            "call {call}: {}",
-            work.describe()
+            run_ordered(&db, true, &query, with(Value::Int64(1))),
+            today_ordered(&db, true, &query, &with(Value::Int64(1))),
+            "LIMIT {count}"
         );
-        assert_eq!(
-            rows,
-            today(&db, true, IS1, &Value::Int64(id)),
-            "call {call}"
-        );
+        let caches = db.memory_usage().caches;
+        let held = caches.parsed_plan_cache_bytes + caches.optimized_plan_cache_bytes;
+        assert!(held <= LIMIT, "LIMIT {count}: {held} bytes held");
     }
 }
 
@@ -351,4 +464,159 @@ fn two_sessions_share_one_recipe() {
     for thread in threads {
         thread.join().unwrap();
     }
+}
+
+/// IS2's shape with its count a parameter.
+fn is2_counted(count: &str) -> String {
+    IS2.replace("LIMIT 3", count)
+}
+
+/// The values of a call of Alix's messages with `counts`.
+fn alix_with(counts: &[(&str, Value)]) -> HashMap<String, Value> {
+    let mut values = with(Value::Int64(1));
+    values.extend(
+        counts
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), value.clone())),
+    );
+    values
+}
+
+/// Each call of one prepared statement takes its own count: a top-k, then a plain limit at 0,
+/// then a top-k again, and a count past the sort's input; SKIP with LIMIT, and SKIP alone. Each
+/// call's rows are those of the statement with its counts written as literals, and no call after
+/// the first plans.
+#[test]
+fn a_count_parameter_follows_each_call() {
+    let int = |count: i64| Value::Int64(count);
+    let cases: Vec<(String, Vec<Vec<(&str, Value)>>)> = vec![
+        (
+            is2_counted("LIMIT $n"),
+            [3, 0, 1, 50, 0, 5, 0]
+                .into_iter()
+                .map(|n| vec![("n", int(n))])
+                .collect(),
+        ),
+        (
+            is2_counted("SKIP $s LIMIT $n"),
+            [(1, 2), (0, 0), (2, 50), (10, 1), (0, 3)]
+                .into_iter()
+                .map(|(s, n)| vec![("s", int(s)), ("n", int(n))])
+                .collect(),
+        ),
+        (
+            is2_counted("SKIP $s"),
+            [0, 1, 4, 10]
+                .into_iter()
+                .map(|s| vec![("s", int(s))])
+                .collect(),
+        ),
+    ];
+    let db = people(Config::in_memory());
+    for cypher in [false, true] {
+        for (query, calls) in &cases {
+            for (call, counts) in calls.iter().enumerate() {
+                let values = alix_with(counts);
+                #[cfg(grafeo_work_counters)]
+                let _ = grafeo_common::work::take();
+                let rows = run_ordered(&db, cypher, query, values.clone());
+                #[cfg(grafeo_work_counters)]
+                if call > 0 {
+                    let work = grafeo_common::work::take();
+                    assert_eq!(
+                        work.get(grafeo_common::work::Work::PlanBuilt),
+                        0,
+                        "{query} call {call}: {}",
+                        work.describe()
+                    );
+                }
+                assert_eq!(
+                    rows,
+                    today_ordered(&db, cypher, query, &values),
+                    "{query} with {counts:?}, cypher {cypher}, call {call}"
+                );
+            }
+        }
+    }
+}
+
+/// A count that is negative, a float, a string or NULL, or that is missing, fails with the
+/// error today's path gives, after calls that opened the recipe with good counts.
+#[test]
+fn a_bad_count_fails_as_today() {
+    let db = people(Config::in_memory());
+    let query = is2_counted("LIMIT $n");
+    for cypher in [false, true] {
+        for _ in 0..2 {
+            run_ordered(&db, cypher, &query, alix_with(&[("n", Value::Int64(2))])).unwrap();
+        }
+        let answers: Vec<Result<Vec<String>, String>> = [
+            Some(Value::Int64(-1)),
+            Some(Value::Float64(1.5)),
+            Some(Value::from("3")),
+            Some(Value::Null),
+            None,
+        ]
+        .into_iter()
+        .map(|value| {
+            let values = match value {
+                Some(value) => alix_with(&[("n", value)]),
+                None => alix_with(&[]),
+            };
+            run_ordered(&db, cypher, &query, values)
+        })
+        .collect();
+        // Today's errors, observed while a count parameter still planned each call in full.
+        let expected: Vec<Result<Vec<String>, String>> = [
+            "GRAFEO-Q006: negative limit value: SKIP/LIMIT must be non-negative, got -1",
+            "GRAFEO-Q006: invalid value type: SKIP/LIMIT must be an integer, got 1.5",
+            "GRAFEO-Q006: invalid value type: SKIP/LIMIT must be an integer, got \"3\"",
+            "GRAFEO-Q006: invalid value type: SKIP/LIMIT must be an integer, got NULL",
+            "GRAFEO-Q002: semantic error: Missing parameter for SKIP/LIMIT: $n",
+        ]
+        .into_iter()
+        .map(|text| Err(text.to_string()))
+        .collect();
+        assert_eq!(answers, expected, "cypher {cypher}");
+    }
+}
+
+/// A bad count fails with the count's error, as on today's path, on a graph dropped after calls
+/// that opened the recipe. The oracle is the same call of a statement no recipe covers
+/// (`ORDER BY abs(...)`), which takes today's path.
+#[test]
+fn a_bad_count_on_a_dropped_graph_fails_as_today() {
+    let answers: Vec<String> = [
+        is2_counted("LIMIT $n"),
+        is2_counted("LIMIT $n").replace("ORDER BY created DESC", "ORDER BY abs(created) DESC"),
+    ]
+    .iter()
+    .map(|query| {
+        let db = GrafeoDB::new_in_memory();
+        db.execute("CREATE GRAPH g").unwrap();
+        let session = db.session();
+        session.execute("USE GRAPH g").unwrap();
+        session
+            .execute(
+                "INSERT (:Message {id: 101, creationDate: 1})-[:HAS_CREATOR]->(:Person {id: 1})",
+            )
+            .unwrap();
+        for _ in 0..2 {
+            session
+                .execute_with_params(query, alix_with(&[("n", Value::Int64(2))]))
+                .unwrap();
+        }
+        db.execute("DROP GRAPH g").unwrap();
+        session
+            .execute_with_params(query, alix_with(&[("n", Value::Int64(-1))]))
+            .map(|_| ())
+            .unwrap_err()
+            .to_string()
+    })
+    .collect();
+    assert_eq!(answers[0], answers[1], "the recipe's call against today's");
+    assert_eq!(
+        answers[1],
+        "GRAFEO-Q006: negative limit value: SKIP/LIMIT must be non-negative, got -1"
+    );
 }

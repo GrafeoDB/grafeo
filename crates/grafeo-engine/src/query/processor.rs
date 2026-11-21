@@ -1550,7 +1550,7 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &Substitution<'_>) -
 
 /// Resolves a `CountExpr::Parameter` by looking up the parameter value; its
 /// errors name the clause `clause` (`SKIP/LIMIT`, or SQL's `OFFSET`).
-fn resolve_count_param(
+pub(crate) fn resolve_count_param(
     count: &mut crate::query::plan::CountExpr,
     params: &QueryParams,
     clause: &str,

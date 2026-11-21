@@ -273,6 +273,10 @@ mod tests {
         for query in [
             "MATCH (n:Person {id: $personId})-[:LIVES_IN]->(c:City) RETURN n.firstName AS firstName, c.id AS cityId",
             "MATCH (n:Person {id: $personId})-[k:KNOWS]-(friend:Person) RETURN friend.id AS friendId, k.creationDate AS since",
+            "MATCH (n:Person {id: $personId})-[k:KNOWS]-(friend:Person) RETURN friend.id AS friendId, k.creationDate AS since ORDER BY since DESC, friendId ASC",
+            "MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(m:Message) RETURN m.id AS messageId, m.creationDate AS created ORDER BY created DESC, messageId ASC LIMIT 10",
+            "MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(m:Message) RETURN m.id AS messageId ORDER BY m.creationDate DESC",
+            "MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(m:Message) RETURN m.id AS messageId SKIP 1 LIMIT 2",
         ] {
             let plan = prepared_plan(query, &params);
             assert!(recipe_of(plan.plan()).is_ok(), "{query}");
@@ -289,8 +293,16 @@ mod tests {
         )]);
         for (query, kind) in [
             (
-                "MATCH (n:Person {id: $personId})-[:KNOWS]-(f:Person) RETURN f.id AS id ORDER BY id",
-                "Sort",
+                "MATCH (n:Person {id: $personId})-[:KNOWS]-(f:Person) RETURN f.id AS id ORDER BY abs(f.id)",
+                "SortKeys",
+            ),
+            (
+                "MATCH (n:Person {id: $personId})-[:KNOWS]-(f:Person) RETURN f.id AS id ORDER BY cosine_similarity(f.embedding, [1.0, 0.0]) DESC LIMIT 3",
+                "SortKeys",
+            ),
+            (
+                "MATCH (n:Person {id: $personId})<-[:HAS_CREATOR]-(m:Message) RETURN m.id + $personId AS x ORDER BY m.creationDate",
+                "ReturnItems",
             ),
             (
                 "MATCH (n:Person {id: $personId})-[:KNOWS]-(f:Person) RETURN count(f) AS friends",
@@ -322,6 +334,7 @@ mod tests {
         let mut kinds: Vec<&str> = [
             "MATCH (n:Person {id: $personId})-[:LIVES_IN]->(c:City) RETURN n.firstName AS firstName, c.id AS cityId",
             "MATCH (n:Person)-[:LIVES_IN]->(c:City) RETURN c.id AS cityId",
+            "MATCH (n:Person)-[:LIVES_IN]->(c:City) RETURN c.id AS cityId ORDER BY cityId SKIP 1 LIMIT 2",
         ]
         .into_iter()
         .flat_map(|query| recipe_of(prepared_plan(query, &params).plan()).unwrap().kinds())
@@ -395,6 +408,70 @@ mod tests {
             crate::query::processor::substitute_params(&mut filled, &values(id)).unwrap();
             let today = planner().plan(&filled).unwrap();
             assert_eq!(rows(opened), rows(today), "id {id}");
+        }
+    }
+
+    /// Opening a recipe whose LIMIT is a parameter builds, for each count, the root operator
+    /// today's planner builds for the filled plan: a top-k for a count above 0, a plain limit
+    /// over the sort for 0.
+    #[test]
+    fn open_takes_a_top_k_where_todays_plan_does() {
+        use crate::query::planner::lpg::recipe::{OpenContext, recipe_of};
+        use grafeo_common::types::{StatementLanguage, Value};
+        use std::collections::HashMap;
+
+        let db = crate::GrafeoDB::new_in_memory();
+        db.execute(
+            "INSERT (alix:Person {id: 1}), (:Message {id: 101, at: 2})-[:HAS_CREATOR]->(alix),              (:Message {id: 102, at: 1})-[:HAS_CREATOR]->(alix)",
+        )
+        .unwrap();
+        let session = db.session();
+        let query = "MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(m:Message)                      RETURN m.id AS id ORDER BY m.at LIMIT $n";
+        let values = |count: i64| {
+            HashMap::from([
+                ("personId".to_string(), Value::Int64(1)),
+                ("n".to_string(), Value::Int64(count)),
+            ])
+        };
+        session.execute_with_params(query, values(1)).unwrap();
+        let key = session.plan_cache_key(query, QueryLanguage::Gql);
+        let cached = session
+            .plan_cache()
+            .get(&key.prepared(), crate::query::cache::Stage::Optimized)
+            .unwrap();
+        let recipe = recipe_of(cached.plan()).unwrap();
+        for count in [0, 1, 3] {
+            let _memory = session.enter_statement_memory();
+            let planner = || {
+                let (epoch, transaction, _pin) = session.get_transaction_context().unwrap();
+                session
+                    .create_planner_for_store_with_read_only(
+                        session.active_store(),
+                        epoch,
+                        transaction,
+                        true,
+                        StatementLanguage::Gql,
+                    )
+                    .unwrap()
+            };
+            let opened = recipe
+                .open(
+                    cached.plan(),
+                    &OpenContext {
+                        planner: &planner(),
+                        values: &values(count),
+                    },
+                )
+                .unwrap()
+                .expect("an integer key opens");
+            let mut filled = cached.plan().clone();
+            crate::query::processor::substitute_params(&mut filled, &values(count)).unwrap();
+            let today = planner().plan(&filled).unwrap();
+            assert_eq!(
+                opened.operator.name(),
+                today.operator.name(),
+                "LIMIT {count}"
+            );
         }
     }
 }

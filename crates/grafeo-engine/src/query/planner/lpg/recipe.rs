@@ -13,14 +13,18 @@ use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, Result};
 
 use super::Planner;
+use super::project::{limit_over, sort_input, takes_top_k};
 use crate::query::plan::{
-    BinaryOp, BuiltinFunction, Callee, FilterOp, LogicalExpression, LogicalOperator, LogicalPlan,
+    BinaryOp, BuiltinFunction, Callee, CountClauses, CountExpr, FilterOp, LimitOp,
+    LogicalExpression, LogicalOperator, LogicalPlan, SkipOp,
 };
 use crate::query::planner::PhysicalPlan;
 
 /// The kinds a recipe covers, by name: the set a test pins, so it grows only on purpose.
 #[cfg(test)]
-pub(crate) const COVERED: [&str; 5] = ["Return", "Expand", "Filter", "Seek", "NodeScan"];
+pub(crate) const COVERED: [&str; 8] = [
+    "Return", "Expand", "Filter", "Seek", "NodeScan", "Sort", "Limit", "Skip",
+];
 
 /// A prepared plan's recipe: what the physical planner builds for each operator, and the
 /// plan's variable names, which the column names it makes up must skip.
@@ -28,8 +32,10 @@ pub(crate) const COVERED: [&str; 5] = ["Return", "Expand", "Filter", "Seek", "No
 pub(crate) struct Recipe {
     root: Step,
     names: HashSet<String>,
-    /// The parameters the plan reads, all in its seek.
+    /// The parameters the plan reads: its seek's key and its counts.
     parameters: Vec<String>,
+    /// The parameters of its LIMIT and SKIP counts, which a call checks before it opens.
+    counts: Vec<String>,
 }
 
 /// What the physical planner builds for one operator of a prepared plan, in the plan's order.
@@ -46,6 +52,14 @@ enum Step {
     Seek,
     /// A scan of a label's nodes.
     NodeScan,
+    /// An ORDER BY of properties and variables, over the step of its input's plan
+    /// ([`sort_input`]: the RETURN's input when the sort adds its keys to that RETURN).
+    Sort(Box<Step>),
+    /// A LIMIT over its input: over a sort, a top-k when the count takes one
+    /// ([`takes_top_k`]).
+    Limit(Box<Step>),
+    /// A SKIP over its input.
+    Skip(Box<Step>),
 }
 
 impl Step {
@@ -58,6 +72,9 @@ impl Step {
             Self::Filter(_) => "Filter",
             Self::Seek => "Seek",
             Self::NodeScan => "NodeScan",
+            Self::Sort(_) => "Sort",
+            Self::Limit(_) => "Limit",
+            Self::Skip(_) => "Skip",
         }
     }
 
@@ -65,7 +82,13 @@ impl Step {
     #[cfg(test)]
     fn kinds(&self, into: &mut Vec<&'static str>) {
         into.push(self.kind());
-        if let Self::Return(input) | Self::Expand(input) | Self::Filter(input) = self {
+        if let Self::Return(input)
+        | Self::Expand(input)
+        | Self::Filter(input)
+        | Self::Sort(input)
+        | Self::Limit(input)
+        | Self::Skip(input) = self
+        {
             input.kinds(into);
         }
     }
@@ -93,27 +116,44 @@ pub(crate) fn recipe_of(plan: &LogicalPlan) -> std::result::Result<Recipe, Uncov
     let mut names = HashSet::new();
     crate::query::optimizer::plan_names(&plan.root, &mut names);
     let mut parameters = Vec::new();
-    seek_parameters(&plan.root, &mut parameters);
+    let mut counts = Vec::new();
+    parameters_of(&plan.root, &mut parameters, &mut counts);
     Ok(Recipe {
         root,
         names,
         parameters,
+        counts,
     })
 }
 
-/// The parameters of the seek in `op`, the one place a covered plan reads one.
-fn seek_parameters(op: &LogicalOperator, parameters: &mut Vec<String>) {
-    if let LogicalOperator::Filter(filter) = op
-        && let LogicalExpression::Binary { left, right, .. } = &filter.predicate
-    {
-        for side in [left, right] {
-            if let LogicalExpression::Parameter(name) = side.as_ref() {
-                parameters.push(name.clone());
+/// The parameters `op` reads, in the places a covered plan reads one: the seek's key, and the
+/// counts of its LIMITs and SKIPs, which also go in `counts`.
+fn parameters_of(op: &LogicalOperator, parameters: &mut Vec<String>, counts: &mut Vec<String>) {
+    match op {
+        LogicalOperator::Filter(filter) => {
+            if let LogicalExpression::Binary { left, right, .. } = &filter.predicate {
+                for side in [left, right] {
+                    if let LogicalExpression::Parameter(name) = side.as_ref() {
+                        parameters.push(name.clone());
+                    }
+                }
             }
         }
+        LogicalOperator::Limit(LimitOp {
+            count: CountExpr::Parameter(name),
+            ..
+        })
+        | LogicalOperator::Skip(SkipOp {
+            count: CountExpr::Parameter(name),
+            ..
+        }) => {
+            parameters.push(name.clone());
+            counts.push(name.clone());
+        }
+        _ => {}
     }
     for child in op.children() {
-        seek_parameters(child, parameters);
+        parameters_of(child, parameters, counts);
     }
 }
 
@@ -122,17 +162,26 @@ fn step_of(op: &LogicalOperator) -> std::result::Result<Step, Uncovered> {
     let uncovered = |kind| Err(Uncovered { kind });
     match op {
         LogicalOperator::Return(ret) => {
-            let plain = |item: &crate::query::plan::ReturnItem| {
-                matches!(
-                    item.expression,
-                    LogicalExpression::Property { .. } | LogicalExpression::Variable(_)
-                )
-            };
-            if ret.items.is_empty() || ret.distinct || !ret.items.iter().all(plain) {
+            if !returns_plainly(ret) {
                 return uncovered("ReturnItems");
             }
             Ok(Step::Return(below(&ret.input)?))
         }
+        LogicalOperator::Sort(sort) => {
+            let plain = |key: &crate::query::plan::SortKey| is_plain(&key.expression);
+            if !sort.keys.iter().all(plain) {
+                return uncovered("SortKeys");
+            }
+            // A sort that adds its keys to the RETURN builds that RETURN itself.
+            if let LogicalOperator::Return(ret) = sort.input.as_ref()
+                && !returns_plainly(ret)
+            {
+                return uncovered("ReturnItems");
+            }
+            Ok(Step::Sort(below(sort_input(sort))?))
+        }
+        LogicalOperator::Limit(limit) => Ok(Step::Limit(below(&limit.input)?)),
+        LogicalOperator::Skip(skip) => Ok(Step::Skip(below(&skip.input)?)),
         LogicalOperator::Expand(expand) => {
             if expand.is_variable_length() {
                 return uncovered("VariableLengthExpand");
@@ -157,6 +206,21 @@ fn step_of(op: &LogicalOperator) -> std::result::Result<Step, Uncovered> {
         LogicalOperator::NodeScan(scan) if scan.input.is_none() => Ok(Step::NodeScan),
         other => uncovered(kind_name(other)),
     }
+}
+
+/// Whether `expression` is a property or a variable.
+fn is_plain(expression: &LogicalExpression) -> bool {
+    matches!(
+        expression,
+        LogicalExpression::Property { .. } | LogicalExpression::Variable(_)
+    )
+}
+
+/// Whether `ret` returns plain properties and variables, not distinct.
+fn returns_plainly(ret: &crate::query::plan::ReturnOp) -> bool {
+    !ret.items.is_empty()
+        && !ret.distinct
+        && ret.items.iter().all(|item| is_plain(&item.expression))
 }
 
 /// Whether `filter` equates a property of the node its input scans, with no input of its
@@ -211,10 +275,7 @@ fn checks_labels_alone(predicate: &LogicalExpression) -> bool {
 /// The name of `op`'s kind, as [`Uncovered`] reports it.
 fn kind_name(op: &LogicalOperator) -> &'static str {
     match op {
-        LogicalOperator::Sort(_) => "Sort",
         LogicalOperator::Aggregate(_) => "Aggregate",
-        LogicalOperator::Limit(_) => "Limit",
-        LogicalOperator::Skip(_) => "Skip",
         LogicalOperator::Project(_) => "Project",
         LogicalOperator::Join(_) => "Join",
         LogicalOperator::LeftJoin(_) => "LeftJoin",
@@ -234,8 +295,8 @@ impl Recipe {
     }
 
     /// The values a call opens this recipe with: the plan's defaults, then `given`; `None`
-    /// when one of its parameters has neither, so the call fills the plan as before and fails
-    /// as it did.
+    /// when one of its parameters has neither, or a count is not one (`CountExpr::count_in`),
+    /// so the call fills the plan as before and fails as it did, before any other check.
     pub(crate) fn values_of(
         &self,
         plan: &LogicalPlan,
@@ -253,10 +314,13 @@ impl Recipe {
                 .iter()
                 .map(|(name, value)| (name.clone(), value.clone())),
         );
-        self.parameters
-            .iter()
-            .all(|name| values.contains_key(name))
-            .then_some(values)
+        let given_all = self.parameters.iter().all(|name| values.contains_key(name));
+        let counts_are_counts = || {
+            self.counts
+                .iter()
+                .all(|name| CountExpr::count_in(&values[name], "").is_ok())
+        };
+        (given_all && counts_are_counts()).then_some(values)
     }
 
     /// The operators of one call of `plan`, the cached plan this recipe was made from, at the
@@ -278,7 +342,8 @@ impl Recipe {
         planner.check_statement_scope();
         planner.plan_names.borrow_mut().clone_from(&self.names);
         planner.session_context.warnings.raise_all(plan.warnings);
-        let Some((operator, columns)) = open_step(&self.root, &plan.root, ctx)? else {
+        let Some((operator, columns)) = open_step(&self.root, &plan.root, plan.count_clauses, ctx)?
+        else {
             return Ok(None);
         };
         let operator = planner.shuffled_root(plan, operator);
@@ -291,13 +356,26 @@ type Built = (
     Vec<String>,
 );
 
-/// The operators of `step`, made from `op`, its operator in the cached plan.
-fn open_step(step: &Step, op: &LogicalOperator, ctx: &OpenContext<'_>) -> Result<Option<Built>> {
+/// The operators of `step`, made from `op`, its operator in the cached plan, whose counts' errors
+/// name `clauses`.
+fn open_step(
+    step: &Step,
+    op: &LogicalOperator,
+    clauses: CountClauses,
+    ctx: &OpenContext<'_>,
+) -> Result<Option<Built>> {
     let planner = ctx.planner;
+    let open = |step: &Step, op: &LogicalOperator| open_step(step, op, clauses, ctx);
+    // A count with the call's value, as filling the plan resolves it, with its errors.
+    let count_of = |count: &CountExpr, clause: &str| -> Result<usize> {
+        let mut count = count.clone();
+        crate::query::processor::resolve_count_param(&mut count, ctx.values, clause)?;
+        Ok(count.value())
+    };
     let mismatch = || Error::Internal("a recipe does not match its plan".to_string());
     match (step, op) {
         (Step::Return(input), LogicalOperator::Return(ret)) => {
-            let Some((input_op, columns)) = open_step(input, &ret.input, ctx)? else {
+            let Some((input_op, columns)) = open(input, &ret.input)? else {
                 return Ok(None);
             };
             planner
@@ -305,7 +383,7 @@ fn open_step(step: &Step, op: &LogicalOperator, ctx: &OpenContext<'_>) -> Result
                 .map(Some)
         }
         (Step::Expand(input), LogicalOperator::Expand(expand)) => {
-            let Some((input_op, columns)) = open_step(input, &expand.input, ctx)? else {
+            let Some((input_op, columns)) = open(input, &expand.input)? else {
                 return Ok(None);
             };
             planner
@@ -313,7 +391,7 @@ fn open_step(step: &Step, op: &LogicalOperator, ctx: &OpenContext<'_>) -> Result
                 .map(Some)
         }
         (Step::Filter(input), LogicalOperator::Filter(filter)) => {
-            let Some((input_op, columns)) = open_step(input, &filter.input, ctx)? else {
+            let Some((input_op, columns)) = open(input, &filter.input)? else {
                 return Ok(None);
             };
             planner.filter_over(filter, input_op, columns).map(Some)
@@ -325,6 +403,37 @@ fn open_step(step: &Step, op: &LogicalOperator, ctx: &OpenContext<'_>) -> Result
             planner.try_plan_filter_with_property_index(&filled)
         }
         (Step::NodeScan, LogicalOperator::NodeScan(scan)) => planner.plan_node_scan(scan).map(Some),
+        (Step::Sort(input), LogicalOperator::Sort(sort)) => {
+            let Some((input_op, columns)) = open(input, sort_input(sort))? else {
+                return Ok(None);
+            };
+            planner.sort_over(sort, None, input_op, columns).map(Some)
+        }
+        (Step::Limit(input), LogicalOperator::Limit(limit)) => {
+            let count = count_of(&limit.count, clauses.limit())?;
+            if let (Step::Sort(sort_step), LogicalOperator::Sort(sort)) =
+                (input.as_ref(), limit.input.as_ref())
+                && takes_top_k(count)
+            {
+                let Some((input_op, columns)) = open(sort_step, sort_input(sort))? else {
+                    return Ok(None);
+                };
+                return planner
+                    .sort_over(sort, Some(count), input_op, columns)
+                    .map(Some);
+            }
+            let opened = planner.below_limit(limit, count, || open(input, &limit.input))?;
+            Ok(opened.map(|(input_op, columns)| limit_over(limit, count, input_op, columns)))
+        }
+        (Step::Skip(input), LogicalOperator::Skip(skip)) => {
+            let Some((input_op, columns)) = open(input, &skip.input)? else {
+                return Ok(None);
+            };
+            let count = count_of(&skip.count, clauses.skip())?;
+            Ok(Some(crate::query::planner::common::build_skip(
+                input_op, columns, count,
+            )))
+        }
         _ => Err(mismatch()),
     }
 }

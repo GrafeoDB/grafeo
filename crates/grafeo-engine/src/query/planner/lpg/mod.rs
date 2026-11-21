@@ -103,6 +103,8 @@ mod load;
 mod mutation;
 mod project;
 pub(crate) mod reachability;
+#[cfg(prepared_plans)]
+pub(crate) mod recipe;
 pub(crate) mod scan;
 pub(crate) mod seek;
 pub(crate) mod subquery;
@@ -676,7 +678,7 @@ impl Planner {
 
     /// Checks, in a debug build, that a session's plan runs inside its
     /// statement's memory scope (see [`Self::in_session`]).
-    fn check_statement_scope(&self) {
+    pub(super) fn check_statement_scope(&self) {
         #[cfg(any(lpg_language, rdf_language))]
         debug_assert!(
             self.planned_for == super::PlannedFor::Standalone
@@ -697,7 +699,7 @@ impl Planner {
 
     /// The root operator, behind a shuffle when the option is on and the
     /// plan does not order its rows.
-    fn shuffled_root(
+    pub(super) fn shuffled_root(
         &self,
         logical_plan: &LogicalPlan,
         operator: Box<dyn Operator>,

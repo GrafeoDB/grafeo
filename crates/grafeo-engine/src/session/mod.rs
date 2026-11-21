@@ -4514,7 +4514,7 @@ impl Session {
                 read_only,
                 grafeo_common::types::StatementLanguage::Gql,
             )?;
-            let physical_plan = planner.plan(&optimized_plan)?;
+            let physical_plan = Self::physical_plan(&optimized_plan, &planner)?;
 
             // Execute the plan via push-based pipeline when possible
             let executor = self.make_executor(&planner, physical_plan.columns.clone());
@@ -4751,7 +4751,7 @@ impl Session {
                 grafeo_common::types::StatementLanguage::Gql,
             )?
             .for_streaming();
-        let physical_plan = planner.plan(&optimized_plan)?;
+        let physical_plan = Self::physical_plan(&optimized_plan, &planner)?;
         let columns = physical_plan.columns.clone();
         let warnings = planner.warnings();
 
@@ -5025,7 +5025,7 @@ impl Session {
                 transaction_id,
                 grafeo_common::types::StatementLanguage::Cypher,
             )?;
-            let mut physical_plan = planner.plan(&optimized_plan)?;
+            let mut physical_plan = Self::physical_plan(&optimized_plan, &planner)?;
 
             // Execute the plan
             let executor = self.make_executor(&planner, physical_plan.columns.clone());
@@ -5523,7 +5523,7 @@ impl Session {
                 transaction_id,
                 grafeo_common::types::StatementLanguage::SqlPgq,
             )?;
-            let mut physical_plan = planner.plan(&optimized_plan)?;
+            let mut physical_plan = Self::physical_plan(&optimized_plan, &planner)?;
             let executor = self.make_executor(&planner, physical_plan.columns.clone());
             executor.execute(physical_plan.operator.as_mut())
         });

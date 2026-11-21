@@ -179,7 +179,7 @@ impl super::Planner {
     /// that frame is on the stack once per hop of the plan (see `crate::query::limits`), and the
     /// operators built here by value would make it larger.
     #[inline(never)]
-    fn expand_over(
+    pub(super) fn expand_over(
         &self,
         expand: &ExpandOp,
         hop_target: Option<HopTarget>,

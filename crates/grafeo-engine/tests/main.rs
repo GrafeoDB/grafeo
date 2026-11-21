@@ -281,6 +281,7 @@ mod post_compact_index;
 mod post_compact_numeric_content;
 mod post_compact_overlay_visibility;
 mod prepared_plans;
+mod prepared_recipes;
 mod procedure_arguments;
 mod procedure_call_in_a_query;
 mod procedure_call_shapes;

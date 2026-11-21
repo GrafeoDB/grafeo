@@ -206,10 +206,19 @@ impl super::Planner {
             return Ok(result);
         }
 
-        // Plan the input operator first. A predicate that reads the graph
-        // after a write (`... SET h.c = i WITH h WHERE h.c = 4`) reads what
-        // the whole write left (see `after_write`).
-        let (mut input_op, columns) = self.plan_input(&filter.input)?;
+        let (input_op, columns) = self.plan_input(&filter.input)?;
+        self.filter_over(filter, input_op, columns)
+    }
+
+    /// The filter `filter` over its planned input, as a predicate checked on each row. A
+    /// predicate that reads the graph after a write (`... SET h.c = i WITH h WHERE h.c = 4`)
+    /// reads what the whole write left (see `after_write`).
+    pub(super) fn filter_over(
+        &self,
+        filter: &FilterOp,
+        mut input_op: Box<dyn Operator>,
+        columns: Vec<String>,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         if super::after_write::reads_the_graph(&filter.predicate) {
             input_op = super::mutation::read_first_after_a_write(input_op, &filter.input);
         }

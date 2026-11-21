@@ -181,6 +181,14 @@ impl Stage {
 #[derive(Debug)]
 pub struct CachedPlan {
     plan: LogicalPlan,
+    /// The physical shape a prepared plan's calls open, made on its first call.
+    #[cfg(prepared_plans)]
+    recipe: std::sync::OnceLock<
+        std::result::Result<
+            crate::query::planner::lpg::recipe::Recipe,
+            crate::query::planner::lpg::recipe::Uncovered,
+        >,
+    >,
     /// What the entry is charged: the plan's deep estimate, its key's text
     /// and the cache's bookkeeping.
     bytes: usize,
@@ -199,6 +207,19 @@ impl CachedPlan {
     #[must_use]
     pub fn plan(&self) -> &LogicalPlan {
         &self.plan
+    }
+
+    /// The recipe the calls of this prepared plan open, or the kind it holds that no recipe
+    /// covers: made on first use, then shared by every call and session.
+    #[cfg(prepared_plans)]
+    pub(crate) fn recipe(
+        &self,
+    ) -> &std::result::Result<
+        crate::query::planner::lpg::recipe::Recipe,
+        crate::query::planner::lpg::recipe::Uncovered,
+    > {
+        self.recipe
+            .get_or_init(|| crate::query::planner::lpg::recipe::recipe_of(&self.plan))
     }
 
     /// What the cache charges the entry, in bytes.
@@ -540,7 +561,12 @@ impl QueryCache {
         } else {
             0
         };
-        let cached = Arc::new(CachedPlan { plan, bytes });
+        let cached = Arc::new(CachedPlan {
+            plan,
+            #[cfg(prepared_plans)]
+            recipe: std::sync::OnceLock::new(),
+            bytes,
+        });
         if !self.is_enabled() {
             return cached;
         }

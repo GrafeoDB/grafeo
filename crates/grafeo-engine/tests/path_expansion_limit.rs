@@ -182,6 +182,36 @@ fn a_shortest_path_search_is_charged_the_edges_it_reads() {
     assert_over_the_limit("any shortest", &error, 3, "keep fewer paths");
 }
 
+/// The smallest limit, up to 200, at which `query` runs on the star after `extra`.
+fn smallest_limit(extra: &str, query: &str) -> u64 {
+    (1..=200)
+        .find(|&expansions| {
+            let db = limited(expansions);
+            if !extra.is_empty() {
+                db.execute(extra).unwrap();
+            }
+            db.execute(query).is_ok()
+        })
+        .expect("the query runs within 200 expansions")
+}
+
+#[test]
+fn a_selective_search_over_two_edge_patterns_is_charged_the_edges_it_reads() {
+    // The search over several edge patterns (#788) charges the edges it reads, as the one-edge
+    // search does: three more edges out of the centre, to nodes its first edge pattern
+    // rejects, leave its rows as they were and raise the smallest limit it runs at. Without
+    // the charge, only the copies of its paths count, and the two limits are equal.
+    let query =
+        "MATCH ANY SHORTEST (s:Star)-[:E]->(l:Leaf)-[:E]->*(t:Leaf) RETURN t.n AS n ORDER BY n";
+    let extra = "MATCH (s:Star) INSERT (s)-[:E]->(:Sink), (s)-[:E]->(:Sink), (s)-[:E]->(:Sink)";
+    let expected: Vec<Vec<Value>> = (1..=5).map(|n| vec![Value::Int64(n)]).collect();
+    let db = limited(1000);
+    db.execute(extra).unwrap();
+    assert_eq!(db.execute(query).unwrap().rows(), expected);
+    assert_eq!(limited(1000).execute(query).unwrap().rows(), expected);
+    assert!(smallest_limit(extra, query) > smallest_limit("", query));
+}
+
 /// A refusal in a transaction leaves the transaction usable, its earlier write in place.
 #[test]
 fn a_refusal_in_a_transaction_changes_nothing_else() {

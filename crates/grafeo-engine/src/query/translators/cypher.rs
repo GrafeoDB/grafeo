@@ -19,7 +19,7 @@ use crate::query::plan::{
     JoinCondition, JoinOp, JoinType, ListPredicateKind, LoadDataFormat, LoadDataOp,
     LogicalExpression, LogicalOperator, LogicalPlan, MapProjectionEntry, MergeOp, NodeScanOp,
     OtherwiseOp, ParameterScanOp, PathMode, PathSelection, ProcedureYield, ProjectOp, Projection,
-    RemoveLabelOp, ReturnItem, ReturnOp, SetPropertyOp, ShortestPathEdgeCondition, ShortestPathOp,
+    RemoveLabelOp, ReturnItem, ReturnOp, SetPropertyOp, ShortestPathCondition, ShortestPathOp,
     SortKey, SortOrder, UnaryOp, UnionOp, UnwindOp,
 };
 use grafeo_adapters::query::cypher::{self, ast};
@@ -1176,7 +1176,7 @@ impl CypherTranslator {
                 op: BinaryOp::And,
                 right: Box::new(right),
             })
-            .map(|predicate| ShortestPathEdgeCondition {
+            .map(|predicate| ShortestPathCondition {
                 variable: candidate,
                 predicate,
             });
@@ -1215,6 +1215,7 @@ impl CypherTranslator {
             edge_variable,
             quantified,
             edge_condition,
+            steps: Vec::new(),
         });
 
         Ok(plan)

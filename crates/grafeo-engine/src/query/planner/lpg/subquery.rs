@@ -815,7 +815,7 @@ fn bound_names(plan: &LogicalOperator, names: &mut HashSet<String>) {
             names.insert(path.source_var.clone());
             names.insert(path.target_var.clone());
             names.insert(path.path_alias.clone());
-            names.extend(path.edge_variable.iter().cloned());
+            names.extend(path.element_variables().cloned());
         }
         LogicalOperator::Project(project) => {
             names.extend(project.projections.iter().filter_map(|p| p.alias.clone()));
@@ -875,10 +875,9 @@ fn plan_names(plan: &LogicalOperator, names: &mut HashSet<String>) -> bool {
             names.insert(path.source_var.clone());
             names.insert(path.target_var.clone());
             names.insert(path.path_alias.clone());
-            names.extend(path.edge_variable.iter().cloned());
-            path.edge_condition
-                .as_ref()
-                .is_none_or(|condition| expression_names(&condition.predicate, names))
+            names.extend(path.element_variables().cloned());
+            path.conditions()
+                .all(|condition| expression_names(&condition.predicate, names))
                 && plan_names(&path.input, names)
         }
         LogicalOperator::Filter(filter) => {

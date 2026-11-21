@@ -145,7 +145,9 @@ pub use scan_text::TextScanOperator;
 #[cfg(feature = "vector-index")]
 pub use scan_vector::VectorScanOperator;
 pub use set_ops::{ExceptOperator, IntersectOperator, OtherwiseOperator};
-pub use shortest_path::{PathSelection as ExecutionPathSelection, ShortestPathOperator};
+pub use shortest_path::{
+    PathSelection as ExecutionPathSelection, PathStep as ExecutionPathStep, ShortestPathOperator,
+};
 pub use shuffle::ShuffleOperator;
 pub use single_row::{EmptyOperator, NodeListOperator, SingleRowOperator};
 pub use sort::{NullOrder, SortDirection, SortKey, SortOperator};

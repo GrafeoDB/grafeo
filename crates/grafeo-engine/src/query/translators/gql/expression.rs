@@ -9,7 +9,9 @@ impl GqlTranslator {
     /// A path function of a quantified edge's variable (`nodes(k)` of
     /// `-[k]->{1,3}`, `length(k)`, `path_length(k)`, `edges(k)`): of the path
     /// that edge walks, whose edges the variable lists, as SQL/PGQ reads it.
-    /// `None` for any other call.
+    /// The run of one edge pattern of several of a path search has no path of
+    /// its own: its length is the size of the list, its edges the list, and
+    /// its nodes are not supported. `None` for any other call.
     pub(super) fn group_path_call(
         &self,
         name: &str,
@@ -19,17 +21,28 @@ impl GqlTranslator {
         let [ast::Expression::Variable(variable)] = args else {
             return None;
         };
-        let call = match BuiltinFunction::from_name(name)? {
+        let function = BuiltinFunction::from_name(name)?;
+        let call = match function {
             BuiltinFunction::Size | BuiltinFunction::PathLength => "path_length",
             BuiltinFunction::Nodes | BuiltinFunction::Edges => name,
             _ => return None,
         };
         let path = self.group_list_variables.borrow().get(variable).cloned()?;
-        Some(resolve_call(
-            call,
-            vec![LogicalExpression::Variable(path)],
-            distinct,
-        ))
+        let list = LogicalExpression::Variable(variable.clone());
+        Some(match (path, function) {
+            (Some(path), _) => {
+                resolve_call(call, vec![LogicalExpression::Variable(path)], distinct)
+            }
+            (None, BuiltinFunction::Edges) => Ok(list),
+            (None, BuiltinFunction::Nodes) => Err(Error::from(QueryError::new(
+                QueryErrorKind::Unsupported,
+                format!(
+                    "the nodes of '{variable}', a group variable of one of several edge \
+                     patterns of a path search, are not supported"
+                ),
+            ))),
+            (None, _) => resolve_call("size", vec![list], distinct),
+        })
     }
 
     pub(super) fn translate_expression(&self, expr: &ast::Expression) -> Result<LogicalExpression> {

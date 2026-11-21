@@ -770,8 +770,7 @@ impl LogicalOperator {
                 .chain(values(&op.on_match))
                 .collect(),
             Self::ShortestPath(op) => op
-                .edge_condition
-                .iter()
+                .conditions()
                 .map(|condition| &condition.predicate)
                 .collect(),
             Self::VectorScan(op) => vec![&op.query_vector],
@@ -1581,7 +1580,7 @@ impl LogicalOperator {
             Self::ShortestPath(path) => {
                 bound = path.input.bound_variables(imports)?;
                 bound.insert(path.path_alias.clone());
-                bound.extend(path.edge_variable.iter().cloned());
+                bound.extend(path.element_variables().cloned());
                 if path.binds_target {
                     bound.insert(path.target_var.clone());
                 }
@@ -2018,9 +2017,67 @@ impl LogicalOperator {
                     PathMode::Simple => " [SIMPLE]",
                     PathMode::Acyclic => " [ACYCLIC]",
                 };
+                // A chain of edge patterns: the whole path pattern, then the
+                // conditions of the later edge patterns and the nodes between
+                let mut steps = String::new();
+                if !op.steps.is_empty() {
+                    let edge = |direction: ExpandDirection,
+                                types: &[String],
+                                variable: Option<&String>,
+                                (min, max): (u32, Option<u32>),
+                                quantified: bool| {
+                        let (left, right) = match direction {
+                            ExpandDirection::Outgoing => ("-", "->"),
+                            ExpandDirection::Incoming => ("<-", "-"),
+                            ExpandDirection::Both => ("-", "-"),
+                        };
+                        let types = if types.is_empty() {
+                            String::new()
+                        } else {
+                            format!(":{}", types.join("|"))
+                        };
+                        let variable = variable.map_or("", String::as_str);
+                        let hops = match (quantified, max) {
+                            (false, _) => String::new(),
+                            (true, Some(max)) => format!("{{{min},{max}}}"),
+                            (true, None) => format!("{{{min},}}"),
+                        };
+                        format!("{left}[{variable}{types}]{right}{hops}")
+                    };
+                    let mut path = edge(
+                        op.direction,
+                        &op.edge_types,
+                        op.edge_variable.as_ref(),
+                        (op.min_hops, op.max_hops),
+                        op.quantified,
+                    );
+                    for step in &op.steps {
+                        let node = step.node_variable.as_deref().unwrap_or("");
+                        let _ = write!(
+                            path,
+                            "({node}){}",
+                            edge(
+                                step.direction,
+                                &step.edge_types,
+                                step.edge_variable.as_ref(),
+                                (step.min_hops, step.max_hops),
+                                step.quantified,
+                            )
+                        );
+                    }
+                    let _ = write!(steps, " [path: {path}]");
+                }
+                for step in &op.steps {
+                    if let Some(c) = &step.node_condition {
+                        let _ = write!(steps, " [node: {}]", fmt_expr(&c.predicate));
+                    }
+                    if let Some(c) = &step.edge_condition {
+                        let _ = write!(steps, " [edges: {}]", fmt_expr(&c.predicate));
+                    }
+                }
                 let _ = writeln!(
                     out,
-                    "{indent}ShortestPath ({from} -> {to}){selection}{mode}{edges}",
+                    "{indent}ShortestPath ({from} -> {to}){selection}{mode}{edges}{steps}",
                     from = op.source_var,
                     to = op.target_var
                 );
@@ -3644,9 +3701,11 @@ pub struct ShortestPathOp {
     /// reaches, each a pair of its own, instead of searching for the node
     /// the input row binds to it.
     pub binds_target: bool,
-    /// Minimum number of edges in a path, from the edge's quantifier.
+    /// Minimum number of edges of the first edge pattern, from its
+    /// quantifier: of the whole path when [`Self::steps`] is empty.
     pub min_hops: u32,
-    /// Maximum number of edges in a path (`None` = unbounded).
+    /// Maximum number of edges of the first edge pattern (`None` =
+    /// unbounded): of the whole path when [`Self::steps`] is empty.
     pub max_hops: Option<u32>,
     /// The variable of the edge pattern, bound to the edges of each path (see
     /// [`Self::quantified`]). `None` when the pattern names no edge, or names
@@ -3660,7 +3719,75 @@ pub struct ShortestPathOp {
     /// that the shortest paths are picked among the paths the pattern matches
     /// (ISO/IEC 39075:2024 16.6): the property map and `WHERE` of the edge
     /// pattern, or the equality with an edge bound before.
-    pub edge_condition: Option<ShortestPathEdgeCondition>,
+    pub edge_condition: Option<ShortestPathCondition>,
+    /// The edge patterns after the first, in path order, each with the node
+    /// pattern before it: the path pattern is linear, and a path's length
+    /// counts the edges of every one. Empty for one edge pattern.
+    pub steps: Vec<ShortestPathStep>,
+}
+
+impl ShortestPathOp {
+    /// The conditions the search checks: on the edges of every edge pattern
+    /// and on the nodes between them.
+    pub fn conditions(&self) -> impl Iterator<Item = &ShortestPathCondition> {
+        self.edge_condition.iter().chain(
+            self.steps
+                .iter()
+                .flat_map(|step| step.node_condition.iter().chain(&step.edge_condition)),
+        )
+    }
+
+    /// The conditions of [`Self::conditions`], to change.
+    pub fn conditions_mut(&mut self) -> impl Iterator<Item = &mut ShortestPathCondition> {
+        self.edge_condition
+            .iter_mut()
+            .chain(self.steps.iter_mut().flat_map(|step| {
+                step.node_condition
+                    .iter_mut()
+                    .chain(step.edge_condition.iter_mut())
+            }))
+    }
+
+    /// The variables the search binds besides its ends and its path: the
+    /// edge variables and the variables of the nodes between the edge
+    /// patterns.
+    pub fn element_variables(&self) -> impl Iterator<Item = &String> {
+        self.edge_variable.iter().chain(
+            self.steps
+                .iter()
+                .flat_map(|step| step.node_variable.iter().chain(&step.edge_variable)),
+        )
+    }
+}
+
+/// An edge pattern of a path search after its first (see
+/// [`ShortestPathOp::steps`]), and the node pattern before it.
+#[derive(Debug, Clone)]
+pub struct ShortestPathStep {
+    /// The variable of the node pattern before the edge pattern, bound to
+    /// that node of each path. `None` when it names none, or one bound before
+    /// (its [`Self::node_condition`] then keeps to it).
+    pub node_variable: Option<String>,
+    /// The labels, property map and `WHERE` of that node pattern, checked
+    /// during the search on the node where the edge pattern starts.
+    pub node_condition: Option<ShortestPathCondition>,
+    /// Edge type filter (empty = match all types, multiple = match any).
+    pub edge_types: Vec<String>,
+    /// Direction of edge traversal.
+    pub direction: ExpandDirection,
+    /// Minimum number of edges of this edge pattern, from its quantifier.
+    pub min_hops: u32,
+    /// Maximum number of edges of this edge pattern (`None` = unbounded).
+    pub max_hops: Option<u32>,
+    /// The variable of the edge pattern (see
+    /// [`ShortestPathOp::edge_variable`]).
+    pub edge_variable: Option<String>,
+    /// Whether the edge pattern has a quantifier (see
+    /// [`ShortestPathOp::quantified`]).
+    pub quantified: bool,
+    /// A condition every edge of this edge pattern meets (see
+    /// [`ShortestPathOp::edge_condition`]).
+    pub edge_condition: Option<ShortestPathCondition>,
 }
 
 /// Which paths a path search keeps for each pair of endpoints: the selection
@@ -3692,14 +3819,15 @@ impl PathSelection {
     }
 }
 
-/// A condition on the edges a shortest-path search may take (see
-/// [`ShortestPathOp::edge_condition`]).
+/// A condition on the edges a shortest-path search may take, or on the nodes
+/// between its edge patterns (see [`ShortestPathOp::edge_condition`] and
+/// [`ShortestPathStep::node_condition`]).
 #[derive(Debug, Clone)]
-pub struct ShortestPathEdgeCondition {
-    /// The variable the predicate reads the candidate edge as.
+pub struct ShortestPathCondition {
+    /// The variable the predicate reads the candidate edge or node as.
     pub variable: String,
-    /// The predicate: it reads the candidate edge and the variables of the
-    /// input row.
+    /// The predicate: it reads the candidate and the variables of the input
+    /// row.
     pub predicate: LogicalExpression,
 }
 
@@ -5957,6 +6085,7 @@ mod tests {
             edge_variable: None,
             quantified: true,
             edge_condition: None,
+            steps: Vec::new(),
         });
         assert_eq!(sp.display_label(), "a -> b");
 
@@ -6462,6 +6591,7 @@ mod tests {
             edge_variable: None,
             quantified: true,
             edge_condition: None,
+            steps: Vec::new(),
         });
         assert!(sp.explain_tree().contains("ShortestPath (a -> b)"));
     }

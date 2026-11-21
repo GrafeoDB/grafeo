@@ -162,6 +162,24 @@ tests:
       rows:
         - [872, "Wall of Asher Mamo", 228, Asher, Mamo]
 
+  # IS6 as graph-bench writes it: ANY SHORTEST over the whole path, a quantified edge before two fixed ones (ISO GQL 16.6).
+  - name: is6_forum_of_a_message_any_shortest
+    params:
+      messageId: 343597393752
+    query: |
+      SELECT forumId, forumTitle, moderatorId, moderatorFirstName, moderatorLastName
+      FROM GRAPH_TABLE (
+          MATCH ANY SHORTEST (m:Post|Comment)-[r:REPLY_OF]->*(p:Post)
+                <-[co:CONTAINER_OF]-(f:Forum)-[hm:HAS_MODERATOR]->(mod:Person)
+          WHERE m.id = $messageId
+          COLUMNS (f.id AS forumId, f.title AS forumTitle, mod.id AS moderatorId,
+                   mod.firstName AS moderatorFirstName, mod.lastName AS moderatorLastName)
+      )
+    expect:
+      ordered: true
+      rows:
+        - [872, "Wall of Asher Mamo", 228, Asher, Mamo]
+
   # IS7. Replies of a message.
   - name: is7_replies_of_a_message
     params:

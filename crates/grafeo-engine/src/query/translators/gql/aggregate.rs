@@ -1104,6 +1104,14 @@ fn binds_edge_list(plan: &LogicalOperator, variable: &str) -> bool {
         LogicalOperator::ShortestPath(search) if named(&search.edge_variable) => {
             search.quantified
         }
+        LogicalOperator::ShortestPath(search)
+            if search.steps.iter().any(|step| named(&step.edge_variable)) =>
+        {
+            search
+                .steps
+                .iter()
+                .any(|step| named(&step.edge_variable) && step.quantified)
+        }
         LogicalOperator::Project(project) => {
             match project
                 .projections

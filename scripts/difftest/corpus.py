@@ -3820,4 +3820,9 @@ case("FC3", "MATCH (n:Person) WITH n.age AS a LIMIT 3 RETURN a, count(*) AS c", 
 case("FC4", "MATCH (n:Person) WITH n.age AS a LIMIT 3 WHERE a >= 0 RETURN a", BOTH)
 ordered("FC5", "MATCH (n:Person) WITH n.age AS a LIMIT 3 RETURN a ORDER BY a", BOTH)
 
+# FD: a selective path pattern over several edge patterns selects whole paths per pair of
+#     endpoints, fixed edges counted in the length (0.6.4; it was refused, GRAFEO-Q004)
+case("FD1", "MATCH p = ANY SHORTEST (a:Person {name: 'Vincent'})-[:KNOWS]->*(b:Person)-[:LIVES_IN]->(c:City) RETURN b.name AS b, c.name AS c, length(p) AS len", GQL)
+case("FD2", "MATCH p = ALL SHORTEST (a:Person)-[:KNOWS]->{1,2}(b)-[l:LIVES_IN]->(c) RETURN a.name AS a, c.name AS c, l.years AS y, length(p) AS len", GQL)
+
 # fmt: on

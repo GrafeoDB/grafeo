@@ -625,7 +625,7 @@ impl GqlTranslator {
             {
                 self.group_list_variables
                     .borrow_mut()
-                    .insert(ev.clone(), pa.clone());
+                    .insert(ev.clone(), Some(pa.clone()));
             }
 
             // For questioned edges (->?), save the plan BEFORE the expand so the

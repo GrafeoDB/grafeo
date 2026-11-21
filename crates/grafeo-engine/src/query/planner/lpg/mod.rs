@@ -3658,6 +3658,7 @@ mod tests {
             edge_variable: Some("r".to_string()),
             quantified: true,
             edge_condition: None,
+            steps: Vec::new(),
         }));
         let physical = planner.plan(&logical).unwrap();
         // The length, the edge variable, then the path's nodes, edges and
@@ -3690,6 +3691,7 @@ mod tests {
             edge_variable: None,
             quantified: true,
             edge_condition: None,
+            steps: Vec::new(),
         }));
         let err = planner.plan(&logical).err().expect("plan should fail");
         assert!(format!("{err}").contains("Source variable"));

@@ -79,7 +79,7 @@ MATCH TRAIL (a:Person)-[:KNOWS]->{1,3}(b:Person)
 A path variable gives `PATH_LENGTH(p)` (or `LENGTH(p)`), `NODES(p)` and `EDGES(p)` in `COLUMNS`. Some patterns are
 refused with an error for now: a quantified pattern of more than one edge (`((a)-[:KNOWS]->(m)-[:KNOWS]->(b)){1,3}`)
 without an upper bound or with more than 16 repetitions, such a pattern with a path variable and no required
-repetition (`{0,2}`), and a shortest path over more than one edge pattern.
+repetition (`{0,2}`), a shortest path over a parenthesized or alternated pattern, one with a questioned edge pattern (`->?`), one that binds a variable at two places of its pattern, or one with an element `WHERE` that reads another element of the same path, and `NODES(r)` of the group variable of one of several edge patterns of a shortest path search (`PATH_LENGTH(r)` and `EDGES(r)` read that edge pattern's edges).
 
 ### COLUMNS Clause
 

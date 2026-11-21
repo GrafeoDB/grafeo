@@ -46,19 +46,19 @@ struct KeptPaths {
 }
 
 impl KeptPaths {
-    /// Keeps the path of `hops` edges that `build` makes, charged before it
-    /// is built: refused when the search would then hold more than its
-    /// budget, `others` paths being held besides the kept ones (the paths a
-    /// restrictive search follows).
+    /// Keeps the path of `bytes` (see [`found_bytes`]) that `build` makes,
+    /// charged before it is built: refused when the search would then hold
+    /// more than its budget, `others` paths being held besides the kept ones
+    /// (the paths a restrictive search follows).
     fn keep(
         &mut self,
         budget: &mut PathBudget,
-        hops: usize,
+        bytes: usize,
         others: usize,
         build: impl FnOnce() -> FoundPath,
     ) -> Result<(), OperatorError> {
         budget.reserve_vec(&mut self.paths, 1)?;
-        charge_paths(budget, path_bytes(hops), self.paths.len() + others)?;
+        charge_paths(budget, bytes, self.paths.len() + others)?;
         self.paths.push(build());
         Ok(())
     }
@@ -68,6 +68,13 @@ impl KeptPaths {
 fn path_bytes(hops: usize) -> usize {
     hops.saturating_mul(size_of::<NodeId>() + size_of::<EdgeId>())
         .saturating_add(size_of::<NodeId>())
+}
+
+/// The bytes `path`'s lists hold: its nodes and edges, and the starts of
+/// its edge patterns after the first.
+fn found_bytes(path: &FoundPath) -> usize {
+    path_bytes(path.edges.len())
+        .saturating_add(path.starts.len().saturating_mul(size_of::<usize>()))
 }
 
 /// Charges `bytes` of paths to `budget`, the search holding `paths` paths:
@@ -125,27 +132,31 @@ fn insert<K: Eq + Hash, V>(
     Ok(())
 }
 
-/// Records the step `step` into `node` in `steps`, charged to `budget` before
-/// anything grows: every step with `all`, only the first one otherwise.
+/// Records the step `step` into `node` (a node, or a state of a search over
+/// several edge patterns) in `steps`, charged to `budget` before anything
+/// grows: the first `keep` steps into it, every step with `usize::MAX`.
 /// Returns whether `node` is new to `steps`.
-fn record_step(
+fn record_step<K: Copy + Eq + Hash>(
     budget: &mut PathBudget,
-    steps: &mut Steps,
-    node: NodeId,
-    step: (NodeId, EdgeId),
-    all: bool,
+    steps: &mut FxHashMap<K, Vec<(K, EdgeId)>>,
+    node: K,
+    step: (K, EdgeId),
+    keep: usize,
 ) -> Result<bool, OperatorError> {
-    if let Some(into) = steps.get_mut(&node) {
-        if all {
-            push(budget, into, step)?;
-        }
-        return Ok(false);
-    }
     budget.reserve_map(steps, 1)?;
-    let mut into = Vec::new();
-    push(budget, &mut into, step)?;
-    steps.insert(node, into);
-    Ok(true)
+    let mut new = false;
+    let into = steps.entry(node).or_insert_with(|| {
+        new = true;
+        Vec::new()
+    });
+    if new {
+        // Room for the steps it keeps, up to the four a growing list starts with
+        budget.reserve_block(into, keep.min(4))?;
+    }
+    if into.len() < keep {
+        push(budget, into, step)?;
+    }
+    Ok(new)
 }
 
 /// Which paths a search keeps for each pair of a source and a target: the
@@ -204,9 +215,11 @@ pub struct ShortestPathOperator {
     selection: PathSelection,
     /// The paths the search follows: WALK, TRAIL, SIMPLE or ACYCLIC.
     path_mode: PathMode,
-    /// Minimum number of edges in a path.
+    /// Minimum number of edges of the first edge pattern: of the whole path
+    /// when there is no other (see [`Self::with_step`]).
     min_hops: u32,
-    /// Maximum number of edges in a path (`None` = unbounded).
+    /// Maximum number of edges of the first edge pattern (`None` =
+    /// unbounded), of the whole path when there is no other.
     max_hops: Option<u32>,
     /// Who reads: the search walks only the edges (and reaches only the
     /// nodes) this view sees.
@@ -220,6 +233,8 @@ pub struct ShortestPathOperator {
     outputs: PathOutputs,
     /// A condition every edge of a path meets (see [`Self::with_edge_condition`]).
     edge_condition: Option<Box<dyn Predicate>>,
+    /// The edge patterns after the first (see [`Self::with_step`]).
+    steps: Vec<PathStep>,
     /// The bytes the search for one input row may hold (see
     /// [`Self::with_memory_budget`]).
     budget: usize,
@@ -270,12 +285,97 @@ enum EdgeOutput {
     Single,
 }
 
+/// An edge pattern of a path search after the first, and the node pattern
+/// before it (see [`ShortestPathOperator::with_step`]): the edges it takes,
+/// how many, and what the search writes for it.
+pub struct PathStep {
+    /// A check on the node the edge pattern starts at (see
+    /// [`Self::with_node_check`]).
+    node_check: Option<Box<dyn Predicate>>,
+    /// The edge types to follow, as stored (every type when empty).
+    edge_types: Vec<ArcStr>,
+    /// Direction of edge traversal.
+    direction: Direction,
+    /// Minimum number of edges of this edge pattern.
+    min_hops: u32,
+    /// Maximum number of edges of this edge pattern (`None` = unbounded).
+    max_hops: Option<u32>,
+    /// A condition every edge of this edge pattern meets.
+    edge_condition: Option<Box<dyn Predicate>>,
+    /// Whether to write the node the edge pattern starts at.
+    node_output: bool,
+    /// What the column of this edge pattern's edges holds, when there is one.
+    edge_output: Option<EdgeOutput>,
+}
+
+impl PathStep {
+    /// An edge pattern of one edge of `edge_types` (as stored, every type
+    /// when empty) in `direction`.
+    pub fn new(edge_types: Vec<String>, direction: Direction) -> Self {
+        Self {
+            node_check: None,
+            edge_types: stored_types(edge_types),
+            direction,
+            min_hops: 1,
+            max_hops: Some(1),
+            edge_condition: None,
+            node_output: false,
+            edge_output: None,
+        }
+    }
+
+    /// Takes between `min_hops` and `max_hops` edges (`None` = unbounded):
+    /// the quantifier of the edge pattern.
+    pub fn with_hop_bounds(mut self, min_hops: u32, max_hops: Option<u32>) -> Self {
+        self.min_hops = min_hops;
+        self.max_hops = max_hops;
+        self
+    }
+
+    /// Takes only the edges that meet `condition`, which reads the row
+    /// [`ShortestPathOperator::with_edge_condition`] describes.
+    pub fn with_edge_condition(mut self, condition: Box<dyn Predicate>) -> Self {
+        self.edge_condition = Some(condition);
+        self
+    }
+
+    /// Starts only at nodes that pass `check`: the labels, properties and
+    /// `WHERE` of the node pattern before the edge pattern. The check reads
+    /// one row: the columns of the input row, a candidate edge, then the
+    /// candidate node.
+    pub fn with_node_check(mut self, check: Box<dyn Predicate>) -> Self {
+        self.node_check = Some(check);
+        self
+    }
+
+    /// Writes the node the edge pattern starts at, in a column of its own.
+    pub fn with_node_output(mut self) -> Self {
+        self.node_output = true;
+        self
+    }
+
+    /// Writes the edges of this edge pattern, in a column of its own: their
+    /// list with `as_list`, otherwise its one edge (see
+    /// [`ShortestPathOperator::with_edge_output`]).
+    pub fn with_edge_output(mut self, as_list: bool) -> Self {
+        self.edge_output = Some(if as_list {
+            EdgeOutput::List
+        } else {
+            EdgeOutput::Single
+        });
+        self
+    }
+}
+
 /// A path a search found: its nodes from the source to the target, and the
 /// edges between them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FoundPath {
     nodes: Vec<NodeId>,
     edges: Vec<EdgeId>,
+    /// For each edge pattern after the first, the index of its first edge in
+    /// `edges` (empty for a search of one edge pattern).
+    starts: Vec<usize>,
 }
 
 impl FoundPath {
@@ -284,8 +384,38 @@ impl FoundPath {
         Self {
             nodes: vec![node],
             edges: Vec::new(),
+            starts: Vec::new(),
         }
     }
+
+    /// The edges of the edge pattern `step` (0 is the first).
+    fn step_edges(&self, step: usize) -> &[EdgeId] {
+        let start = step.checked_sub(1).map_or(0, |index| self.starts[index]);
+        let end = self.starts.get(step).copied().unwrap_or(self.edges.len());
+        &self.edges[start..end]
+    }
+}
+
+/// A state of the search over a path pattern of several edge patterns: a
+/// node, the edge pattern the path is in there (the number of edge patterns
+/// when it is past the last), and the edges it took of it, counted up to its
+/// maximum, or to its minimum when it has none: past that the states of an
+/// unbounded quantifier go on alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct State {
+    node: NodeId,
+    step: u16,
+    hops: u32,
+}
+
+/// An edge pattern as the search over states reads it.
+#[derive(Clone, Copy)]
+struct Hop<'a> {
+    edge_types: &'a [ArcStr],
+    direction: Direction,
+    min_hops: u32,
+    max_hops: Option<u32>,
+    condition: Option<&'a dyn Predicate>,
 }
 
 impl ShortestPathOperator {
@@ -360,6 +490,7 @@ impl ShortestPathOperator {
             expansions: None,
             outputs: PathOutputs::default(),
             edge_condition: None,
+            steps: Vec::new(),
             budget: DEFAULT_PATH_SEARCH_BUDGET,
             memory: crate::execution::memory::capture(),
             path_budget: None,
@@ -430,9 +561,10 @@ impl ShortestPathOperator {
         self
     }
 
-    /// Limits the paths to between `min_hops` and `max_hops` edges (`None` =
-    /// unbounded). The default is 0 to unbounded, so a node paired with
-    /// itself has a zero-length path.
+    /// Limits the first edge pattern to between `min_hops` and `max_hops`
+    /// edges (`None` = unbounded): the whole path when it is the only one,
+    /// and its own run when [`Self::with_step`] adds others. The default is 0
+    /// to unbounded, so a node paired with itself has a zero-length path.
     pub fn with_hop_bounds(mut self, min_hops: u32, max_hops: Option<u32>) -> Self {
         self.min_hops = min_hops;
         self.max_hops = max_hops;
@@ -471,6 +603,19 @@ impl ShortestPathOperator {
         self
     }
 
+    /// Adds an edge pattern after the last: the path pattern is the chain of
+    /// them (ISO/IEC 39075:2024 16.6), each path's length counts the edges
+    /// of all of them, and the selection keeps whole paths of each pair of a
+    /// source and a target. The search then runs over states (a node, an
+    /// edge pattern, the edges taken of it), so that a node is reached once
+    /// for each place in the pattern. The columns of the added edge patterns
+    /// come after the edge column, in order: the node each starts at, then
+    /// its edges, for those that write them.
+    pub fn with_step(mut self, step: PathStep) -> Self {
+        self.steps.push(step);
+        self
+    }
+
     /// The search for the input row `row` of `chunk`, taking its expansions from
     /// `allowance`.
     fn search_for_row(
@@ -479,7 +624,11 @@ impl ShortestPathOperator {
         row: usize,
         allowance: Allowance,
     ) -> PathSearch<'_> {
-        let condition_row = self.edge_condition.as_ref().map(|_| {
+        let node_checks = self.steps.iter().any(|step| step.node_check.is_some());
+        let conditions = self.edge_condition.is_some()
+            || node_checks
+            || self.steps.iter().any(|step| step.edge_condition.is_some());
+        let condition_row = conditions.then(|| {
             let mut types: Vec<LogicalType> = (0..chunk.column_count())
                 .map(|i| {
                     chunk
@@ -488,6 +637,9 @@ impl ShortestPathOperator {
                 })
                 .collect();
             types.push(LogicalType::Edge);
+            if node_checks {
+                types.push(LogicalType::Node);
+            }
             let mut condition_row = DataChunk::with_capacity(&types, 1);
             for i in 0..chunk.column_count() {
                 if let (Some(from), Some(to)) = (chunk.column(i), condition_row.column_mut(i)) {
@@ -497,12 +649,16 @@ impl ShortestPathOperator {
             if let Some(edge) = condition_row.column_mut(chunk.column_count()) {
                 edge.push_edge_id(EdgeId(0));
             }
+            if node_checks && let Some(node) = condition_row.column_mut(chunk.column_count() + 1) {
+                node.push_node_id(NodeId(0));
+            }
             condition_row.set_count(1);
             RefCell::new(condition_row)
         });
         PathSearch {
             operator: self,
             condition_row,
+            edge_column: chunk.column_count(),
             condition_error: RefCell::new(None),
             allowance: RefCell::new(allowance),
         }
@@ -514,8 +670,11 @@ impl ShortestPathOperator {
 struct PathSearch<'a> {
     /// The operator whose search this is.
     operator: &'a ShortestPathOperator,
-    /// The input row and, in its last column, the edge the condition checks.
+    /// The input row, the edge a condition checks, then the node a node
+    /// check checks.
     condition_row: Option<RefCell<DataChunk>>,
+    /// The column of the condition row with the edge, after the input row.
+    edge_column: usize,
     /// The first error of the edge condition or of a read of the store,
     /// which fails the search (see [`paths`](Self::paths)).
     condition_error: RefCell<Option<OperatorError>>,
@@ -536,12 +695,30 @@ impl PathSearch<'_> {
     /// both ways.
     fn neighbors(&self, node: NodeId, direction: Direction) -> Vec<(NodeId, EdgeId)> {
         let op = self.operator;
+        self.edges_of(
+            node,
+            direction,
+            &op.edge_types,
+            op.edge_condition.as_deref(),
+        )
+    }
+
+    /// The neighbors of [`neighbors`](Self::neighbors) along the edges of
+    /// `edge_types` that meet `condition`.
+    fn edges_of(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        edge_types: &[ArcStr],
+        condition: Option<&dyn Predicate>,
+    ) -> Vec<(NodeId, EdgeId)> {
+        let op = self.operator;
         let found = visible_edges_from(
             op.store.as_ref(),
             node,
             direction,
             &EdgeWalk {
-                edge_types: &op.edge_types,
+                edge_types,
                 view: op.view,
                 reads: op.reads.as_deref(),
             },
@@ -561,9 +738,9 @@ impl PathSearch<'_> {
                 .get_or_insert_with(|| op.expansions_out());
             return Vec::new();
         }
-        if let (Some(condition), Some(row)) = (&op.edge_condition, &self.condition_row) {
+        if let (Some(condition), Some(row)) = (condition, &self.condition_row) {
             let mut row = row.borrow_mut();
-            let edge_column = row.column_count() - 1;
+            let edge_column = self.edge_column;
             edges.retain(|&(_, edge)| {
                 let Some(column) = row.column_mut(edge_column) else {
                     return false;
@@ -611,6 +788,13 @@ impl PathSearch<'_> {
         let op = self.operator;
         if op.selection.count() == 0 {
             return Ok(Vec::new());
+        }
+        if !op.steps.is_empty() {
+            return if op.path_mode == PathMode::Walk {
+                self.program_walks(budget, source, target)
+            } else {
+                self.program_paths(budget, source, target)
+            };
         }
         if op.path_mode != PathMode::Walk {
             return self.restricted_paths(budget, source, target);
@@ -692,8 +876,9 @@ impl PathSearch<'_> {
             let mut reached = Vec::new();
             let mut steps = Steps::default();
             for &node in &frontier {
+                budget.tick()?;
                 for (neighbor, edge) in self.neighbors(node, op.direction) {
-                    if record_step(budget, &mut steps, neighbor, (node, edge), true)? {
+                    if record_step(budget, &mut steps, neighbor, (node, edge), usize::MAX)? {
                         push(budget, &mut reached, neighbor)?;
                     }
                 }
@@ -754,12 +939,20 @@ impl PathSearch<'_> {
             if limit == 0 {
                 continue;
             }
-            *taken += read_back(budget, end, depth, limit, &mut kept, |node, depth| {
-                layers
-                    .get(depth)
-                    .and_then(|layer| layer.get(&node))
-                    .map_or(&[], Vec::as_slice)
-            })?;
+            *taken += read_back(
+                budget,
+                end,
+                depth,
+                (limit, 0),
+                &mut kept,
+                |node, depth| {
+                    layers
+                        .get(depth)
+                        .and_then(|layer| layer.get(&node))
+                        .map_or(&[], Vec::as_slice)
+                },
+                walk_path,
+            )?;
         }
         Ok(kept.paths)
     }
@@ -786,17 +979,6 @@ impl PathSearch<'_> {
         source: NodeId,
         target: Option<NodeId>,
     ) -> Result<Vec<FoundPath>, OperatorError> {
-        /// What the selection kept of the paths to one end.
-        #[derive(Default)]
-        struct Kept {
-            /// The number of paths kept.
-            paths: usize,
-            /// The number of lengths kept.
-            lengths: usize,
-            /// The length of the last path kept.
-            last: u32,
-        }
-
         const REFUSED: &str = "A shortest path search";
         let op = self.operator;
         let count = op.selection.count();
@@ -820,46 +1002,32 @@ impl PathSearch<'_> {
         // taken, then given back with the segments only it held
         let mut expanded: Option<Arc<PathSegment>> = None;
         while let Some((segment, depth)) = queue.pop(budget) {
+            budget.tick()?;
             if let Some(done) = expanded.replace(Arc::clone(&segment)) {
                 release_segments(budget, done);
             }
             // The target has its paths: every later path is as long or longer
-            if let Some(end) = target.and_then(|target| kept.get(&target)) {
-                let done = if groups {
-                    end.lengths >= count && depth > end.last
-                } else {
-                    end.paths >= count
-                };
-                if done {
-                    break;
-                }
+            if let Some(end) = target.and_then(|target| kept.get(&target))
+                && end.done(depth, count, groups)
+            {
+                break;
             }
             if depth >= op.min_hops && target.is_none_or(|target| target == segment.node) {
                 if !kept.contains_key(&segment.node) {
                     budget.reserve_map(&mut kept, 1)?;
                 }
-                let end = kept.entry(segment.node).or_default();
-                let keep = if groups {
-                    if end.paths > 0 && depth == end.last {
-                        true
-                    } else if end.lengths < count {
-                        end.lengths += 1;
-                        end.last = depth;
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    end.paths < count
-                };
-                if keep {
-                    end.paths += 1;
+                if kept
+                    .entry(segment.node)
+                    .or_default()
+                    .admits(depth, count, groups)
+                {
                     // The paths held besides the kept ones: those queued and
                     // the one expanded
                     let hops = usize::try_from(depth).unwrap_or(usize::MAX);
-                    paths.keep(budget, hops, queue.len() + 1, || FoundPath {
+                    paths.keep(budget, path_bytes(hops), queue.len() + 1, || FoundPath {
                         nodes: segment.collect_nodes(depth),
                         edges: segment.collect_edges(depth),
+                        starts: Vec::new(),
                     })?;
                 }
             }
@@ -868,13 +1036,7 @@ impl PathSearch<'_> {
                 continue;
             }
             for (neighbor, edge) in self.neighbors(segment.node, op.direction) {
-                let allowed = match op.path_mode {
-                    PathMode::Walk => true,
-                    PathMode::Trail => !segment.contains_edge(edge),
-                    PathMode::Simple => neighbor == source || !segment.contains_node(neighbor),
-                    PathMode::Acyclic => !segment.contains_node(neighbor),
-                };
-                if allowed {
+                if allowed(op.path_mode, &segment, source, (neighbor, edge)) {
                     // The paths held: those queued, the one expanded and the
                     // kept ones
                     let held = queue.len() + 1 + paths.paths.len();
@@ -910,7 +1072,7 @@ impl PathSearch<'_> {
         {
             return Ok(());
         }
-        kept.keep(budget, hops, 0, build)
+        kept.keep(budget, path_bytes(hops), 0, build)
     }
 
     /// Finds one shortest path with a breadth-first search from `source`,
@@ -932,6 +1094,7 @@ impl PathSearch<'_> {
         push_back(budget, &mut queue, source)?;
 
         while let Some(current) = queue.pop_front() {
+            budget.tick()?;
             for (neighbor, edge) in self.neighbors(current, self.operator.direction) {
                 if neighbor == target {
                     insert(budget, &mut parents, target, (current, edge))?;
@@ -969,6 +1132,7 @@ impl PathSearch<'_> {
         let mut path = FoundPath {
             nodes: Vec::with_capacity(hops + 1),
             edges: Vec::with_capacity(hops),
+            starts: Vec::new(),
         };
         path.nodes.push(node);
         let mut current = node;
@@ -1012,6 +1176,8 @@ impl PathSearch<'_> {
         if max_hops.is_some_and(|max| max < min_hops) {
             return Ok(Vec::new());
         }
+        // The steps kept into each node: every one with `all`
+        let keep = if all { usize::MAX } else { 1 };
 
         // Walks of exactly `min_hops` edges: `layers[i]` holds the steps into
         // the nodes the walks reach after `i + 1` edges (grown a layer at a
@@ -1023,8 +1189,9 @@ impl PathSearch<'_> {
             let mut steps = Steps::default();
             let mut next = Vec::new();
             for &node in &current {
+                budget.tick()?;
                 for (neighbor, edge) in self.neighbors(node, op.direction) {
-                    if record_step(budget, &mut steps, neighbor, (node, edge), all)? {
+                    if record_step(budget, &mut steps, neighbor, (node, edge), keep)? {
                         push(budget, &mut next, neighbor)?;
                     }
                 }
@@ -1054,15 +1221,16 @@ impl PathSearch<'_> {
             let mut next_frontier = Vec::new();
             let expanded = frontier.capacity().saturating_mul(size_of::<NodeId>());
             for node in frontier {
+                budget.tick()?;
                 for (neighbor, edge) in self.neighbors(node, op.direction) {
                     match lengths.get(&neighbor) {
                         None => {
                             insert(budget, &mut lengths, neighbor, length)?;
                             push(budget, &mut next_frontier, neighbor)?;
-                            record_step(budget, &mut steps, neighbor, (node, edge), all)?;
+                            record_step(budget, &mut steps, neighbor, (node, edge), keep)?;
                         }
                         Some(&reached_at) if reached_at == length => {
-                            record_step(budget, &mut steps, neighbor, (node, edge), all)?;
+                            record_step(budget, &mut steps, neighbor, (node, edge), keep)?;
                         }
                         // Already reached by a shorter path
                         Some(_) => {}
@@ -1075,9 +1243,15 @@ impl PathSearch<'_> {
 
         let limit = if all { usize::MAX } else { 1 };
         let mut kept = KeptPaths::default();
-        read_back(budget, target, length, limit, &mut kept, |node, depth| {
-            steps_into(&layers, &steps, min_hops, node, depth)
-        })?;
+        read_back(
+            budget,
+            target,
+            length,
+            (limit, 0),
+            &mut kept,
+            |node, depth| steps_into(&layers, &steps, min_hops, node, depth),
+            walk_path,
+        )?;
         Ok(kept.paths)
     }
 
@@ -1135,6 +1309,7 @@ impl PathSearch<'_> {
         let mut last_forward = false;
 
         loop {
+            budget.tick()?;
             // Expand the smaller frontier, the sides taking turns on a tie, so
             // that a side with nothing left is seen at once. A side that runs
             // out before the sides met has expanded everything it reaches,
@@ -1243,6 +1418,7 @@ impl PathSearch<'_> {
             let mut path = FoundPath {
                 nodes: Vec::with_capacity(hops.saturating_add(1)),
                 edges: Vec::with_capacity(hops),
+                starts: Vec::new(),
             };
             path.nodes.push(from);
             let mut node = from;
@@ -1264,6 +1440,425 @@ impl PathSearch<'_> {
             path
         })
     }
+
+    /// The edge pattern `step` of the path pattern: 0 is the operator's own,
+    /// the next ones those of [`ShortestPathOperator::with_step`].
+    fn hop(&self, step: u16) -> Hop<'_> {
+        let op = self.operator;
+        match usize::from(step)
+            .checked_sub(1)
+            .and_then(|index| op.steps.get(index))
+        {
+            None => Hop {
+                edge_types: &op.edge_types,
+                direction: op.direction,
+                min_hops: op.min_hops,
+                max_hops: op.max_hops,
+                condition: op.edge_condition.as_deref(),
+            },
+            Some(step) => Hop {
+                edge_types: &step.edge_types,
+                direction: step.direction,
+                min_hops: step.min_hops,
+                max_hops: step.max_hops,
+                condition: step.edge_condition.as_deref(),
+            },
+        }
+    }
+
+    /// The number of edge patterns: the step of a state past the last.
+    fn last_step(&self) -> Result<u16, OperatorError> {
+        u16::try_from(self.operator.steps.len() + 1).map_err(|_| {
+            OperatorError::Internal("a path pattern of too many edge patterns".to_string())
+        })
+    }
+
+    /// Whether `node` passes `check`, a node check of a node pattern between
+    /// two edge patterns. An error of the check ends the search with it (see
+    /// [`paths`](Self::paths)).
+    fn node_passes(&self, node: NodeId, check: &dyn Predicate) -> bool {
+        let Some(row) = &self.condition_row else {
+            return false;
+        };
+        let mut row = row.borrow_mut();
+        let Some(column) = row.column_mut(self.edge_column + 1) else {
+            return false;
+        };
+        column.clear();
+        column.push_node_id(node);
+        match check.evaluate(&row, 0) {
+            Ok(passes) => passes,
+            Err(error) => {
+                self.condition_error.borrow_mut().get_or_insert(error);
+                false
+            }
+        }
+    }
+
+    /// Adds to `into` the states of a path that reaches `node` with `hops`
+    /// edges of the edge pattern `step`: in that edge pattern while it may
+    /// take more, and past it when it has taken enough, at the next edge
+    /// pattern if `node` passes the check of the node pattern between (a
+    /// quantifier from 0 passes on at once), or at `last`, the end of the
+    /// path. They are at most one per edge pattern and the end, which `into`
+    /// has the room for (see [`program_walks`](Self::program_walks)).
+    fn arrive(&self, node: NodeId, mut step: u16, mut hops: u32, last: u16, into: &mut Vec<State>) {
+        loop {
+            let hop = self.hop(step);
+            if hop.max_hops.is_none_or(|max| hops < max) {
+                let counted = hops.min(hop.max_hops.unwrap_or(hop.min_hops));
+                into.push(State {
+                    node,
+                    step,
+                    hops: counted,
+                });
+            }
+            if hops < hop.min_hops {
+                return;
+            }
+            step += 1;
+            hops = 0;
+            if step == last {
+                into.push(State { node, step, hops });
+                return;
+            }
+            let check = self.operator.steps[usize::from(step) - 1]
+                .node_check
+                .as_deref();
+            if check.is_some_and(|check| !self.node_passes(node, check)) {
+                return;
+            }
+        }
+    }
+
+    /// The walks (WALK mode) the selection keeps over a path pattern of
+    /// several edge patterns, from `source` to `target` or to every node it
+    /// reaches when there is no target, in the order of their lengths.
+    ///
+    /// The search of [`selected_walks`](Self::selected_walks) over states
+    /// instead of nodes (a node, the edge pattern a walk is in there, the
+    /// edges it took of it), each layer holding the steps into its states
+    /// (from which state, over which edge): what a walk can still match on
+    /// from a node depends on its state there, so a state reached at `k`
+    /// lengths is not expanded at a later one, for the same reason; nor,
+    /// past a bounded edge pattern's minimum, one that `k` earlier depths
+    /// dominate (see [`dominated`]). A state keeps its first `k` steps per
+    /// layer (every one for groups). A walk ends at a state past the last
+    /// edge pattern. Each edge of a walk read back belongs to the edge pattern
+    /// of the state it leaves. Everything it holds is charged to `budget`
+    /// before it grows, and a state it lets go gives its charge back.
+    fn program_walks(
+        &self,
+        budget: &mut PathBudget,
+        source: NodeId,
+        target: Option<NodeId>,
+    ) -> Result<Vec<FoundPath>, OperatorError> {
+        let op = self.operator;
+        let count = op.selection.count();
+        let groups = matches!(op.selection, PathSelection::ShortestGroups(_));
+        let keep = if groups { usize::MAX } else { count };
+        let last = self.last_step()?;
+        let is_end =
+            |state: &State| state.step == last && target.is_none_or(|end| end == state.node);
+        // The states one edge reaches, at most one per edge pattern and the end
+        let mut landed = Vec::new();
+        budget.reserve_vec(&mut landed, usize::from(last) + 1)?;
+        // The steps into the states of each layer; layer 0 holds the source's
+        let mut layers: Vec<StateSteps> = Vec::new();
+        push(budget, &mut layers, StateSteps::default())?;
+        // How many lengths each state was expanded at
+        let mut lengths: FxHashMap<State, usize> = FxHashMap::default();
+        // For each node and bounded edge pattern, the depths and hop counts of
+        // its states expanded past the edge pattern's minimum, in depth order
+        let mut dominance: Dominance = FxHashMap::default();
+        // The minimum of each bounded edge pattern, none for an unbounded one:
+        // only a bounded one's states past it can be dominated
+        let mut minimums: Vec<Option<u32>> = Vec::new();
+        budget.reserve_vec(&mut minimums, usize::from(last))?;
+        minimums.extend((0..last).map(|step| {
+            let hop = self.hop(step);
+            hop.max_hops.map(|_| hop.min_hops)
+        }));
+        let past_minimum = |state: &State| {
+            minimums
+                .get(usize::from(state.step))
+                .copied()
+                .flatten()
+                .is_some_and(|min| state.hops >= min)
+        };
+        // The ends of the walks to read back: a state and its depth
+        let mut ends: Vec<(State, usize)> = Vec::new();
+        let mut frontier = Vec::new();
+        budget.reserve_vec(&mut frontier, usize::from(last) + 1)?;
+        self.arrive(source, 0, 0, last, &mut frontier);
+        for &state in &frontier {
+            insert(budget, &mut lengths, state, 1)?;
+            if past_minimum(&state) {
+                note_expanded(budget, &mut dominance, state, 0)?;
+            }
+            if is_end(&state) {
+                push(budget, &mut ends, (state, 0))?;
+            }
+        }
+        frontier.retain(|state| state.step < last);
+        let mut depth = 0;
+        loop {
+            // The target has its lengths: every later walk is longer
+            if let Some(target) = target
+                && lengths
+                    .get(&State {
+                        node: target,
+                        step: last,
+                        hops: 0,
+                    })
+                    .is_some_and(|&reached| reached >= count)
+            {
+                break;
+            }
+            if frontier.is_empty() {
+                break;
+            }
+            depth += 1;
+            let mut reached = Vec::new();
+            let mut steps = StateSteps::default();
+            for &state in &frontier {
+                budget.tick()?;
+                let hop = self.hop(state.step);
+                for (neighbor, edge) in
+                    self.edges_of(state.node, hop.direction, hop.edge_types, hop.condition)
+                {
+                    landed.clear();
+                    self.arrive(neighbor, state.step, state.hops + 1, last, &mut landed);
+                    for &next in &landed {
+                        // The first k steps into a state give it k walks (each
+                        // step comes from a state with a walk back): enough
+                        // for the k paths of an end, in the order found
+                        if record_step(budget, &mut steps, next, (state, edge), keep)? {
+                            push(budget, &mut reached, next)?;
+                        }
+                    }
+                }
+            }
+            // A state expanded at k lengths already is not expanded again, nor
+            // one past a bounded edge pattern's minimum that k earlier depths
+            // dominate: it leaves this layer, and its step list gives its
+            // charge back
+            let mut expanded = Vec::new();
+            for &state in &reached {
+                let past_minimum = past_minimum(&state);
+                if past_minimum
+                    && dominance
+                        .get(&(state.node, state.step))
+                        .is_some_and(|seen| dominated(seen, state.hops, depth, count))
+                {
+                    if let Some(into) = steps.remove(&state) {
+                        release_list(budget, into);
+                    }
+                    continue;
+                }
+                budget.reserve_map(&mut lengths, 1)?;
+                let times = lengths.entry(state).or_insert(0);
+                if *times >= count {
+                    if let Some(into) = steps.remove(&state) {
+                        release_list(budget, into);
+                    }
+                    continue;
+                }
+                *times += 1;
+                if past_minimum {
+                    note_expanded(budget, &mut dominance, state, depth)?;
+                }
+                push(budget, &mut expanded, state)?;
+            }
+            release_list(budget, std::mem::replace(&mut reached, expanded));
+            for &state in &reached {
+                if is_end(&state) {
+                    push(budget, &mut ends, (state, depth))?;
+                }
+            }
+            push(budget, &mut layers, steps)?;
+            reached.retain(|state| state.step < last);
+            release_list(budget, std::mem::replace(&mut frontier, reached));
+        }
+
+        let mut taken: FxHashMap<NodeId, usize> = FxHashMap::default();
+        let mut kept = KeptPaths::default();
+        // Each path's starts: one for each edge pattern after the first
+        let starts = (usize::from(last) - 1).saturating_mul(size_of::<usize>());
+        for (end, depth) in ends {
+            if !taken.contains_key(&end.node) {
+                budget.reserve_map(&mut taken, 1)?;
+            }
+            let taken = taken.entry(end.node).or_insert(0);
+            let limit = if groups {
+                usize::MAX
+            } else {
+                count.saturating_sub(*taken)
+            };
+            if limit == 0 {
+                continue;
+            }
+            *taken += read_back(
+                budget,
+                end,
+                depth,
+                (limit, starts),
+                &mut kept,
+                |state, depth| {
+                    layers
+                        .get(depth)
+                        .and_then(|layer| layer.get(&state))
+                        .map_or(&[], Vec::as_slice)
+                },
+                |states, edges| state_path(states, edges, last),
+            )?;
+        }
+        Ok(kept.paths)
+    }
+
+    /// The paths a restrictive path mode allows (TRAIL, SIMPLE, ACYCLIC)
+    /// over a path pattern of several edge patterns, which the selection
+    /// keeps: the search of [`restricted_paths`](Self::restricted_paths),
+    /// each path in the queue with its state at its last node (see
+    /// [`program_walks`](Self::program_walks)) and where each edge pattern
+    /// after the first began. The path mode holds for the whole path. A
+    /// path's segment and its starts are charged when they are made and given
+    /// back when the last path that holds them is done.
+    fn program_paths(
+        &self,
+        budget: &mut PathBudget,
+        source: NodeId,
+        target: Option<NodeId>,
+    ) -> Result<Vec<FoundPath>, OperatorError> {
+        /// A path in the queue: its last segment, its length, its state there,
+        /// and where each edge pattern after the first began.
+        type Queued = (Arc<PathSegment>, u32, State, Arc<[usize]>);
+        const REFUSED: &str = "A shortest path search";
+
+        let op = self.operator;
+        let count = op.selection.count();
+        let groups = matches!(op.selection, PathSelection::ShortestGroups(_));
+        let last = self.last_step()?;
+        let starts_up_to = |step: u16| usize::from(step).min(usize::from(last) - 1);
+        let mut kept: FxHashMap<NodeId, Kept> = FxHashMap::default();
+        let mut paths = KeptPaths::default();
+        // In blocks, as the restrictive search of one edge pattern queues
+        let mut queue: PathQueue<Queued> = PathQueue::new();
+        // The states one edge reaches, at most one per edge pattern and the end
+        let mut landed = Vec::new();
+        budget.reserve_vec(&mut landed, usize::from(last) + 1)?;
+        charge_paths(budget, SEGMENT_BYTES, 0)?;
+        let root = Arc::new(PathSegment {
+            node: source,
+            edge: None,
+            parent: None,
+        });
+        self.arrive(source, 0, 0, last, &mut landed);
+        for &state in &landed {
+            let starts = starts_up_to(state.step);
+            charge_paths(budget, starts_bytes(starts), queue.len())?;
+            queue.reserve(budget).map_err(|error| {
+                with_path_count(error, REFUSED, queue.len(), budget, SHORTEST_PATH_ADVICE)
+            })?;
+            queue.push((
+                Arc::clone(&root),
+                0,
+                state,
+                std::iter::repeat_n(0, starts).collect(),
+            ));
+        }
+        drop(root);
+        // The path being expanded, out of the queue: held until the next is
+        // taken, then given back with the segments and starts only it held
+        let mut expanded: Option<(Arc<PathSegment>, Arc<[usize]>)> = None;
+        while let Some((segment, depth, state, starts)) = queue.pop(budget) {
+            budget.tick()?;
+            if let Some((done, done_starts)) =
+                expanded.replace((Arc::clone(&segment), Arc::clone(&starts)))
+            {
+                release_segments(budget, done);
+                release_starts(budget, done_starts);
+            }
+            // The target has its paths: every later path is as long or longer
+            if let Some(end) = target.and_then(|target| kept.get(&target))
+                && end.done(depth, count, groups)
+            {
+                break;
+            }
+            if state.step == last {
+                if target.is_none_or(|target| target == state.node) {
+                    if !kept.contains_key(&state.node) {
+                        budget.reserve_map(&mut kept, 1)?;
+                    }
+                    if kept
+                        .entry(state.node)
+                        .or_default()
+                        .admits(depth, count, groups)
+                    {
+                        // The paths held besides the kept ones: those queued
+                        // and the one expanded
+                        let hops = usize::try_from(depth).unwrap_or(usize::MAX);
+                        let bytes = path_bytes(hops)
+                            .saturating_add(starts.len().saturating_mul(size_of::<usize>()));
+                        paths.keep(budget, bytes, queue.len() + 1, || FoundPath {
+                            nodes: segment.collect_nodes(depth),
+                            edges: segment.collect_edges(depth),
+                            starts: starts.to_vec(),
+                        })?;
+                    }
+                }
+                continue;
+            }
+            if op.path_mode == PathMode::Simple && depth > 0 && state.node == source {
+                continue;
+            }
+            let hop = self.hop(state.step);
+            for (neighbor, edge) in
+                self.edges_of(state.node, hop.direction, hop.edge_types, hop.condition)
+            {
+                if !allowed(op.path_mode, &segment, source, (neighbor, edge)) {
+                    continue;
+                }
+                landed.clear();
+                self.arrive(neighbor, state.step, state.hops + 1, last, &mut landed);
+                if landed.is_empty() {
+                    continue;
+                }
+                // The paths held: those queued, the one expanded and the
+                // kept ones
+                let held = queue.len() + 1 + paths.paths.len();
+                charge_paths(budget, SEGMENT_BYTES, held)?;
+                let next = Arc::new(PathSegment {
+                    node: neighbor,
+                    edge: Some(edge),
+                    parent: Some(Arc::clone(&segment)),
+                });
+                for &into in &landed {
+                    // The edge patterns the path passes on to begin after this
+                    // edge: new starts, charged; in the same one it shares them
+                    let starts = if into.step == state.step {
+                        Arc::clone(&starts)
+                    } else {
+                        let length = starts_up_to(into.step);
+                        charge_paths(budget, starts_bytes(length), held)?;
+                        let begun = usize::try_from(depth + 1).unwrap_or(usize::MAX);
+                        let new = length.saturating_sub(starts.len());
+                        starts
+                            .iter()
+                            .copied()
+                            .chain(std::iter::repeat_n(begun, new))
+                            .collect()
+                    };
+                    queue.reserve(budget).map_err(|error| {
+                        with_path_count(error, REFUSED, held, budget, SHORTEST_PATH_ADVICE)
+                    })?;
+                    queue.push((Arc::clone(&next), depth + 1, into, starts));
+                }
+                release_segments(budget, next);
+            }
+        }
+        Ok(paths.paths)
+    }
 }
 
 /// A node or edge id as the `Value::Int64` item of a path's node or edge
@@ -1274,25 +1869,182 @@ fn entity_id(id: u64) -> Result<Value, OperatorError> {
         .map_err(|_| OperatorError::Internal(format!("id {id} exceeds the i64 range")))
 }
 
+/// What the selection kept of the paths to one end of a search over the
+/// paths of a restrictive path mode.
+#[derive(Default)]
+struct Kept {
+    /// The number of paths kept.
+    paths: usize,
+    /// The number of lengths kept.
+    lengths: usize,
+    /// The length of the last path kept.
+    last: u32,
+}
+
+impl Kept {
+    /// Whether this end has its paths before a path of `depth` edges: every
+    /// later path is as long or longer.
+    fn done(&self, depth: u32, count: usize, groups: bool) -> bool {
+        if groups {
+            self.lengths >= count && depth > self.last
+        } else {
+            self.paths >= count
+        }
+    }
+
+    /// Whether the selection keeps a path of `depth` edges to this end, the
+    /// paths coming in the order of their lengths; counts it when it does.
+    fn admits(&mut self, depth: u32, count: usize, groups: bool) -> bool {
+        let keep = if groups {
+            if self.paths > 0 && depth == self.last {
+                true
+            } else if self.lengths < count {
+                self.lengths += 1;
+                self.last = depth;
+                true
+            } else {
+                false
+            }
+        } else {
+            self.paths < count
+        };
+        if keep {
+            self.paths += 1;
+        }
+        keep
+    }
+}
+
+/// Whether a state with `hops` edges of its edge pattern, past the pattern's
+/// minimum, reached at `depth`, is dominated by `seen`, the depths and hop
+/// counts of the states of its node and edge pattern expanded past the
+/// minimum: when those with `hops` or fewer were expanded at `count`
+/// distinct depths before `depth`. Such a state can leave the edge pattern
+/// at once and has at least as many of its edges left, so every walk on from
+/// the dominated state goes on from each of them too, at `count` distinct
+/// shorter lengths: it is beyond the `count` shortest lengths and walks of
+/// its end. A state at the same depth is never counted, so ties stay. For one
+/// edge pattern this is the rule that keys the lengths on the node alone; an
+/// unbounded quantifier needs none, its hops stopping at its minimum.
+fn dominated(seen: &[(usize, u32)], hops: u32, depth: usize, count: usize) -> bool {
+    let mut depths = 0;
+    let mut last = None;
+    for &(at, by) in seen {
+        if at < depth && by <= hops && last != Some(at) {
+            depths += 1;
+            last = Some(at);
+            if depths >= count {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// For each node and bounded edge pattern, the depths and hop counts of its
+/// states expanded past the edge pattern's minimum (see [`dominated`]).
+type Dominance = FxHashMap<(NodeId, u16), Vec<(usize, u32)>>;
+
+/// Notes in `dominance` that `state`, past its bounded edge pattern's
+/// minimum, was expanded at `depth`: charged to `budget` before anything
+/// grows, by capacity like the step lists.
+fn note_expanded(
+    budget: &mut PathBudget,
+    dominance: &mut Dominance,
+    state: State,
+    depth: usize,
+) -> Result<(), OperatorError> {
+    budget.reserve_map(dominance, 1)?;
+    let seen = dominance.entry((state.node, state.step)).or_default();
+    push(budget, seen, (depth, state.hops))
+}
+
+/// Whether a path along `segment` from `source` may go on to `neighbor` over
+/// `edge` under `path_mode`: TRAIL repeats no edge, ACYCLIC no node, SIMPLE
+/// no node but the first, as the last.
+fn allowed(
+    path_mode: PathMode,
+    segment: &PathSegment,
+    source: NodeId,
+    (neighbor, edge): (NodeId, EdgeId),
+) -> bool {
+    match path_mode {
+        PathMode::Walk => true,
+        PathMode::Trail => !segment.contains_edge(edge),
+        PathMode::Simple => neighbor == source || !segment.contains_node(neighbor),
+        PathMode::Acyclic => !segment.contains_node(neighbor),
+    }
+}
+
+/// The steps that reach each state of a layer of a search over a path
+/// pattern of several edge patterns: from which state, over which edge.
+type StateSteps = FxHashMap<State, Vec<(State, EdgeId)>>;
+
+/// The path of a walk read back from its end: `nodes` and `edges` from the
+/// end back to the source.
+fn walk_path(nodes: &[NodeId], edges: &[EdgeId]) -> FoundPath {
+    FoundPath {
+        nodes: nodes.iter().rev().copied().collect(),
+        edges: edges.iter().rev().copied().collect(),
+        starts: Vec::new(),
+    }
+}
+
+/// The path of a walk over states read back from its end (see
+/// [`PathSearch::program_walks`]): `states` and `edges` from the end back to
+/// the source, of a path pattern of `last` edge patterns. Each edge belongs
+/// to the edge pattern of the state it leaves.
+fn state_path(states: &[State], edges: &[EdgeId], last: u16) -> FoundPath {
+    let steps: Vec<u16> = states
+        .iter()
+        .rev()
+        .take(edges.len())
+        .map(|state| state.step)
+        .collect();
+    FoundPath {
+        nodes: states.iter().rev().map(|state| state.node).collect(),
+        edges: edges.iter().rev().copied().collect(),
+        starts: (1..last)
+            .map(|step| steps.partition_point(|&taken| taken < step))
+            .collect(),
+    }
+}
+
+/// The bytes the starts of a path in the queue hold, `starts` of them, as an
+/// `Arc` of its own: its two counts and the starts (most are shared).
+fn starts_bytes(starts: usize) -> usize {
+    starts.saturating_add(2).saturating_mul(size_of::<usize>())
+}
+
+/// Gives back what `starts` held when this was its last holder.
+fn release_starts(budget: &mut PathBudget, starts: Arc<[usize]>) {
+    if Arc::strong_count(&starts) == 1 {
+        budget.release(starts_bytes(starts.len()));
+    }
+}
+
 /// The paths of `length` edges from the source to `end`, read back from
-/// `end` along the steps `steps_into` gives into a node at a depth (from
-/// which node, over which edge; none at depth 0, the source): the first
-/// `limit` of them, added to `kept`; returns how many. Iterative, so that a
+/// `end` along the steps `steps_into` gives into a node (or state) at a
+/// depth (from which node, over which edge; none at depth 0, the source):
+/// the first `limit` of them, made by `path` from the nodes and edges back
+/// from `end` and added to `kept`, each with `starts` bytes of starts besides
+/// its lists (see [`found_bytes`]); returns how many. Iterative, so that a
 /// long path does not run out of stack. Fails when the search would hold
 /// more than its budget: the shortest paths between two nodes can be
 /// exponentially many.
-fn read_back<'a>(
+fn read_back<'a, K: Copy + 'a>(
     budget: &mut PathBudget,
-    end: NodeId,
+    end: K,
     length: usize,
-    limit: usize,
+    (limit, starts): (usize, usize),
     kept: &mut KeptPaths,
-    steps_into: impl Fn(NodeId, usize) -> &'a [(NodeId, EdgeId)],
+    steps_into: impl Fn(K, usize) -> &'a [(K, EdgeId)],
+    path: impl Fn(&[K], &[EdgeId]) -> FoundPath,
 ) -> Result<usize, OperatorError> {
     let mut found = 0;
     // One frame per node on the way back: the node, its depth, and the
     // next of its steps to follow
-    let mut frames: Vec<(NodeId, usize, usize)> = Vec::new();
+    let mut frames: Vec<(K, usize, usize)> = Vec::new();
     push(budget, &mut frames, (end, length, 0))?;
     let mut nodes = Vec::new();
     push(budget, &mut nodes, end)?;
@@ -1302,10 +2054,8 @@ fn read_back<'a>(
             break;
         }
         if depth == 0 {
-            kept.keep(budget, edges.len(), 0, || FoundPath {
-                nodes: nodes.iter().rev().copied().collect(),
-                edges: edges.iter().rev().copied().collect(),
-            })?;
+            let bytes = path_bytes(edges.len()).saturating_add(starts);
+            kept.keep(budget, bytes, 0, || path(&nodes, &edges))?;
             found += 1;
         } else if let Some(&(previous, edge)) = steps_into(node, depth).get(next) {
             if let Some(frame) = frames.last_mut() {
@@ -1393,12 +2143,17 @@ impl ShortestPathOperator {
                 output_schema.push(LogicalType::Node);
             }
             output_schema.push(LogicalType::Any); // Path column (stores length as int)
-            match self.outputs.edge {
-                Some(EdgeOutput::List) => {
-                    output_schema.push(LogicalType::List(Box::new(LogicalType::Edge)));
+            let edge_type = |output: Option<EdgeOutput>| match output {
+                Some(EdgeOutput::List) => Some(LogicalType::List(Box::new(LogicalType::Edge))),
+                Some(EdgeOutput::Single) => Some(LogicalType::Edge),
+                None => None,
+            };
+            output_schema.extend(edge_type(self.outputs.edge));
+            for step in &self.steps {
+                if step.node_output {
+                    output_schema.push(LogicalType::Node);
                 }
-                Some(EdgeOutput::Single) => output_schema.push(LogicalType::Edge),
-                None => {}
+                output_schema.extend(edge_type(step.edge_output));
             }
             if self.outputs.path {
                 // Node ids, edge ids, and the `Value::Path`
@@ -1451,7 +2206,7 @@ impl ShortestPathOperator {
                             // nothing and grows within the grant the earlier
                             // ones took
                             let mut budget = self.path_budget.take().unwrap_or_else(|| {
-                                PathBudget::new(self.budget, None)
+                                PathBudget::new(self.budget, crate::execution::deadline::current())
                                     .with_memory(std::mem::take(&mut self.memory))
                                     .with_refusal(SHORTEST_PATH_REFUSAL)
                             });
@@ -1513,14 +2268,19 @@ impl ShortestPathOperator {
                 }
                 column += 1;
 
-                let edge_ids = || -> Result<Vec<Value>, OperatorError> {
-                    path.edges.iter().map(|&edge| entity_id(edge.0)).collect()
+                let edge_values = |edges: &[EdgeId]| -> Result<Vec<Value>, OperatorError> {
+                    edges.iter().map(|&edge| entity_id(edge.0)).collect()
                 };
-                if let Some(output) = self.outputs.edge {
+                // The edges of one edge pattern, in the column of its variable
+                let write_edges = |builder: &mut DataChunkBuilder,
+                                   column: usize,
+                                   output: EdgeOutput,
+                                   edges: &[EdgeId]|
+                 -> Result<(), OperatorError> {
                     if let Some(out_col) = builder.column_mut(column) {
-                        match (output, path.edges.as_slice()) {
+                        match (output, edges) {
                             (EdgeOutput::List, _) => {
-                                out_col.push_value(Value::List(edge_ids()?.into()));
+                                out_col.push_value(Value::List(edge_values(edges)?.into()));
                             }
                             (EdgeOutput::Single, [edge]) => out_col.push_edge_id(*edge),
                             // An edge pattern without a quantifier is one
@@ -1528,7 +2288,26 @@ impl ShortestPathOperator {
                             (EdgeOutput::Single, _) => out_col.push_value(Value::Null),
                         }
                     }
+                    Ok(())
+                };
+                if let Some(output) = self.outputs.edge {
+                    write_edges(&mut builder, column, output, path.step_edges(0))?;
                     column += 1;
+                }
+                for (index, step) in self.steps.iter().enumerate() {
+                    if step.node_output {
+                        let start = path.starts.get(index).copied().unwrap_or(0);
+                        if let (Some(out_col), Some(&node)) =
+                            (builder.column_mut(column), path.nodes.get(start))
+                        {
+                            out_col.push_node_id(node);
+                        }
+                        column += 1;
+                    }
+                    if let Some(output) = step.edge_output {
+                        write_edges(&mut builder, column, output, path.step_edges(index + 1))?;
+                        column += 1;
+                    }
                 }
 
                 if self.outputs.path {
@@ -1537,7 +2316,7 @@ impl ShortestPathOperator {
                         .iter()
                         .map(|&node| entity_id(node.0))
                         .collect::<Result<_, _>>()?;
-                    let edge_ids = edge_ids()?;
+                    let edge_ids = edge_values(&path.edges)?;
                     if let Some(out_col) = builder.column_mut(column) {
                         out_col.push_value(Value::List(node_ids.clone().into()));
                     }
@@ -1555,7 +2334,7 @@ impl ShortestPathOperator {
                 builder.advance_row();
                 // Written: the path's lists go, and so does their charge
                 if let Some(budget) = &mut self.path_budget {
-                    budget.release(path_bytes(path.edges.len()));
+                    budget.release(found_bytes(&path));
                 }
             }
 
@@ -4211,5 +4990,270 @@ mod tests {
             }),
             "expected the path search budget's refusal, got {result:?}"
         );
+    }
+
+    // --- The search over a chain of edge patterns ---
+
+    /// A search for `pairs` over `-[:R]->{min,max}` then `-[:S]->`, with
+    /// `selection` and a memory budget of `budget` bytes.
+    fn two_steps(
+        store: &Arc<RowGroupStore>,
+        pairs: Vec<(NodeId, NodeId)>,
+        (min_hops, max_hops): (u32, Option<u32>),
+        selection: PathSelection,
+        budget: usize,
+    ) -> ShortestPathOperator {
+        ShortestPathOperator::new(
+            Arc::clone(store) as Arc<dyn GraphStore>,
+            Box::new(MockPairOperator::new(pairs)),
+            0,
+            1,
+            vec!["R".to_string()],
+            Direction::Outgoing,
+            ReadView::latest(),
+        )
+        .with_hop_bounds(min_hops, max_hops)
+        .with_step(PathStep::new(vec!["S".to_string()], Direction::Outgoing))
+        .with_selection(selection)
+        .with_memory_budget(budget)
+    }
+
+    #[test]
+    fn a_chain_of_edge_patterns_counts_every_edge() {
+        // a -R-> b -R-> c -S-> d, and a -S-> d: the chain needs its R edges
+        // before the S edge, so a to d is three edges, not the S edge alone
+        let store = Arc::new(RowGroupStore::new());
+        let [a, b, c, d] = [(); 4].map(|()| store.create_node(&["Node"]));
+        store.create_edge(a, b, "R");
+        store.create_edge(b, c, "R");
+        store.create_edge(c, d, "S");
+        store.create_edge(a, d, "S");
+        let mut op = two_steps(
+            &store,
+            vec![(a, d), (b, d), (d, a)],
+            (1, None),
+            PathSelection::Shortest(1),
+            DEFAULT_PATH_SEARCH_BUDGET,
+        );
+        assert_eq!(
+            rows(&mut op),
+            [(a, d, Value::Int64(3)), (b, d, Value::Int64(2))]
+        );
+        // With the R edges optional, a reaches d over its S edge alone
+        let mut op = two_steps(
+            &store,
+            vec![(a, d)],
+            (0, None),
+            PathSelection::Shortest(1),
+            DEFAULT_PATH_SEARCH_BUDGET,
+        );
+        assert_eq!(rows(&mut op), [(a, d, Value::Int64(1))]);
+    }
+
+    #[test]
+    fn a_bounded_quantifier_in_a_chain_keeps_to_its_bounds() {
+        // A chain of three R edges from the start, each node on it with an S
+        // edge to the end: {2,2} takes only the second node of the chain
+        let store = Arc::new(RowGroupStore::new());
+        let start = store.create_node(&["Node"]);
+        let chain = [(); 3].map(|()| store.create_node(&["Node"]));
+        let end = store.create_node(&["Node"]);
+        let mut from = start;
+        for node in chain {
+            store.create_edge(from, node, "R");
+            store.create_edge(node, end, "S");
+            from = node;
+        }
+        let mut op = two_steps(
+            &store,
+            vec![(start, end)],
+            (2, Some(2)),
+            PathSelection::ShortestGroups(2),
+            DEFAULT_PATH_SEARCH_BUDGET,
+        );
+        assert_eq!(rows(&mut op), [(start, end, Value::Int64(3))]);
+    }
+
+    /// a -R-> b over 50 parallel edges, then b -S-> c.
+    fn parallel_then_one() -> (Arc<RowGroupStore>, NodeId, NodeId) {
+        let store = Arc::new(RowGroupStore::new());
+        let [a, b, c] = [(); 3].map(|()| store.create_node(&["Node"]));
+        for _ in 0..50 {
+            store.create_edge(a, b, "R");
+        }
+        store.create_edge(b, c, "S");
+        (store, a, c)
+    }
+
+    #[test]
+    fn a_chain_search_holds_its_predecessors_within_the_budget() {
+        // Two kilobytes hold the states and one step into each, not the 50
+        // steps into b that ALL SHORTEST keeps
+        let (store, a, c) = parallel_then_one();
+        let mut any = two_steps(
+            &store,
+            vec![(a, c)],
+            (1, None),
+            PathSelection::Shortest(1),
+            2048,
+        );
+        assert_eq!(rows(&mut any), [(a, c, Value::Int64(2))]);
+        let mut all = two_steps(
+            &store,
+            vec![(a, c)],
+            (1, None),
+            PathSelection::ShortestGroups(1),
+            2048,
+        );
+        let error = drain(&mut all).expect_err("50 steps into b pass 2 KiB");
+        assert!(
+            super::super::variable_length_expand::path_budget_message(&error).is_some(),
+            "{error:?}"
+        );
+        // With room for them, every path through a parallel edge
+        let mut all = two_steps(
+            &store,
+            vec![(a, c)],
+            (1, None),
+            PathSelection::ShortestGroups(1),
+            DEFAULT_PATH_SEARCH_BUDGET,
+        );
+        assert_eq!(drain(&mut all).unwrap().0, 50);
+    }
+
+    #[test]
+    fn a_one_edge_search_stops_at_the_deadline() {
+        // A few nodes only: the search looks at the deadline on its first
+        // node, not after a thousand; with a minimum of two edges, in the
+        // walks of the minimum too, which reach the target before the search
+        // past them begins
+        let (store, a, c) = parallel_then_one();
+        let _deadline =
+            crate::execution::deadline::enter(Some(grafeo_common::clock::Instant::now()));
+        for selection in [PathSelection::Shortest(1), PathSelection::ShortestGroups(1)] {
+            for min_hops in [0, 2] {
+                let mut op = ShortestPathOperator::new(
+                    Arc::clone(&store) as Arc<dyn GraphStore>,
+                    Box::new(MockPairOperator::new(vec![(a, c)])),
+                    0,
+                    1,
+                    vec![],
+                    Direction::Outgoing,
+                    ReadView::latest(),
+                )
+                .with_hop_bounds(min_hops, None)
+                .with_selection(selection);
+                assert!(
+                    matches!(drain(&mut op), Err(OperatorError::Timeout)),
+                    "{selection:?} from {min_hops} edges"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_chain_search_stops_at_the_deadline() {
+        let (store, a, c) = parallel_then_one();
+        let _deadline =
+            crate::execution::deadline::enter(Some(grafeo_common::clock::Instant::now()));
+        for selection in [PathSelection::Shortest(1), PathSelection::ShortestGroups(1)] {
+            let mut op = two_steps(
+                &store,
+                vec![(a, c)],
+                (1, None),
+                selection,
+                DEFAULT_PATH_SEARCH_BUDGET,
+            );
+            assert!(
+                matches!(drain(&mut op), Err(OperatorError::Timeout)),
+                "{selection:?}"
+            );
+        }
+    }
+
+    /// A [`fan`] of `R` edges then `S` edges, for [`two_steps`].
+    fn fan_r_then_s(width: usize) -> (Arc<RowGroupStore>, NodeId, NodeId) {
+        let store = Arc::new(RowGroupStore::new());
+        let [source, target] = [(); 2].map(|()| store.create_node(&["Node"]));
+        for _ in 0..width {
+            let middle = store.create_node(&["Node"]);
+            store.create_edge(source, middle, "R");
+            store.create_edge(middle, target, "S");
+        }
+        (store, source, target)
+    }
+
+    /// `op` with a budget whose deadline passes after `polls` reads of the
+    /// clock, `polls` x 1,024 units of work, whatever the clock says.
+    fn expiring(mut op: ShortestPathOperator, polls: u32) -> ShortestPathOperator {
+        let mut budget = PathBudget::new(op.budget, None)
+            .with_memory(std::mem::take(&mut op.memory))
+            .with_refusal(SHORTEST_PATH_REFUSAL);
+        budget.ticker.expire_after_polls(polls);
+        op.path_budget = Some(budget);
+        op
+    }
+
+    #[test]
+    fn a_one_edge_search_counts_every_node_it_takes_up() {
+        // 5,000 middle nodes in one layer: their step lists count about
+        // 5,000 units of work when the layer is made, and taking them up
+        // 5,000 more, in the walks of the minimum (ANY SHORTEST from two
+        // edges) and in the search past them (ALL SHORTEST from one). Each
+        // search needs three clock reads more than `polls` with the ticks of
+        // the nodes taken up, and two fewer without them
+        let (store, source, target) = fan(5_000);
+        for (selection, min_hops, polls) in [
+            (PathSelection::Shortest(1), 2, 7),
+            (PathSelection::ShortestGroups(1), 1, 12),
+        ] {
+            let mut op = expiring(
+                ShortestPathOperator::new(
+                    Arc::clone(&store) as Arc<dyn GraphStore>,
+                    Box::new(MockPairOperator::new(vec![(source, target)])),
+                    0,
+                    1,
+                    vec![],
+                    Direction::Outgoing,
+                    ReadView::latest(),
+                )
+                .with_hop_bounds(min_hops, None)
+                .with_selection(selection),
+                polls,
+            );
+            assert!(
+                matches!(drain(&mut op), Err(OperatorError::Timeout)),
+                "{selection:?} from {min_hops} edges"
+            );
+        }
+    }
+
+    #[test]
+    fn a_chain_search_counts_every_state_it_takes_up() {
+        // The 5,000 middle nodes give 10,000 states, one in each edge pattern,
+        // which count about 10,000 units when taken up: as in
+        // `a_one_edge_search_counts_every_node_it_takes_up`, `polls` falls
+        // between the clock reads the search needs with those ticks and
+        // without them
+        let (store, source, target) = fan_r_then_s(5_000);
+        for (selection, polls) in [
+            (PathSelection::Shortest(1), 15),
+            (PathSelection::ShortestGroups(1), 20),
+        ] {
+            let mut op = expiring(
+                two_steps(
+                    &store,
+                    vec![(source, target)],
+                    (1, None),
+                    selection,
+                    DEFAULT_PATH_SEARCH_BUDGET,
+                ),
+                polls,
+            );
+            assert!(
+                matches!(drain(&mut op), Err(OperatorError::Timeout)),
+                "{selection:?}"
+            );
+        }
     }
 }

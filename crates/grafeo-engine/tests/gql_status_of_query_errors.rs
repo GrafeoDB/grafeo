@@ -160,7 +160,7 @@ fn a_feature_grafeo_lacks_is_42000_and_unsupported() {
     for (language, query) in [
         (
             "gql",
-            "MATCH ANY SHORTEST (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN a.name AS name",
+            "MATCH ANY SHORTEST ((a:Person)-[:KNOWS]->(b)){1,2} RETURN a.name AS name",
         ),
         (
             "cypher",

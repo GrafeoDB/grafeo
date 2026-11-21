@@ -385,6 +385,7 @@ mod search_operations;
 mod search_soft_delete;
 mod search_ties;
 mod selected_graph_direct_calls;
+mod selective_path_patterns;
 mod selector_paths_s_group;
 mod selector_paths_s_group_cases;
 mod self_loops_and_generated_names;

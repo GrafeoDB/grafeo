@@ -86,12 +86,26 @@ tests:
         - [Alix, Gus]
         - [Gus, Alix]
 
-  - name: any_over_two_edge_patterns_is_an_error
+  - name: any_over_two_edge_patterns_keeps_one_path_for_each_pair
     setup:
-      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (alix)-[:KNOWS {w: 3}]->(gus)"
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (jules:Person {name: 'Jules'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(vincent), (gus)-[:KNOWS {w: 88}]->(mia), (vincent)-[:KNOWS {w: 38}]->(mia), (gus)-[:KNOWS {w: 33}]->(vincent), (mia)-[:KNOWS {w: 83}]->(jules)"
     query: "MATCH ANY (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN a.name, c.name"
     expect:
-      error: "more than one edge pattern"
+      rows:
+        - [Alix, Mia]
+        - [Alix, Vincent]
+        - [Gus, Jules]
+        - [Gus, Mia]
+        - [Vincent, Jules]
+
+  - name: all_shortest_over_a_quantified_and_a_fixed_edge_pattern
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), (vincent:Person {name: 'Vincent'}), (mia:Person {name: 'Mia'}), (jules:Person {name: 'Jules'}), (alix)-[:KNOWS {w: 3}]->(gus), (alix)-[:KNOWS {w: 19}]->(vincent), (gus)-[:KNOWS {w: 88}]->(mia), (vincent)-[:KNOWS {w: 38}]->(mia), (gus)-[:KNOWS {w: 33}]->(vincent), (mia)-[:KNOWS {w: 83}]->(jules)"
+    query: "MATCH p = ALL SHORTEST (a:Person {name: 'Alix'})-[e:KNOWS]->*(b)-[f:KNOWS WHERE f.w > 80]->(c:Person {name: 'Jules'}) RETURN [x IN e | x.w] AS run, f.w AS last, length(p) AS len"
+    expect:
+      rows:
+        - ["[3, 88]", 83, 3]
+        - ["[19, 38]", 83, 3]
 
   - name: any_zero_is_an_error
     setup:

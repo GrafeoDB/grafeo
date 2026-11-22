@@ -64,6 +64,7 @@ Performance and memory release, in progress: this section lists what has landed 
 
 ### Fixed
 
+- **`text_match` and `text_score` run on a store of its own** ([#809](https://github.com/GrafeoDB/grafeo/issues/809)): on a database built with `GrafeoDB::with_read_store` or `with_store`, both now ask the store for its text index and score each row, where they were refused although the store kept one; a store without the index still refuses the query.
 - **Small named graphs, stores, transactions and query operators count what they hold**: each counts at most about twice its own size against the memory limit (at least 4 KiB).
 - **A SPARQL join in `GRAPH <iri>` or after `FROM <iri>` reads only the matching subjects** ([#810](https://github.com/GrafeoDB/grafeo/issues/810)): it looks its other patterns up from the subjects it matched, as the same join does on the default graph. With 3 matching subjects among 200, a two-pattern join scans 6 rows instead of 206, and the rows scanned no longer grow with the graph; a join inside `GRAPH ?g` still reads whole predicates.
 - **SPARQL keeps the sign of a number written with one**: `+1`, `-0.5` and `+05` are numeric literals with the sign in their lexical form, as the SPARQL 1.1 grammar has it. A pattern or `VALUES` entry `+3.5` matches only that term, not `3.5`, as RDF term equality requires; `=` still compares the values.

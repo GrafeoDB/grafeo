@@ -197,9 +197,9 @@ impl ColumnKinds {
 pub(super) enum StoreKind {
     /// The built-in store, with its vector and text indexes.
     BuiltIn,
-    /// A store of its own (`with_store`), which has none of the built-in
-    /// store's indexes: a text search is then the unsupported error rather
-    /// than a missing index.
+    /// A store of its own (`with_read_store` or `with_store`), which keeps
+    /// only the indexes it reports: a text search without one is then the
+    /// unsupported error, with no CREATE INDEX hint.
     External,
 }
 

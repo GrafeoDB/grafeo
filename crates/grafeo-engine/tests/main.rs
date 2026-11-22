@@ -491,6 +491,7 @@ mod temporal_properties;
 mod temporal_types;
 mod text_index_mutations;
 mod text_index_options;
+mod text_search_on_a_store_of_its_own;
 mod time_travel;
 mod topk_rewrite;
 mod topological_cycles;

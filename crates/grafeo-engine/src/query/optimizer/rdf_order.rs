@@ -10,21 +10,26 @@
 //! which every pattern of a star on one subject shares, so it reorders no
 //! SPARQL group.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use std::sync::Arc;
 
+use grafeo_core::graph::rdf::RdfStore;
 use grafeo_core::statistics::RdfStatistics;
 
 use crate::query::plan::{
-    JoinCondition, JoinOp, JoinType, LogicalExpression, LogicalOperator, TripleComponent,
+    GraphsRead, JoinCondition, JoinOp, JoinType, LogicalExpression, LogicalOperator,
+    TripleComponent, TripleScanOp,
 };
 
 /// What the order is estimated from: the store's statistics (per-predicate
 /// counts and totals), when the optimizer was made from RDF statistics,
-/// shared with the cardinality estimator.
+/// shared with the cardinality estimator, and those of the named graphs the
+/// plan's patterns and paths read (each its own store, with its own
+/// statistics).
 pub(super) struct RdfOrder {
     statistics: Arc<RdfStatistics>,
+    graphs: BTreeMap<String, Arc<RdfStatistics>>,
 }
 
 #[expect(
@@ -37,7 +42,63 @@ fn estimate_of(count: u64) -> f64 {
 
 impl RdfOrder {
     pub(super) fn new(statistics: Arc<RdfStatistics>) -> Self {
-        Self { statistics }
+        Self {
+            statistics,
+            graphs: BTreeMap::new(),
+        }
+    }
+
+    /// The statistics of the named graphs the plan reads, by name: every
+    /// existing graph [`graphs_read`] names.
+    pub(super) fn set_graphs(&mut self, graphs: BTreeMap<String, Arc<RdfStatistics>>) {
+        self.graphs = graphs;
+    }
+
+    /// The statistics of the graphs `read` names: the default graph's, or those of the named
+    /// graphs the plan reads that the store holds (a graph it does not hold has none).
+    fn statistics_of(&self, read: GraphsRead<'_>) -> Vec<&RdfStatistics> {
+        match read {
+            GraphsRead::Default => vec![self.statistics.as_ref()],
+            GraphsRead::Named(names) => names
+                .into_iter()
+                .filter_map(|name| self.graphs.get(name).map(Arc::as_ref))
+                .collect(),
+            GraphsRead::EveryNamed => self.graphs.values().map(Arc::as_ref).collect(),
+        }
+    }
+
+    /// The rows `scan` is estimated to give, unbound, per subject and per
+    /// object (see [`Cost::Pattern`]): from the statistics of each graph it
+    /// reads, summed over them, so a graph it does not find gives none.
+    fn pattern_rows(&self, scan: &TripleScanOp) -> [f64; 3] {
+        self.statistics_of(scan.graphs_read())
+            .into_iter()
+            .fold([0.0; 3], |sum, statistics| {
+                let rows = pattern_rows_in(statistics, scan);
+                [sum[0] + rows[0], sum[1] + rows[1], sum[2] + rows[2]]
+            })
+    }
+
+    /// The triples of the graphs a chain's patterns and paths read, each graph once: what an
+    /// input whose rows are not known is estimated at. The default graph's when none reads one.
+    fn chain_total(&self, inputs: &[&LogicalOperator]) -> f64 {
+        let mut read: Vec<&RdfStatistics> = Vec::new();
+        for input in inputs {
+            let graphs = match input {
+                LogicalOperator::TripleScan(scan) => scan.graphs_read(),
+                LogicalOperator::PropertyPath(path) => path.graphs_read(),
+                _ => continue,
+            };
+            for statistics in self.statistics_of(graphs) {
+                if !read.iter().any(|seen| std::ptr::eq(*seen, statistics)) {
+                    read.push(statistics);
+                }
+            }
+        }
+        if read.is_empty() {
+            read.push(&self.statistics);
+        }
+        estimate_of(read.iter().map(|statistics| statistics.total_triples).sum()).max(1.0)
     }
 
     /// `op` with every chain of inner joins in it ordered.
@@ -162,6 +223,7 @@ impl RdfOrder {
     /// variables are not known. Each input is costed once, so a step only
     /// compares numbers.
     fn chain(&self, inputs: &[&LogicalOperator]) -> Option<(Vec<usize>, Vec<Vec<String>>)> {
+        let total = self.chain_total(inputs);
         let mut names: Vec<String> = Vec::new();
         let mut index = |name: &str| match names.iter().position(|known| known == name) {
             Some(i) => i,
@@ -172,7 +234,7 @@ impl RdfOrder {
         };
         let costed: Vec<Costed> = inputs
             .iter()
-            .map(|input| self.costed(input, &mut index))
+            .map(|input| self.costed(input, &mut index, total))
             .collect::<Option<_>>()?;
         let mut bound = vec![false; names.len()];
         let mut remaining: Vec<usize> = (0..inputs.len()).collect();
@@ -210,15 +272,14 @@ impl RdfOrder {
     }
 
     /// What the order reads of `leaf`: its variables (by `index`) and how
-    /// its rows depend on the ones bound before it; `None` when its
-    /// variables are not known.
+    /// its rows depend on the ones bound before it, `total` rows when they
+    /// are not known; `None` when its variables are not known.
     fn costed(
         &self,
         leaf: &LogicalOperator,
         index: &mut impl FnMut(&str) -> usize,
+        total: f64,
     ) -> Option<Costed> {
-        let statistics = &self.statistics;
-        let total = estimate_of(statistics.total_triples).max(1.0);
         let mut end = |component: &TripleComponent| match component.as_variable() {
             Some(name) => End::Variable(index(name)),
             None => End::Constant,
@@ -226,29 +287,7 @@ impl RdfOrder {
         let (cost, mut variables) = match leaf {
             LogicalOperator::TripleScan(scan) => {
                 let (subject, object) = (end(&scan.subject), end(&scan.object));
-                let counted = match &scan.predicate {
-                    TripleComponent::Iri(iri) => statistics.get_predicate(&format!("<{iri}>")),
-                    _ => None,
-                };
-                let rows = match counted {
-                    Some(counted) => {
-                        let triples = estimate_of(counted.triple_count);
-                        [
-                            triples,
-                            triples / estimate_of(counted.distinct_subjects.max(1)),
-                            triples / estimate_of(counted.distinct_objects.max(1)),
-                        ]
-                    }
-                    None => [
-                        if scan.predicate.as_variable().is_some() {
-                            total
-                        } else {
-                            total / estimate_of(statistics.predicate_count.max(1))
-                        },
-                        total / estimate_of(statistics.subject_count.max(1)),
-                        total / estimate_of(statistics.object_count.max(1)),
-                    ],
-                };
+                let rows = self.pattern_rows(scan);
                 (
                     Cost::Pattern {
                         subject,
@@ -260,7 +299,12 @@ impl RdfOrder {
             }
             LogicalOperator::PropertyPath(path) => {
                 let (subject, object) = (end(&path.subject), end(&path.object));
-                let one_end = estimate_of(statistics.subject_count.max(1));
+                // From the graphs the path searches, as a pattern's rows are.
+                let graphs = self.statistics_of(path.graphs_read());
+                let one_end =
+                    estimate_of(graphs.iter().map(|g| g.subject_count).sum::<u64>().max(1));
+                let total =
+                    estimate_of(graphs.iter().map(|g| g.total_triples).sum::<u64>()).max(1.0);
                 (
                     Cost::Path {
                         subject,
@@ -278,6 +322,55 @@ impl RdfOrder {
         found.sort();
         variables.extend(found.into_iter().map(|name| index(name)));
         Some(Costed { variables, cost })
+    }
+}
+
+/// The rows `scan` is estimated to give in the graph of `statistics`,
+/// unbound, per subject and per object: from its predicate's counts, else
+/// from the graph's totals.
+fn pattern_rows_in(statistics: &RdfStatistics, scan: &TripleScanOp) -> [f64; 3] {
+    let total = estimate_of(statistics.total_triples).max(1.0);
+    let counted = match &scan.predicate {
+        TripleComponent::Iri(iri) => statistics.get_predicate(&format!("<{iri}>")),
+        _ => None,
+    };
+    match counted {
+        Some(counted) => {
+            let triples = estimate_of(counted.triple_count);
+            [
+                triples,
+                triples / estimate_of(counted.distinct_subjects.max(1)),
+                triples / estimate_of(counted.distinct_objects.max(1)),
+            ]
+        }
+        None => [
+            if scan.predicate.as_variable().is_some() {
+                total
+            } else {
+                total / estimate_of(statistics.predicate_count.max(1))
+            },
+            total / estimate_of(statistics.subject_count.max(1)),
+            total / estimate_of(statistics.object_count.max(1)),
+        ],
+    }
+}
+
+/// Adds to `names` the named graphs the patterns and paths of `op` read:
+/// those they name, and for `GRAPH ?g` the dataset's or every graph of
+/// `store`.
+pub(super) fn graphs_read(op: &LogicalOperator, store: &RdfStore, names: &mut BTreeSet<String>) {
+    let read = match op {
+        LogicalOperator::TripleScan(scan) => scan.graphs_read(),
+        LogicalOperator::PropertyPath(path) => path.graphs_read(),
+        _ => GraphsRead::Default,
+    };
+    match read {
+        GraphsRead::Default => {}
+        GraphsRead::Named(read) => names.extend(read.into_iter().map(str::to_string)),
+        GraphsRead::EveryNamed => names.extend(store.graph_names_latest()),
+    }
+    for child in op.children() {
+        graphs_read(child, store, names);
     }
 }
 
@@ -315,7 +408,7 @@ enum Cost {
         total: f64,
     },
     /// Rows that do not depend on what is bound (a VALUES block, or an input
-    /// the order knows nothing of, at the store's size).
+    /// the order knows nothing of, at the size of the graphs its chain reads).
     Rows(f64),
 }
 

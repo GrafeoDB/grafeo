@@ -3414,6 +3414,67 @@ pub struct TripleScanOp {
     pub dataset: Option<DatasetRestriction>,
 }
 
+/// The graphs a triple scan reads, as its scan reads them: what its estimates are taken from.
+#[derive(Debug, PartialEq, Eq)]
+pub enum GraphsRead<'a> {
+    /// The store's default graph.
+    Default,
+    /// These named graphs, merged; none reads nothing.
+    Named(Vec<&'a str>),
+    /// Every named graph of the store: `GRAPH ?g` without `FROM NAMED`.
+    EveryNamed,
+}
+
+impl TripleScanOp {
+    /// The graphs the scan reads (see [`graphs_read`]).
+    #[must_use]
+    pub fn graphs_read(&self) -> GraphsRead<'_> {
+        graphs_read(self.graph.as_ref(), self.dataset.as_ref())
+    }
+}
+
+impl PropertyPathOp {
+    /// The graphs the path searches (see [`graphs_read`]).
+    #[must_use]
+    pub fn graphs_read(&self) -> GraphsRead<'_> {
+        graphs_read(self.graph.as_ref(), self.dataset.as_ref())
+    }
+}
+
+/// The graphs a pattern or path in `graph` under `dataset` reads, as the scan and the path search
+/// read them: in `GRAPH <iri>` its graph (none when the dataset does not list it), in `GRAPH ?g`
+/// the dataset's named graphs or every named graph, and outside a `GRAPH` the graphs `FROM`
+/// merges, or the default graph without a dataset. Each graph once.
+#[must_use]
+pub fn graphs_read<'a>(
+    graph: Option<&'a TripleComponent>,
+    dataset: Option<&'a DatasetRestriction>,
+) -> GraphsRead<'a> {
+    let once = |names: &'a [String]| {
+        let mut names: Vec<&str> = names.iter().map(String::as_str).collect();
+        names.sort_unstable();
+        names.dedup();
+        GraphsRead::Named(names)
+    };
+    let listed = dataset.and_then(DatasetRestriction::listed_named_graphs);
+    let name = match graph {
+        Some(TripleComponent::Variable(_)) => {
+            return listed.map_or(GraphsRead::EveryNamed, once);
+        }
+        Some(TripleComponent::Iri(name)) => Some(name.as_str()),
+        Some(TripleComponent::Literal(Value::String(name))) => Some(name.as_str()),
+        _ => None,
+    };
+    match (name, dataset) {
+        (Some(name), _) if listed.is_some_and(|names| !names.iter().any(|n| n == name)) => {
+            GraphsRead::Named(Vec::new())
+        }
+        (Some(name), _) => GraphsRead::Named(vec![name]),
+        (None, Some(dataset)) => once(&dataset.default_graphs),
+        (None, None) => GraphsRead::Default,
+    }
+}
+
 /// A component of a triple pattern.
 #[derive(Debug, Clone)]
 #[non_exhaustive]

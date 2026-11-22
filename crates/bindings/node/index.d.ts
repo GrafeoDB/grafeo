@@ -994,6 +994,12 @@ export interface CreateOptions {
    */
   queryMemoryLimit?: number
   /**
+   * How many bytes the in-memory change log may hold: past it the oldest
+   * commits go. By default a sixteenth of `memoryLimit`, and never more
+   * than `memoryLimit`. For this open only.
+   */
+  cdcMemoryLimit?: number
+  /**
    * How many bytes one path search may hold: everything a variable-length,
    * shortest-path or RDF property path search holds at once (the nodes it
    * visits, its queues and the paths it keeps), which counts against

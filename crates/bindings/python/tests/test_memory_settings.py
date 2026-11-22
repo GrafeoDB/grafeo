@@ -127,3 +127,20 @@ def test_the_plan_cache_limit_reads_back():
     assert caches(off)["cached_plan_count"] == 0
     with pytest.raises((OverflowError, ValueError, TypeError)):
         grafeo.GrafeoDB(plan_cache_limit=-1)
+
+
+def test_the_cdc_memory_limit_reads_back():
+    """#679: `cdc_memory_limit` bounds the change log's bytes. It reads back as the report's
+    `cdc.limit_bytes`, defaults to a sixteenth of the memory limit, is capped at the memory
+    limit, and 0 is refused."""
+
+    def cdc(db):
+        return db.memory_usage()["cdc"]
+
+    db = grafeo.GrafeoDB(memory_limit=64 * MIB, cdc_memory_limit=512 * 1024)
+    assert cdc(db)["limit_bytes"] == 512 * 1024
+    assert cdc(grafeo.GrafeoDB(memory_limit=64 * MIB))["limit_bytes"] == 4 * MIB, "a sixteenth"
+    capped = grafeo.GrafeoDB(memory_limit=32 * MIB, cdc_memory_limit=1024 * MIB)
+    assert cdc(capped)["limit_bytes"] == 32 * MIB
+    with pytest.raises((ValueError, grafeo.GrafeoError)):
+        grafeo.GrafeoDB(cdc_memory_limit=0)

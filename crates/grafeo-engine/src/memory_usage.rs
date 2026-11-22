@@ -77,7 +77,8 @@ pub struct MemoryUsage {
     /// RDF triple store (only populated when the `triple-store` feature is enabled).
     #[serde(default, skip_serializing_if = "RdfMemory::is_empty")]
     pub rdf: RdfMemory,
-    /// Change data capture log (only populated when the `cdc` feature is enabled).
+    /// Change data capture log (only populated when the `cdc` feature is
+    /// enabled, and then always, with its byte bound).
     #[serde(default, skip_serializing_if = "CdcMemory::is_empty")]
     pub cdc: CdcMemory,
     /// What the open has spilled to disk, against its spill limit. Disk, not
@@ -257,13 +258,18 @@ pub struct CdcMemory {
     /// `total_bytes`, and leaves the grant out of the execution buffers.
     #[serde(default)]
     pub granted_bytes: usize,
+    /// The byte bound of the log in force (see
+    /// [`Config::with_cdc_memory_limit`](crate::Config::with_cdc_memory_limit)).
+    #[serde(default)]
+    pub limit_bytes: usize,
 }
 
 impl CdcMemory {
-    /// True when no CDC memory is reported.
+    /// True when no CDC memory is reported: no events and no byte bound (a
+    /// database with a change log always has a bound, so reports it).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.event_count == 0 && self.total_bytes == 0
+        self.event_count == 0 && self.total_bytes == 0 && self.limit_bytes == 0
     }
 }
 
@@ -341,6 +347,7 @@ mod tests {
                 event_count: 3,
                 entity_count: 2,
                 granted_bytes: 0,
+                limit_bytes: 0,
             },
             ..Default::default()
         };
@@ -367,6 +374,7 @@ mod tests {
                 event_count: 3,
                 entity_count: 2,
                 granted_bytes: 64,
+                limit_bytes: 0,
             },
             ..Default::default()
         };

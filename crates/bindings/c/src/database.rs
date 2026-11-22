@@ -2264,8 +2264,8 @@ pub extern "C" fn grafeo_clear_plan_cache(db: *mut GrafeoDatabase) -> GrafeoStat
 
 /// The database's memory report as a JSON object: `total_bytes`, `limit_bytes` (the memory
 /// limit), `query_limit_bytes` (what one statement's operators may hold), the parts (`store`,
-/// `indexes`, `mvcc`, `caches`, `string_pool`, `buffer_manager`, and `rdf` and `cdc` when they
-/// hold anything) and `spill` (`total_bytes`, `limit_bytes` or null for no limit, and the bytes
+/// `indexes`, `mvcc`, `caches`, `string_pool`, `buffer_manager`, `rdf` when it holds anything,
+/// and `cdc` in a build with the change log) and `spill` (`total_bytes`, `limit_bytes` or null for no limit, and the bytes
 /// per owner). Caller must free with `grafeo_free_string`; NULL for a null database.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_memory_usage_json(db: *mut GrafeoDatabase) -> *mut c_char {

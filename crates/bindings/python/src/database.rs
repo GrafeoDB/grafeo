@@ -631,6 +631,10 @@ impl PyGrafeoDB {
     /// it they spill to disk where they can, else the statement raises
     /// GRAFEO-S001. For this open only.
     ///
+    /// cdc_memory_limit is how many bytes the in-memory change log may hold:
+    /// past it the oldest commits go. By default a sixteenth of memory_limit,
+    /// and never more than memory_limit. For this open only.
+    ///
     /// path_search_budget is how many bytes one path search may hold:
     /// everything a variable-length, shortest-path or RDF property path search
     /// holds at once (the nodes it visits, its queues and the paths it keeps),
@@ -690,6 +694,7 @@ impl PyGrafeoDB {
         wal_segment_size=None,
         memory_limit=None,
         query_memory_limit=None,
+        cdc_memory_limit=None,
         path_search_budget=None,
         path_expansion_limit=None,
         max_query_length=None,
@@ -718,6 +723,7 @@ impl PyGrafeoDB {
         wal_segment_size: Option<u64>,
         memory_limit: Option<usize>,
         query_memory_limit: Option<usize>,
+        cdc_memory_limit: Option<usize>,
         path_search_budget: Option<usize>,
         path_expansion_limit: Option<u64>,
         max_query_length: Option<usize>,
@@ -760,6 +766,17 @@ impl PyGrafeoDB {
         }
         if let Some(bytes) = query_memory_limit {
             config = config.with_query_memory_limit(bytes);
+        }
+        if let Some(bytes) = cdc_memory_limit {
+            #[cfg(feature = "cdc")]
+            {
+                config = config.with_cdc_memory_limit(bytes);
+            }
+            #[cfg(not(feature = "cdc"))]
+            return Err(PyGrafeoError::InvalidArgument(format!(
+                "cdc_memory_limit={bytes} needs the cdc feature, which this build lacks"
+            ))
+            .into());
         }
         if let Some(bytes) = path_search_budget {
             config = config.with_path_search_budget(bytes);
@@ -3256,6 +3273,7 @@ impl PyGrafeoDB {
         cdc.set_item("entity_count", usage.cdc.entity_count)?;
         cdc.set_item("event_count", usage.cdc.event_count)?;
         cdc.set_item("granted_bytes", usage.cdc.granted_bytes)?;
+        cdc.set_item("limit_bytes", usage.cdc.limit_bytes)?;
 
         let spill = pyo3::types::PyDict::new(py);
         spill.set_item("total_bytes", usage.spill.total_bytes)?;

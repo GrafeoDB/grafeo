@@ -24,6 +24,7 @@ public sealed class GrafeoOptions : IDisposable
 {
     private ulong? _memoryLimit;
     private ulong? _queryMemoryLimit;
+    private ulong? _cdcMemoryLimit;
     private ulong? _pathSearchBudget;
     private ulong? _pathExpansionLimit;
     private ulong? _maxQueryLength;
@@ -50,6 +51,17 @@ public sealed class GrafeoOptions : IDisposable
     public GrafeoOptions SetQueryMemoryLimit(long bytes)
     {
         _queryMemoryLimit = Bytes(bytes);
+        return this;
+    }
+
+    /// <summary>
+    /// How many bytes the in-memory change log may hold: past it the oldest commits go. A
+    /// sixteenth of the memory limit by default, never more than it. A zero or negative limit
+    /// fails at the open.
+    /// </summary>
+    public GrafeoOptions SetCdcMemoryLimit(long bytes)
+    {
+        _cdcMemoryLimit = Bytes(bytes);
         return this;
     }
 
@@ -165,6 +177,8 @@ public sealed class GrafeoOptions : IDisposable
             GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_memory_limit(native, memory));
         if (_queryMemoryLimit is { } query)
             GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_query_memory_limit(native, query));
+        if (_cdcMemoryLimit is { } cdc)
+            GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_cdc_memory_limit(native, cdc));
         if (_pathSearchBudget is { } paths)
             GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_path_search_budget(native, paths));
         if (_pathExpansionLimit is { } expansions)

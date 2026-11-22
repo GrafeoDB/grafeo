@@ -243,6 +243,12 @@ path = "tests/node_rows_in_the_account.rs"
 
 # Counts allocated bytes with its own global allocator.
 [[test]]
+name = "cdc_log_in_the_account"
+path = "tests/cdc_log_in_the_account.rs"
+required-features = ["cdc"]
+
+# Counts allocated bytes with its own global allocator.
+[[test]]
 name = "rdf_overlay_in_the_account"
 path = "tests/rdf_overlay_in_the_account.rs"
 required-features = ["sparql", "triple-store"]

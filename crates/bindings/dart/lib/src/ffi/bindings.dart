@@ -1210,6 +1210,11 @@ final class GrafeoBindings {
       int Function(
           Pointer<Void>, int)>('grafeo_options_set_query_memory_limit');
 
+  /// Sets the CDC memory limit in bytes, above zero. Returns GrafeoStatus.
+  late final grafeoOptionsSetCdcMemoryLimit = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64),
+      int Function(Pointer<Void>, int)>('grafeo_options_set_cdc_memory_limit');
+
   /// Sets the path search budget in bytes, above zero. Returns GrafeoStatus.
   late final grafeoOptionsSetPathSearchBudget = library.lookupFunction<
       Int32 Function(Pointer<Void>, Uint64),

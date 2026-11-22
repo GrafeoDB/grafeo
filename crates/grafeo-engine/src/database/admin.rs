@@ -172,6 +172,7 @@ impl super::Open {
                 entity_count,
                 event_count,
                 granted_bytes: self.cdc_log.granted_bytes(),
+                limit_bytes: self.cdc_log.max_bytes().unwrap_or(0),
             };
         }
 

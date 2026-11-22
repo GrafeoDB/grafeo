@@ -1577,8 +1577,8 @@ impl Database {
     /// its keys as the engine names them: `total_bytes`, `limit_bytes` (the
     /// memory limit), `query_limit_bytes` (what one statement may hold), the
     /// `store`, `indexes`, `mvcc`, `caches`, `string_pool` and
-    /// `buffer_manager` sections, `rdf` and `cdc` when they hold anything,
-    /// and `spill`.
+    /// `buffer_manager` sections, `rdf` when it holds anything, and
+    /// `spill` (a WebAssembly build has no change log, so no `cdc`).
     ///
     /// ```js
     /// const usage = db.memoryUsage();

@@ -212,6 +212,27 @@ When enabled, each mutation incurs:
 For bulk data loading or benchmarks, disable CDC or use `session_with_cdc(false)`
 to avoid this overhead.
 
+### Memory bound
+
+The in-memory log counts the bytes its events hold and keeps them under a bound.
+When the log passes the bound, its oldest whole commits are dropped until it is
+at or below three quarters of the bound; the newest commit is always kept, even
+when it alone is larger than the bound. The bound is
+`Config::with_cdc_memory_limit` (Python `cdc_memory_limit=`, Node.js
+`cdcMemoryLimit`, C `grafeo_options_set_cdc_memory_limit`, C#
+`SetCdcMemoryLimit`, Go `Options.CdcMemoryLimit`, Dart `cdcMemoryLimit:`);
+unset, it is a sixteenth of the memory limit (with no memory limit set, of the
+buffer manager's default budget, 75% of the memory the process may use), and it
+is never above the memory limit. Zero is refused at the open (`GRAFEO-V001`). The epoch and event bounds
+of `CdcRetentionConfig` apply too; `CdcRetentionConfig::unlimited()` lifts those
+two, not the byte bound, and a retention without a byte bound of its own keeps
+the one `with_cdc_memory_limit` set. `memory_usage()` reports the bound in force
+as `cdc.limit_bytes`.
+
+Under memory pressure the eviction cycle may prune the log further, the newest
+commit included. Pruning the in-memory log never touches the log kept on disk
+for the change feed's cursor.
+
 ## Feature flag
 
 CDC requires the `cdc` feature flag at compile time. The `lpg`, `ai` and `enterprise`

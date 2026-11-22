@@ -25,6 +25,10 @@ type Options struct {
 	// QueryMemoryLimit is how many bytes one statement's sorts, joins and aggregates may hold,
 	// never more than MemoryLimit; zero fails at the open.
 	QueryMemoryLimit *uint64
+	// CdcMemoryLimit is how many bytes the in-memory change log may hold: past it the oldest
+	// commits go. A sixteenth of MemoryLimit by default, never more than it; zero fails at the
+	// open.
+	CdcMemoryLimit *uint64
 	// PathSearchBudget is how many bytes one path search may hold: everything a variable-length,
 	// shortest-path or RDF property path search holds at once (the nodes it visits, its queues and
 	// the paths it keeps), which counts against QueryMemoryLimit too. Never more than
@@ -75,6 +79,11 @@ func (o *Options) apply(native *C.GrafeoOptions) error {
 	}
 	if o.QueryMemoryLimit != nil {
 		if err := statusToError(C.grafeo_options_set_query_memory_limit(native, C.uint64_t(*o.QueryMemoryLimit))); err != nil {
+			return err
+		}
+	}
+	if o.CdcMemoryLimit != nil {
+		if err := statusToError(C.grafeo_options_set_cdc_memory_limit(native, C.uint64_t(*o.CdcMemoryLimit))); err != nil {
 			return err
 		}
 	}

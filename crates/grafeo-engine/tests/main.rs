@@ -49,6 +49,7 @@ mod call_followed_by_statements;
 mod call_procedures;
 mod call_subquery_imports;
 mod catalog_v2;
+mod cdc_byte_bound;
 mod cdc_commit_order;
 mod cdc_crud_api;
 mod cdc_cursor_retention;

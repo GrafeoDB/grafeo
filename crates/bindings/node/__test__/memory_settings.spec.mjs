@@ -69,6 +69,16 @@ describe('memory settings', () => {
     expect(caches(off).cachedPlanCount).toBe(0)
     expect(() => GrafeoDB.create(undefined, { planCacheLimit: -1 })).toThrow()
   })
+
+  it('read the CDC memory limit back, a sixteenth by default, capped, 0 refused (#679)', () => {
+    const cdc = (db) => db.memoryUsage().cdc
+    const db = GrafeoDB.create(undefined, { memoryLimit: 64 * MIB, cdcMemoryLimit: 512 * 1024 })
+    expect(cdc(db).limitBytes).toBe(512 * 1024)
+    expect(cdc(GrafeoDB.create(undefined, { memoryLimit: 64 * MIB })).limitBytes).toBe(4 * MIB)
+    const capped = GrafeoDB.create(undefined, { memoryLimit: 32 * MIB, cdcMemoryLimit: 1024 * MIB })
+    expect(cdc(capped).limitBytes).toBe(32 * MIB)
+    expect(() => GrafeoDB.create(undefined, { cdcMemoryLimit: 0 })).toThrow()
+  })
 })
 
 describe('spill settings', () => {

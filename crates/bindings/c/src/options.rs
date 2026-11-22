@@ -17,6 +17,8 @@ use crate::types::GrafeoDatabase;
 pub struct GrafeoOptions {
     memory_limit: Option<usize>,
     query_memory_limit: Option<usize>,
+    #[cfg(feature = "cdc")]
+    cdc_memory_limit: Option<usize>,
     path_search_budget: Option<usize>,
     path_expansion_limit: Option<u64>,
     max_query_length: Option<usize>,
@@ -36,6 +38,10 @@ impl GrafeoOptions {
         }
         if let Some(bytes) = self.query_memory_limit {
             config = config.with_query_memory_limit(bytes);
+        }
+        #[cfg(feature = "cdc")]
+        if let Some(bytes) = self.cdc_memory_limit {
+            config = config.with_cdc_memory_limit(bytes);
         }
         if let Some(bytes) = self.path_search_budget {
             config = config.with_path_search_budget(bytes);
@@ -135,6 +141,23 @@ pub extern "C" fn grafeo_options_set_query_memory_limit(
 ) -> GrafeoStatus {
     match options_mut(options).and_then(|options| {
         options.query_memory_limit = Some(positive(bytes, "query_memory_limit")?);
+        Ok(())
+    }) {
+        Ok(()) => GrafeoStatus::Ok,
+        Err(status) => status,
+    }
+}
+
+/// Sets the bytes the in-memory change log may hold, above zero: past it the oldest commits go
+/// (the default is a sixteenth of the memory limit, which it never exceeds).
+#[cfg(feature = "cdc")]
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_options_set_cdc_memory_limit(
+    options: *mut GrafeoOptions,
+    bytes: u64,
+) -> GrafeoStatus {
+    match options_mut(options).and_then(|options| {
+        options.cdc_memory_limit = Some(positive(bytes, "cdc_memory_limit")?);
         Ok(())
     }) {
         Ok(()) => GrafeoStatus::Ok,

@@ -171,3 +171,31 @@ func TestPlanCacheLimitReadsBack(t *testing.T) {
 		}
 	}
 }
+
+// The change log's memory limit (#679) reads back as cdc.limit_bytes: a sixteenth of the memory
+// limit when unset, capped at the memory limit; zero fails at the open.
+func TestCdcMemoryLimitReadsBack(t *testing.T) {
+	for _, c := range []struct {
+		memory uint64
+		limit  *uint64
+		want   string
+	}{
+		{64 * mib, ptr(512 * 1024), "524288"},
+		{64 * mib, nil, "4194304"},
+		{32 * mib, ptr(1024 * mib), "33554432"},
+	} {
+		db, err := OpenWithOptions("", &Options{MemoryLimit: ptr(c.memory), CdcMemoryLimit: c.limit})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := string(usageOf(t, db).Cdc["limit_bytes"])
+		db.Close()
+		if got != c.want {
+			t.Errorf("limit %v under %d: got %s, want %s", c.limit, c.memory, got, c.want)
+		}
+	}
+	if db, err := OpenWithOptions("", &Options{CdcMemoryLimit: ptr(0)}); err == nil {
+		db.Close()
+		t.Fatal("a zero CDC memory limit opened a database")
+	}
+}

@@ -37,6 +37,10 @@ internal static partial class NativeMethods
     [LibraryImport(LibName)]
     internal static partial int grafeo_options_set_query_memory_limit(OptionsHandle options, ulong bytes);
 
+    /// <summary>Sets the CDC memory limit in bytes, above zero.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int grafeo_options_set_cdc_memory_limit(OptionsHandle options, ulong bytes);
+
     /// <summary>Sets the path search budget in bytes, above zero.</summary>
     [LibraryImport(LibName)]
     internal static partial int grafeo_options_set_path_search_budget(OptionsHandle options, ulong bytes);

@@ -273,6 +273,10 @@ pub struct CreateOptions {
     /// disk where they can, else the statement throws `GRAFEO-S001`. For
     /// this open only.
     pub query_memory_limit: Option<i64>,
+    /// How many bytes the in-memory change log may hold: past it the oldest
+    /// commits go. By default a sixteenth of `memoryLimit`, and never more
+    /// than `memoryLimit`. For this open only.
+    pub cdc_memory_limit: Option<i64>,
     /// How many bytes one path search may hold: everything a variable-length,
     /// shortest-path or RDF property path search holds at once (the nodes it
     /// visits, its queues and the paths it keeps), which counts against
@@ -340,6 +344,18 @@ fn memory_settings(mut config: Config, options: &CreateOptions) -> Result<Config
     }
     if let Some(bytes) = options.query_memory_limit {
         config = config.with_query_memory_limit(positive(bytes, "queryMemoryLimit")?);
+    }
+    if let Some(bytes) = options.cdc_memory_limit {
+        let bytes = positive(bytes, "cdcMemoryLimit")?;
+        #[cfg(feature = "cdc")]
+        {
+            config = config.with_cdc_memory_limit(bytes);
+        }
+        #[cfg(not(feature = "cdc"))]
+        return Err(NodeGrafeoError::InvalidArgument(format!(
+            "cdcMemoryLimit={bytes} needs the cdc feature, which this build lacks"
+        ))
+        .into());
     }
     if let Some(bytes) = options.path_search_budget {
         config = config.with_path_search_budget(positive(bytes, "pathSearchBudget")?);

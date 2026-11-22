@@ -40,6 +40,11 @@ class GrafeoOptions {
   /// never more than [memoryLimit]; zero fails at the open.
   final int? queryMemoryLimit;
 
+  /// How many bytes the in-memory change log may hold: past it the oldest
+  /// commits go. A sixteenth of [memoryLimit] by default, never more than it;
+  /// zero fails at the open.
+  final int? cdcMemoryLimit;
+
   /// How many bytes one path search may hold: everything a variable-length,
   /// shortest-path or RDF property path search holds at once (the nodes it
   /// visits, its queues and the paths it keeps), which counts against
@@ -95,6 +100,7 @@ class GrafeoOptions {
   const GrafeoOptions({
     this.memoryLimit,
     this.queryMemoryLimit,
+    this.cdcMemoryLimit,
     this.pathSearchBudget,
     this.pathExpansionLimit,
     this.maxQueryLength,
@@ -126,6 +132,13 @@ class GrafeoOptions {
         throw ArgumentError.value(query, 'queryMemoryLimit', 'must not be negative');
       }
       check(bindings.grafeoOptionsSetQueryMemoryLimit(native, query));
+    }
+    final cdc = cdcMemoryLimit;
+    if (cdc != null) {
+      if (cdc < 0) {
+        throw ArgumentError.value(cdc, 'cdcMemoryLimit', 'must not be negative');
+      }
+      check(bindings.grafeoOptionsSetCdcMemoryLimit(native, cdc));
     }
     final paths = pathSearchBudget;
     if (paths != null) {

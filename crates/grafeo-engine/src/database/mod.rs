@@ -979,7 +979,9 @@ impl Open {
         let wal_retention_limit = config.wal_retention_limit();
         #[cfg(feature = "cdc")]
         let cdc_log = {
-            let log = crate::cdc::CdcLog::with_retention(config.cdc_retention().clone());
+            let log = crate::cdc::CdcLog::with_retention(
+                config.cdc_retention_under(buffer_manager.hard_limit()),
+            );
             log.attach_memory(Arc::clone(&buffer_manager));
             Arc::new(log)
         };
@@ -1198,7 +1200,7 @@ impl Open {
         Self::watch_rdf_snapshots(&rdf_store, &transaction_manager);
         #[cfg(feature = "cdc")]
         let cdc_log = Arc::new(crate::cdc::CdcLog::with_retention(
-            config.cdc_retention().clone(),
+            config.cdc_retention_under(buffer_manager.hard_limit()),
         ));
         #[cfg(feature = "cdc")]
         cdc_log.attach_memory(Arc::clone(&buffer_manager));
@@ -1309,7 +1311,7 @@ impl Open {
         Self::watch_rdf_snapshots(&rdf_store, &transaction_manager);
         #[cfg(feature = "cdc")]
         let cdc_log = Arc::new(crate::cdc::CdcLog::with_retention(
-            config.cdc_retention().clone(),
+            config.cdc_retention_under(buffer_manager.hard_limit()),
         ));
         #[cfg(feature = "cdc")]
         cdc_log.attach_memory(Arc::clone(&buffer_manager));

@@ -916,7 +916,7 @@ jobs:
         run: |
           cargo test -p grafeo-common --all-features --lib work::
           cargo test -p grafeo-core --all-features --lib profile
-          cargo test -p grafeo-engine --all-features --test main work_counters::
+          cargo test -p grafeo-engine --all-features --test main -- work_counters:: prepared_filters:: prepared_recipes::
 
       - name: Count and check against the baseline
         run: cargo bench -p grafeo-engine --features cypher,sql-pgq,algos --bench work_per_query -- --check

@@ -110,6 +110,7 @@ mod crash_injection_single_file;
 mod create_or_replace_graph;
 mod csv_loader;
 mod cyclic_patterns;
+mod cypher_create_chains;
 mod cypher_power_associativity;
 mod cypher_string_plus;
 mod cypher_type_ddl;

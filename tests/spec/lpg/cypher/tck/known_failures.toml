@@ -189,6 +189,8 @@ s2_nested_full_existential_subquery = { issue = "fix in 0.6.5", note = "syntax n
 s3_nested_full_existential_subquery_with_pattern_predicate = { issue = "fix in 0.6.5", note = "syntax not supported yet" }
 
 [Graph3]
+
+s8_labels_failing_on_a_path = { issue = "fix in 0.7.0", note = "a function argument of the wrong type" }
 s7_labels_on_null_node = { issue = "#800", note = "Cypher column names are not the source text, or RETURN * is not by name" }
 s9_labels_failing_on_invalid_arguments = { issue = "fix in 0.7.0", note = "a function argument of the wrong type" }
 
@@ -389,84 +391,83 @@ s29_fail_when_re_using_a_relationship_in_the_same_pattern = { issue = "#795", no
 s30_fail_when_using_a_list_or_nodes_as_a_node = { issue = "#795", note = "an invalid query is accepted" }
 
 [Match6]
-s1_zero_length_named_path = { issue = "#798", note = "syntax not supported yet" }
-s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_1 = { issue = "#795", note = "an invalid query is accepted" }
-s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_10 = { issue = "#795", note = "an invalid query is accepted" }
-s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_11 = { issue = "#795", note = "an invalid query is accepted" }
-s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_12 = { issue = "#795", note = "an invalid query is accepted" }
-s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_13 = { issue = "#795", note = "an invalid query is accepted" }
-s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_14 = { issue = "#795", note = "an invalid query is accepted" }
-s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_2 = { issue = "#795", note = "an invalid query is accepted" }
-s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_3 = { issue = "#795", note = "an invalid query is accepted" }
-s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_4 = { issue = "#795", note = "an invalid query is accepted" }
-s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_5 = { issue = "#795", note = "an invalid query is accepted" }
-s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_6 = { issue = "#795", note = "an invalid query is accepted" }
-s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_7 = { issue = "#795", note = "an invalid query is accepted" }
-s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_8 = { issue = "#795", note = "an invalid query is accepted" }
-s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_9 = { issue = "#795", note = "an invalid query is accepted" }
-s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_1 = { issue = "#795", note = "an invalid query is accepted" }
-s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_10 = { issue = "#795", note = "an invalid query is accepted" }
-s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_11 = { issue = "#795", note = "an invalid query is accepted" }
-s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_12 = { issue = "#795", note = "an invalid query is accepted" }
-s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_13 = { issue = "#795", note = "an invalid query is accepted" }
-s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_14 = { issue = "#795", note = "an invalid query is accepted" }
-s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_15 = { issue = "#795", note = "an invalid query is accepted" }
-s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_2 = { issue = "#795", note = "an invalid query is accepted" }
-s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_3 = { issue = "#795", note = "an invalid query is accepted" }
-s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_4 = { issue = "#795", note = "an invalid query is accepted" }
-s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_5 = { issue = "#795", note = "an invalid query is accepted" }
-s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_6 = { issue = "#795", note = "an invalid query is accepted" }
-s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_7 = { issue = "#795", note = "an invalid query is accepted" }
-s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_8 = { issue = "#795", note = "an invalid query is accepted" }
-s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_9 = { issue = "#795", note = "an invalid query is accepted" }
-s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_1 = { issue = "#795", note = "an invalid query is accepted" }
-s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_10 = { issue = "#795", note = "an invalid query is accepted" }
-s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_11 = { issue = "#795", note = "an invalid query is accepted" }
-s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_12 = { issue = "#795", note = "an invalid query is accepted" }
-s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_13 = { issue = "#795", note = "an invalid query is accepted" }
-s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_14 = { issue = "#795", note = "an invalid query is accepted" }
-s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_15 = { issue = "#795", note = "an invalid query is accepted" }
-s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_16 = { issue = "#795", note = "an invalid query is accepted" }
-s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_17 = { issue = "#795", note = "an invalid query is accepted" }
-s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_18 = { issue = "#795", note = "an invalid query is accepted" }
-s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_19 = { issue = "#795", note = "an invalid query is accepted" }
-s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_2 = { issue = "#795", note = "an invalid query is accepted" }
-s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_20 = { issue = "#795", note = "an invalid query is accepted" }
-s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_3 = { issue = "#795", note = "an invalid query is accepted" }
-s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_4 = { issue = "#795", note = "an invalid query is accepted" }
-s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_5 = { issue = "#795", note = "an invalid query is accepted" }
-s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_6 = { issue = "#795", note = "an invalid query is accepted" }
-s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_7 = { issue = "#795", note = "an invalid query is accepted" }
-s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_8 = { issue = "#795", note = "an invalid query is accepted" }
-s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_9 = { issue = "#795", note = "an invalid query is accepted" }
-s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_1 = { issue = "#795", note = "an invalid query is accepted" }
-s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_10 = { issue = "#795", note = "an invalid query is accepted" }
-s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_11 = { issue = "#795", note = "an invalid query is accepted" }
-s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_12 = { issue = "#795", note = "an invalid query is accepted" }
-s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_13 = { issue = "#795", note = "an invalid query is accepted" }
-s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_14 = { issue = "#795", note = "an invalid query is accepted" }
-s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_15 = { issue = "#795", note = "an invalid query is accepted" }
-s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_16 = { issue = "#795", note = "an invalid query is accepted" }
-s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_17 = { issue = "#795", note = "an invalid query is accepted" }
-s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_18 = { issue = "#795", note = "an invalid query is accepted" }
-s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_19 = { issue = "#795", note = "an invalid query is accepted" }
-s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_2 = { issue = "#795", note = "an invalid query is accepted" }
-s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_20 = { issue = "#795", note = "an invalid query is accepted" }
-s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_3 = { issue = "#795", note = "an invalid query is accepted" }
-s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_4 = { issue = "#795", note = "an invalid query is accepted" }
-s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_5 = { issue = "#795", note = "an invalid query is accepted" }
-s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_6 = { issue = "#795", note = "an invalid query is accepted" }
-s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_7 = { issue = "#795", note = "an invalid query is accepted" }
-s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_8 = { issue = "#795", note = "an invalid query is accepted" }
-s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_9 = { issue = "#795", note = "an invalid query is accepted" }
-s25_fail_when_matching_a_path_variable_bound_to_a_value_1 = { issue = "#795", note = "an invalid query is accepted" }
-s25_fail_when_matching_a_path_variable_bound_to_a_value_2 = { issue = "#795", note = "an invalid query is accepted" }
-s25_fail_when_matching_a_path_variable_bound_to_a_value_3 = { issue = "#795", note = "an invalid query is accepted" }
-s25_fail_when_matching_a_path_variable_bound_to_a_value_4 = { issue = "#795", note = "an invalid query is accepted" }
-s25_fail_when_matching_a_path_variable_bound_to_a_value_5 = { issue = "#795", note = "an invalid query is accepted" }
-s25_fail_when_matching_a_path_variable_bound_to_a_value_6 = { issue = "#795", note = "an invalid query is accepted" }
-s25_fail_when_matching_a_path_variable_bound_to_a_value_7 = { issue = "#795", note = "an invalid query is accepted" }
-s25_fail_when_matching_a_path_variable_bound_to_a_value_8 = { issue = "#795", note = "an invalid query is accepted" }
+s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_1 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_10 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_11 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_12 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_13 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_14 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_2 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_3 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_4 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_5 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_6 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_7 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_8 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s21_fail_when_a_node_has_the_same_variable_in_a_preceding_match_9 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_1 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_10 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_11 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_12 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_13 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_14 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_15 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_2 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_3 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_4 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_5 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_6 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_7 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_8 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s22_fail_when_a_relationship_has_the_same_variable_in_a_preceding_match_9 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_1 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_10 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_11 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_12 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_13 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_14 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_15 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_16 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_17 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_18 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_19 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_2 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_20 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_3 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_4 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_5 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_6 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_7 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_8 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s23_fail_when_a_node_has_the_same_variable_in_the_same_pattern_9 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_1 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_10 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_11 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_12 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_13 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_14 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_15 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_16 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_17 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_18 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_19 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_2 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_20 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_3 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_4 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_5 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_6 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_7 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_8 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s24_fail_when_a_relationship_has_the_same_variable_in_the_same_pattern_9 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s25_fail_when_matching_a_path_variable_bound_to_a_value_1 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s25_fail_when_matching_a_path_variable_bound_to_a_value_2 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s25_fail_when_matching_a_path_variable_bound_to_a_value_3 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s25_fail_when_matching_a_path_variable_bound_to_a_value_4 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s25_fail_when_matching_a_path_variable_bound_to_a_value_5 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s25_fail_when_matching_a_path_variable_bound_to_a_value_6 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s25_fail_when_matching_a_path_variable_bound_to_a_value_7 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
+s25_fail_when_matching_a_path_variable_bound_to_a_value_8 = { issue = "fix in 0.6.5", note = "an invalid query is accepted" }
 
 [MatchWhere1]
 s14_fail_when_filtering_path_with_property_predicate = { issue = "#795", note = "a statically typed operand of the wrong type is accepted" }

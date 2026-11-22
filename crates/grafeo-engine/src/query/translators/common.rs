@@ -270,6 +270,12 @@ impl HavingScope {
             LogicalExpression::List(items) => {
                 LogicalExpression::List(items.into_iter().map(|item| self.resolve(item)).collect())
             }
+            LogicalExpression::Map(entries) => LogicalExpression::Map(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, self.resolve(value)))
+                    .collect(),
+            ),
             LogicalExpression::Case {
                 operand,
                 when_clauses,
@@ -289,6 +295,11 @@ impl HavingScope {
             LogicalExpression::MapAccess { base, key } => LogicalExpression::MapAccess {
                 base: Box::new(self.resolve(*base)),
                 key,
+            },
+            LogicalExpression::SliceAccess { base, start, end } => LogicalExpression::SliceAccess {
+                base: Box::new(self.resolve(*base)),
+                start: start.map(|start| Box::new(self.resolve(*start))),
+                end: end.map(|end| Box::new(self.resolve(*end))),
             },
             other => other,
         }

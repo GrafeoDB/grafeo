@@ -185,7 +185,9 @@ impl RowVersion {
     };
 
     /// Whether `read` sees the row: it sees the create and not the delete.
+    /// Counted as one visibility test, whichever path asks.
     fn visible(self, read: Read) -> bool {
+        grafeo_common::work::count(grafeo_common::work::Work::VisibilityTest, 1);
         read.sees(self.created) && !read.sees(self.deleted)
     }
 }
@@ -1284,6 +1286,7 @@ impl Inner {
     /// its vector's versions, a bit test while the vector is flat.
     #[inline]
     fn node_seen(&self, id: u64, read: Read) -> Option<(&NodeGroup, usize)> {
+        grafeo_common::work::count(grafeo_common::work::Work::RowGroupLookup, 1);
         let (group, row) = locate(id);
         let group = self.nodes.get(&group)?;
         group.versions.visible(row, read).then_some((group, row))
@@ -1293,6 +1296,7 @@ impl Inner {
     /// [`node_seen`](Self::node_seen)).
     #[inline]
     fn edge_seen(&self, id: u64, read: Read) -> Option<(&EdgeGroup, usize)> {
+        grafeo_common::work::count(grafeo_common::work::Work::RowGroupLookup, 1);
         let (group, row) = locate(id);
         let group = self.edges.get(&group)?;
         group.versions.visible(row, read).then_some((group, row))
@@ -1492,6 +1496,21 @@ pub struct RowGroupStore {
     /// The database's planning generation, which a large move of a count
     /// moves, once a database attaches it.
     planning: std::sync::OnceLock<Arc<AtomicU64>>,
+    /// Which store this is, for the edge type filters it resolves (`read`).
+    identity: StoreIdentity,
+}
+
+/// A number no other row-group store of the process has: a filter one store
+/// resolved is never read with another's ids. Not an address, which a store
+/// made after a dropped one may reuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StoreIdentity(pub(crate) u64);
+
+impl Default for StoreIdentity {
+    fn default() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
 }
 
 /// What a collect took out: rows, and the values and label sets kept for

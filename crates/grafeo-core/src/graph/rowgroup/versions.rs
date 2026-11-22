@@ -497,10 +497,21 @@ impl Versions {
     /// test); a stamped vector's row by its stamps.
     #[inline]
     pub(super) fn visible(&self, row: usize, read: Read) -> bool {
+        use grafeo_common::work::{Work, count};
         match self.vectors.get(row / VECTOR_ROWS) {
-            None => false,
-            Some(Vector::Flat(exists)) => exists.get(row % VECTOR_ROWS),
-            Some(Vector::Stamped(stamped)) => stamped.get(row % VECTOR_ROWS).visible(read),
+            None => {
+                count(Work::VisibilityTest, 1);
+                false
+            }
+            Some(Vector::Flat(exists)) => {
+                count(Work::VisibilityTest, 1);
+                exists.get(row % VECTOR_ROWS)
+            }
+            // The stamps' test counts itself (`RowVersion::visible`).
+            Some(Vector::Stamped(stamped)) => {
+                count(Work::StampedRead, 1);
+                stamped.get(row % VECTOR_ROWS).visible(read)
+            }
         }
     }
 
@@ -529,13 +540,23 @@ impl Versions {
     /// version), a row at a time in the others.
     #[inline]
     pub(super) fn visible_word(&self, index: usize, asked: u64, read: Read) -> u64 {
+        use grafeo_common::work::{Work, count};
         if asked == 0 {
             return 0;
         }
+        // A word read alike is one visibility test; a stamped word's tests count themselves
+        // (`RowVersion::visible`): one for a uniform version, one per row otherwise.
         match self.vectors.get(index / WORDS) {
-            None => 0,
-            Some(Vector::Flat(exists)) => asked & exists.word(index % WORDS),
+            None => {
+                count(Work::VisibilityTest, 1);
+                0
+            }
+            Some(Vector::Flat(exists)) => {
+                count(Work::VisibilityTest, 1);
+                asked & exists.word(index % WORDS)
+            }
             Some(Vector::Stamped(stamped)) => {
+                count(Work::StampedRead, 1);
                 let exists = asked & stamped.exists.word(index % WORDS);
                 match stamped.uniform() {
                     Some(version) if version.visible(read) => exists,

@@ -25,10 +25,10 @@
 //! legal, not just which is faster. Each rewrite lives in the submodule
 //! that owns the corresponding logical operator.
 //!
-//! 1. **Factorized counts** (`aggregate::plan_factorized_aggregate`): a bare
+//! 1. **Factorized counts** (`aggregate::factorized_over`): a bare
 //!    `COUNT` over two or more consecutive `Expand`s counts the paths level
 //!    by level, without flattening them, unless the degree count
-//!    (`aggregate::plan_edge_count`) counts the last hop's edges of each row
+//!    (`aggregate::edge_count_over`) counts the last hop's edges of each row
 //!    from the adjacency, which is faster. Any other chain of expands streams
 //!    hop by hop, which stops early under a LIMIT and holds one chunk (a
 //!    flattened factorized chain built the whole product first). Disabled
@@ -93,7 +93,7 @@
 //! at every hop. See [`crate::transaction`] for the epoch/visibility rules.
 
 pub(crate) mod after_write;
-mod aggregate;
+pub(crate) mod aggregate;
 mod expand;
 mod expression;
 pub(crate) mod filter;
@@ -103,6 +103,8 @@ mod load;
 mod mutation;
 mod project;
 pub(crate) mod reachability;
+#[cfg(prepared_plans)]
+pub(crate) mod recipe;
 pub(crate) mod scan;
 pub(crate) mod seek;
 pub(crate) mod subquery;
@@ -154,14 +156,6 @@ use crate::query::planner::{
     value_to_logical_type,
 };
 use crate::transaction::TransactionManager;
-
-/// Range bounds for property-based range queries.
-struct RangeBounds<'a> {
-    min: Option<&'a Value>,
-    max: Option<&'a Value>,
-    min_inclusive: bool,
-    max_inclusive: bool,
-}
 
 /// How the planned query's rows reach the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,8 +216,12 @@ pub struct Planner {
     pub(super) plan_names: std::cell::RefCell<std::collections::HashSet<String>>,
     /// Edge conditions a filter hands to the variable-length expand that
     /// binds their path, to check during its search (see
-    /// `try_plan_filter_into_variable_length_expand`).
+    /// `plan_filter_into_variable_length_expand`).
     pub(super) pending_edge_conditions: std::cell::RefCell<Vec<expand::PendingEdgeCondition>>,
+    /// The routes `plan_filter` builds and the builds that decline, in the order they run (see
+    /// [`FilterRoute::name`](filter::FilterRoute::name)), for a test to pin.
+    #[cfg(test)]
+    pub(crate) filter_routes_taken: std::cell::RefCell<Vec<String>>,
     /// Counter for the column names of subqueries planned per row.
     pub(super) subquery_counter: std::cell::Cell<u32>,
     /// Whether to use factorized execution for multi-hop queries.
@@ -358,6 +356,8 @@ impl Planner {
             anon_edge_counter: std::cell::Cell::new(0),
             plan_names: std::cell::RefCell::new(std::collections::HashSet::new()),
             pending_edge_conditions: std::cell::RefCell::new(Vec::new()),
+            #[cfg(test)]
+            filter_routes_taken: std::cell::RefCell::new(Vec::new()),
             subquery_counter: std::cell::Cell::new(0),
             factorized_execution: true,
             rules: crate::query::optimizer::PlannerRules::all(),
@@ -426,6 +426,8 @@ impl Planner {
             anon_edge_counter: std::cell::Cell::new(0),
             plan_names: std::cell::RefCell::new(std::collections::HashSet::new()),
             pending_edge_conditions: std::cell::RefCell::new(Vec::new()),
+            #[cfg(test)]
+            filter_routes_taken: std::cell::RefCell::new(Vec::new()),
             subquery_counter: std::cell::Cell::new(0),
             factorized_execution: true,
             rules: crate::query::optimizer::PlannerRules::all(),
@@ -723,7 +725,7 @@ impl Planner {
 
     /// Checks, in a debug build, that a session's plan runs inside its
     /// statement's memory scope (see [`Self::in_session`]).
-    fn check_statement_scope(&self) {
+    pub(super) fn check_statement_scope(&self) {
         #[cfg(any(lpg_language, rdf_language))]
         debug_assert!(
             self.planned_for == super::PlannedFor::Standalone
@@ -744,7 +746,7 @@ impl Planner {
 
     /// The root operator, behind a shuffle when the option is on and the
     /// plan does not order its rows.
-    fn shuffled_root(
+    pub(super) fn shuffled_root(
         &self,
         logical_plan: &LogicalPlan,
         operator: Box<dyn Operator>,
@@ -987,6 +989,7 @@ impl Planner {
     /// or invalid expressions.
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
         let _span = grafeo_debug_span!("grafeo::query::plan");
+        grafeo_common::work::count(grafeo_common::work::Work::PlanBuilt, 1);
         self.check_statement_scope();
         self.take_plan_names(logical_plan);
         self.find_reachability_expands(&logical_plan.root);
@@ -1012,6 +1015,7 @@ impl Planner {
         &self,
         logical_plan: &LogicalPlan,
     ) -> Result<(PhysicalPlan, Vec<crate::query::profile::ProfileEntry>)> {
+        grafeo_common::work::count(grafeo_common::work::Work::PlanBuilt, 1);
         self.profiling.set(true);
         self.profile_entries.borrow_mut().clear();
         self.check_statement_scope();
@@ -1133,7 +1137,7 @@ impl Planner {
             LogicalOperator::Project(project) => self.plan_project(project),
             LogicalOperator::Limit(limit) => self.plan_limit(limit),
             LogicalOperator::Skip(skip) => self.plan_skip(skip),
-            LogicalOperator::Sort(sort) => self.plan_sort(sort),
+            LogicalOperator::Sort(sort) => self.plan_sort(sort, None),
             LogicalOperator::Aggregate(agg) => self.plan_aggregate(agg),
             LogicalOperator::Join(join) => self.plan_join(join),
             LogicalOperator::Union(union) => self.plan_union(union),
@@ -2075,14 +2079,14 @@ mod tests {
     #[test]
     fn test_limit_pushdown_blocked_by_sort_in_between() {
         use grafeo_core::execution::operators::{
-            LimitOperator, ProjectOperator, RangeScanOperator, SortOperator,
+            LimitOperator, ProjectOperator, RangeScanOperator, TopKOperator,
         };
         let store = create_test_store();
         let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // LIMIT 5 over SORT BY n.name over WHERE n.age > 30 over Scan(n:Person)
-        // Sort needs full materialization; the LIMIT must NOT be pushed
-        // through it into the range scan.
+        // runs as one top-k of 5, which reads its whole input: the LIMIT must
+        // NOT be pushed through it into the range scan.
         let logical = LogicalPlan::new(LogicalOperator::Limit(LogicalLimitOp {
             count: 5.into(),
             input: Box::new(LogicalOperator::Sort(SortOp {
@@ -2116,28 +2120,23 @@ mod tests {
         let physical = planner.plan(&logical).unwrap();
         let root = physical.into_operator();
 
-        // Walk down: Limit → Sort → Project → RangeScan, asserting at each step.
-        let limit_op = root
+        // Walk down: TopK → Project → RangeScan, asserting at each step.
+        // The top-k also drops the sort-key column (`n_name`) it needed.
+        let top_k = root
             .into_any()
-            .downcast::<LimitOperator>()
-            .expect("top operator is LimitOperator");
-        let (after_limit, _cap) = limit_op.into_parts();
+            .downcast::<TopKOperator>()
+            .expect("LIMIT over ORDER BY runs as a top-k");
+        assert_eq!(top_k.output_width(), Some(1));
+        let (after_sort, _keys, limit) = top_k.into_parts();
+        assert_eq!(limit, 5);
 
-        // The Sort also drops the sort-key column (`n_name`) it needed.
-        let sort_op = after_limit
-            .into_any()
-            .downcast::<SortOperator>()
-            .expect("operator under Limit must be Sort (Sort blocks pushdown)");
-        assert_eq!(sort_op.output_width(), Some(1));
-        let (after_sort, _keys, _width) = sort_op.into_parts();
-
-        // Sort wraps its input in a Project that materializes the sort
-        // keys. The fold from Filter+NodeScan to RangeScan happens
+        // The top-k reads its input through a Project that materializes the
+        // sort keys. The fold from Filter+NodeScan to RangeScan happens
         // inside that Project.
         let project_op = after_sort
             .into_any()
             .downcast::<ProjectOperator>()
-            .expect("operator under Sort must be Project (Sort materializes sort keys)");
+            .expect("operator under the top-k must be Project (it materializes sort keys)");
         let (after_project, _projs, _types) = project_op.into_parts();
 
         let range_op = after_project
@@ -2145,14 +2144,14 @@ mod tests {
             .downcast::<RangeScanOperator>()
             .expect("operator under Project must be RangeScan (Filter folded into scan)");
 
-        // Core assertion of the test: with a Sort between the Limit and
-        // the range scan, LIMIT must NOT be pushed into the scan —
-        // doing so would let Sort observe a truncated input and lose
-        // the globally-smallest rows.
+        // Core assertion of the test: with a sort between the LIMIT and
+        // the range scan, LIMIT must NOT be pushed into the scan: doing so
+        // would let the top-k observe a truncated input and lose the
+        // globally-smallest rows.
         assert_eq!(
             range_op.limit(),
             None,
-            "Sort between Limit and RangeScan must block LIMIT pushdown"
+            "a sort between LIMIT and RangeScan must block LIMIT pushdown"
         );
 
         // Sanity: the planner cleared its scratch limit-hint after

@@ -145,6 +145,8 @@ macro_rules! __conformance_cases {
             reserved_ids_are_never_given_out_again,
             bulk_ranges_are_stamped_and_undone_by_range,
             a_bulk_range_across_row_groups_commits_each_row,
+            a_chunk_applies_in_order_and_a_refused_one_is_taken_back,
+            a_replayed_chunk_builds_what_its_rows_build,
             counts_move_at_commit_only,
             every_access_path_agrees,
             a_node_with_edges_cannot_be_deleted,
@@ -165,6 +167,7 @@ macro_rules! __conformance_cases {
             an_immediate_write_keeps_the_old_value_for_an_older_reader,
             a_property_set_to_null_is_removed,
             no_edge_read_shows_an_end_the_reader_does_not_see,
+            the_edge_type_filter_reads_as_the_names,
         }
     };
     (@each tests($store:ty, $make:expr, $gaps:expr); $($case:ident),* $(,)?) => {
@@ -1380,20 +1383,17 @@ pub(crate) fn paths_at<S: Store + ?Sized>(
             })
             .map(|(id, _)| *id)
             .collect();
+        let range = crate::graph::ValueRange::new(
+            min.as_ref(),
+            max.as_ref(),
+            min_inclusive,
+            max_inclusive,
+            crate::execution::operators::value_utils::AcrossKinds::Apart,
+        );
         let what = format!("find_nodes_in_range(age, {min:?}, {max:?})");
         let found = id_set(
             &ok(
-                store.find_nodes_in_range(
-                    "age",
-                    &crate::graph::ValueRange::new(
-                        min.as_ref(),
-                        max.as_ref(),
-                        min_inclusive,
-                        max_inclusive,
-                        crate::execution::operators::value_utils::AcrossKinds::Apart,
-                    ),
-                    view,
-                ),
+                store.find_nodes_in_range("age", &range, view),
                 "find_nodes_in_range",
             ),
             &what,
@@ -1401,6 +1401,25 @@ pub(crate) fn paths_at<S: Store + ?Sized>(
         );
         if found != wanted {
             problems.push(format!("{what} is {found:?}, expected {wanted:?}"));
+        }
+        // The same range among each label's nodes.
+        for label in &label_names {
+            let what = format!("find_nodes_with_label_in_range({label}, age, {min:?}, {max:?})");
+            let found = id_set(
+                &ok(
+                    store.find_nodes_with_label_in_range(label, "age", &range, view),
+                    "find_nodes_with_label_in_range",
+                ),
+                &what,
+                &mut problems,
+            );
+            let wanted: BTreeSet<u64> = wanted
+                .intersection(&with_any(&[label.as_str()]))
+                .copied()
+                .collect();
+            if found != wanted {
+                problems.push(format!("{what} is {found:?}, expected {wanted:?}"));
+            }
         }
     }
 

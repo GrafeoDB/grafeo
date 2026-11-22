@@ -615,12 +615,12 @@ fn decimal_error(
     }
 }
 
-/// Compiled patterns of `=~` and `LIKE`, by their final regex text, shared by
-/// an evaluator and the list scopes it creates, so a pattern compiles once
-/// instead of once per row. `None` marks a pattern that does not compile.
-/// Empty in builds without a regex feature.
+/// Compiled patterns of `=~` and `LIKE` (and SPARQL's `REGEX` and `REPLACE`),
+/// by their final regex text, shared by an evaluator and the list scopes it
+/// creates, so a pattern compiles once instead of once per row. `None` marks a
+/// pattern that does not compile. Empty in builds without a regex feature.
 #[derive(Default)]
-struct PatternCache(
+pub struct PatternCache(
     #[cfg(any(feature = "regex", feature = "regex-lite"))]
     parking_lot::Mutex<HashMap<String, Option<Regex>>>,
 );
@@ -633,15 +633,21 @@ impl PatternCache {
 
     /// Whether `text` matches `regex`, or `None` when `regex` does not compile.
     fn is_match(&self, regex: String, text: &str) -> Option<bool> {
+        self.with_regex(regex, |re| re.is_match(text))
+    }
+
+    /// `used` of the compiled `source`, which compiles on its first use; `None`
+    /// when it does not compile.
+    pub fn with_regex<T>(&self, source: String, used: impl FnOnce(&Regex) -> T) -> Option<T> {
         let mut patterns = self.0.lock();
-        if patterns.len() >= Self::CAPACITY && !patterns.contains_key(&regex) {
+        if patterns.len() >= Self::CAPACITY && !patterns.contains_key(&source) {
             patterns.clear();
         }
         patterns
-            .entry(regex)
-            .or_insert_with_key(|regex| Regex::new(regex).ok())
+            .entry(source)
+            .or_insert_with_key(|source| Regex::new(source).ok())
             .as_ref()
-            .map(|re| re.is_match(text))
+            .map(used)
     }
 }
 

@@ -51,6 +51,7 @@ mod parameter_scan;
 mod path_expansions;
 mod project;
 pub mod push;
+mod range_fold;
 mod range_scan;
 mod rdf_path;
 mod read_counter;
@@ -94,7 +95,7 @@ pub use factorized_filter::{
 };
 pub use filter::{
     BinaryFilterOp, ChosenPart, ExpressionPredicate, FilterExpression, FilterOperator, LazyValue,
-    ListPredicateKind, Predicate, SessionContext, StatementClock, UnaryFilterOp,
+    ListPredicateKind, PatternCache, Predicate, SessionContext, StatementClock, UnaryFilterOp,
 };
 pub use functions::{
     Arity, BuiltinFunction, FunctionGroup, FunctionSupport, REGEX_SUPPORT, Volatility,
@@ -132,6 +133,7 @@ pub use push::{
 };
 #[cfg(feature = "spill")]
 pub use push::{SpillableAggregatePushOperator, SpillableSortPushOperator};
+pub use range_fold::RangeFoldOperator;
 pub use range_scan::RangeScanOperator;
 pub use rdf_path::{PathStep, RdfPathGraph};
 #[cfg(feature = "triple-store")]

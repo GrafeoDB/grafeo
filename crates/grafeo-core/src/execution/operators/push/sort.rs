@@ -191,6 +191,7 @@ fn output_chunk_taking(
                 out.push_value(value);
             }
         }
+        grafeo_common::work::count(grafeo_common::work::Work::ColumnCopied, width as u64);
         builder.advance_row();
     }
     builder.finish()

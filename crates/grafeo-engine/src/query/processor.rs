@@ -71,6 +71,33 @@ impl QueryLanguage {
         EqualAcrossKinds::False
     }
 
+    /// The statement language whose value rules a statement in this language follows.
+    #[must_use]
+    pub const fn statement_language(&self) -> grafeo_common::types::StatementLanguage {
+        use grafeo_common::types::StatementLanguage;
+        match self {
+            #[cfg(feature = "gql")]
+            Self::Gql => StatementLanguage::Gql,
+            #[cfg(feature = "cypher")]
+            Self::Cypher => StatementLanguage::Cypher,
+            #[cfg(feature = "gremlin")]
+            Self::Gremlin => StatementLanguage::Gremlin,
+            #[cfg(feature = "graphql")]
+            Self::GraphQL => StatementLanguage::GraphQl,
+            #[cfg(feature = "sql-pgq")]
+            Self::SqlPgq => StatementLanguage::SqlPgq,
+            #[cfg(feature = "sparql")]
+            Self::Sparql => StatementLanguage::Sparql,
+            #[cfg(all(feature = "graphql", feature = "triple-store"))]
+            Self::GraphQLRdf => StatementLanguage::GraphQl,
+            #[allow(
+                unreachable_patterns,
+                reason = "only a build with no query language reaches it; a reference to an empty enum still needs an arm"
+            )]
+            _ => StatementLanguage::Gql,
+        }
+    }
+
     /// Returns whether this language targets LPG (vs RDF).
     #[must_use]
     pub const fn is_lpg(&self) -> bool {
@@ -97,6 +124,23 @@ impl QueryLanguage {
 
 /// Query parameters for prepared statements.
 pub type QueryParams = HashMap<String, Value>;
+
+/// What a statement in `language` plans with: its value rules, and openCypher's comparison of a
+/// zoned and a local time for Cypher, else the local one at UTC (a processor has no session time
+/// zone).
+fn statement_context(language: QueryLanguage) -> grafeo_core::execution::operators::SessionContext {
+    use grafeo_common::types::{StatementLanguage, TemporalComparison};
+    let language = language.statement_language();
+    grafeo_core::execution::operators::SessionContext {
+        temporal_comparison: if language == StatementLanguage::Cypher {
+            TemporalComparison::TypesApart
+        } else {
+            TemporalComparison::default()
+        },
+        language,
+        ..Default::default()
+    }
+}
 
 /// Processes queries through the full pipeline.
 ///
@@ -132,8 +176,6 @@ pub struct QueryProcessor {
     transaction_manager: Arc<TransactionManager>,
     /// Catalog for schema and index metadata.
     catalog: Arc<Catalog>,
-    /// Query optimizer.
-    optimizer: Optimizer,
     /// Current transaction context (if any).
     transaction_context: Option<(EpochId, TransactionId)>,
     /// The storage key of the graph the store holds (`None`: the default
@@ -155,7 +197,6 @@ impl QueryProcessor {
     /// epoch of its own) included.
     #[must_use]
     pub fn for_lpg(store: Arc<RowGroupStore>) -> Self {
-        let optimizer = Optimizer::from_graph_store(&*store);
         let graph_store = Arc::clone(&store) as Arc<dyn GraphStore>;
         let write_store = Some(Arc::clone(&store) as Arc<dyn GraphBackend>);
         Self {
@@ -164,7 +205,6 @@ impl QueryProcessor {
             write_store,
             transaction_manager: Arc::new(TransactionManager::new()),
             catalog: Arc::new(Catalog::new()),
-            optimizer,
             transaction_context: None,
             graph: None,
             follows_store_epoch: true,
@@ -179,7 +219,6 @@ impl QueryProcessor {
         store: Arc<RowGroupStore>,
         transaction_manager: Arc<TransactionManager>,
     ) -> Self {
-        let optimizer = Optimizer::from_graph_store(&*store);
         let graph_store = Arc::clone(&store) as Arc<dyn GraphStore>;
         let write_store = Some(Arc::clone(&store) as Arc<dyn GraphBackend>);
         Self {
@@ -188,7 +227,6 @@ impl QueryProcessor {
             write_store,
             transaction_manager,
             catalog: Arc::new(Catalog::new()),
-            optimizer,
             transaction_context: None,
             graph: None,
             follows_store_epoch: false,
@@ -206,7 +244,6 @@ impl QueryProcessor {
         store: Arc<dyn GraphBackend>,
         transaction_manager: Arc<TransactionManager>,
     ) -> Result<Self> {
-        let optimizer = Optimizer::from_graph_store(&*store);
         let read_store = Arc::clone(&store) as Arc<dyn GraphStore>;
         Ok(Self {
             lpg_store: None,
@@ -214,7 +251,6 @@ impl QueryProcessor {
             write_store: Some(store),
             transaction_manager,
             catalog: Arc::new(Catalog::new()),
-            optimizer,
             transaction_context: None,
             graph: None,
             follows_store_epoch: false,
@@ -233,14 +269,12 @@ impl QueryProcessor {
         write_store: Option<Arc<dyn GraphBackend>>,
         transaction_manager: Arc<TransactionManager>,
     ) -> Result<Self> {
-        let optimizer = Optimizer::from_graph_store(&*read_store);
         Ok(Self {
             lpg_store: None,
             graph_store: read_store,
             write_store,
             transaction_manager,
             catalog: Arc::new(Catalog::new()),
-            optimizer,
             transaction_context: None,
             graph: None,
             follows_store_epoch: false,
@@ -284,13 +318,6 @@ impl QueryProcessor {
     #[must_use]
     pub fn with_catalog(mut self, catalog: Arc<Catalog>) -> Self {
         self.catalog = catalog;
-        self
-    }
-
-    /// Sets a custom optimizer.
-    #[must_use]
-    pub fn with_optimizer(mut self, optimizer: Optimizer) -> Self {
-        self.optimizer = optimizer;
         self
     }
 
@@ -377,7 +404,9 @@ impl QueryProcessor {
         let _binding_context = binder.bind(&logical_plan)?;
 
         // 4. Optimize the plan
-        let optimized_plan = self.optimizer.optimize(logical_plan)?;
+        let optimized_plan = Optimizer::from_graph_store(self.graph_store.as_ref())
+            .with_equal_across_kinds(language.equal_across_kinds())
+            .optimize(logical_plan)?;
 
         // A processor with its own transaction manager reads what the
         // store's direct writes stamped (each at an epoch of its own) outside
@@ -415,7 +444,12 @@ impl QueryProcessor {
                 .transaction_manager
                 .start_epoch(transaction)
                 .unwrap_or_else(|| self.transaction_manager.current_epoch());
-            return match self.run_plan(&optimized_plan, Some((epoch, transaction)), start_time) {
+            return match self.run_plan(
+                &optimized_plan,
+                language,
+                Some((epoch, transaction)),
+                start_time,
+            ) {
                 Ok(result) => {
                     self.transaction_manager.commit(transaction)?;
                     Ok(result)
@@ -429,14 +463,20 @@ impl QueryProcessor {
                 }
             };
         }
-        self.run_plan(&optimized_plan, self.transaction_context, start_time)
+        self.run_plan(
+            &optimized_plan,
+            language,
+            self.transaction_context,
+            start_time,
+        )
     }
 
-    /// Plans and runs `optimized_plan` in `context` (its epoch and
-    /// transaction), or outside a transaction.
+    /// Plans and runs `optimized_plan`, a statement in `language`, in
+    /// `context` (its epoch and transaction), or outside a transaction.
     fn run_plan(
         &self,
         optimized_plan: &LogicalPlan,
+        language: QueryLanguage,
         context: Option<(EpochId, TransactionId)>,
         start_time: grafeo_common::clock::Instant,
     ) -> Result<QueryResult> {
@@ -472,7 +512,8 @@ impl QueryProcessor {
                 self.transaction_manager.current_epoch(),
             )
         }
-        .with_read_only(is_read_only);
+        .with_read_only(is_read_only)
+        .with_session_context(statement_context(language));
         let mut physical_plan = planner.plan(optimized_plan)?;
 
         // 6. Execute and collect results
@@ -563,12 +604,6 @@ impl QueryProcessor {
     pub fn catalog(&self) -> &Arc<Catalog> {
         &self.catalog
     }
-
-    /// Returns a reference to the optimizer.
-    #[must_use]
-    pub fn optimizer(&self) -> &Optimizer {
-        &self.optimizer
-    }
 }
 
 impl QueryProcessor {
@@ -591,7 +626,6 @@ impl QueryProcessor {
         lpg_store: Arc<RowGroupStore>,
         rdf_store: Arc<grafeo_core::graph::rdf::RdfStore>,
     ) -> Self {
-        let optimizer = Optimizer::from_graph_store(&*lpg_store);
         let graph_store = Arc::clone(&lpg_store) as Arc<dyn GraphStore>;
         let write_store = Some(Arc::clone(&lpg_store) as Arc<dyn GraphBackend>);
         Self {
@@ -600,7 +634,6 @@ impl QueryProcessor {
             write_store,
             transaction_manager: Arc::new(TransactionManager::new()),
             catalog: Arc::new(Catalog::new()),
-            optimizer,
             transaction_context: None,
             graph: None,
             follows_store_epoch: false,
@@ -682,6 +715,8 @@ impl QueryProcessor {
 
             // EXPLAIN ANALYZE (PROFILE): execute with instrumentation, report stats.
             if optimized_plan.profile {
+                // The profiled run's work, from here (see `grafeo_common::work`).
+                let _ = grafeo_common::work::take();
                 let (mut physical_plan, entries) = planner.plan_profiled(&optimized_plan)?;
 
                 let start = grafeo_common::clock::Instant::now();
@@ -691,8 +726,12 @@ impl QueryProcessor {
 
                 let tree =
                     crate::query::profile::build_profile_tree(&optimized_plan.root, entries)?;
-                return Ok(crate::query::profile::profile_result(&tree, elapsed_ms)
-                    .with_warnings(planner.warnings().raised()));
+                return Ok(crate::query::profile::profile_result(
+                    &tree,
+                    elapsed_ms,
+                    &grafeo_common::work::take(),
+                )
+                .with_warnings(planner.warnings().raised()));
             }
 
             let mut physical_plan = planner.plan(&optimized_plan)?;
@@ -896,6 +935,18 @@ fn annotate_hints(
         annotate_hints(&mut child, store, rules, writes, after_a_write);
         child
     });
+    // An aggregate over a range the scan reads folds the range, as the
+    // planner plans it (`plan_range_fold`).
+    if let LogicalOperator::Aggregate(aggregate) = op
+        && rules.has(crate::query::optimizer::PlannerRule::RangeFold)
+        && let Some(filter) = aggregate.range_fold_filter_mut()
+        && let Some(crate::query::plan::PushdownHint::RangeScan { property }) =
+            &filter.pushdown_hint
+    {
+        filter.pushdown_hint = Some(crate::query::plan::PushdownHint::RangeFold {
+            property: property.clone(),
+        });
+    }
 }
 
 /// The property whose index `merge` looks its node up through: the first of
@@ -1204,6 +1255,7 @@ pub fn substitute_params(plan: &mut LogicalPlan, params: &QueryParams) -> Result
         values: params,
         clauses: plan.count_clauses,
         renamed_keys: std::cell::RefCell::new(HashMap::new()),
+        missing: None,
     };
     substitute_in_operator(&mut plan.root, &params)?;
     // A grouping key is a column named by its text, which the operators above read it by: a key
@@ -1214,6 +1266,52 @@ pub fn substitute_params(plan: &mut LogicalPlan, params: &QueryParams) -> Result
     Ok(())
 }
 
+/// Substitutes the parameters of `expression`, an expression of a plan whose counts' errors
+/// name `clauses`, with `params`, as [`substitute_params`] does in the whole plan.
+///
+/// # Errors
+///
+/// As [`substitute_params`]: a referenced parameter that is not in `params`.
+#[cfg(prepared_plans)]
+pub(crate) fn substitute_expression_params(
+    expression: &mut crate::query::plan::LogicalExpression,
+    params: &QueryParams,
+    clauses: crate::query::plan::CountClauses,
+) -> Result<()> {
+    substitute_in_expression(
+        expression,
+        &Substitution {
+            values: params,
+            clauses,
+            renamed_keys: std::cell::RefCell::new(HashMap::new()),
+            missing: None,
+        },
+    )
+}
+
+/// The parameters `expression` reads, where [`substitute_expression_params`] fills them, in
+/// the order it meets them.
+///
+/// # Errors
+///
+/// A count in a subquery of `expression` that names no value.
+#[cfg(prepared_plans)]
+pub(crate) fn expression_parameters(
+    expression: &crate::query::plan::LogicalExpression,
+    clauses: crate::query::plan::CountClauses,
+) -> Result<Vec<String>> {
+    let params = Substitution {
+        values: &QueryParams::new(),
+        clauses,
+        renamed_keys: std::cell::RefCell::new(HashMap::new()),
+        missing: Some(std::cell::RefCell::new(Vec::new())),
+    };
+    substitute_in_expression(&mut expression.clone(), &params)?;
+    Ok(params
+        .missing
+        .map_or_else(Vec::new, std::cell::RefCell::into_inner))
+}
+
 /// The values a plan's parameters take, and what its statement calls the
 /// clauses that skip and limit rows, which the error of a bad count names.
 struct Substitution<'a> {
@@ -1221,6 +1319,8 @@ struct Substitution<'a> {
     clauses: crate::query::plan::CountClauses,
     /// The grouping keys whose text the values changed: the old column name, then the new.
     renamed_keys: std::cell::RefCell<HashMap<String, String>>,
+    /// With a list, a parameter without a value is listed here instead of failing.
+    missing: Option<std::cell::RefCell<Vec<String>>>,
 }
 
 /// Recursively substitutes parameters in an operator.
@@ -1520,7 +1620,7 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &Substitution<'_>) -
 
 /// Resolves a `CountExpr::Parameter` by looking up the parameter value; its
 /// errors name the clause `clause` (`SKIP/LIMIT`, or SQL's `OFFSET`).
-fn resolve_count_param(
+pub(crate) fn resolve_count_param(
     count: &mut crate::query::plan::CountExpr,
     params: &QueryParams,
     clause: &str,
@@ -1547,6 +1647,8 @@ fn substitute_in_expression(expr: &mut LogicalExpression, params: &Substitution<
         LogicalExpression::Parameter(name) => {
             if let Some(value) = params.values.get(name) {
                 *expr = LogicalExpression::Literal(value.clone());
+            } else if let Some(missing) = &params.missing {
+                missing.borrow_mut().push(name.clone());
             } else {
                 return Err(Error::from(grafeo_common::utils::error::QueryError::new(
                     grafeo_common::utils::error::QueryErrorKind::InvalidReference,
@@ -1745,7 +1847,9 @@ mod tests {
         // Planned now, run after A's index is gone.
         let logical = processor.translate_lpg(query, QueryLanguage::Gql).unwrap();
         Binder::new().bind(&logical).unwrap();
-        let optimized = processor.optimizer.optimize(logical).unwrap();
+        let optimized = Optimizer::from_graph_store(&*store)
+            .optimize(logical)
+            .unwrap();
         let planner = Planner::new(
             Arc::clone(&store) as Arc<dyn GraphStore>,
             processor.transaction_manager.current_epoch(),

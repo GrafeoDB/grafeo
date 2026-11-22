@@ -132,7 +132,9 @@ missing_docs = "warn"
 # features name instead of the ones the runner's CPU offers). `coverage` is set
 # by `cargo llvm-cov` (the Code Coverage job): a longer child deadline in
 # grafeo_common::testing::child_process.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(grafeo_codspeed)", "cfg(coverage)"] }
+# `grafeo_work_counters`: the work counters (#794, grafeo_common::work), set only by the
+# work_per_query bench's job and local runs of it; it also fixes the hash seed.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(grafeo_codspeed)", "cfg(coverage)", "cfg(grafeo_work_counters)"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

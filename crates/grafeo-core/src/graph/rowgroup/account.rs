@@ -887,7 +887,7 @@ mod tests {
     use grafeo_common::storage::{ChunkCaps, ImageSource, MemoryImage, SectionType};
     use grafeo_common::types::{EdgeId, NodeId, ReadView, Value};
 
-    use crate::graph::conformance::{Tx, people};
+    use crate::graph::conformance::{Tx, committed, people};
     use crate::graph::rowgroup::RowGroupStore;
     use crate::graph::rowgroup::section::LPG_SECTION_VERSION;
     use crate::graph::traits::GraphStore;
@@ -1279,5 +1279,154 @@ mod tests {
         assert_counted(&loaded, "a compression");
         loaded.collect_all(loaded.current_epoch());
         assert_counted(&loaded, "a collect of every vector");
+    }
+
+    /// `count` creates of one kind for a bulk write: nodes, or edges from `ends`'s pairs.
+    fn chunk_ops(
+        store: &RowGroupStore,
+        count: usize,
+        ends: Option<&dyn Fn(usize) -> (NodeId, NodeId)>,
+    ) -> (
+        grafeo_common::change::Table,
+        std::ops::Range<u64>,
+        Vec<grafeo_common::change::DataOp>,
+    ) {
+        use crate::graph::apply::GraphBackend;
+        use grafeo_common::change::{DataOp, Table};
+        use grafeo_common::types::ArcStr;
+
+        let (table, ids) = match ends {
+            None => (Table::Nodes, store.reserve_node_ids(count as u64).unwrap()),
+            Some(_) => (Table::Edges, store.reserve_edge_ids(count as u64).unwrap()),
+        };
+        let ops = ids
+            .clone()
+            .enumerate()
+            .map(|(at, raw)| match ends {
+                None => DataOp::CreateNode {
+                    id: NodeId::new(raw),
+                    labels: crate::graph::conformance::labels(&["Person"]),
+                    properties: crate::graph::conformance::properties(&[
+                        ("i", Value::Int64(i64::try_from(at).unwrap())),
+                        ("name", Value::from(format!("Mia {at}").as_str())),
+                    ]),
+                },
+                Some(ends) => {
+                    let (src, dst) = ends(at);
+                    DataOp::CreateEdge {
+                        id: EdgeId::new(raw),
+                        src,
+                        dst,
+                        edge_type: ArcStr::from("KNOWS"),
+                        properties: crate::graph::conformance::properties(&[(
+                            "w",
+                            Value::Int64(i64::try_from(at).unwrap()),
+                        )]),
+                    }
+                }
+            })
+            .collect();
+        (table, ids, ops)
+    }
+
+    /// What a chunk of creates adds besides its values stays within the bound its
+    /// admission takes for each row (`NODE_ROW_BYTES`, `EDGE_ROW_BYTES`): measured
+    /// chunk by chunk, for nodes and for edges in source order and shuffled, both ways.
+    #[test]
+    fn a_chunk_adds_no_more_structure_than_admission_takes() {
+        use super::super::apply::structure_bytes;
+        use crate::graph::apply::{CHUNK_ROWS, GraphBackend};
+
+        const NODES: usize = 4 * CHUNK_ROWS;
+        // The most a chunk added beyond its values' own bytes, per byte its admission took.
+        let mut most: f64 = 0.0;
+        let mut apply = |store: &RowGroupStore,
+                         tx: &Tx<'_, RowGroupStore>,
+                         part: &[grafeo_common::change::DataOp]| {
+            let before = store.memory().total_bytes();
+            store.apply_chunk(part, tx.writer()).unwrap();
+            let grown = store.memory().total_bytes().saturating_sub(before);
+            let payload: usize = part
+                .iter()
+                .map(grafeo_common::change::DataOp::payload_bytes)
+                .sum();
+            let bound: usize = part.iter().map(structure_bytes).sum();
+            let share = grown.saturating_sub(payload) as f64 / bound as f64;
+            most = most.max(share);
+        };
+        let store = RowGroupStore::new();
+        let mut tx = Tx::begin(&store, 10);
+        let (table, ids, ops) = chunk_ops(&store, NODES, None);
+        for part in ops.chunks(CHUNK_ROWS) {
+            apply(&store, &tx, part);
+        }
+        tx.push_bulk(table, ids.clone()).unwrap();
+        tx.commit().unwrap();
+        let node = |at: u64| NodeId::new(ids.start + at % NODES as u64);
+        let in_order = |at: usize| (node(at as u64 / 3), node(at as u64 * 7 + 1));
+        // A fixed scatter of the rows over the nodes.
+        let shuffled = |at: usize| {
+            let spread = (at as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            (node(spread), node(spread >> 32))
+        };
+        for (id, ends) in [
+            (11, &in_order as &dyn Fn(usize) -> (NodeId, NodeId)),
+            (12, &shuffled),
+        ] {
+            let mut tx = Tx::begin(&store, id);
+            let (table, edge_ids, ops) = chunk_ops(&store, 3 * NODES, Some(ends));
+            for part in ops.chunks(CHUNK_ROWS) {
+                apply(&store, &tx, part);
+            }
+            tx.push_bulk(table, edge_ids).unwrap();
+            tx.commit().unwrap();
+        }
+        assert!(
+            most <= 1.0,
+            "a chunk added {most:.2} times what its admission took"
+        );
+    }
+
+    /// A bulk load against a small budget stays within the budget plus one grant step at
+    /// every chunk, and the chunk that would pass it is refused before it changes anything.
+    #[test]
+    fn a_bulk_load_stays_within_the_limit_and_a_step() {
+        use crate::graph::apply::{ApplyError, CHUNK_ROWS, GraphBackend};
+
+        let store = RowGroupStore::new();
+        let manager = BufferManager::with_budget(4 << 20);
+        store.attach_memory(Arc::clone(&manager));
+        let limit = manager.budget() + manager.grant_step();
+        let mut tx = Tx::begin(&store, 10);
+        let (table, ids, ops) = chunk_ops(&store, 2 * CHUNK_ROWS, None);
+        for part in ops.chunks(CHUNK_ROWS) {
+            store.apply_chunk(part, tx.writer()).unwrap();
+        }
+        tx.push_bulk(table, ids.clone()).unwrap();
+        tx.commit().unwrap();
+        let node = |at: u64| NodeId::new(ids.start + at % (2 * CHUNK_ROWS) as u64);
+        let ends = |at: usize| (node(at as u64), node(at as u64 * 31 + 7));
+        let mut tx = Tx::begin(&store, 11);
+        let (table, edge_ids, ops) = chunk_ops(&store, 400 * CHUNK_ROWS, Some(&ends));
+        let mut refused = false;
+        for part in ops.chunks(CHUNK_ROWS) {
+            let before = committed(&store);
+            match store.apply_chunk(part, tx.writer()) {
+                Ok(()) => assert!(
+                    manager.allocated() <= limit,
+                    "{} allocated past {limit}",
+                    manager.allocated()
+                ),
+                Err(ApplyError::Limit(_) | ApplyError::Memory(_)) => {
+                    assert_eq!(committed(&store), before, "a refused chunk changes nothing");
+                    refused = true;
+                    break;
+                }
+                Err(other) => panic!("{other:?}"),
+            }
+        }
+        assert!(refused, "the load reached the limit");
+        tx.push_bulk(table, edge_ids).unwrap();
+        tx.roll_back().unwrap();
     }
 }

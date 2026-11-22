@@ -1055,7 +1055,7 @@ impl Column {
     /// The value at `row` as `read` sees it. A cold column has no update
     /// chains (a write thaws it), so every reader reads its one value, from
     /// the chunk's point view where it has one.
-    fn value_at(&self, row: usize, read: Read) -> Option<Value> {
+    pub(super) fn value_at(&self, row: usize, read: Read) -> Option<Value> {
         match self.hot.get() {
             Some(hot) => hot.get_at(row, read),
             None => self.get(row),
@@ -1750,8 +1750,14 @@ impl Columns {
         taken
     }
 
+    /// The column of key `key`, for reads of many rows without a lookup each.
+    pub(super) fn column(&self, key: u32) -> Option<&Column> {
+        self.by_key.get(&key)
+    }
+
     /// The value of key `key` at `row` as `read` sees it.
     pub(super) fn get_at(&self, key: u32, row: usize, read: Read) -> Option<Value> {
+        grafeo_common::work::count(grafeo_common::work::Work::ColumnRead, 1);
         self.by_key.get(&key)?.value_at(row, read)
     }
 

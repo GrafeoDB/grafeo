@@ -147,6 +147,12 @@ impl CacheKey {
     pub fn language(&self) -> QueryLanguage {
         self.language
     }
+
+    /// The planner rules the plan is made with.
+    #[must_use]
+    pub fn rules(&self) -> crate::query::optimizer::PlannerRules {
+        self.rules
+    }
 }
 
 /// The text a statement is cached by: the whole text but the whitespace
@@ -186,6 +192,14 @@ impl Stage {
 /// hands out the same plan, never a copy.
 pub struct CachedPlan {
     plan: LogicalPlan,
+    /// The physical shape a prepared plan's calls open, made on its first call.
+    #[cfg(prepared_plans)]
+    recipe: std::sync::OnceLock<
+        std::result::Result<
+            crate::query::planner::lpg::recipe::Recipe,
+            crate::query::planner::lpg::recipe::Uncovered,
+        >,
+    >,
     /// What the entry is charged: the plan's deep estimate, its key's text
     /// and the cache's bookkeeping.
     bytes: usize,
@@ -222,6 +236,21 @@ impl CachedPlan {
     #[must_use]
     pub fn plan(&self) -> &LogicalPlan {
         &self.plan
+    }
+
+    /// The recipe the calls of this prepared plan open, or the kind it holds that no recipe
+    /// covers: made on first use from `inputs`, which every call of one cache key and database
+    /// gives alike (read only then), then shared by every call and session.
+    #[cfg(prepared_plans)]
+    pub(crate) fn recipe(
+        &self,
+        inputs: impl FnOnce() -> crate::query::planner::lpg::aggregate::RouteInputs,
+    ) -> &std::result::Result<
+        crate::query::planner::lpg::recipe::Recipe,
+        crate::query::planner::lpg::recipe::Uncovered,
+    > {
+        self.recipe
+            .get_or_init(|| crate::query::planner::lpg::recipe::recipe_of(&self.plan, inputs()))
     }
 
     /// What the cache charges the entry, in bytes.
@@ -581,8 +610,10 @@ impl QueryCache {
         };
         if found.is_some() {
             hits.fetch_add(1, Ordering::Relaxed);
+            grafeo_common::work::count(grafeo_common::work::Work::PlanCacheHit, 1);
         } else {
             misses.fetch_add(1, Ordering::Relaxed);
+            grafeo_common::work::count(grafeo_common::work::Work::PlanCacheMiss, 1);
         }
         found
     }
@@ -610,6 +641,8 @@ impl QueryCache {
         };
         let cached = Arc::new(CachedPlan {
             plan,
+            #[cfg(prepared_plans)]
+            recipe: std::sync::OnceLock::new(),
             bytes,
             key,
             stage,
@@ -829,6 +862,8 @@ impl SessionPlans {
                     Some(plan) if plan.is_for(key, stage) => {
                         plan.mark_used();
                         self.shared.session_hits.fetch_add(1, Ordering::Relaxed);
+                        // A hit as the shared cache counts one: each lookup counts once.
+                        grafeo_common::work::count(grafeo_common::work::Work::PlanCacheHit, 1);
                         return Some(plan);
                     }
                     // Evicted, cleared, or another key's plan: a miss.

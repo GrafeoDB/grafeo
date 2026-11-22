@@ -2,7 +2,7 @@
 //! through `GraphBackend` and the read traits only.
 
 use grafeo_common::change::{Before, DataOp, Table};
-use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, Value};
+use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, ReadView, Value};
 
 use super::{
     Image, LABELS, Outcome, Reader, Rng, Store, Tx, apply_all, committed, committed_view, counts,
@@ -11,6 +11,7 @@ use super::{
 };
 use crate::graph::Direction;
 use crate::graph::apply::{Applied, ApplyError, Writer};
+use crate::graph::traits::{EdgeTypeFilter, FilteredHop, HopFrom};
 
 /// The nodes and edges two images hold, without their problems.
 fn data(
@@ -984,6 +985,189 @@ pub(crate) fn a_bulk_range_across_row_groups_commits_each_row<S: Store>(
     same_data(&committed(&store), &before, "after the bulk rollback")
 }
 
+/// A chunk of a bulk write applies its creates in order and commits with its
+/// range; a chunk refused at its last row (an end no one sees) fails, and the
+/// transaction's rollback of its range leaves the store as it was. A chunk
+/// that mixes nodes and edges, or holds an op that is no create, is refused.
+pub(crate) fn a_chunk_applies_in_order_and_a_refused_one_is_taken_back<S: Store>(
+    make: &dyn Fn() -> S,
+) -> Outcome {
+    let store = make();
+    let people = people(&store)?;
+    let (nodes_before, edges_before, _) = counts(&store, &LABELS);
+    let mut tx = Tx::begin(&store, 10);
+    let ids = store
+        .reserve_node_ids(3)
+        .map_err(|error| format!("{error:?}"))?;
+    let cities: Vec<DataOp> = ids
+        .clone()
+        .zip(["Amsterdam", "Utrecht", "Leiden"])
+        .map(|(raw, name)| DataOp::CreateNode {
+            id: NodeId::new(raw),
+            labels: labels(&["City"]),
+            properties: properties(&[("name", Value::from(name))]),
+        })
+        .collect();
+    store
+        .apply_chunk(&cities, tx.writer())
+        .map_err(|error| format!("a chunk of nodes: {error:?}"))?;
+    let edge_ids = store
+        .reserve_edge_ids(3)
+        .map_err(|error| format!("{error:?}"))?;
+    let city = |index: usize| NodeId::new(ids.start + index as u64);
+    let routes: Vec<DataOp> = edge_ids
+        .clone()
+        .zip([
+            (city(0), city(1)),
+            (city(1), city(2)),
+            (people.alix, city(0)),
+        ])
+        .map(|(raw, (src, dst))| DataOp::CreateEdge {
+            id: EdgeId::new(raw),
+            src,
+            dst,
+            edge_type: ArcStr::from("ROUTE"),
+            properties: properties(&[]),
+        })
+        .collect();
+    store
+        .apply_chunk(&routes, tx.writer())
+        .map_err(|error| format!("a chunk of edges: {error:?}"))?;
+    let mixed = [cities[0].clone(), routes[0].clone()];
+    ensure(
+        matches!(
+            store.apply_chunk(&mixed, tx.writer()),
+            Err(ApplyError::Refused(_))
+        ),
+        || "a chunk of nodes and edges is refused".to_string(),
+    )?;
+    tx.push_bulk(Table::Nodes, ids.clone())?;
+    tx.push_bulk(Table::Edges, edge_ids.clone())?;
+    let epoch = tx.commit()?;
+    let after = image(&store, Reader::At(epoch));
+    after.consistent("after the chunks commit")?;
+    after.has_node(city(2), &["City"], "name", Some(&Value::from("Leiden")))?;
+    same(
+        &(after.nodes.len(), after.edges.len()),
+        &(nodes_before + 3, edges_before + 3),
+        "the chunks' rows are seen",
+    )?;
+    let route = |raw: u64| after.edges.get(&raw).map(|edge| (edge.0, edge.1));
+    same(
+        &edge_ids.clone().map(route).collect::<Vec<_>>(),
+        &vec![
+            Some((city(0).as_u64(), city(1).as_u64())),
+            Some((city(1).as_u64(), city(2).as_u64())),
+            Some((people.alix.as_u64(), city(0).as_u64())),
+        ],
+        "each edge has its ends, in the chunk's order",
+    )?;
+
+    let before = committed(&store);
+    let mut tx = Tx::begin(&store, 11);
+    let edge_ids = store
+        .reserve_edge_ids(3)
+        .map_err(|error| format!("{error:?}"))?;
+    let nowhere = NodeId::new(
+        store
+            .reserve_node_ids(1)
+            .map_err(|error| format!("{error:?}"))?
+            .start,
+    );
+    let refused: Vec<DataOp> = edge_ids
+        .clone()
+        .zip([
+            (city(0), people.gus),
+            (people.gus, city(2)),
+            (city(1), nowhere),
+        ])
+        .map(|(raw, (src, dst))| DataOp::CreateEdge {
+            id: EdgeId::new(raw),
+            src,
+            dst,
+            edge_type: ArcStr::from("ROUTE"),
+            properties: properties(&[]),
+        })
+        .collect();
+    let failed = store.apply_chunk(&refused, tx.writer());
+    ensure(matches!(failed, Err(ApplyError::Missing(_))), || {
+        format!("a chunk whose last edge ends nowhere fails: {failed:?}")
+    })?;
+    tx.push_bulk(Table::Edges, edge_ids)?;
+    tx.roll_back()?;
+    same_data(
+        &committed(&store),
+        &before,
+        "after the refused chunk's rollback",
+    )
+}
+
+/// Replay of a logged group's creates as chunks builds what replay of the
+/// same creates one at a time builds: the same nodes, edges, counts, epoch
+/// and next ids. Self-loops and parallel edges included.
+pub(crate) fn a_replayed_chunk_builds_what_its_rows_build<S: Store>(
+    make: &dyn Fn() -> S,
+) -> Outcome {
+    let (one_at_a_time, chunked) = (make(), make());
+    let first = reserve_node(&one_at_a_time)?;
+    let epoch = next_epoch(&one_at_a_time);
+    let names = ["Vincent", "Jules", "Mia", "Butch", "Django"];
+    let node = |index: usize| NodeId::new(first + index as u64);
+    let nodes: Vec<DataOp> = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| DataOp::CreateNode {
+            id: node(index),
+            labels: labels(&["Person"]),
+            properties: properties(&[("name", Value::from(*name))]),
+        })
+        .collect();
+    let first_edge = reserve_edge(&one_at_a_time)?;
+    let ends = [(0, 1), (1, 2), (2, 0), (3, 3), (3, 4), (3, 4), (4, 0)];
+    let edges: Vec<DataOp> = ends
+        .iter()
+        .enumerate()
+        .map(|(index, &(src, dst))| DataOp::CreateEdge {
+            id: EdgeId::new(first_edge + index as u64),
+            src: node(src),
+            dst: node(dst),
+            edge_type: ArcStr::from(if index % 2 == 0 { "KNOWS" } else { "LIKES" }),
+            properties: properties(&[(
+                "since",
+                Value::Int64(2_000 + i64::try_from(index).expect("a few edges")),
+            )]),
+        })
+        .collect();
+    let writer = Writer::Replay { epoch };
+    apply_all(&one_at_a_time, &nodes, writer)?;
+    apply_all(&one_at_a_time, &edges, writer)?;
+    for chunk in [&nodes, &edges] {
+        chunked
+            .apply_chunk(chunk, writer)
+            .map_err(|error| format!("a replayed chunk: {error:?}"))?;
+    }
+    same_data(
+        &committed(&chunked),
+        &committed(&one_at_a_time),
+        "the replayed chunks",
+    )?;
+    same(
+        &counts(&chunked, &LABELS),
+        &counts(&one_at_a_time, &LABELS),
+        "the counts",
+    )?;
+    same(
+        &chunked.committed_epoch(),
+        &one_at_a_time.committed_epoch(),
+        "the epoch",
+    )?;
+    same(
+        &(reserve_node(&chunked)?, reserve_edge(&chunked)?),
+        &(reserve_node(&one_at_a_time)?, reserve_edge(&one_at_a_time)?),
+        "the next ids",
+    )
+}
+
 /// The counts move when a transaction commits, by what it wrote, and not
 /// while it is open or when it rolls back.
 pub(crate) fn counts_move_at_commit_only<S: Store>(make: &dyn Fn() -> S) -> Outcome {
@@ -1191,6 +1375,127 @@ fn ends_seen<S: Store>(store: &S, reader: Reader, what: &str) -> Outcome {
                 &edges.len(),
                 &format!("{what}: node {raw}'s degree ({direction:?})"),
             )?;
+        }
+    }
+    Ok(())
+}
+
+/// The reads that take an edge type filter answer as the reads by name: the same edges in
+/// the same order, and the same nodes in common with the same entries read, for every type
+/// list, way and pair of nodes, at a transaction's view and at a committed reader's. The
+/// filters are made before any edge type exists and kept through a seeded workload, so a
+/// read after a new type resolves again.
+pub(crate) fn the_edge_type_filter_reads_as_the_names<S: Store>(make: &dyn Fn() -> S) -> Outcome {
+    let lists: Vec<Vec<ArcStr>> = std::iter::once(&[][..])
+        .chain(super::TYPES)
+        .map(|types| types.iter().map(|name| ArcStr::from(*name)).collect())
+        .collect();
+    for seed in 1..=6 {
+        let store = make();
+        let mut rng = Rng::new(seed);
+        let filters = || -> Vec<EdgeTypeFilter> {
+            lists
+                .iter()
+                .map(|names| store.edge_type_filter(names))
+                .collect()
+        };
+        let (mut near, mut far) = (filters(), filters());
+        for transaction in 0..8_u64 {
+            let mut tx = Tx::begin(&store, 300 + transaction);
+            for _ in 0..12 {
+                random_write(&mut tx, &mut rng)?;
+            }
+            let what = format!("seed {seed}, transaction {transaction}");
+            let own = super::read_view(Reader::Transaction(tx.id, tx.snapshot));
+            filters_read_as_names(&store, own, &lists, (&mut near, &mut far), &what)?;
+            if rng.below(3) == 0 {
+                tx.roll_back()?;
+            } else {
+                tx.commit()?;
+            }
+            let committed = committed_view(&store);
+            let what = format!("{what}, committed");
+            filters_read_as_names(&store, committed, &lists, (&mut near, &mut far), &what)?;
+        }
+    }
+    Ok(())
+}
+
+/// [`the_edge_type_filter_reads_as_the_names`] at `view`: `near` and `far` hold a filter of
+/// each of `lists`, in its order.
+fn filters_read_as_names<S: Store>(
+    store: &S,
+    view: ReadView,
+    lists: &[Vec<ArcStr>],
+    (near, far): (&mut [EdgeTypeFilter], &mut [EdgeTypeFilter]),
+    what: &str,
+) -> Outcome {
+    const WAYS: [Direction; 3] = [Direction::Outgoing, Direction::Incoming, Direction::Both];
+    let mut nodes = ok(store.node_ids(view), "node_ids");
+    // A node no reader sees has no edges either way.
+    nodes.push(NodeId::new(1 << 40));
+    for (index, names) in lists.iter().enumerate() {
+        for &node in &nodes {
+            for direction in WAYS {
+                same(
+                    &ok(
+                        store.edges_with_filter(node, direction, &mut near[index], view),
+                        "edges_with_filter",
+                    ),
+                    &ok(store.edges(node, direction, names, view), "edges"),
+                    &format!("{what}: edges of {node:?} {direction:?} {names:?}"),
+                )?;
+            }
+        }
+        for far_index in [index, (index + 1) % lists.len()] {
+            let far_names = &lists[far_index];
+            for &a in nodes.iter().take(6) {
+                for &b in nodes.iter().rev().take(6) {
+                    for (near_way, far_way) in WAYS.into_iter().flat_map(|near_way| {
+                        WAYS.into_iter().map(move |far_way| (near_way, far_way))
+                    }) {
+                        let by_filter = ok(
+                            store.common_edges_with_filter(
+                                FilteredHop {
+                                    node: a,
+                                    direction: near_way,
+                                    filter: &mut near[index],
+                                },
+                                FilteredHop {
+                                    node: b,
+                                    direction: far_way,
+                                    filter: &mut far[far_index],
+                                },
+                                view,
+                            ),
+                            "common_edges_with_filter",
+                        );
+                        let by_names = ok(
+                            store.common_edges(
+                                &HopFrom {
+                                    node: a,
+                                    direction: near_way,
+                                    edge_types: names,
+                                },
+                                &HopFrom {
+                                    node: b,
+                                    direction: far_way,
+                                    edge_types: far_names,
+                                },
+                                view,
+                            ),
+                            "common_edges",
+                        );
+                        same(
+                            &by_filter,
+                            &by_names,
+                            &format!(
+                                "{what}: common edges of {a:?} {near_way:?} {names:?} and {b:?} {far_way:?} {far_names:?}"
+                            ),
+                        )?;
+                    }
+                }
+            }
         }
     }
     Ok(())

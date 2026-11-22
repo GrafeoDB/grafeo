@@ -373,6 +373,50 @@ mod database {
         );
     }
 
+    /// A store with the default filter reads (the example backend overrides none of
+    /// them) answers the expands, intersections and counts as the built-in store does,
+    /// whose filter reads resolve the types once: the same rows on the same graph, also
+    /// for a type created within the statement.
+    #[test]
+    fn a_store_with_the_default_filter_reads_answers_as_the_built_in_one() {
+        let backend = GrafeoDB::with_store(
+            Arc::new(ExampleBackend::in_memory()) as Arc<dyn GraphBackend>,
+            Config::in_memory(),
+        )
+        .unwrap();
+        let built_in = GrafeoDB::new_in_memory();
+        let graph = "INSERT (a:Person {name: 'Alix'}), (g:Person {name: 'Gus'}), (m:Person {name: 'Mia'}), (v:Person {name: 'Vincent'}), (a)-[:KNOWS]->(g), (g)-[:KNOWS]->(m), (m)-[:KNOWS]->(a), (a)-[:KNOWS]->(m), (a)-[:KNOWS]->(g), (v)-[:KNOWS]->(v), (v)-[:LIKES]->(a), (m)-[:LIKES]->(g)";
+        let queries = [
+            "MATCH (a:Person)-[k:KNOWS]->(b) RETURN a.name, b.name",
+            "MATCH (a:Person)<-[:KNOWS|LIKES]-(b) RETURN a.name, b.name",
+            "MATCH (a:Person)-[:KNOWS]-(b) RETURN a.name, b.name",
+            "MATCH (a:Person)-[:MISSING]->(b) RETURN a.name, b.name",
+            "MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c)-[:KNOWS]->(a) RETURN a.name, b.name, c.name",
+            "MATCH (a)-[:KNOWS]->(c)<-[:LIKES]-(b) RETURN a.name, b.name, c.name",
+            "MATCH (a:Person) RETURN a.name, COUNT { MATCH (a)-[:KNOWS]->() } AS knows",
+            "MATCH (a:Person {name: 'Alix'}) INSERT (a)-[:NEW]->(:X) WITH a              MATCH (a)-[:NEW]->(b) RETURN a.name, labels(b)",
+        ];
+        let rows = |db: &GrafeoDB, query: &str| {
+            let mut rows: Vec<String> = db
+                .execute(query)
+                .unwrap()
+                .rows()
+                .iter()
+                .map(|row| format!("{row:?}"))
+                .collect();
+            rows.sort();
+            rows
+        };
+        for db in [&backend, &built_in] {
+            db.execute(graph).unwrap();
+        }
+        for query in queries {
+            let expected = rows(&built_in, query);
+            assert!(!expected.is_empty() || query.contains("MISSING"), "{query}");
+            assert_eq!(rows(&backend, query), expected, "{query}");
+        }
+    }
+
     /// A close flushes the durable backend: its file holds every commit and
     /// the reopen reads it, with the ids the commits took never given again.
     #[test]

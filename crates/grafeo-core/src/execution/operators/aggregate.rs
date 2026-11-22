@@ -1464,6 +1464,10 @@ impl Operator for HashAggregateOperator {
                 }
             }
 
+            grafeo_common::work::count(
+                grafeo_common::work::Work::ColumnCopied,
+                (self.group_columns.len() + self.aggregates.len()) as u64,
+            );
             builder.advance_row();
 
             if builder.is_full() {
@@ -1522,6 +1526,39 @@ pub struct SimpleAggregateOperator {
     growing: GrowingStates,
 }
 
+/// Adds one row to the states of an aggregate without grouping, each
+/// aggregate's value read from the row's column `value_at` gives: a
+/// `count(*)` reads none, a null or missing value is skipped, and the binary
+/// set functions read two. [`SimpleAggregateOperator`] and the range fold
+/// ([`RangeFoldOperator`](super::RangeFoldOperator)) both add their rows here,
+/// so they reach the same states.
+pub(crate) fn update_row(
+    aggregates: &[AggregateExpr],
+    states: &mut [AggregateState],
+    mut value_at: impl FnMut(usize) -> Option<Value>,
+) {
+    for (state, agg) in states.iter_mut().zip(aggregates) {
+        // Binary set functions: read two column values
+        if agg.column2.is_some() {
+            let y_val = agg.column.and_then(&mut value_at);
+            let x_val = agg.column2.and_then(&mut value_at);
+            state.update_bivariate(y_val, x_val);
+            continue;
+        }
+        // COUNT(*) without DISTINCT needs no value; every other aggregate
+        // skips a null or missing one, but a `collect` that keeps nulls reads
+        // them too.
+        if let (AggregateFunction::Count, false) = (agg.function, agg.distinct) {
+            state.update_under(None, agg.temporal);
+            continue;
+        }
+        let value = agg.column.and_then(&mut value_at);
+        if agg.keep_nulls || (value.is_some() && !matches!(value, Some(Value::Null))) {
+            state.update_under(value, agg.temporal);
+        }
+    }
+}
+
 impl SimpleAggregateOperator {
     /// Creates a new simple aggregate operator.
     pub fn new(
@@ -1564,56 +1601,9 @@ impl Operator for SimpleAggregateOperator {
         while let Some(chunk) = self.child.next()? {
             crate::execution::deadline::check()?;
             for row in chunk.selected_indices() {
-                for (i, agg) in self.aggregates.iter().enumerate() {
-                    // Binary set functions: read two column values
-                    if agg.column2.is_some() {
-                        let y_val = agg
-                            .column
-                            .and_then(|col| chunk.column(col).and_then(|c| c.get_value(row)));
-                        let x_val = agg
-                            .column2
-                            .and_then(|col| chunk.column(col).and_then(|c| c.get_value(row)));
-                        self.states[i].update_bivariate(y_val, x_val);
-                        continue;
-                    }
-
-                    let value = match (agg.function, agg.distinct) {
-                        // COUNT(*) without DISTINCT doesn't need a value
-                        (AggregateFunction::Count, false) => None,
-                        // COUNT DISTINCT needs the actual value to track unique values
-                        (AggregateFunction::Count, true) => agg
-                            .column
-                            .and_then(|col| chunk.column(col).and_then(|c| c.get_value(row))),
-                        _ => agg
-                            .column
-                            .and_then(|col| chunk.column(col).and_then(|c| c.get_value(row))),
-                    };
-
-                    match (agg.function, agg.distinct) {
-                        (AggregateFunction::Count, false) => {
-                            self.states[i].update_under(None, agg.temporal);
-                        }
-                        (AggregateFunction::Count, true) => {
-                            // COUNT DISTINCT needs the value to track unique values
-                            if value.is_some() && !matches!(value, Some(Value::Null)) {
-                                self.states[i].update_under(value, agg.temporal);
-                            }
-                        }
-                        (AggregateFunction::CountNonNull, _) => {
-                            if value.is_some() && !matches!(value, Some(Value::Null)) {
-                                self.states[i].update_under(value, agg.temporal);
-                            }
-                        }
-                        // A `collect` that keeps nulls reads them too.
-                        _ => {
-                            if agg.keep_nulls
-                                || (value.is_some() && !matches!(value, Some(Value::Null)))
-                            {
-                                self.states[i].update_under(value, agg.temporal);
-                            }
-                        }
-                    }
-                }
+                update_row(&self.aggregates, &mut self.states, |col| {
+                    chunk.column(col).and_then(|c| c.get_value(row))
+                });
             }
             // Its growing states, against the statement's memory: a chunk at
             // a time, a compare within the grant.

@@ -182,28 +182,44 @@ fn a_cached_plan_does_not_keep_the_values() {
 }
 
 /// An empty map fills in nothing: a statement without parameters reuses its
-/// optimized plan like the same call without a map, and one that names a
-/// parameter still fails as missing it.
+/// optimized plan like the same call without a map, found by its first lookup
+/// (no miss, so no parse), and one that names a parameter still fails as
+/// missing it.
 #[test]
 fn an_empty_parameter_map_uses_the_cached_plan() {
     let db = GrafeoDB::new_in_memory();
     db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
     let query = "MATCH (p:Person) RETURN p.name";
-    let hits = || db.query_cache().stats().optimized_hits;
-    let before = hits();
-    for _ in 0..3 {
+    let call = || {
         let rows = db
             .execute_with_params(query, HashMap::new())
             .unwrap()
             .rows()
             .to_vec();
         assert_eq!(rows, [vec![Value::from("Alix")]]);
-    }
+    };
+    call();
+    let before = db.query_cache().stats();
+    call();
+    call();
+    let after = db.query_cache().stats();
     assert_eq!(
-        hits() - before,
+        after.optimized_hits - before.optimized_hits,
         2,
         "the second and third call reuse the plan"
     );
+    assert_eq!(
+        (
+            after.optimized_misses - before.optimized_misses,
+            after.parsed_misses - before.parsed_misses
+        ),
+        (0, 0),
+        "a repeat misses nothing, so it parses nothing"
+    );
+    // The call without a map and the one with an empty map share one plan.
+    let hits = after.optimized_hits;
+    assert_eq!(db.execute(query).unwrap().rows().len(), 1);
+    assert_eq!(db.query_cache().stats().optimized_hits, hits + 1);
 
     let error = db
         .execute_with_params(
@@ -212,6 +228,22 @@ fn an_empty_parameter_map_uses_the_cached_plan() {
         )
         .unwrap_err();
     assert!(error.to_string().contains("$name"), "{error}");
+}
+
+/// An EXPLAIN without a map shows its parameters unresolved, and that plan is
+/// cached; the same EXPLAIN with an empty map answers as it does when nothing
+/// was cached before (it fails as missing its parameter), not with that plan.
+#[test]
+fn an_empty_map_explain_answers_the_same_whatever_was_cached_before() {
+    let query = "EXPLAIN MATCH (p:Person) WHERE p.name = $name RETURN p.name";
+    let answer = |db: &GrafeoDB| match db.execute_with_params(query, HashMap::new()) {
+        Ok(result) => format!("{:?}", result.rows()),
+        Err(error) => error.to_string(),
+    };
+    let fresh = answer(&GrafeoDB::new_in_memory());
+    let db = GrafeoDB::new_in_memory();
+    db.execute(query).unwrap();
+    assert_eq!(answer(&db), fresh);
 }
 
 /// A statement without parameters looks its optimized plan up once per call:

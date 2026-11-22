@@ -399,11 +399,9 @@ impl StatementPlanning {
             viewing_epoch,
         )
         .with_factorized_execution(
-            session.plan_options.factorized_execution
-                && session
-                    .plan_options
-                    .rules
-                    .has(PlannerRule::FactorizedExecution),
+            session
+                .plan_options
+                .factorized_execution_under(session.plan_options.rules),
         )
         .with_rules(session.plan_options.rules)
         .with_shuffle_unordered(session.plan_options.shuffle_unordered)

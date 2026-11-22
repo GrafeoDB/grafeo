@@ -22,11 +22,6 @@ use super::terms::{
     sparql_compare, sparql_equal, str_of,
 };
 
-#[cfg(feature = "regex")]
-use regex::Regex;
-#[cfg(all(feature = "regex-lite", not(feature = "regex")))]
-use regex_lite::Regex;
-
 use super::exists_per_row::RowBinding;
 
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
@@ -58,6 +53,9 @@ pub(super) struct RdfExpressionPredicate {
     fallback_columns: HashMap<String, usize>,
     terms: Arc<QueryTermIds>,
     context: ExpressionContext,
+    /// The compiled patterns of `REGEX` and `REPLACE`, by their final source: a
+    /// pattern compiles once, not once per row (#675).
+    patterns: grafeo_core::execution::operators::PatternCache,
 }
 
 /// An operand of a comparison: a variable's dictionary entry (whose value is
@@ -151,6 +149,7 @@ impl RdfExpressionPredicate {
             fallback_columns: HashMap::new(),
             terms,
             context,
+            patterns: grafeo_core::execution::operators::PatternCache::default(),
         }
     }
 
@@ -638,18 +637,22 @@ impl RdfExpressionPredicate {
             }
             "REGEX" => {
                 let text = self.string_view(arg(0), chunk, row)?;
-                let regex = self.regex(arg(1), arg(2), chunk, row)?;
-                Some(Value::Bool(regex.is_match(text.text())))
+                let pattern = self.regex_source(arg(1), arg(2), chunk, row)?;
+                self.patterns
+                    .with_regex(pattern, |regex| Value::Bool(regex.is_match(text.text())))
             }
             "REPLACE" => {
                 let source = self.string_arg(arg(0), chunk, row)?;
-                let regex = self.regex(arg(1), arg(3), chunk, row)?;
+                let pattern = self.regex_source(arg(1), arg(3), chunk, row)?;
                 let replacement = self.simple_string(arg(2), chunk, row)?;
-                // A pattern that matches the empty string is an error (17.4.3.15).
-                if regex.is_match("") {
-                    return None;
-                }
-                Some(source.with_text(regex.replace_all(&source.text, &*replacement).into_owned()))
+                self.patterns
+                    .with_regex(pattern, |regex| {
+                        // A pattern that matches the empty string is an error (17.4.3.15).
+                        (!regex.is_match(""))
+                            .then(|| regex.replace_all(&source.text, &*replacement).into_owned())
+                    })
+                    .flatten()
+                    .map(|text| source.with_text(text))
             }
 
             // ---- Functions on numerics (17.4.4) ----
@@ -786,15 +789,16 @@ impl RdfExpressionPredicate {
         a.compatible_with(&b).then_some((a, b))
     }
 
-    /// The regular expression of a pattern and its flags (17.4.3.14,
-    /// XPath's `s`, `m`, `i`, `x` and `q`).
-    fn regex(
+    /// The source of the regular expression of a pattern and its flags
+    /// (17.4.3.14, XPath's `s`, `m`, `i`, `x` and `q`), the flags folded in:
+    /// the key its compiled form is cached by.
+    fn regex_source(
         &self,
         pattern: Option<&FilterExpression>,
         flags: Option<&FilterExpression>,
         chunk: &DataChunk,
         row: usize,
-    ) -> Option<Regex> {
+    ) -> Option<String> {
         let pattern = self.simple_string(pattern, chunk, row)?;
         let flags = match flags {
             Some(_) => self.simple_string(flags, chunk, row)?,
@@ -814,12 +818,11 @@ impl RdfExpressionPredicate {
         } else {
             pattern.to_string()
         };
-        let source = if inline.is_empty() {
+        Some(if inline.is_empty() {
             body
         } else {
             format!("(?{inline}){body}")
-        };
-        Regex::new(&source).ok()
+        })
     }
 }
 

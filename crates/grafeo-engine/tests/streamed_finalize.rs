@@ -5,9 +5,11 @@
 //! measured in `streamed_finalize_peak.rs` (a counting allocator); that the
 //! merge stops at a limit, and the pipeline's own rules, in `grafeo-core`.
 //!
-//! Each query here takes no top-k rewrite (the sort key is not returned, or
-//! a filter or an aggregate follows the sort) and spills: without a spill
-//! path it refuses at the query memory limit.
+//! A limit directly after the sort runs as one top-k: within the query memory
+//! limit it needs no spill, and past it the top-k goes on as the spilling sort
+//! and a limit. The other queries here take no top-k (a filter or an aggregate
+//! follows the sort) and spill: without a spill path they refuse at the query
+//! memory limit.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test main streamed_finalize::
@@ -102,16 +104,45 @@ fn assert_oracle_rows(dbs: &Databases, query: &str) {
     );
 }
 
-/// A limit after a spilled sort, behind an augmenting projection (the sort
-/// key is not returned): a limit within the first merged chunk and one past
-/// it (3,000 rows, over two chunks of 2,048).
+/// A limit directly after the sort, behind an augmenting projection (the sort key is not
+/// returned), runs as one top-k: a limit within the first merged chunk and one past it (3,000
+/// rows, over two chunks of 2,048) keep their rows within the query memory limit, without a
+/// spill path, and give the oracle's rows.
 #[test]
-fn a_spilled_sort_then_a_limit_gives_the_oracle_rows() {
+fn a_top_k_within_the_limit_needs_no_spill() {
     let dbs = databases();
     for query in [
         "MATCH (n:Person) RETURN n.name ORDER BY n.age LIMIT 10",
         "MATCH (n:Person) RETURN n.city ORDER BY n.age DESC LIMIT 3000",
     ] {
+        assert_eq!(
+            rows(&dbs.without_a_spill_path, query),
+            rows(&dbs.oracle, query),
+            "{query}"
+        );
+    }
+}
+
+/// A top-k whose rows outgrow the statement's memory goes on as the spilling sort and a limit:
+/// with a spill path it gives the oracle's rows in the oracle's order (ties in the order the
+/// rows came, as the sort keeps them) and leaves no spill file; without one it fails with
+/// `GRAFEO-S001`, as the sort does.
+#[test]
+fn a_top_k_past_the_limit_spills_as_the_sort_does() {
+    let dbs = databases();
+    for query in [
+        "MATCH (n:Person) RETURN n.name ORDER BY n.age LIMIT 30000",
+        "MATCH (n:Person) RETURN n.name ORDER BY n.age DESC LIMIT 20000",
+        "MATCH (n:Person) RETURN n.name ORDER BY n.city LIMIT 25000",
+    ] {
+        let refused = dbs
+            .without_a_spill_path
+            .execute(query)
+            .expect_err("past the query memory limit without a spill path");
+        assert!(
+            refused.to_string().contains("GRAFEO-S001"),
+            "{query}: {refused}"
+        );
         assert_oracle_rows(&dbs, query);
     }
 }

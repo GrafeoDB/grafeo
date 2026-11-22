@@ -1,10 +1,12 @@
 //! Expand operator for relationship traversal.
 
 use super::node_seek::node_ids;
+use super::value_utils::{EqualAcrossKinds, ValueKinds};
 use super::{Operator, OperatorError, OperatorResult, ReadCounter, SeekKey};
 use crate::execution::DataChunk;
 use crate::graph::Direction;
 use crate::graph::GraphStore;
+use crate::graph::traits::EdgeTypeFilter;
 use grafeo_common::types::{ArcStr, EdgeId, LogicalType, NodeId, ReadView, Value};
 use std::sync::Arc;
 
@@ -55,8 +57,9 @@ pub struct ExpandOperator {
     source_column: usize,
     /// Direction of edge traversal.
     direction: Direction,
-    /// The edge types to follow, as stored (every type when empty).
-    edge_types: Vec<ArcStr>,
+    /// The edge types to follow, as stored (every type when empty), prepared by the
+    /// store once for every row's read.
+    edge_types: EdgeTypeFilter,
     /// What is known of the node each row's edges end at.
     target: HopTarget,
     /// Chunk capacity.
@@ -75,6 +78,9 @@ pub struct ExpandOperator {
     view: ReadView,
     /// Counts the edges the expansion reads.
     reads: Option<Arc<ReadCounter>>,
+    /// What the statement's `=` gives two values of two kinds, which decides when a target key
+    /// may be read (see [`with_equal_across_kinds`](Self::with_equal_across_kinds)).
+    equal: EqualAcrossKinds,
 }
 
 /// The nodes that may hold `value` under `property`, through the indexes on `labels` or with no
@@ -112,12 +118,13 @@ impl ExpandOperator {
         edge_types: Vec<String>,
         view: ReadView,
     ) -> Self {
+        let edge_types = store.edge_type_filter(&stored_types(edge_types));
         Self {
             store,
             input,
             source_column,
             direction,
-            edge_types: stored_types(edge_types),
+            edge_types,
             target: HopTarget::Unknown,
             chunk_capacity: 2048,
             current_input: None,
@@ -127,6 +134,32 @@ impl ExpandOperator {
             exhausted: false,
             view,
             reads: None,
+            equal: EqualAcrossKinds::False,
+        }
+    }
+
+    /// Reads a target key only where it answers as a statement whose `=` gives `equal` across
+    /// kinds compares: where `=` raises (SQL/PGQ), only when no node the hop can reach holds a
+    /// value of another kind (see `key_answers_as_compared`); otherwise it lists every edge.
+    #[must_use]
+    pub fn with_equal_across_kinds(mut self, equal: EqualAcrossKinds) -> Self {
+        self.equal = equal;
+        self
+    }
+
+    /// Whether finding the target by `key` = `value` answers as the filter that compares every
+    /// reached node would, under `=` that raises across kinds: a null compares as unknown and
+    /// never raises; an `id()` is a number; a property key needs its whole column, on nodes of
+    /// every label, to hold `value`'s kind alone (or nulls), so no reached node can raise.
+    fn key_answers_as_compared(&self, key: &SeekKey, value: &Value) -> bool {
+        let kind = ValueKinds::of(value);
+        match key {
+            SeekKey::Id => kind.within(ValueKinds::of(&Value::Int64(0))),
+            SeekKey::Property(property) => {
+                value.is_null()
+                    || (kind.is_one()
+                        && self.store.column_holds_only_kind(true, property, kind) == Some(true))
+            }
         }
     }
 
@@ -173,6 +206,10 @@ impl ExpandOperator {
         let HopTarget::Key(key, value, labels) = &self.target else {
             return Ok(());
         };
+        if self.equal == EqualAcrossKinds::Raises && !self.key_answers_as_compared(key, value) {
+            self.target = HopTarget::Unknown;
+            return Ok(());
+        }
         let found = match key {
             SeekKey::Id => Some(node_ids(value)),
             SeekKey::Property(property) => find_few_through_label_indexes(
@@ -247,12 +284,12 @@ impl ExpandOperator {
         let HopTarget::Nodes(nodes) = &self.target else {
             return Ok(None);
         };
-        if self.direction == Direction::Both || self.edge_types.len() != 1 {
+        if self.direction == Direction::Both || self.edge_types.names().len() != 1 {
             return Ok(None);
         }
         let long = self
             .store
-            .edge_entries_at_most(source, self.direction, &self.edge_types, self.view)
+            .edge_entries_at_most(source, self.direction, self.edge_types.names(), self.view)
             .is_some_and(|entries| entries > nodes.len().saturating_mul(ENTRIES_PER_TARGET));
         if !long {
             return Ok(None);
@@ -263,7 +300,7 @@ impl ExpandOperator {
                 source,
                 *target,
                 self.direction,
-                &self.edge_types,
+                self.edge_types.names(),
                 self.view,
             )?;
             super::read_counter::count(self.reads.as_deref(), found.len());
@@ -311,22 +348,20 @@ impl ExpandOperator {
                 source_id,
                 target,
                 self.direction,
-                &self.edge_types,
+                self.edge_types.names(),
                 self.view,
             )?;
             super::read_counter::count(self.reads.as_deref(), edges.len());
             edges.into_iter().map(|edge| (target, edge)).collect()
         } else {
-            visible_edges_from(
-                self.store.as_ref(),
+            let edges = self.store.edges_with_filter(
                 source_id,
                 self.direction,
-                &EdgeWalk {
-                    edge_types: &self.edge_types,
-                    view: self.view,
-                    reads: self.reads.as_deref(),
-                },
-            )?
+                &mut self.edge_types,
+                self.view,
+            )?;
+            super::read_counter::count(self.reads.as_deref(), edges.len());
+            edges
         };
         // Edges found target by target have the right ends already; this costs them a search.
         if let HopTarget::Nodes(nodes) = &self.target {

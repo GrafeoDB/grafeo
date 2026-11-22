@@ -55,6 +55,7 @@ pub fn parse(query: &str) -> Result<Document> {
 /// Returns a `QueryError` if the query is syntactically invalid, or longer
 /// than `limits` allows, or has a name longer than that (`GRAFEO-Q002`).
 pub fn parse_with(query: &str, limits: &ParseLimits) -> Result<Document> {
+    grafeo_common::work::count(grafeo_common::work::Work::Parse, 1);
     limits.check_query(query)?;
     let mut parser = Parser::new(query);
     // The parser reads every token first, so a long name is found before a

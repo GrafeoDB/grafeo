@@ -1271,3 +1271,121 @@ fn a_rerun_keeps_what_the_key_found() {
         nobody.rows_scanned()
     );
 }
+
+/// Under SQL/PGQ, whose `=` raises 22G04 across kinds, the last hop finds its far end by its key
+/// only when the key's whole column holds that kind or null: then no node the hop reaches can
+/// raise, and the rows are the plain hop's, read with far fewer reads. Once the column holds a
+/// value of another kind, the hop lists every edge as before, with the plain hop's reads; and
+/// once a hop reaches that value, both raise 22G04.
+#[cfg(feature = "sql-pgq")]
+#[test]
+fn sql_pgq_finds_the_far_end_by_key_only_over_a_one_kind_column() {
+    use grafeo_common::utils::gqlstatus::GqlStatus;
+
+    let db = GrafeoDB::new_in_memory();
+    db.create_property_index("id").unwrap();
+    let people: Vec<NodeId> = (0..2_000)
+        .map(|i| {
+            db.create_node_with_props(&["Person"], [("id", Value::from(format!("p{i}")))])
+                .unwrap()
+        })
+        .collect();
+    for i in 0..2_000_usize {
+        for step in [1, 7, 31, 211] {
+            db.create_edge(people[i], people[(i + step) % 2_000], "KNOWS")
+                .unwrap();
+        }
+    }
+    let query = "SELECT count(*) AS n FROM GRAPH_TABLE (MATCH (a:Person)-[k1:KNOWS]-(c:Person)-[k2:KNOWS]-(b:Person) \
+                 WHERE a.id = 'p1' AND b.id = 'p9' COLUMNS (c.id AS c))";
+    let usual = db.session();
+    let mut plain = db.session();
+    plain.set_planner_rules(PlannerRules::all().with(PlannerRule::PinnedFarEnd, false));
+    let run = |session: &Session| {
+        session
+            .execute_sql(query)
+            .map(|result| (result.rows().to_vec(), result.rows_scanned().unwrap()))
+            .map_err(|error| GqlStatus::from(&error).as_str().to_string())
+    };
+
+    // One kind: the key is taken.
+    let (on, off) = (run(&usual).unwrap(), run(&plain).unwrap());
+    assert_eq!(on.0, off.0, "the rows of the plain hop");
+    assert_ne!(
+        on.0,
+        vec![vec![Value::Int64(0)]],
+        "p1 and p9 share the friends p2 and p8"
+    );
+    assert!(
+        on.1 * 4 < off.1,
+        "the key read reads less: {} against {}",
+        on.1,
+        off.1
+    );
+
+    // Two kinds in the column, the other one on a node no `Person` scan or hop meets: every
+    // edge is listed, as before.
+    db.create_node_with_props(&["Other"], [("id", Value::Int64(7))])
+        .unwrap();
+    let (on, off) = (run(&usual).unwrap(), run(&plain).unwrap());
+    assert_eq!(on.0, off.0, "the rows of the plain hop");
+    assert_eq!(on.1, off.1, "the plain hop's reads: no key read");
+
+    // A `Person` with an integer id, reached as `b` from p1's friend p2: both raise.
+    let stray = db
+        .create_node_with_props(&["Person"], [("id", Value::Int64(7))])
+        .unwrap();
+    db.create_edge(people[2], stray, "KNOWS").unwrap();
+    assert_eq!(
+        run(&plain),
+        Err("22G04".to_string()),
+        "the plain hop compares 7"
+    );
+    assert_eq!(
+        run(&usual),
+        Err("22G04".to_string()),
+        "so does the pinned one"
+    );
+}
+
+/// Under SQL/PGQ an `id()` key that is not a number keeps the plain expand: `id(b)` is a number
+/// on every node, so `id(b) = 'x'` raises 22G04 on each node the hop reaches, as the plain hop
+/// does, where a read of the key would find no node and raise nothing. A number key answers as
+/// the plain hop.
+#[cfg(feature = "sql-pgq")]
+#[test]
+fn sql_pgq_keeps_the_plain_expand_for_an_id_key_of_another_kind() {
+    use grafeo_common::utils::gqlstatus::GqlStatus;
+
+    let db = GrafeoDB::new_in_memory();
+    db.create_property_index("id").unwrap();
+    let people: Vec<NodeId> = (0..200)
+        .map(|i| {
+            db.create_node_with_props(&["Person"], [("id", Value::from(format!("p{i}")))])
+                .unwrap()
+        })
+        .collect();
+    for i in 0..200_usize {
+        db.create_edge(people[i], people[(i + 1) % 200], "KNOWS")
+            .unwrap();
+    }
+    let usual = db.session();
+    let mut plain = db.session();
+    plain.set_planner_rules(PlannerRules::all().with(PlannerRule::PinnedFarEnd, false));
+    let run = |session: &Session, key: &str| {
+        session
+            .execute_sql(&format!(
+                "SELECT count(*) AS n FROM GRAPH_TABLE (MATCH (a:Person)-[k:KNOWS]-(b:Person) \
+                 WHERE a.id = 'p1' AND id(b) = {key} COLUMNS (b.id AS b))"
+            ))
+            .map(|result| result.rows().to_vec())
+            .map_err(|error| GqlStatus::from(&error).as_str().to_string())
+    };
+    for key in ["'x'", "'2'"] {
+        assert_eq!(run(&plain, key), Err("22G04".to_string()), "plain, {key}");
+        assert_eq!(run(&usual, key), Err("22G04".to_string()), "pinned, {key}");
+    }
+    let friend = people[2].as_u64().to_string();
+    assert_eq!(run(&usual, &friend), run(&plain, &friend));
+    assert_eq!(run(&usual, &friend), Ok(vec![vec![Value::Int64(1)]]));
+}

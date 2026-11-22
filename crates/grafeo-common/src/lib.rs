@@ -29,6 +29,7 @@ pub mod testing;
 pub mod tracing_macros;
 pub mod types;
 pub mod utils;
+pub mod work;
 
 // The types you'll use most often
 pub use mvcc::{Version, VersionChain, VersionInfo};

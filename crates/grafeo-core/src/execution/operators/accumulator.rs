@@ -384,12 +384,14 @@ impl HashableValue {
 
 impl From<&Value> for HashableValue {
     fn from(value: &Value) -> Self {
+        grafeo_common::work::count(grafeo_common::work::Work::ValueHash, 1);
         Self(grafeo_common::types::HashableValue(representative(value)))
     }
 }
 
 impl From<Value> for HashableValue {
     fn from(value: Value) -> Self {
+        grafeo_common::work::count(grafeo_common::work::Work::ValueHash, 1);
         let representative = match value {
             Value::Float64(float) => representative_float(float),
             Value::Decimal(decimal) => representative_decimal(decimal),

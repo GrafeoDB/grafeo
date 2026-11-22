@@ -903,76 +903,69 @@ impl super::Planner {
 
     /// Plans a LIMIT operator.
     ///
-    /// The order of `try_*_topk_rewrite` attempts is load-bearing, not a
-    /// performance tweak:
-    ///
-    /// 1. The PROFILE gate (`!self.profiling.get()`) comes first. Every
-    ///    fused-operator rewrite must skip under PROFILE because
-    ///    `build_profile_tree` expects one `ProfileEntry` per logical
-    ///    operator. Without the gate, PROFILE panics with the same
-    ///    failure mode as the absorbed-NodeScan case in `filter.rs`
-    ///    (see [`Self::record_absorbed_scan_entry`]).
-    /// 2. The vector/text rewrite ([`Self::try_topk_rewrite`]) fires
-    ///    before the heap rewrite because it bypasses the input scan
-    ///    entirely via HNSW or BM25 indexes, strictly better than heap
-    ///    top-K when both could match (e.g. `ORDER BY cosine_similarity(...)`).
-    /// 3. The heap rewrite ([`Self::try_heap_topk_rewrite`]) is the
-    ///    generic fallback. It always wins memory vs. the unfused
-    ///    `Sort + Limit`, and modestly wins CPU. It accepts any input
-    ///    subtree shape that doesn't need an augmenting projection.
-    /// 4. Phase 2 (separate spec) would slot `try_index_topk_rewrite`
-    ///    between vector/text and heap when a sorted property index is
-    ///    applicable; the heap path remains the safety net.
-    ///
-    /// Changing this order needs a correctness argument, not just a benchmark.
+    /// A literal LIMIT over an ORDER BY runs as one top-k. The vector or text
+    /// index rewrite ([`Self::try_topk_rewrite`]) comes first, as it skips the
+    /// input scan; it stays off under PROFILE, which it would leave without an
+    /// entry for each logical operator. Otherwise [`Self::plan_sort`] plans
+    /// the sort as a top-k of the limit, for any input it can sort; PROFILE
+    /// shows it on the LIMIT's line, naming the ORDER BY it took in.
     pub(super) fn plan_limit(&self, limit: &LimitOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        if !self.profiling.get()
-            && let LogicalOperator::Sort(sort) = limit.input.as_ref()
-        {
-            if let Some(result) = self.try_topk_rewrite(sort, &limit.count)? {
+        if let LogicalOperator::Sort(sort) = limit.input.as_ref() {
+            if !self.profiling.get()
+                && let Some(result) = self.try_topk_rewrite(sort, &limit.count)?
+            {
                 return Ok(result);
             }
-            if let Some(result) = self.try_heap_topk_rewrite(sort, &limit.count)? {
-                return Ok(result);
+            if let crate::query::plan::CountExpr::Literal(k) = limit.count
+                && takes_top_k(k)
+            {
+                let planned = self.plan_sort(sort, Some(k))?;
+                if self.profiling.get() {
+                    self.profile_entries.borrow_mut().push(
+                        crate::query::profile::ProfileEntry::absorbed(
+                            "Sort",
+                            limit.input.display_label(),
+                        ),
+                    );
+                }
+                return Ok(planned);
             }
         }
 
-        // Phase 4e LIMIT pushdown: when this LIMIT sits directly above a
-        // Filter, push the count as a hint into leaf scan operators
-        // (currently `RangeScanOperator`). The outer `LimitOperator`
-        // wrapper still enforces correctness; the hint is purely an
-        // optimization that bounds the inner materialization step.
-        //
-        // Only fires when the input is `Filter` directly: any
-        // intermediate operator (Sort, Skip, Project, Distinct) needs
-        // full materialization and would produce wrong results if its
-        // child were truncated. Save-and-restore via `Cell::replace` so
-        // nested LIMITs don't leak hints across scopes.
-        let saved_hint = if matches!(limit.input.as_ref(), LogicalOperator::Filter(_)) {
-            Some(self.limit_hint.replace(Some(limit.count.value())))
-        } else {
-            None
-        };
+        let count = limit.count.value();
+        let (input_op, columns) =
+            self.below_limit(limit, count, || self.plan_operator(&limit.input))?;
+        Ok(limit_over(limit, count, input_op, columns))
+    }
 
-        let plan_result = self.plan_operator(&limit.input);
-
-        if let Some(prev) = saved_hint {
-            self.limit_hint.set(prev);
+    /// `plan_input`, the planning of `limit`'s input, with the limit's `count` as a hint to
+    /// the range scan its input filter becomes: the filter takes the hint (`plan_filter`), so no
+    /// scan further down sees it.
+    ///
+    /// Phase 4e LIMIT pushdown: when this LIMIT sits directly above a
+    /// Filter, push the count as a hint into leaf scan operators
+    /// (currently `RangeScanOperator`). The outer `LimitOperator`
+    /// wrapper still enforces correctness; the hint is purely an
+    /// optimization that bounds the inner materialization step.
+    ///
+    /// Only fires when the input is `Filter` directly: any
+    /// intermediate operator (Sort, Skip, Project, Distinct) needs
+    /// full materialization and would produce wrong results if its
+    /// child were truncated. Save-and-restore via `Cell::replace` so
+    /// nested LIMITs don't leak hints across scopes.
+    pub(super) fn below_limit<T>(
+        &self,
+        limit: &LimitOp,
+        count: usize,
+        plan_input: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let saved_hint = matches!(limit.input.as_ref(), LogicalOperator::Filter(_))
+            .then(|| self.limit_hint.replace(Some(count)));
+        let planned = plan_input();
+        if let Some(previous) = saved_hint {
+            self.limit_hint.set(previous);
         }
-
-        let (input_op, columns) = plan_result?;
-        // After a write the LIMIT cuts the rows, not the write: the whole
-        // input is read first, so the rows after the limit are written too
-        // (see `after_write`). A LIMIT over any write reads its input to the
-        // end, also a `LIMIT 0` (GQL's `FINISH`), which would otherwise read
-        // none of it.
-        let input_op = super::mutation::read_first_after_a_write(input_op, &limit.input);
-        if limit.input.has_mutations() {
-            let operator =
-                LimitOperator::new(input_op, limit.count.value()).running_its_input_to_the_end();
-            return Ok((Box::new(operator), columns));
-        }
-        Ok(common::build_limit(input_op, columns, limit.count.value()))
+        planned
     }
 
     /// Plans a SKIP operator.
@@ -991,10 +984,27 @@ impl super::Planner {
     /// may reference entity variables that Return has already projected away. In
     /// that case we inject a property projection BEFORE the Return so the sort
     /// key is available in the output columns.
-    pub(super) fn plan_sort(&self, sort: &SortOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        // Top-K rewrite is wired from plan_limit (the actual plan shape is
-        // Limit-above-Sort), so plan_sort only handles the standard path.
+    ///
+    /// With `top_k`, the sort keeps only its first `top_k` rows, as one
+    /// top-k (a LIMIT above it, see [`Self::plan_limit`]).
+    pub(super) fn plan_sort(
+        &self,
+        sort: &SortOp,
+        top_k: Option<usize>,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let (input_op, input_columns) = self.plan_operator(sort_input(sort))?;
+        self.sort_over(sort, top_k, input_op, input_columns)
+    }
 
+    /// The operators of `sort` over `inner_op`, which is [`sort_input`]'s plan: the RETURN's
+    /// input when the sort adds its keys to that RETURN, the sort's input otherwise.
+    pub(super) fn sort_over(
+        &self,
+        sort: &SortOp,
+        top_k: Option<usize>,
+        inner_op: Box<dyn Operator>,
+        inner_columns: Vec<String>,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // Check if we need pre-Return property/entity projections. This is
         // necessary when ORDER BY references a variable (e.g. p.age, labels(n))
         // that is not included in the RETURN clause.
@@ -1004,12 +1014,11 @@ impl super::Planner {
         let mut sort_extra_count: usize = 0;
 
         let (mut input_op, input_columns) = if needs_pre_return {
-            // Plan the Return's input, then build a combined projection that
+            // The Return's input is planned; build a combined projection that
             // outputs both RETURN items and ORDER BY sort-key properties.
             let LogicalOperator::Return(ret) = sort.input.as_ref() else {
                 unreachable!()
             };
-            let (inner_op, inner_columns) = self.plan_operator(&ret.input)?;
             let inner_vars: HashMap<String, usize> = inner_columns
                 .iter()
                 .enumerate()
@@ -1116,7 +1125,7 @@ impl super::Planner {
             sort_extra_count = extra_columns.len();
             (op, columns)
         } else {
-            let (op, columns) = self.plan_operator(&sort.input)?;
+            let (op, columns) = (inner_op, inner_columns);
             // Sort keys that read the graph after a write (`... SET h.c = i
             // WITH h ORDER BY h.c`) read what the whole write left (see
             // `after_write`); the augmented RETURN above reads its input
@@ -1285,9 +1294,6 @@ impl super::Planner {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let mut sort = SortOperator::new(input_op, physical_keys)
-            .with_temporal(self.session_context.temporal_comparison);
-
         // The sort drops the columns added for ORDER BY, which come last: the
         // pre-Return projections (sort_extra_count) and every projection added
         // after it (properties of a RETURN alias such as `e.w` in
@@ -1296,13 +1302,33 @@ impl super::Planner {
         // projection here would make them `Any`, and an edge ID in an `Any`
         // column reads its properties from the node with that ID.
         let total_extra = sort_extra_count + extra_projection_count;
-        if total_extra > 0 {
-            let keep_count = output_columns.len() - total_extra;
-            sort = sort.with_output_width(keep_count);
+        let keep_count = (total_extra > 0).then(|| output_columns.len() - total_extra);
+        if let Some(keep_count) = keep_count {
             output_columns.truncate(keep_count);
         }
-
-        Ok((Box::new(sort), output_columns))
+        let temporal = self.session_context.temporal_comparison;
+        let operator: Box<dyn Operator> = match top_k {
+            Some(k) => {
+                let mut top = grafeo_core::execution::operators::TopKOperator::new(
+                    input_op,
+                    physical_keys,
+                    k,
+                )
+                .with_temporal(temporal);
+                if let Some(keep_count) = keep_count {
+                    top = top.with_output_width(keep_count);
+                }
+                Box::new(top)
+            }
+            None => {
+                let mut sort = SortOperator::new(input_op, physical_keys).with_temporal(temporal);
+                if let Some(keep_count) = keep_count {
+                    sort = sort.with_output_width(keep_count);
+                }
+                Box::new(sort)
+            }
+        };
+        Ok((operator, output_columns))
     }
 
     /// Resolves a sort expression to a column index, using projected property columns.
@@ -1596,96 +1622,6 @@ impl super::Planner {
             columns.contains(&score_col).then_some(score_col)
         }
     }
-
-    /// Attempts to rewrite `Limit` over `Sort` into a single [`TopKOperator`].
-    ///
-    /// Phase 1: heap-based, O(k) memory, accepts any input shape but bails
-    /// when the sort keys cannot be resolved against the columns the input
-    /// subtree will produce. Called from [`Self::plan_limit`] when the input
-    /// is a `Sort`, after the more specific vector/text rewrite
-    /// ([`Self::try_topk_rewrite`]).
-    ///
-    /// PROFILE-mode plans skip this rewrite via the gate in `plan_limit`:
-    /// `build_profile_tree` walks the logical tree expecting one entry per
-    /// logical op, and the rewrite collapses two logical ops
-    /// (`Sort` + `Limit`) into one physical op without recording synthetic
-    /// entries (intentional, see the doc on `plan_limit`).
-    ///
-    /// Returns `Ok(None)` to fall through to the unfused path when:
-    ///
-    /// 1. `count` is not a literal (parameter `LIMIT $k` falls through).
-    /// 2. `count` is zero (no rewrite needed).
-    /// 3. The input subtree's output columns can't be predicted (current scope:
-    ///    only Return is supported; anything else falls through).
-    /// 4. Any sort key fails to resolve against the predicted columns.
-    ///
-    /// ## Predict first, plan second
-    ///
-    /// Planning mutates planner state (`scalar_columns`, `edge_columns`), so
-    /// planning speculatively and then bailing out made the fallback re-plan
-    /// return raw NodeIds instead of maps (#335, #347). Sort keys are resolved
-    /// against columns predicted from the `Return` items first; the input is
-    /// planned only once resolution succeeds. A key that needs an augmenting
-    /// projection is never in the predicted set, so it falls through to
-    /// `plan_sort`.
-    fn try_heap_topk_rewrite(
-        &self,
-        sort: &SortOp,
-        count: &crate::query::plan::CountExpr,
-    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
-        let crate::query::plan::CountExpr::Literal(k) = count else {
-            return Ok(None);
-        };
-        let k = *k;
-        if k == 0 {
-            return Ok(None);
-        }
-
-        // Only `Return` inputs are predicted; anything else falls through.
-        let Some(predicted_columns) = predict_subtree_columns(sort.input.as_ref()) else {
-            return Ok(None);
-        };
-
-        // Same lookup `plan_sort` builds, including `v.p` -> `v_p` aliases so
-        // `RETURN n.title ORDER BY n.title LIMIT k` still takes the rewrite.
-        let mut variable_columns: HashMap<String, usize> = predicted_columns
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (n.clone(), i))
-            .collect();
-        register_return_property_sort_aliases(sort.input.as_ref(), &mut variable_columns);
-
-        // Resolve against the prediction; on failure nothing has been mutated.
-        let Ok(mut physical_keys) = resolve_logical_to_physical_keys(&sort.keys, &variable_columns)
-        else {
-            return Ok(None);
-        };
-
-        // Commit: plan the input once, for real.
-        let (input_op, columns) = self.plan_operator(&sort.input)?;
-        if columns != predicted_columns {
-            // The prediction drifted from the planner. Planner state is already
-            // committed, so re-resolve against the real columns rather than
-            // sorting by a wrong index; fail loudly if that is impossible.
-            debug_assert!(
-                false,
-                "predicted {predicted_columns:?}, planned {columns:?}"
-            );
-            let mut actual_columns: HashMap<String, usize> = columns
-                .iter()
-                .enumerate()
-                .map(|(i, n)| (n.clone(), i))
-                .collect();
-            register_return_property_sort_aliases(sort.input.as_ref(), &mut actual_columns);
-            physical_keys = resolve_logical_to_physical_keys(&sort.keys, &actual_columns)?;
-        }
-
-        let op: Box<dyn Operator> = Box::new(
-            grafeo_core::execution::operators::TopKOperator::new(input_op, physical_keys, k)
-                .with_temporal(self.session_context.temporal_comparison),
-        );
-        Ok(Some((op, columns)))
-    }
 }
 
 /// The items of `RETURN *`: every input column a query can name (internal
@@ -1713,35 +1649,9 @@ fn expand_return_star(
     )
 }
 
-/// Predicts the output column names of `op` without planning it.
-///
-/// Returns `None` for shapes that are not predicted; callers then skip the
-/// rewrite. Each branch must mirror the naming rule of its `plan_*` method.
-fn predict_subtree_columns(op: &LogicalOperator) -> Option<Vec<String>> {
-    match op {
-        LogicalOperator::Return(ret) => {
-            // `RETURN *` expands from the input's columns, which are unknown
-            // without planning the input.
-            if ret.items.len() == 1
-                && matches!(&ret.items[0].expression, LogicalExpression::Variable(n) if n == "*")
-            {
-                return None;
-            }
-            Some(
-                ret.items
-                    .iter()
-                    .map(|item| output_column_name(item.alias.as_deref(), &item.expression))
-                    .collect(),
-            )
-        }
-        _ => None,
-    }
-}
-
 /// Registers `v_p` aliases for `v.p` items of a `Return`, so ORDER BY keys
 /// (resolved as `v_p`) find the column the Return already produced (named
-/// `v.p` or its alias). Used by both `plan_sort` and the top-K rewrite so
-/// the two paths resolve keys identically.
+/// `v.p` or its alias), for `plan_sort`.
 fn register_return_property_sort_aliases(
     sort_input: &LogicalOperator,
     variable_columns: &mut HashMap<String, usize>,
@@ -1761,45 +1671,6 @@ fn register_return_property_sort_aliases(
             }
         }
     }
-}
-
-/// Resolves logical sort keys to physical sort keys for `TopKOperator`.
-///
-/// For each logical key:
-///   - Looks up the column index via `common::resolve_expression_to_column`.
-///   - Maps `SortOrder` → physical `SortDirection`.
-///   - Maps `Option<NullsOrdering>` → physical `NullOrder` with
-///     [`common::physical_null_order`], as `plan_sort` does.
-///
-/// Returns `Err` if any key fails to resolve in `variable_columns`.
-/// Callers translate that to `Ok(None)` to fall through to the unfused path.
-fn resolve_logical_to_physical_keys(
-    keys: &[crate::query::plan::SortKey],
-    variable_columns: &HashMap<String, usize>,
-) -> Result<Vec<grafeo_core::execution::operators::SortKey>> {
-    use crate::query::plan::SortOrder;
-    use grafeo_core::execution::operators::{SortDirection, SortKey as PhysSortKey};
-
-    let mut out = Vec::with_capacity(keys.len());
-    for key in keys {
-        let col = crate::query::planner::common::resolve_expression_to_column(
-            &key.expression,
-            variable_columns,
-            " for ORDER BY",
-        )?;
-
-        let direction = match key.order {
-            SortOrder::Ascending => SortDirection::Ascending,
-            SortOrder::Descending => SortDirection::Descending,
-        };
-
-        out.push(PhysSortKey {
-            column: col,
-            direction,
-            null_order: common::physical_null_order(key),
-        });
-    }
-    Ok(out)
 }
 
 /// Stand-in reported by [`collect_vars`] for a subquery: never the name of a
@@ -1932,6 +1803,41 @@ pub(super) fn collect_vars(expr: &LogicalExpression, out: &mut Vec<String>) {
     }
 }
 
+/// Whether a LIMIT of `count` over an ORDER BY runs as one top-k; `LIMIT 0` keeps the sort and
+/// an empty limit.
+pub(super) fn takes_top_k(count: usize) -> bool {
+    count > 0
+}
+
+/// The operators of `limit`, cutting its input at `count` rows, over `input_op`, its input's
+/// plan.
+///
+/// After a write the LIMIT cuts the rows, not the write: the whole input is read first, so the
+/// rows after the limit are written too (see `after_write`). A LIMIT over any write reads its
+/// input to the end, also a `LIMIT 0` (GQL's `FINISH`), which would otherwise read none of it.
+pub(super) fn limit_over(
+    limit: &LimitOp,
+    count: usize,
+    input_op: Box<dyn Operator>,
+    columns: Vec<String>,
+) -> (Box<dyn Operator>, Vec<String>) {
+    let input_op = super::mutation::read_first_after_a_write(input_op, &limit.input);
+    if limit.input.has_mutations() {
+        let operator = LimitOperator::new(input_op, count).running_its_input_to_the_end();
+        return (Box::new(operator), columns);
+    }
+    common::build_limit(input_op, columns, count)
+}
+
+/// The operator a sort's operators are built over: the RETURN's input when the sort adds its
+/// keys to that RETURN ([`sort_needs_augmenting_projection`]), the sort's input otherwise.
+pub(super) fn sort_input(sort: &SortOp) -> &LogicalOperator {
+    match sort.input.as_ref() {
+        LogicalOperator::Return(ret) if sort_needs_augmenting_projection(sort) => &ret.input,
+        input => input,
+    }
+}
+
 /// True if `sort` requires injecting extra projection columns before sorting.
 ///
 /// Mirrors the logic at the top of `plan_sort`: when the sort input is a
@@ -1947,9 +1853,7 @@ pub(super) fn collect_vars(expr: &LogicalExpression, out: &mut Vec<String>) {
 ///   from Return entirely (covers wrapped references like `CASE n.tier ...`,
 ///   `n.s[1..]` or `[x IN n.s | x * 2]`).
 ///
-/// Used by both `plan_sort` (which knows how to inject the augmenting
-/// projection) and `try_heap_topk_rewrite` (which doesn't, and bails out so
-/// `plan_sort`'s unfused path runs instead).
+/// Used by `plan_sort`, which then injects the augmenting projection.
 pub(super) fn sort_needs_augmenting_projection(sort: &SortOp) -> bool {
     let LogicalOperator::Return(ret) = sort.input.as_ref() else {
         return false;

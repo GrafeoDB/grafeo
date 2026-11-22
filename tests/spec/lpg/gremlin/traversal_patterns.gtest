@@ -403,6 +403,15 @@ tests:
     expect:
       count: 1
 
+  - name: limit_after_range_traversal_and_filter
+    # Persons with age >= 25: Gus(25), Alix(30), Vincent(35). Their in(KNOWS) named Gus:
+    # only Vincent's (Gus knows Vincent), the last person by age and by id. The limit keeps
+    # that row; it must not cut the age scan to its first person before the traversal.
+    query: "g.V().hasLabel('Person').has('age', gte(25)).in('KNOWS').has('name', 'Gus').limit(1).values('name')"
+    expect:
+      rows:
+        - [Gus]
+
   - name: traversal_then_skip_limit
     # All persons out(KNOWS): Gus, Vincent (2 results). Skip 1, limit 1 = 1 result.
     query: "g.V().hasLabel('Person').out('KNOWS').skip(1).limit(1)"

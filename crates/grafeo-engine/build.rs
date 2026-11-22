@@ -17,10 +17,18 @@ fn main() {
     println!("cargo::rustc-check-cfg=cfg(lpg_language)");
     println!("cargo::rustc-check-cfg=cfg(rdf_language)");
     println!("cargo::rustc-check-cfg=cfg(stored_procedures)");
+    println!("cargo::rustc-check-cfg=cfg(prepared_plans)");
     let enabled = |language: &str| std::env::var_os(format!("CARGO_FEATURE_{language}")).is_some();
     let lpg_languages = ["GQL", "CYPHER", "GREMLIN", "GRAPHQL", "SQL_PGQ"];
     if lpg_languages.iter().any(|language| enabled(language)) {
         println!("cargo::rustc-cfg=lpg_language");
+    }
+    // The languages whose statements take prepared plans (`session::prepared`).
+    if ["GQL", "CYPHER", "SQL_PGQ"]
+        .iter()
+        .any(|language| enabled(language))
+    {
+        println!("cargo::rustc-cfg=prepared_plans");
     }
     if enabled("SPARQL") || lpg_languages.iter().any(|language| enabled(language)) {
         println!("cargo::rustc-cfg=query_language");

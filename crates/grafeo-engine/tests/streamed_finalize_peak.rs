@@ -4,8 +4,10 @@
 //! and nothing keeps them all. Measured with a counting global allocator: the
 //! statement's own count cannot show rows that something outside it holds.
 //!
-//! Each plan here takes no top-k rewrite (the sort key is not returned) and
-//! spills: without a spill path it refuses at the limit.
+//! Each plan here spills: without a spill path it refuses at the limit. The
+//! limit is a top-k whose 10,000 rows outgrow the statement's memory, so it
+//! goes on as the spilling sort and a limit; the others take no top-k (a filter
+//! or an aggregate follows the sort).
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test streamed_finalize_peak
@@ -151,8 +153,8 @@ fn peak_of(db: &GrafeoDB, query: &str) -> (usize, Vec<Vec<Value>>) {
 /// after an augmenting projection, a filter, an aggregate.
 const SHAPES: &[(&str, &str)] = &[
     (
-        "MATCH (n:Person) RETURN n.bio ORDER BY n.age LIMIT 10",
-        "MATCH (n:Person) RETURN n.bio LIMIT 10",
+        "MATCH (n:Person) RETURN n.bio ORDER BY n.age LIMIT 10000",
+        "MATCH (n:Person) RETURN n.bio LIMIT 10000",
     ),
     (
         "MATCH (n:Person) WITH n.bio AS bio, n.age AS age ORDER BY age WHERE age % 1000 = 0 RETURN bio, age",

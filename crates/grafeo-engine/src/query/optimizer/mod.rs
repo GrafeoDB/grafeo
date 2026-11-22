@@ -28,7 +28,9 @@ mod rules;
 #[cfg(any(feature = "sparql", feature = "triple-store"))]
 mod same_term;
 mod scanned_labels;
+mod top_k_projection;
 mod turn_cost;
+pub(crate) use closing_hops::without_check;
 pub(crate) use cycles::{close_cycles, plan_names};
 pub mod join_order;
 
@@ -500,6 +502,9 @@ impl Optimizer {
             if self.rules.has(PlannerRule::PinnedFarEnd) {
                 root = self.look_up_pinned_far_ends(root);
             }
+        }
+        if self.rules.has(PlannerRule::ProjectAfterTopK) {
+            Self::project_after_top_k(&mut root);
         }
 
         Ok(LogicalPlan {
@@ -2339,6 +2344,54 @@ pub(crate) fn cannot_raise(expr: &LogicalExpression) -> bool {
             .all(|arg| is_value(arg) || matches!(arg, LogicalExpression::Variable(_))),
         other => is_search_call(other),
     }
+}
+
+/// [`cannot_raise`] under `kinds`, the statement language's rule for comparing two kinds.
+/// Under [`EqualAcrossKinds::Raises`] (SQL/PGQ) a comparison of two kinds raises (22G04), so
+/// a comparison cannot raise only between two literals of one kind; label and null checks
+/// and the string predicates are as `cannot_raise` says. The check placement of the join
+/// search reads it; the other rewrites read `cannot_raise`.
+pub(crate) fn cannot_raise_in(expr: &LogicalExpression, kinds: EqualAcrossKinds) -> bool {
+    match kinds {
+        EqualAcrossKinds::False => cannot_raise(expr),
+        EqualAcrossKinds::Raises => cannot_raise(expr) && compares_literals_of_one_kind(expr),
+    }
+}
+
+/// Whether every comparison in `expr` is of two literals of one kind.
+fn compares_literals_of_one_kind(expr: &LogicalExpression) -> bool {
+    match expr {
+        LogicalExpression::Binary { left, op, right } => match op {
+            BinaryOp::And | BinaryOp::Or | BinaryOp::Xor => {
+                compares_literals_of_one_kind(left) && compares_literals_of_one_kind(right)
+            }
+            BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge => literals_of_one_kind(left, right),
+            _ => true,
+        },
+        LogicalExpression::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } => compares_literals_of_one_kind(operand),
+        _ => true,
+    }
+}
+
+/// Whether `left` and `right` are literals of one kind that hold no other values, which
+/// SQL/PGQ compares without raising.
+fn literals_of_one_kind(left: &LogicalExpression, right: &LogicalExpression) -> bool {
+    use grafeo_common::types::Value;
+    let scalar = |value: &Value| !matches!(value, Value::List(_) | Value::Map(_));
+    matches!(
+        (left, right),
+        (LogicalExpression::Literal(a), LogicalExpression::Literal(b))
+            if scalar(a) && scalar(b)
+                && !grafeo_core::execution::operators::value_utils::of_two_kinds(a, b)
+    )
 }
 
 /// Whether `expr` gives a value without raising: a literal, a parameter, a property,

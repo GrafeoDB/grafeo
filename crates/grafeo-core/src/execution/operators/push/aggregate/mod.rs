@@ -243,10 +243,19 @@ impl PushOperator for AggregatePushOperator {
                 for (i, acc) in state.accumulators.iter().enumerate() {
                     columns[self.group_by.len() + i].push(acc.finalize()?);
                 }
+                grafeo_common::work::count(
+                    grafeo_common::work::Work::ColumnCopied,
+                    (state.key_values.len() + state.accumulators.len()) as u64,
+                );
             }
         }
 
         if !columns.is_empty() && !columns[0].is_empty() {
+            grafeo_common::work::count(grafeo_common::work::Work::ChunkBuilt, 1);
+            grafeo_common::work::count(
+                grafeo_common::work::Work::RowBuilt,
+                columns[0].len() as u64,
+            );
             let chunk = DataChunk::new(columns);
             sink.consume(chunk)?;
         }
@@ -787,6 +796,10 @@ impl PushOperator for SpillableAggregatePushOperator {
                 for (i, acc) in state.accumulators.iter().enumerate() {
                     columns[self.group_by.len() + i].push(acc.finalize()?);
                 }
+                grafeo_common::work::count(
+                    grafeo_common::work::Work::ColumnCopied,
+                    (state.key_values.len() + state.accumulators.len()) as u64,
+                );
             }
         }
 
@@ -794,6 +807,11 @@ impl PushOperator for SpillableAggregatePushOperator {
         self.unregister_consumer();
 
         if !columns.is_empty() && !columns[0].is_empty() {
+            grafeo_common::work::count(grafeo_common::work::Work::ChunkBuilt, 1);
+            grafeo_common::work::count(
+                grafeo_common::work::Work::RowBuilt,
+                columns[0].len() as u64,
+            );
             let chunk = DataChunk::new(columns);
             sink.consume(chunk)?;
         }

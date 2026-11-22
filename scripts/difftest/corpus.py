@@ -692,6 +692,28 @@ def listed_type(grafeo):
     return db
 
 
+def string_id_square(grafeo):
+    """Section FD's square: 200 people (`id` and `n` their number), each who knows 4 and
+    follows 12 others, drawn as `early_checks.rs` draws them, and an odd person with the
+    string id 'x' and no `n`, who knows person 3 and follows no one, so lies on no square."""
+    db = grafeo.GrafeoDB()
+    db.execute("UNWIND range(0, 199) AS i INSERT (:Person {id: i, n: i})")
+    state = 17
+    edges = {"KNOWS": [], "FOLLOWS": []}
+    for i in range(200):
+        for kind, count in (("KNOWS", 4), ("FOLLOWS", 12)):
+            for _ in range(count):
+                state = (state * 6364136223846793005 + 1442695040888963407) % (1 << 64)
+                edges[kind].append([i, (state >> 33) % 200])
+    for kind, pairs in edges.items():
+        db.execute(
+            f"UNWIND {pairs} AS p MATCH (a:Person {{n: p[0]}}), (b:Person {{n: p[1]}}) "
+            f"INSERT (a)-[:{kind}]->(b)"
+        )
+    db.execute("MATCH (a:Person {n: 3}) INSERT (:Person {id: 'x'})-[:KNOWS]->(a)")
+    return db
+
+
 FIXTURES = {
     "rdf": rdf,
     "rdf_writes": rdf_writes,
@@ -743,6 +765,7 @@ FIXTURES = {
     "rdf_sort_limit": rdf_sort_limit,
     "index_graphs": index_graphs,
     "listed_type": listed_type,
+    "string_id_square": string_id_square,
     "graph_replace": empty,
 }
 
@@ -947,6 +970,9 @@ case("J11", "UNWIND [2.5, 3.5] AS x RETURN 0 AS g, collect(x) AS xs, sum(x) AS t
 case("J12", "MATCH (a:Person) WITH a.name AS name, a.age AS age WITH age % 2 AS odd, collect(name) AS names RETURN odd, names")
 case("J13", "MATCH (a:Person)-[r:KNOWS]->(b) RETURN a.age % 2 AS odd, collect(r) AS rs, collect(b) AS bs, sum(r.w * 2) AS doubled")
 case("J14", "MATCH p = (a:Person)-[:KNOWS]->(b) RETURN a.age % 2 AS odd, collect(p) AS ps")
+# J15: a count of a variable from before a chain of two hops counts its values, skipping nulls
+# (it counted the chain's paths, so an OPTIONAL MATCH's nulls too)
+case("J15", "MATCH (p:Person) OPTIONAL MATCH (p)-[:LIVES_IN]->(t:City) MATCH (p)-[:KNOWS]->(f)-[:KNOWS]->(g) RETURN count(t) AS n")
 
 # K: variables bound before a later pattern, and values through a later MATCH
 for case_id, query, languages in [
@@ -1093,6 +1119,8 @@ for case_id, query in [
     ("O11", "MATCH ()-[r:KNOWS {w: 5}]->() WITH collect(r) AS rs RETURN rs[0].w AS w, rs[-1].since AS since"),
     # An UNWIND after WITH ... WHERE unwinds the rows the filter kept (0.5.44 read the first rows of the chunk)
     ("O12", "MATCH (a:Person) WITH a.name AS n, a.age AS age, [a.age, a.age + 1] AS l WHERE age >= 30 UNWIND l AS v RETURN n, v"),
+    # A group list of edges keeps its edges through a second variable-length pattern (0.6.3 read their properties as null)
+    ("O13", "MATCH (:Person {name: 'Alix'})-[x:KNOWS*0..1]->(m)-[y:KNOWS*1..2]->(c) RETURN m.name AS m, [e IN x | e.w] AS xs, [e IN y | e.w] AS ys, c.name AS c"),
 ]:
     case(case_id, query)
 
@@ -3824,5 +3852,12 @@ ordered("FC5", "MATCH (n:Person) WITH n.age AS a LIMIT 3 RETURN a ORDER BY a", B
 #     endpoints, fixed edges counted in the length (0.6.4; it was refused, GRAFEO-Q004)
 case("FD1", "MATCH p = ANY SHORTEST (a:Person {name: 'Vincent'})-[:KNOWS]->*(b:Person)-[:LIVES_IN]->(c:City) RETURN b.name AS b, c.name AS c, length(p) AS len", GQL)
 case("FD2", "MATCH p = ALL SHORTEST (a:Person)-[:KNOWS]->{1,2}(b)-[l:LIVES_IN]->(c) RETURN a.name AS a, c.name AS c, l.years AS y, length(p) AS len", GQL)
+
+# FE: a SQL/PGQ comparison of two values of two kinds raises 22G04, so the optimizer moves
+#     none to rows the written statement never compares. The odd person 'x' knows person 3
+#     and lies on no square: FD1 gives the rows its GQL twin FD2 gives, where moving
+#     `b.id < d.id` under the intersection met 'x' and raised (0.6.4 development builds).
+case("FE1", "SELECT * FROM GRAPH_TABLE (MATCH (a:Person {n: 3})-[:KNOWS]-(b:Person)-[:FOLLOWS]-(c:Person)-[:FOLLOWS]-(d:Person)-[:KNOWS]-(a) WHERE b.id < d.id AND c.n <> 3 COLUMNS (b.id AS b, c.id AS c, d.id AS d))", SQL, "string_id_square")
+case("FE2", "MATCH (a:Person {n: 3})-[:KNOWS]-(b:Person)-[:FOLLOWS]-(c:Person)-[:FOLLOWS]-(d:Person)-[:KNOWS]-(a) WHERE b.id < d.id AND c.n <> 3 RETURN b.id AS b, c.id AS c, d.id AS d", GQL, "string_id_square")
 
 # fmt: on

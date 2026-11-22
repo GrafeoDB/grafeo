@@ -260,6 +260,8 @@ impl SessionInner {
                 .make_rdf_planner(deadline, view, expands_copies)?
                 .with_query_values(language == "graphql");
             if optimized_plan.profile {
+                // The profiled run's work, from here (see `grafeo_common::work`).
+                let _ = grafeo_common::work::take();
                 let (mut physical_plan, entries) = planner.plan_profiled(optimized_plan)?;
                 let executor = self
                     .executor_with_deadline(physical_plan.columns.clone())
@@ -268,10 +270,12 @@ impl SessionInner {
                 let total_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
                 let profile_tree =
                     crate::query::profile::build_profile_tree(&optimized_plan.root, entries)?;
-                return Ok(
-                    crate::query::profile::profile_result(&profile_tree, total_time_ms)
-                        .with_warnings(planner.warnings().raised()),
-                );
+                return Ok(crate::query::profile::profile_result(
+                    &profile_tree,
+                    total_time_ms,
+                    &grafeo_common::work::take(),
+                )
+                .with_warnings(planner.warnings().raised()));
             }
             let mut physical_plan = planner.plan(optimized_plan)?;
             let executor = self

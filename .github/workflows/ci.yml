@@ -895,6 +895,51 @@ jobs:
         env:
           RUSTC_WRAPPER: sccache
 
+  # Work per query (#794): the engine's own count of the work each graph-bench query does, per
+  # class, in a build with `--cfg grafeo_work_counters` (no shipped or timed build counts). Fails
+  # when a count differs from benches/work_per_query.baseline.json, up or down; a change that moves
+  # work updates the baseline in the same commit (`-- --update-baseline`). Code under the cfg
+  # escapes the other jobs, so this one also runs clippy and the counter tests with it.
+  work-per-query:
+    name: Work per Query
+    needs: [rust-check]
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --cfg grafeo_work_counters
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          components: clippy
+
+      - name: Configure sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-work-per-query-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-work-per-query-
+
+      - name: Clippy with the counters
+        run: cargo clippy -p grafeo-common -p grafeo-core -p grafeo-adapters -p grafeo-engine --all-features --all-targets -- -D warnings
+
+      - name: The counter tests
+        run: |
+          cargo test -p grafeo-common --all-features --lib work::
+          cargo test -p grafeo-core --all-features --lib profile
+          cargo test -p grafeo-engine --all-features --test main -- work_counters:: prepared_filters:: prepared_recipes::
+
+      - name: Count and check against the baseline
+        run: cargo bench -p grafeo-engine --features cypher,sql-pgq,algos --bench work_per_query -- --check
+
   # Miri undefined behavior check
   miri:
     name: Miri UB Check
@@ -1760,6 +1805,7 @@ jobs:
       - rust-feature-matrix
       - rust-feature-builds
       - memory-per-entity
+      - work-per-query
       - miri
       - python-test
       - python-test-lpg

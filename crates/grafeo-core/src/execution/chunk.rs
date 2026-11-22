@@ -635,6 +635,8 @@ impl DataChunkBuilder {
     /// Finishes building and returns the chunk.
     #[must_use]
     pub fn finish(self) -> DataChunk {
+        grafeo_common::work::count(grafeo_common::work::Work::ChunkBuilt, 1);
+        grafeo_common::work::count(grafeo_common::work::Work::RowBuilt, self.chunk.count as u64);
         self.chunk
     }
 

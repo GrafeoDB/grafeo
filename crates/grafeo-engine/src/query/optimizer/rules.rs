@@ -51,6 +51,10 @@ pub enum PlannerRule {
     IndexLookup,
     /// A range filter on a property reads the nodes in that range.
     IndexRange,
+    /// An aggregate without grouping over a label's range (with `IndexRange`) folds the range's
+    /// values in one store call, without an id list or a second read; off, the range scan feeds
+    /// the aggregate.
+    RangeFold,
     /// A filter on an indexed property, over a scan per input row, looks the
     /// key up per row.
     KeySeek,
@@ -70,11 +74,18 @@ pub enum PlannerRule {
     /// An `EXISTS` that a run without the row answers runs once; off, every `EXISTS` runs per row,
     /// which must give the same answers.
     ExistsRunOnce,
+    /// An `ORDER BY ... LIMIT` computes its sort keys before the top-k and the items that cannot
+    /// raise (properties of what the pattern binds, literals, parameters) after it, for the rows
+    /// the limit keeps; off, every item is computed for every row.
+    ProjectAfterTopK,
+    /// A check over several relations of a pattern that cannot raise runs where the
+    /// relations it reads are joined; off, it runs above the whole join.
+    EarlyChecks,
 }
 
 impl PlannerRule {
     /// Every rule.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 20] = [
         Self::JoinOrder,
         Self::SoughtEnd,
         Self::FactorizedExecution,
@@ -85,6 +96,7 @@ impl PlannerRule {
         Self::IntersectExpand,
         Self::IndexLookup,
         Self::IndexRange,
+        Self::RangeFold,
         Self::KeySeek,
         Self::IdSeek,
         Self::ZoneMaps,
@@ -92,6 +104,8 @@ impl PlannerRule {
         Self::ExistsEdgeCheck,
         Self::KeyColumnLookup,
         Self::ExistsRunOnce,
+        Self::ProjectAfterTopK,
+        Self::EarlyChecks,
     ];
 
     /// The rule's bit in a [`PlannerRules`].

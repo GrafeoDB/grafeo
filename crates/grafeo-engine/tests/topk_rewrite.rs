@@ -1,18 +1,11 @@
-//! Integration tests for the heap-based top-K rewrite added in
-//! `query/planner/lpg/project.rs::try_heap_topk_rewrite`.
+//! Integration tests for the top-k a LIMIT over an ORDER BY runs as
+//! (`query/planner/lpg/project.rs`, `plan_limit` and `plan_sort`).
 //!
 //! These tests exercise end-to-end via `session.execute()`, asserting result
-//! correctness on the cases the rewrite fires for and the cases that should
-//! fall through.
-//!
-//! Direct string-match verification that the heap rewrite fired isn't
-//! possible from outside the engine: EXPLAIN walks the logical tree (which
-//! the rewrite leaves unchanged: the fusion is physical-only, see the
-//! `try_topk_rewrite` doc), and PROFILE gates the rewrite off so its output
-//! never names TopK either. PROFILE is still useful for the *negative*
-//! direction (test 18 confirms the gate works by asserting Sort + Limit
-//! both run with timings); silent fall-through under non-PROFILE mode is
-//! the regression class caught by the §2.9 e2e benchmark in `benches/topk_e2e.rs`.
+//! correctness on the cases the top-k runs for and the cases that fall
+//! through. EXPLAIN walks the logical tree, which the top-k leaves unchanged
+//! (the fusion is physical-only); PROFILE shows the top-k that runs, on the
+//! line of the LIMIT, naming the ORDER BY it took in.
 
 use grafeo_common::types::{PropertyKey, Value};
 use grafeo_engine::GrafeoDB;
@@ -210,29 +203,24 @@ fn cypher_skip_limit_falls_through() {
     );
 }
 
+/// PROFILE shows what runs: the top-k, on the line of the LIMIT, naming the
+/// ORDER BY it took in, with no line for a full sort the run does not do.
 #[test]
-fn cypher_order_by_limit_unfused_under_profile() {
+fn profile_shows_the_top_k_that_runs() {
     let db = seed_items(19);
     let plan = profile(&db, "MATCH (n:Item) RETURN n.r ORDER BY n.r DESC LIMIT 5");
-
-    // PROFILE should not panic, and the unfused path should run: both Sort
-    // and Limit operators must be visible.
+    let lines: Vec<&str> = plan.lines().collect();
+    let top_k = lines
+        .iter()
+        .find(|line| line.trim_start().starts_with("TopK"))
+        .unwrap_or_else(|| panic!("PROFILE names the top-k:\n{plan}"));
+    assert!(top_k.contains("Sort"), "the top-k names its sort:\n{plan}");
+    assert!(top_k.contains("rows=5"), "the top-k gives 5 rows:\n{plan}");
     assert!(
-        plan.contains("Sort"),
-        "PROFILE under heap-rewrite-disabled should show Sort:\n{plan}"
-    );
-    assert!(
-        plan.contains("Limit"),
-        "PROFILE under heap-rewrite-disabled should show Limit:\n{plan}"
-    );
-    assert!(
-        plan.contains("rows="),
-        "PROFILE should report row counts:\n{plan}"
-    );
-    // Defensive: confirm the rewrite did NOT fire under PROFILE.
-    assert!(
-        !plan.contains("TopK"),
-        "PROFILE must not show TopK; rewrite should be gated by !profiling:\n{plan}"
+        !lines
+            .iter()
+            .any(|line| line.trim_start().starts_with("Sort ")),
+        "no line for a full sort:\n{plan}"
     );
 }
 
@@ -590,4 +578,104 @@ fn order_by_limit_binary_key_yields_map() {
         .collect();
     // a + b is 8 for a = 3 and 3 for a = 1; DESC puts a = 3 first.
     assert_eq!(sums, vec![Value::Int64(3), Value::Int64(1)]);
+}
+
+/// `n` `:Item` nodes with `id`, a pseudo-random `r` and a group `g` of three
+/// values, so `ORDER BY g` ties.
+fn seed_grouped_items(n: usize) -> GrafeoDB {
+    let db = GrafeoDB::new_in_memory();
+    db.session()
+        .execute(&format!(
+            "FOR i IN range(1, {n}) INSERT (:Item {{id: i - 1, r: (i - 1) * 2654435761 % 1000000, \
+             g: (i - 1) % 3}})"
+        ))
+        .unwrap();
+    db
+}
+
+/// The rows of `result`, or its error.
+fn rows_of(
+    result: grafeo_common::utils::error::Result<grafeo_engine::database::QueryResult>,
+) -> Vec<Vec<Value>> {
+    result.expect("the query runs").rows().to_vec()
+}
+
+/// A LIMIT over an ORDER BY returns the rows the ORDER BY alone returns, cut
+/// to the limit: whatever the sort's input (a RETURN, a filter under SQL/PGQ's
+/// outer query, a key the RETURN leaves out), on ties (in the sort's order), and
+/// for every limit, 0 and past the row count included; a SKIP before it skips
+/// first.
+#[test]
+fn a_limit_over_an_order_by_cuts_the_ordered_rows() {
+    let db = seed_grouped_items(200);
+    let session = db.session();
+    let mut shapes: Vec<(&str, &str)> = vec![
+        ("gql", "MATCH (n:Item) RETURN n.id, n.r ORDER BY n.r DESC"),
+        (
+            "gql",
+            "MATCH (n:Item) WHERE n.r > 300000 RETURN n.id ORDER BY n.r, n.id",
+        ),
+        ("cypher", "MATCH (n:Item) RETURN n.id ORDER BY n.r"),
+        ("cypher", "MATCH (n:Item) RETURN n.id, n.g ORDER BY n.g"),
+        (
+            "cypher",
+            "MATCH (n:Item) RETURN n.id ORDER BY n.g DESC, n.r",
+        ),
+    ];
+    #[cfg(feature = "sql-pgq")]
+    shapes.extend([
+        (
+            "sql",
+            "SELECT id, r FROM GRAPH_TABLE (MATCH (n:Item) COLUMNS (n.id AS id, n.r AS r)) ORDER BY r DESC",
+        ),
+        (
+            "sql",
+            "SELECT id FROM GRAPH_TABLE (MATCH (n:Item) WHERE n.r > 300000 COLUMNS (n.id AS id, n.r AS r)) \
+             ORDER BY r, id",
+        ),
+        (
+            "sql",
+            "SELECT id, g FROM GRAPH_TABLE (MATCH (n:Item) COLUMNS (n.id AS id, n.g AS g)) ORDER BY g",
+        ),
+    ]);
+    let run = |language: &str, query: &str| match language {
+        "cypher" => rows_of(session.execute_cypher(query)),
+        #[cfg(feature = "sql-pgq")]
+        "sql" => rows_of(session.execute_sql(query)),
+        _ => rows_of(session.execute(query)),
+    };
+    for (language, ordered) in shapes {
+        let all = run(language, ordered);
+        assert!(all.len() > 20, "{language} `{ordered}` returns rows");
+        for k in [0, 1, 5, 20, all.len(), all.len() + 50] {
+            let limited = run(language, &format!("{ordered} LIMIT {k}"));
+            assert_eq!(
+                limited,
+                all[..k.min(all.len())],
+                "{language} `{ordered} LIMIT {k}`"
+            );
+        }
+        let skip = if language == "sql" {
+            "LIMIT 4 OFFSET 3"
+        } else {
+            "SKIP 3 LIMIT 4"
+        };
+        let skipped = run(language, &format!("{ordered} {skip}"));
+        assert_eq!(skipped, all[3..7], "{language} `{ordered} {skip}`");
+    }
+}
+
+/// A LIMIT over an ORDER BY over a write cuts the rows, not the write: every
+/// matched node is written, and the rows are the first of the ordered ones.
+#[test]
+fn a_limit_over_an_ordered_write_writes_every_row() {
+    let db = seed_grouped_items(50);
+    let session = db.session();
+    let ordered = rows_of(session.execute("MATCH (n:Item) RETURN n.id ORDER BY n.r DESC"));
+    let limited = rows_of(
+        session.execute("MATCH (n:Item) SET n.w = n.r + 1 RETURN n.id ORDER BY n.w DESC LIMIT 3"),
+    );
+    assert_eq!(limited, ordered[..3]);
+    let written = rows_of(session.execute("MATCH (n:Item) WHERE n.w = n.r + 1 RETURN count(n)"));
+    assert_eq!(written, vec![vec![Value::Int64(50)]]);
 }

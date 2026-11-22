@@ -994,6 +994,12 @@ export interface CreateOptions {
    */
   queryMemoryLimit?: number
   /**
+   * How many bytes the in-memory change log may hold: past it the oldest
+   * commits go. By default a sixteenth of `memoryLimit`, and never more
+   * than `memoryLimit`. For this open only.
+   */
+  cdcMemoryLimit?: number
+  /**
    * How many bytes one path search may hold: everything a variable-length,
    * shortest-path or RDF property path search holds at once (the nodes it
    * visits, its queues and the paths it keeps), which counts against
@@ -1049,6 +1055,15 @@ export interface CreateOptions {
    * For this open only.
    */
   unlimitedSpill?: boolean
+  /**
+   * How many bytes of plans the database keeps for repeated statements,
+   * by a deep estimate of what each plan holds; 0 keeps none, so every
+   * statement plans. By default a sixty-fourth of `memoryLimit`, from
+   * 4 MiB to 64 MiB; never more than `memoryLimit`.
+   * `memoryUsage().caches.planCacheLimitBytes` reads it back. For this
+   * open only.
+   */
+  planCacheLimit?: number
 }
 
 /** Options for CSV import. */

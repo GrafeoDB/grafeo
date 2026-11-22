@@ -158,17 +158,25 @@ const char*     grafeo_version(void);
        (16 MiB by default; parameter values do not count), the identifier
        length limit how many bytes one name in it may have (16 KiB by
        default); a statement over either fails with GRAFEO-Q002.
-     - The memory and query memory limits, the path search budget, the path
-       expansion limit and the query and identifier lengths must be above
-       zero (another status otherwise); a spill limit of 0 means
+     - The CDC memory limit bounds the bytes the in-memory change log holds:
+       past it the oldest commits go. A sixteenth of the memory limit by
+       default, never above it.
+     - The memory, query memory and CDC memory limits, the path search
+       budget, the path expansion limit and the query and identifier lengths
+       must be above zero (another status otherwise); a spill limit of 0 means
        nothing spills, and unlimited spill, once set, wins over a spill limit.
        An in-memory database spills nothing whatever the settings.
+     - The plan cache limit is how many bytes of plans the database keeps
+       for repeated statements; 0 keeps none. By default a sixty-fourth of
+       the memory limit, from 4 MiB to 64 MiB, and never more than the
+       memory limit.
      - grafeo_open_with_options opens in memory when path is NULL, else the
        file at path; NULL options are the defaults. */
 GrafeoOptions*  grafeo_options_new(void);
 void            grafeo_options_free(GrafeoOptions* options);
 GrafeoStatus    grafeo_options_set_memory_limit(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_query_memory_limit(GrafeoOptions* options, uint64_t bytes);
+GrafeoStatus    grafeo_options_set_cdc_memory_limit(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_path_search_budget(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_path_expansion_limit(GrafeoOptions* options, uint64_t expansions);
 GrafeoStatus    grafeo_options_set_max_query_length(GrafeoOptions* options, uint64_t bytes);
@@ -177,6 +185,7 @@ GrafeoStatus    grafeo_options_set_snapshot_retention_limit(GrafeoOptions* optio
 GrafeoStatus    grafeo_options_set_history_retention_limit(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_spill_limit(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_unlimited_spill(GrafeoOptions* options);
+GrafeoStatus    grafeo_options_set_plan_cache_limit(GrafeoOptions* options, uint64_t bytes);
 GrafeoDatabase* grafeo_open_with_options(const char* path, const GrafeoOptions* options);
 
 /* ---- Change Data Capture ------------------------------------------------- */

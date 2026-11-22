@@ -73,7 +73,11 @@ fn with_literals(template: &str, values: &HashMap<String, Value>) -> String {
 /// The prepared-plan hits and misses so far.
 fn lookups(db: &GrafeoDB) -> (u64, u64) {
     let stats = db.query_cache().stats();
-    (stats.optimized_hits, stats.optimized_misses)
+    // A repeat in one session is a hit of the session's own cache.
+    (
+        stats.optimized_hits + stats.session_hits,
+        stats.optimized_misses,
+    )
 }
 
 /// The statements and the values each call takes: lookups through an index

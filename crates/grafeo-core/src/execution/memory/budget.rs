@@ -20,16 +20,18 @@ use grafeo_common::utils::error::{Error, LimitBound, LimitRefusal};
 pub struct QueryMemory {
     /// The cap, in bytes.
     limit: usize,
-    /// The step the operators' grants grow by under this cap: the buffer
-    /// manager's, smaller for a small cap so its rounding does not eat it.
+    /// The step of the grant rule the operators' grants follow under this cap
+    /// (see [`BufferManager::grant_size_by`]): the buffer manager's, smaller
+    /// for a small cap so its rounding does not eat it.
     step: usize,
     /// What the statement's operators hold under the cap.
     used: AtomicUsize,
 }
 
 impl QueryMemory {
-    /// A statement's memory under `limit` bytes, whose grants grow by at most
-    /// `step` bytes at a time (a 64th of the cap, from 4 KiB).
+    /// A statement's memory under `limit` bytes, whose grants follow the
+    /// grant rule at `step`, or at a 64th of the cap (from 4 KiB) when that is
+    /// smaller.
     #[must_use]
     pub fn new(limit: usize, step: usize) -> Arc<Self> {
         Arc::new(Self {
@@ -78,7 +80,7 @@ impl QueryMemory {
 }
 
 /// An operator's grant: what it holds under its statement's cap and the
-/// buffer manager's limit, grown by steps through
+/// buffer manager's limit, grown by the grant rule through
 /// [`OperatorMemoryContext::grow`] and given back to both when it is
 /// released or dropped (the operator ended, or failed).
 #[derive(Debug, Default)]
@@ -136,7 +138,7 @@ impl Drop for ConsumerRegistration {
 /// hash join's build side, a distinct's seen keys, an eager or collecting
 /// operator, a set operation, an in-memory sort, a pull aggregate): it counts
 /// what the operator holds, a chunk or a table resize at a time, and takes a
-/// grant a step at a time. At the statement's cap or the memory limit the
+/// grant rounded by the buffer manager's rule. At the statement's cap or the memory limit the
 /// operator fails with `GRAFEO-S001` naming the bound that refused. Built
 /// outside a budgeted statement it counts nothing.
 #[derive(Default)]
@@ -280,7 +282,7 @@ impl OperatorMemory {
     }
 
     /// Gives back the grant above what it counts or `at_least`, whichever is
-    /// more (kept to a whole step), so the operators after it can take that
+    /// more (rounded by the grant rule), so the operators after it can take that
     /// room: a merge between batches, whose rows went on to them, keeping the
     /// room its plan promised. It never grows the grant.
     pub fn trim_to(&mut self, at_least: usize) {
@@ -385,7 +387,8 @@ impl OperatorMemoryContext {
         &self.query
     }
 
-    /// Grows `grant` to cover `counted` bytes, a step at a time. Past what it
+    /// Grows `grant` to cover `counted` bytes, rounded by the buffer manager's
+    /// rule (see [`BufferManager::grant_size_by`]). Past what it
     /// holds: the statement's cap first (one atomic), then the buffer
     /// manager's grant, and when that has no room its eviction cycle and the
     /// grant once more (an operator holds no store lock). Within what it holds
@@ -400,11 +403,12 @@ impl OperatorMemoryContext {
             return Ok(());
         }
         let exact = counted - grant.held;
-        // Rounded up to the step, so the next chunks cost a compare; when the
-        // rounding alone would pass the cap, the exact bytes are asked for.
-        let rounded = counted
-            .checked_next_multiple_of(self.query.step)
-            .map_or(exact, |wanted| wanted - grant.held);
+        // Rounded by the buffer manager's rule at the statement's step (a
+        // power of two below a step, step multiples above), so the next chunks
+        // cost a compare and a small holder takes at most twice what it
+        // counts; when the rounding alone would pass the cap, the exact bytes
+        // are asked for.
+        let rounded = BufferManager::grant_size_by(self.query.step, counted) - grant.held;
         let more = if self.query.take(rounded).is_ok() {
             rounded
         } else {
@@ -436,12 +440,13 @@ impl OperatorMemoryContext {
         Ok(())
     }
 
-    /// Gives back what `grant` holds above `keep` bytes, rounded up to the
-    /// step its grants grow by, to the statement's cap and the buffer manager.
+    /// Gives back what `grant` holds above `keep` bytes, rounded by the
+    /// buffer manager's rule at the statement's step (see
+    /// [`BufferManager::grant_size_by`]), to the statement's cap and the
+    /// buffer manager: a deliberate give-back (a trim), so without the
+    /// hysteresis of a settle. It never grows the grant.
     pub fn shrink(&self, grant: &mut OperatorGrant, keep: usize) {
-        let keep = keep
-            .checked_next_multiple_of(self.query.step)
-            .unwrap_or(keep);
+        let keep = BufferManager::grant_size_by(self.query.step, keep);
         let extra = grant.held.saturating_sub(keep);
         if extra == 0 {
             return;

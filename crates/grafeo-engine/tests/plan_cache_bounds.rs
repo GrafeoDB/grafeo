@@ -12,7 +12,10 @@
 //!   under an older generation is returned but never stored.
 //! - **Statistics:** a count that doubles or halves, by at least 1,000 rows, since its anchor
 //!   moves the generation.
-//! - **Session cache:** a per-session cache sits in front of the shared one.
+//! - **Session cache:** a per-session cache sits in front of the shared one. It holds weak
+//!   references, so it keeps no plan alive, and its bytes are its own map's. `compact()` and
+//!   `close()` clear the shared cache at once (#712; the freed memory itself is pinned in
+//!   `deleted_values_leave_memory.rs`).
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test main plan_cache_bounds::
@@ -793,5 +796,257 @@ mod race {
             }
             stop.store(true, Ordering::Relaxed);
         });
+    }
+}
+
+/// The per-session cache: a repeat in one session is a session hit, a generation move clears
+/// it, a plan held by both caches counts once, a limit of 0 turns it off, and a transaction
+/// with a queued schema change uses neither cache.
+mod session_cache {
+    use grafeo_engine::query::cache::{CacheKey, Stage};
+    use grafeo_engine::query::processor::QueryLanguage;
+
+    use super::*;
+
+    const QUERY: &str = "MATCH (p:Person) RETURN p.name AS name";
+
+    fn session_hits(db: &GrafeoDB) -> u64 {
+        db.query_cache().stats().session_hits
+    }
+
+    fn database(limit: usize) -> GrafeoDB {
+        let db = with_limit(limit);
+        db.execute("INSERT (:Person {name: 'Django'})").unwrap();
+        db
+    }
+
+    /// The second run in a session is a session hit and takes nothing from the shared
+    /// cache; a new session's first run is a shared hit.
+    #[test]
+    fn a_repeat_in_one_session_is_a_session_hit() {
+        let db = database(MIB);
+        let session = db.session();
+        session.execute(QUERY).unwrap();
+        let (shared, own) = (hits(&db), session_hits(&db));
+        session.execute(QUERY).unwrap();
+        assert_eq!(session_hits(&db), own + 1);
+        assert_eq!(hits(&db), shared);
+
+        let other = db.session();
+        other.execute(QUERY).unwrap();
+        assert_eq!(hits(&db), shared + 1, "a new session finds the shared plan");
+        assert_eq!(session_hits(&db), own + 1);
+    }
+
+    /// A generation move clears every session's cache: the next run plans again.
+    #[test]
+    fn a_generation_move_clears_the_session_cache() {
+        let db = database(MIB);
+        let session = db.session();
+        session.execute(QUERY).unwrap();
+        session.execute(QUERY).unwrap();
+        let own = session_hits(&db);
+        let misses = db.query_cache().stats().optimized_misses;
+        db.clear_plan_cache();
+        session.execute(QUERY).unwrap();
+        assert_eq!(session_hits(&db), own, "not a session hit");
+        assert_eq!(db.query_cache().stats().optimized_misses, misses + 1);
+    }
+
+    /// A plan both caches hold counts once, in the shared fields: a session's cache holds a weak
+    /// reference, and `session_plan_cache_bytes` is its map's own bytes, less than the plan's.
+    /// Once the shared cache evicts the plan, the session holds nothing of it: its bytes do not
+    /// grow, its next lookup misses, and that run caches the new plan as the first did.
+    #[test]
+    fn a_session_cache_counts_only_its_own_entries() {
+        let limit = 256 * KIB;
+        let db = database(limit);
+        let query = format!(
+            "MATCH (p:Person) WHERE p.name <> '{}' RETURN p.name AS name",
+            "z".repeat(4 * KIB)
+        );
+        let empty = held(&db);
+        db.execute(&query).unwrap();
+        let plan = held(&db) - empty;
+        assert_eq!(
+            db.memory_usage().caches.session_plan_cache_bytes,
+            0,
+            "a one-shot call's session is gone"
+        );
+
+        let session = db.session();
+        session.execute(&query).unwrap();
+        let caches = db.memory_usage().caches;
+        assert_eq!(held(&db), empty + plan, "the shared hit adds no plan bytes");
+        let entry = caches.session_plan_cache_bytes;
+        assert!(entry > 0, "the session's entry is counted");
+        assert!(
+            entry < plan,
+            "the session counts its entry ({entry} bytes), not the plan ({plan} bytes)"
+        );
+        assert_eq!(
+            caches.total_bytes,
+            caches.parsed_plan_cache_bytes
+                + caches.optimized_plan_cache_bytes
+                + caches.session_plan_cache_bytes
+        );
+
+        // A lookup makes the entry the newest, so the loop watches a weak reference instead.
+        let key = CacheKey::new(&query, QueryLanguage::Gql);
+        let cached = db
+            .query_cache()
+            .get(&key, Stage::Optimized)
+            .expect("cached");
+        let probe = std::sync::Arc::downgrade(&cached);
+        drop(cached);
+        let mut i = 0;
+        while probe.strong_count() > 0 {
+            db.execute(&format!("RETURN {i} AS i, '{}' AS s", "x".repeat(500)))
+                .unwrap();
+            i += 1;
+            assert!(i < 10_000, "the shared cache never evicted the plan");
+        }
+        assert_eq!(
+            db.memory_usage().caches.session_plan_cache_bytes,
+            entry,
+            "the session took nothing over from the evicted plan"
+        );
+
+        let own = session_hits(&db);
+        session.execute(&query).unwrap();
+        assert_eq!(session_hits(&db), own, "an evicted plan is a session miss");
+        assert_eq!(
+            db.memory_usage().caches.session_plan_cache_bytes,
+            entry,
+            "the run cached the new plan as the first did"
+        );
+        let own = session_hits(&db);
+        session.execute(&query).unwrap();
+        assert_eq!(session_hits(&db), own + 1, "and the next run hits it");
+    }
+
+    /// `compact()` clears the shared cache at once and moves the generation, before any
+    /// statement runs; an open session's next run plans again.
+    #[test]
+    fn compact_clears_the_shared_cache_at_once() {
+        let mut db = database(MIB);
+        let session = db.session();
+        session.execute(QUERY).unwrap();
+        session.execute(QUERY).unwrap();
+        assert!(held(&db) > 0);
+        let before = db.query_cache().stats();
+
+        db.compact().unwrap();
+        assert_eq!(held(&db), 0, "compact() freed every plan");
+        assert!(
+            db.query_cache().stats().generation > before.generation,
+            "compact() moved the generation"
+        );
+
+        let own = session_hits(&db);
+        let misses = db.query_cache().stats().optimized_misses;
+        session.execute(QUERY).unwrap();
+        assert_eq!(session_hits(&db), own, "not a session hit");
+        assert_eq!(db.query_cache().stats().optimized_misses, misses + 1);
+    }
+
+    /// `close()` clears the shared cache at once and moves the generation, before the drop and
+    /// while a session that cached a plan is still open.
+    #[test]
+    fn close_clears_the_shared_cache_at_once() {
+        let db = database(MIB);
+        let session = db.session();
+        session.execute(QUERY).unwrap();
+        session.execute(QUERY).unwrap();
+        assert!(held(&db) > 0);
+        // Taken before the close: a closed database hands out a cache of its own.
+        let cache = db.query_cache();
+        let before = cache.stats();
+
+        db.close().unwrap();
+        assert_eq!(cache.held_bytes(), 0, "close() freed every plan");
+        assert!(
+            cache.stats().generation > before.generation,
+            "close() moved the generation"
+        );
+        drop(session);
+    }
+
+    /// A statistics move clears the session's cache too, though nothing reads the shared cache
+    /// between the move and the session's next run: the move only moves the generation, and the
+    /// shared cache empties at its next lookup, which a session hit would never make.
+    #[test]
+    fn a_statistics_move_clears_the_session_cache() {
+        let db = database(MIB);
+        let session = db.session();
+        session.execute(QUERY).unwrap();
+        session.execute(QUERY).unwrap();
+        let own = session_hits(&db);
+        assert!(own > 0, "the repeat was a session hit");
+        db.execute("UNWIND range(1, 5000) AS i INSERT (:Person {name: 'Vincent'})")
+            .unwrap();
+        let rows = session.execute(QUERY).unwrap();
+        assert_eq!(rows.rows().len(), 5001);
+        assert_eq!(session_hits(&db), own, "the next run plans again");
+    }
+
+    /// A plan a long-lived session keeps repeating stays in the shared cache while other
+    /// statements fill it many times over: a session hit marks it used, so the shared cache
+    /// gives it a second chance at eviction, and it is never planned again.
+    #[test]
+    fn a_plan_a_session_repeats_outlives_other_statements() {
+        let db = database(256 * KIB);
+        let session = db.session();
+        session.execute(QUERY).unwrap();
+        for round in 0..100 {
+            for i in 0..20 {
+                db.execute(&format!(
+                    "RETURN {round} AS round, {i} AS i, '{}' AS s",
+                    "x".repeat(500)
+                ))
+                .unwrap();
+            }
+            let own = session_hits(&db);
+            session.execute(QUERY).unwrap();
+            assert_eq!(
+                session_hits(&db),
+                own + 1,
+                "round {round}: the repeat is a session hit, never planned again"
+            );
+        }
+    }
+
+    /// A limit of 0 turns the session cache off too.
+    #[test]
+    fn a_limit_of_zero_turns_the_session_cache_off() {
+        let db = database(0);
+        let session = db.session();
+        for _ in 0..3 {
+            session.execute(QUERY).unwrap();
+        }
+        assert_eq!(session_hits(&db), 0);
+    }
+
+    /// A transaction with a queued schema change plans privately: neither its session cache
+    /// nor the shared cache sees its lookups.
+    #[test]
+    fn a_transaction_with_a_schema_change_uses_neither_cache() {
+        let db = database(MIB);
+        let mut session = db.session();
+        session.execute(QUERY).unwrap();
+        session.execute(QUERY).unwrap();
+        session.begin_transaction().unwrap();
+        session
+            .execute("CREATE INDEX person_name FOR (p:Person) ON (p.name)")
+            .unwrap();
+        let stats = db.query_cache().stats();
+        for _ in 0..3 {
+            session.execute(QUERY).unwrap();
+        }
+        let after = db.query_cache().stats();
+        assert_eq!(after.session_hits, stats.session_hits);
+        assert_eq!(after.optimized_hits, stats.optimized_hits);
+        assert_eq!(after.optimized_misses, stats.optimized_misses);
+        session.rollback().unwrap();
     }
 }

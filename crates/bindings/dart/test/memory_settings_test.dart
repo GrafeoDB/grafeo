@@ -84,6 +84,29 @@ void main() {
       }
     });
 
+    test('the CDC memory limit reads back, a sixteenth by default, capped (#679)', () {
+      for (final (memory, limit, want) in [
+        (64 * mib, 512 * 1024, 512 * 1024),
+        (64 * mib, null, 4 * mib),
+        (32 * mib, 1024 * mib, 32 * mib),
+      ]) {
+        final db = GrafeoDB.openWithOptions(
+          null,
+          GrafeoOptions(memoryLimit: memory, cdcMemoryLimit: limit),
+        );
+        try {
+          final cdc = db.memoryUsage()['cdc'] as Map<String, dynamic>;
+          expect(cdc['limit_bytes'], equals(want), reason: '$limit under $memory');
+        } finally {
+          db.close();
+        }
+      }
+      expect(
+        () => GrafeoDB.openWithOptions(null, GrafeoOptions(cdcMemoryLimit: 0)),
+        throwsA(isA<GrafeoException>()),
+      );
+    });
+
     test('a zero memory limit fails at the open', () {
       expect(
         () => GrafeoDB.openWithOptions(null, GrafeoOptions(memoryLimit: 0)),
@@ -126,6 +149,42 @@ void main() {
           // Windows may hold file locks briefly after close.
         }
       }
+    });
+
+    test(
+      'the plan cache limit reads back, capped, 0 turning it off (#674)',
+      () {
+        for (final (memory, limit, want) in [
+          (64 * mib, 8 * mib, 8 * mib),
+          (32 * mib, 1024 * mib, 32 * mib),
+          (64 * mib, 0, 0),
+        ]) {
+          final db = GrafeoDB.openWithOptions(
+            null,
+            GrafeoOptions(memoryLimit: memory, planCacheLimit: limit),
+          );
+          try {
+            final caches = db.memoryUsage()['caches'] as Map<String, dynamic>;
+            expect(
+              caches['plan_cache_limit_bytes'],
+              equals(want),
+              reason: '$limit under $memory',
+            );
+          } finally {
+            db.close();
+          }
+        }
+      },
+    );
+
+    test('a negative plan cache limit is refused (#674)', () {
+      expect(
+        () => GrafeoDB.openWithOptions(
+          null,
+          const GrafeoOptions(planCacheLimit: -1),
+        ),
+        throwsArgumentError,
+      );
     });
   });
 }

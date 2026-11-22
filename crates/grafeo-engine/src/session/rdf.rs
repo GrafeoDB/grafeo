@@ -38,6 +38,7 @@ impl SessionInner {
             catalog: cfg.catalog,
             rdf_store,
             transaction_manager: cfg.transaction_manager,
+            session_plans: crate::query::cache::SessionPlans::new(Arc::clone(&cfg.query_cache)),
             query_cache: cfg.query_cache,
             #[cfg(feature = "gql")]
             slots: cfg.slots,

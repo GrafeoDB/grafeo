@@ -36,6 +36,7 @@ pub(crate) mod path_queue;
 pub mod pipeline;
 pub mod pipeline_convert;
 pub mod profile;
+pub(crate) mod segment_arena;
 pub mod selection;
 pub mod sink;
 pub mod source;
@@ -59,6 +60,7 @@ pub use memory::{
     in_scope as in_operator_memory_scope, statement as current_statement_memory,
 };
 pub use operators::PATH_QUEUE_ENTRY_BYTES;
+pub use operators::PATH_RESTRICTIVE_QUEUE_ENTRY_BYTES;
 /// The bytes one segment of a followed path holds, for capacity accounting
 /// and tests.
 pub use operators::PATH_SEGMENT_BYTES;

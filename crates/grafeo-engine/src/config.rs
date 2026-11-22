@@ -413,6 +413,8 @@ pub enum ConfigError {
     ZeroMemoryLimit,
     /// [`Config::with_query_memory_limit`] must be greater than zero.
     ZeroQueryMemoryLimit,
+    /// [`Config::with_cdc_memory_limit`] must be greater than zero.
+    ZeroCdcMemoryLimit,
     /// [`Config::with_path_search_budget`] must be greater than zero.
     ZeroPathSearchBudget,
     /// [`Config::with_path_expansion_limit`] must be greater than zero.
@@ -505,6 +507,9 @@ impl fmt::Display for ConfigError {
             Self::MemoryFractionNotFinite => write!(f, "memory_fraction must be a finite number"),
             Self::ZeroQueryMemoryLimit => {
                 write!(f, "query_memory_limit must be greater than zero")
+            }
+            Self::ZeroCdcMemoryLimit => {
+                write!(f, "cdc_memory_limit must be greater than zero")
             }
             Self::ZeroPathSearchBudget => {
                 write!(f, "path_search_budget must be greater than zero")
@@ -882,8 +887,9 @@ pub struct Config {
     /// Controls how many events the CDC log retains in memory. By default,
     /// retains up to 1,000 epochs and 100,000 events.
     /// [`CdcRetentionConfig::unlimited()`](crate::cdc::CdcRetentionConfig::unlimited)
-    /// disables pruning, but beware of unbounded memory growth on
-    /// long-running instances. Set it with [`Config::with_cdc_retention()`].
+    /// lifts those two; the byte bound stays (see
+    /// [`Config::with_cdc_memory_limit`]). Set it with
+    /// [`Config::with_cdc_retention()`].
     #[cfg(feature = "cdc")]
     #[deprecated(
         since = "0.6.0",
@@ -1738,7 +1744,9 @@ impl Config {
 
     /// Sets how many CDC events the change history keeps (see
     /// [`Config::cdc_retention`]); garbage collection drops the oldest
-    /// events beyond it.
+    /// events beyond it. A retention without a byte bound of its own keeps
+    /// the one [`with_cdc_memory_limit`](Self::with_cdc_memory_limit) set,
+    /// in either order.
     ///
     /// # Examples
     ///
@@ -1754,7 +1762,31 @@ impl Config {
     #[cfg(feature = "cdc")]
     #[must_use]
     pub fn with_cdc_retention(mut self, retention: crate::cdc::CdcRetentionConfig) -> Self {
+        let max_bytes = retention.max_bytes.or(self.cdc_retention.max_bytes);
         self.cdc_retention = retention;
+        self.cdc_retention.max_bytes = max_bytes;
+        self
+    }
+
+    /// Bounds the bytes the in-memory change log holds (the retention's
+    /// [`max_bytes`](crate::cdc::CdcRetentionConfig::max_bytes)).
+    /// When the log passes the bound, its oldest whole commits are dropped
+    /// until it is at or below three quarters of the bound; the newest
+    /// commit is always kept. Unset, the bound is a sixteenth of the memory limit; a bound above the memory
+    /// limit is capped at it. 0 is refused at the open with `GRAFEO-V001`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use grafeo_engine::Config;
+    ///
+    /// let config = Config::in_memory().with_cdc().with_cdc_memory_limit(4 << 20);
+    /// assert_eq!(config.cdc_memory_limit(), Some(4 << 20));
+    /// ```
+    #[cfg(feature = "cdc")]
+    #[must_use]
+    pub fn with_cdc_memory_limit(mut self, bytes: usize) -> Self {
+        self.cdc_retention.max_bytes = Some(bytes);
         self
     }
 
@@ -2156,6 +2188,24 @@ impl Config {
         &self.cdc_retention
     }
 
+    /// The bound set with [`with_cdc_memory_limit`](Self::with_cdc_memory_limit),
+    /// `None` when the database derives it.
+    #[cfg(feature = "cdc")]
+    #[must_use]
+    pub fn cdc_memory_limit(&self) -> Option<usize> {
+        self.cdc_retention.max_bytes
+    }
+
+    /// The retention with its byte bound in force under a memory budget of
+    /// `budget` bytes: the one set, or a sixteenth of the budget, and never
+    /// above the budget.
+    #[cfg(feature = "cdc")]
+    pub(crate) fn cdc_retention_under(&self, budget: usize) -> crate::cdc::CdcRetentionConfig {
+        let mut retention = self.cdc_retention.clone();
+        retention.max_bytes = Some(retention.max_bytes.unwrap_or(budget / 16).min(budget));
+        retention
+    }
+
     /// The memory configuration of each section that has one.
     #[must_use]
     pub fn section_configs(
@@ -2249,6 +2299,10 @@ impl Config {
         }
         if self.query_memory_limit == Some(0) {
             return Err(ConfigError::ZeroQueryMemoryLimit);
+        }
+        #[cfg(feature = "cdc")]
+        if self.cdc_retention.max_bytes == Some(0) {
+            return Err(ConfigError::ZeroCdcMemoryLimit);
         }
         if self.path_search_budget == Some(0) {
             return Err(ConfigError::ZeroPathSearchBudget);

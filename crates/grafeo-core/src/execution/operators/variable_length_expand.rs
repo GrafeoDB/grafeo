@@ -7,6 +7,8 @@ use super::{Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
 use crate::execution::path_budget::{PathBudget, PathRefusal};
 use crate::execution::path_queue::PathQueue;
+pub use crate::execution::segment_arena::SEGMENT_BYTES;
+use crate::execution::segment_arena::{NO_SEGMENT, SegmentArena};
 use crate::graph::Direction;
 use crate::graph::GraphStore;
 use grafeo_common::types::{ArcStr, EdgeId, LogicalType, NodeId, ReadView};
@@ -305,15 +307,18 @@ impl OutputRow {
 }
 
 /// A path the search from an input row has found and not yet emitted or
-/// extended: the node it ends at, its number of edges, its last edge, and
-/// the path itself when the search follows paths whole (see
-/// [`VariableLengthExpandOperator::follows_paths`]).
+/// extended: the node it ends at, its last edge, its number of edges, and
+/// its last segment in the search's arena when the search follows paths
+/// whole (see [`VariableLengthExpandOperator::follows_paths`]), else
+/// [`NO_SEGMENT`]. It holds that segment.
 struct OpenPath {
     node: NodeId,
-    length: u32,
     edge: EdgeId,
-    segment: Option<Arc<PathSegment>>,
+    length: u32,
+    segment: u32,
 }
+
+const _: () = assert!(std::mem::size_of::<OpenPath>() == 24);
 
 /// The breadth-first search of the paths from the source of one input row,
 /// which [`VariableLengthExpandOperator::next`] resumes until it has
@@ -327,10 +332,11 @@ struct RowSearch {
     source: NodeId,
     /// The paths found and not yet emitted or extended, shortest first.
     open: PathQueue<OpenPath>,
-    /// The bytes a path is charged beyond its entry in `open`, and charged
-    /// more for each of its edges (see
-    /// [`VariableLengthExpandOperator::path_charges`]).
-    per_path: usize,
+    /// The segments of the paths it follows.
+    segments: SegmentArena,
+    /// The bytes a path is charged for each of its edges, beyond its entry
+    /// in `open` and its segment (see
+    /// [`VariableLengthExpandOperator::per_edge_charge`]).
     per_edge: usize,
     /// The row the edge condition reads (see
     /// [`VariableLengthExpandOperator::condition_row`]).
@@ -338,24 +344,46 @@ struct RowSearch {
 }
 
 impl RowSearch {
-    /// The bytes an open path of `length` edges is charged (see
-    /// [`VariableLengthExpandOperator::path_charges`]).
+    /// The bytes an open path of `length` edges is charged beyond its entry
+    /// and its segment (see
+    /// [`VariableLengthExpandOperator::per_edge_charge`]).
     fn cost(&self, length: u32) -> usize {
         let edges = usize::try_from(length).unwrap_or(usize::MAX);
-        self.per_path
-            .saturating_add(edges.saturating_mul(self.per_edge))
+        edges.saturating_mul(self.per_edge)
     }
 
-    /// Makes room in `open` for one more path of `length` edges, within
-    /// `budget`, before the path is built: `open` grows by blocks, each
-    /// charged before it is allocated, and the path is charged its
-    /// [`cost`](Self::cost).
-    fn make_room(&mut self, length: u32, budget: &mut PathBudget) -> Result<(), OperatorError> {
+    /// Queues the path of `length` edges that extends the one ending at
+    /// `parent` over `edge` to `node`, within `budget`: `open` and the
+    /// segments grow by blocks, each charged before it is allocated, and the
+    /// path is charged its [`cost`](Self::cost). Without a `parent`
+    /// ([`NO_SEGMENT`]) the path has no segment. A refusal queues nothing.
+    fn open_path(
+        &mut self,
+        budget: &mut PathBudget,
+        (node, edge, length): (NodeId, EdgeId, u32),
+        parent: u32,
+    ) -> Result<(), OperatorError> {
         let cost = self.cost(length);
-        self.open
+        let segment = self
+            .open
             .reserve(budget)
             .and_then(|()| budget.charge(cost))
-            .map_err(|error| self.as_path_count(error, budget))
+            .and_then(|()| {
+                if parent == NO_SEGMENT {
+                    return Ok(NO_SEGMENT);
+                }
+                self.segments
+                    .push(budget, parent, node, edge)
+                    .inspect_err(|_| budget.release(cost))
+            })
+            .map_err(|error| self.as_path_count(error, budget))?;
+        self.open.push(OpenPath {
+            node,
+            edge,
+            length,
+            segment,
+        });
+        Ok(())
     }
 
     /// `error` as the refusal that counts the paths held, when the budget
@@ -373,98 +401,14 @@ impl RowSearch {
         )
     }
 
-    /// The next path to emit and extend, its charge per edge released. Its
-    /// segment stays charged while it lives: give it back with
-    /// [`release_segments`] once the path is done, which frees it and the
-    /// segments before it only when no extension holds them.
+    /// The next path to emit and extend, its charge per edge released. It
+    /// holds its segment: let go of it with [`SegmentArena::release`] once
+    /// the path is done, which frees it and the segments before it only when
+    /// no extension holds them.
     fn pop(&mut self, budget: &mut PathBudget) -> Option<OpenPath> {
         let path = self.open.pop(budget)?;
-        budget.release(self.cost(path.length) - self.per_path);
+        budget.release(self.cost(path.length));
         Some(path)
-    }
-}
-
-/// A shared-prefix path segment for efficient BFS path tracking.
-///
-/// Instead of cloning entire `Vec<NodeId>` / `Vec<EdgeId>` at each BFS expansion
-/// step (O(depth) per clone), segments form an `Arc`-linked list that shares common
-/// prefixes. Expansion costs O(1) (one `Arc::clone` + one allocation). Full paths
-/// are only materialized when emitting output rows. The shortest-path search
-/// follows the paths of a restrictive path mode with it too.
-///
-/// Every walk along a path is a loop, and so is the drop of a path (see the
-/// `Drop` implementation): a path as long as the graph allows does not need
-/// a stack as deep.
-pub(super) struct PathSegment {
-    /// The node at this position in the path.
-    pub(super) node: NodeId,
-    /// The edge taken to reach this node. `None` for the source/root node.
-    pub(super) edge: Option<EdgeId>,
-    /// Parent segment, or `None` for the root.
-    pub(super) parent: Option<Arc<PathSegment>>,
-}
-
-/// What one segment of a followed path holds: the segment with the two
-/// counts of its `Arc` (its earlier segments are shared with the path it
-/// extends). Public for capacity accounting and tests.
-pub const SEGMENT_BYTES: usize =
-    std::mem::size_of::<PathSegment>() + 2 * std::mem::size_of::<usize>();
-
-/// Gives back to `budget` the segments that dropping `segment` frees: it, and
-/// each segment before it that only it held.
-pub(super) fn release_segments(budget: &mut PathBudget, segment: Arc<PathSegment>) {
-    let mut next = Some(segment);
-    while let Some(segment) = next {
-        next = Arc::into_inner(segment).and_then(|mut freed| {
-            budget.release(SEGMENT_BYTES);
-            freed.parent.take()
-        });
-    }
-}
-
-impl PathSegment {
-    /// This segment and its parents, back to the root.
-    fn back_to_the_root(&self) -> impl Iterator<Item = &PathSegment> {
-        std::iter::successors(Some(self), |segment| segment.parent.as_deref())
-    }
-
-    /// Materializes the full node path from root to this segment.
-    pub(super) fn collect_nodes(&self, depth: u32) -> Vec<NodeId> {
-        let mut nodes = Vec::with_capacity(depth as usize + 1);
-        nodes.extend(self.back_to_the_root().map(|segment| segment.node));
-        nodes.reverse();
-        nodes
-    }
-
-    /// Materializes the full edge path from root to this segment.
-    pub(super) fn collect_edges(&self, depth: u32) -> Vec<EdgeId> {
-        let mut edges = Vec::with_capacity(depth as usize);
-        edges.extend(self.back_to_the_root().filter_map(|segment| segment.edge));
-        edges.reverse();
-        edges
-    }
-
-    /// Checks whether a node already appears in this path segment chain.
-    pub(super) fn contains_node(&self, target: NodeId) -> bool {
-        self.back_to_the_root()
-            .any(|segment| segment.node == target)
-    }
-
-    /// Checks whether an edge already appears in this path segment chain.
-    pub(super) fn contains_edge(&self, target: EdgeId) -> bool {
-        self.back_to_the_root()
-            .any(|segment| segment.edge == Some(target))
-    }
-}
-
-impl Drop for PathSegment {
-    /// Drops the parents only this segment holds one at a time: the default
-    /// drop would recurse once per segment, as deep as the path is long.
-    fn drop(&mut self) {
-        let mut parent = self.parent.take();
-        while let Some(segment) = parent {
-            parent = Arc::into_inner(segment).and_then(|mut segment| segment.parent.take());
-        }
     }
 }
 
@@ -803,25 +747,26 @@ impl VariableLengthExpandOperator {
         Ok(edges)
     }
 
-    /// Checks whether a candidate expansion is allowed under the current path mode.
+    /// Checks whether a candidate expansion of the path that ends at
+    /// `segment` of `segments` is allowed under the current path mode.
     fn is_expansion_allowed(
         &self,
-        segment: &PathSegment,
+        (segments, segment): (&SegmentArena, u32),
         target: NodeId,
         edge_id: EdgeId,
         source_node: NodeId,
     ) -> bool {
         match self.path_mode {
             PathMode::Walk => true,
-            PathMode::Trail => !segment.contains_edge(edge_id),
+            PathMode::Trail => !segments.contains_edge(segment, edge_id),
             PathMode::Simple => {
                 // No repeated nodes, except that the path may end where it
                 // started (ISO/IEC 39075:2024 16.6): once it is back at the
                 // start, it goes no further.
-                let closed = segment.parent.is_some() && segment.node == source_node;
-                !closed && (target == source_node || !segment.contains_node(target))
+                let closed = !segments.is_first(segment) && segments.node(segment) == source_node;
+                !closed && (target == source_node || !segments.contains_node(segment, target))
             }
-            PathMode::Acyclic => !segment.contains_node(target),
+            PathMode::Acyclic => !segments.contains_node(segment, target),
         }
     }
 
@@ -832,26 +777,20 @@ impl VariableLengthExpandOperator {
         self.output_path_detail || self.output_edge_list || self.path_mode != PathMode::Walk
     }
 
-    /// The bytes one open path of the search is charged, and charged more
-    /// for each of its edges (see `RowSearch::cost`).
+    /// The bytes one open path of the search is charged for each of its
+    /// edges (see `RowSearch::cost`).
     ///
-    /// A path is charged what it holds beyond its entry in the search's
-    /// queue, whose blocks are charged as it grows: in a search that follows
-    /// paths, the one segment it adds to the path it extends, which stays
-    /// charged as long as a path through it lives (see `RowSearch::pop`). An
-    /// unbounded walk is charged a segment
-    /// per edge on top: a walk around a cycle never ends and can hold few
-    /// paths at once, so a charge that grows with its length is what makes
-    /// it reach the budget. A bounded search ends at its last hop, and a
-    /// path in TRAIL, SIMPLE or ACYCLIC mode ends on its own.
-    fn path_charges(&self) -> (usize, usize) {
-        let per_path = if self.follows_paths() {
-            SEGMENT_BYTES
-        } else {
-            0
-        };
+    /// A path holds its entry in the search's queue and, in a search that
+    /// follows paths, the one segment it adds to the path it extends, which
+    /// lives as long as a path through it does: both grow by blocks, charged
+    /// as they grow. An unbounded walk is charged a segment per edge on top:
+    /// a walk around a cycle never ends and can hold few paths at once, so a
+    /// charge that grows with its length is what makes it reach the budget.
+    /// A bounded search ends at its last hop, and a path in TRAIL, SIMPLE or
+    /// ACYCLIC mode ends on its own.
+    fn per_edge_charge(&self) -> usize {
         let unbounded_walk = self.path_mode == PathMode::Walk && self.max_hops == u32::MAX;
-        (per_path, if unbounded_walk { SEGMENT_BYTES } else { 0 })
+        if unbounded_walk { SEGMENT_BYTES } else { 0 }
     }
 
     /// The most node and edge ids the rows buffered for one chunk hold in
@@ -958,67 +897,52 @@ impl VariableLengthExpandOperator {
                 path_edges: (expand.output_path_detail || expand.output_edge_list).then(Vec::new),
             })?;
         }
-        let (per_path, per_edge) = self.path_charges();
         let mut search = RowSearch {
             input_idx,
             source,
             open: PathQueue::new(),
-            per_path,
-            per_edge,
+            segments: SegmentArena::within(self.path_budget.limit()),
+            per_edge: self.per_edge_charge(),
             condition_row: self.condition_row(input_idx),
         };
         if self.max_hops > 0 {
             let root = if follows_paths {
-                self.path_budget.charge(SEGMENT_BYTES)?;
-                Some(Arc::new(PathSegment {
-                    node: source,
-                    edge: None,
-                    parent: None,
-                }))
+                search.segments.root(&mut self.path_budget, source)?
             } else {
-                None
+                NO_SEGMENT
             };
-            self.extend(&mut search, allowance, source, 0, root.as_ref())?;
-            if let Some(root) = root {
-                release_segments(&mut self.path_budget, root);
-            }
+            self.extend(&mut search, allowance, source, 0, root)?;
+            search.segments.release(root);
         }
         Ok(search)
     }
 
     /// Adds the extensions by one edge of the path that ends at `node` after
     /// `length` edges to the search, those the path mode allows, in the
-    /// order of the node's edges. `segment` is the path when the search
-    /// follows paths.
+    /// order of the node's edges. `segment` is the path's last segment when
+    /// the search follows paths, else [`NO_SEGMENT`].
     fn extend(
         &mut self,
         search: &mut RowSearch,
         allowance: &mut Allowance,
         node: NodeId,
         length: u32,
-        segment: Option<&Arc<PathSegment>>,
+        segment: u32,
     ) -> Result<(), OperatorError> {
         for (target, edge) in
             self.get_edges(node, search.condition_row.as_mut(), Some(allowance))?
         {
-            if let Some(segment) = segment
-                && !self.is_expansion_allowed(segment, target, edge, search.source)
+            if segment != NO_SEGMENT
+                && !self.is_expansion_allowed(
+                    (&search.segments, segment),
+                    target,
+                    edge,
+                    search.source,
+                )
             {
                 continue;
             }
-            search.make_room(length + 1, &mut self.path_budget)?;
-            search.open.push(OpenPath {
-                node: target,
-                length: length + 1,
-                edge,
-                segment: segment.map(|segment| {
-                    Arc::new(PathSegment {
-                        node: target,
-                        edge: Some(edge),
-                        parent: Some(Arc::clone(segment)),
-                    })
-                }),
-            });
+            search.open_path(&mut self.path_budget, (target, edge, length + 1), segment)?;
         }
         Ok(())
     }
@@ -1047,32 +971,23 @@ impl VariableLengthExpandOperator {
                     };
                     self.take(allowance, copied)?;
                 }
-                let segment = path.segment.as_ref();
+                let followed = path.segment != NO_SEGMENT;
+                let segments = &search.segments;
                 self.buffer(path.length, |expand| OutputRow {
                     input_idx: search.input_idx,
                     edge_id: Some(path.edge),
                     target_id: path.node,
                     path_length: path.length,
-                    path_nodes: segment
-                        .filter(|_| expand.output_path_detail)
-                        .map(|segment| segment.collect_nodes(path.length)),
-                    path_edges: segment
-                        .filter(|_| with_edges)
-                        .map(|segment| segment.collect_edges(path.length)),
+                    path_nodes: (followed && expand.output_path_detail)
+                        .then(|| segments.collect_nodes(path.segment, path.length)),
+                    path_edges: (followed && with_edges)
+                        .then(|| segments.collect_edges(path.segment, path.length)),
                 })?;
             }
             if path.length < self.max_hops {
-                self.extend(
-                    search,
-                    allowance,
-                    path.node,
-                    path.length,
-                    path.segment.as_ref(),
-                )?;
+                self.extend(search, allowance, path.node, path.length, path.segment)?;
             }
-            if let Some(segment) = path.segment {
-                release_segments(&mut self.path_budget, segment);
-            }
+            search.segments.release(path.segment);
         }
         Ok(!search.open.is_empty())
     }
@@ -1259,6 +1174,8 @@ impl VariableLengthExpandOperator {
             if let Some(mut search) = self.search.take() {
                 if self.advance(&mut search, allowance)? {
                     self.search = Some(search);
+                } else {
+                    search.segments.give_back(&mut self.path_budget);
                 }
                 continue;
             }
@@ -2064,111 +1981,63 @@ mod tests {
         assert!(any.downcast::<VariableLengthExpandOperator>().is_ok());
     }
 
-    // --- PathSegment collection tests ---
+    // --- Path segment collection tests ---
+
+    /// The path from `root` over each `(node, edge)` of `hops`, in one arena:
+    /// the arena and the path's last segment.
+    fn path_of(root: u64, hops: &[(u64, u64)]) -> (SegmentArena, u32) {
+        let mut budget = PathBudget::new(usize::MAX, None);
+        let mut segments = SegmentArena::within(usize::MAX);
+        let mut last = segments.root(&mut budget, NodeId(root)).unwrap();
+        for &(node, edge) in hops {
+            let next = segments
+                .push(&mut budget, last, NodeId(node), EdgeId(edge))
+                .unwrap();
+            segments.release(last);
+            last = next;
+        }
+        (segments, last)
+    }
 
     #[test]
     fn test_path_segment_collect_nodes_single_hop() {
         // Root (Alix) -> target (Gus): one hop
-        let root = Arc::new(PathSegment {
-            node: NodeId(1),
-            edge: None,
-            parent: None,
-        });
-        let hop1 = Arc::new(PathSegment {
-            node: NodeId(2),
-            edge: Some(EdgeId(100)),
-            parent: Some(Arc::clone(&root)),
-        });
-
-        let nodes = hop1.collect_nodes(1);
+        let (segments, hop1) = path_of(1, &[(2, 100)]);
+        let nodes = segments.collect_nodes(hop1, 1);
         assert_eq!(nodes, vec![NodeId(1), NodeId(2)]);
     }
 
     #[test]
     fn test_path_segment_collect_nodes_multi_hop() {
         // Chain: Alix(1) -> Gus(2) -> Vincent(3) -> Jules(4)
-        let root = Arc::new(PathSegment {
-            node: NodeId(1),
-            edge: None,
-            parent: None,
-        });
-        let hop1 = Arc::new(PathSegment {
-            node: NodeId(2),
-            edge: Some(EdgeId(100)),
-            parent: Some(Arc::clone(&root)),
-        });
-        let hop2 = Arc::new(PathSegment {
-            node: NodeId(3),
-            edge: Some(EdgeId(101)),
-            parent: Some(Arc::clone(&hop1)),
-        });
-        let hop3 = Arc::new(PathSegment {
-            node: NodeId(4),
-            edge: Some(EdgeId(102)),
-            parent: Some(Arc::clone(&hop2)),
-        });
-
-        let nodes = hop3.collect_nodes(3);
+        let (segments, hop3) = path_of(1, &[(2, 100), (3, 101), (4, 102)]);
+        let nodes = segments.collect_nodes(hop3, 3);
         assert_eq!(nodes, vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)]);
     }
 
     #[test]
     fn test_path_segment_collect_edges_single_hop() {
-        let root = Arc::new(PathSegment {
-            node: NodeId(1),
-            edge: None,
-            parent: None,
-        });
-        let hop1 = Arc::new(PathSegment {
-            node: NodeId(2),
-            edge: Some(EdgeId(100)),
-            parent: Some(Arc::clone(&root)),
-        });
-
-        let edges = hop1.collect_edges(1);
+        let (segments, hop1) = path_of(1, &[(2, 100)]);
+        let edges = segments.collect_edges(hop1, 1);
         assert_eq!(edges, vec![EdgeId(100)]);
     }
 
     #[test]
     fn test_path_segment_collect_edges_multi_hop() {
         // Chain: 3 edges connecting 4 nodes
-        let root = Arc::new(PathSegment {
-            node: NodeId(1),
-            edge: None,
-            parent: None,
-        });
-        let hop1 = Arc::new(PathSegment {
-            node: NodeId(2),
-            edge: Some(EdgeId(10)),
-            parent: Some(Arc::clone(&root)),
-        });
-        let hop2 = Arc::new(PathSegment {
-            node: NodeId(3),
-            edge: Some(EdgeId(20)),
-            parent: Some(Arc::clone(&hop1)),
-        });
-        let hop3 = Arc::new(PathSegment {
-            node: NodeId(4),
-            edge: Some(EdgeId(30)),
-            parent: Some(Arc::clone(&hop2)),
-        });
-
-        let edges = hop3.collect_edges(3);
+        let (segments, hop3) = path_of(1, &[(2, 10), (3, 20), (4, 30)]);
+        let edges = segments.collect_edges(hop3, 3);
         assert_eq!(edges, vec![EdgeId(10), EdgeId(20), EdgeId(30)]);
     }
 
     #[test]
     fn test_path_segment_root_has_no_edges() {
-        let root = PathSegment {
-            node: NodeId(1),
-            edge: None,
-            parent: None,
-        };
+        let (segments, root) = path_of(1, &[]);
 
-        let edges = root.collect_edges(0);
+        let edges = segments.collect_edges(root, 0);
         assert!(edges.is_empty(), "Root segment should yield no edges");
 
-        let nodes = root.collect_nodes(0);
+        let nodes = segments.collect_nodes(root, 0);
         assert_eq!(
             nodes,
             vec![NodeId(1)],
@@ -2178,41 +2047,32 @@ mod tests {
 
     #[test]
     fn test_path_segment_contains_node() {
-        let root = Arc::new(PathSegment {
-            node: NodeId(1),
-            edge: None,
-            parent: None,
-        });
-        let hop1 = Arc::new(PathSegment {
-            node: NodeId(2),
-            edge: Some(EdgeId(100)),
-            parent: Some(Arc::clone(&root)),
-        });
+        let (segments, hop1) = path_of(1, &[(2, 100)]);
 
-        assert!(hop1.contains_node(NodeId(1)), "Should find root node");
-        assert!(hop1.contains_node(NodeId(2)), "Should find current node");
         assert!(
-            !hop1.contains_node(NodeId(3)),
+            segments.contains_node(hop1, NodeId(1)),
+            "Should find root node"
+        );
+        assert!(
+            segments.contains_node(hop1, NodeId(2)),
+            "Should find current node"
+        );
+        assert!(
+            !segments.contains_node(hop1, NodeId(3)),
             "Should not find absent node"
         );
     }
 
     #[test]
     fn test_path_segment_contains_edge() {
-        let root = Arc::new(PathSegment {
-            node: NodeId(1),
-            edge: None,
-            parent: None,
-        });
-        let hop1 = Arc::new(PathSegment {
-            node: NodeId(2),
-            edge: Some(EdgeId(100)),
-            parent: Some(Arc::clone(&root)),
-        });
+        let (segments, hop1) = path_of(1, &[(2, 100)]);
 
-        assert!(hop1.contains_edge(EdgeId(100)), "Should find current edge");
         assert!(
-            !hop1.contains_edge(EdgeId(999)),
+            segments.contains_edge(hop1, EdgeId(100)),
+            "Should find current edge"
+        );
+        assert!(
+            !segments.contains_edge(hop1, EdgeId(999)),
             "Should not find absent edge"
         );
     }
@@ -3335,7 +3195,7 @@ mod tests {
             store.create_edge(last, next, "NEXT");
             last = next;
         }
-        let (_, per_edge) = from_sources(&store, 1, 2_000).path_charges();
+        let per_edge = from_sources(&store, 1, 2_000).per_edge_charge();
         assert_eq!(per_edge, 0, "a bounded walk is not charged per edge");
         let expand = |budget: usize| {
             from_sources(&store, 1, 2_000)
@@ -3370,20 +3230,25 @@ mod tests {
             store.create_edge(last, next, "NEXT");
             last = next;
         }
-        let segment = std::mem::size_of::<PathSegment>() + 2 * std::mem::size_of::<usize>();
-        let blocks = 2 * crate::execution::path_queue::BLOCK_BYTES;
+        let segment = SEGMENT_BYTES;
+        let block = crate::execution::path_queue::BLOCK_BYTES;
+        let blocks = 2 * block;
         assert!(segment < blocks && LENGTH * segment > blocks);
         let expand = |budget: usize| {
             from_sources(&store, 1, 2_000)
                 .with_path_mode(PathMode::Trail)
                 .with_memory_budget(budget)
         };
-        let Err(error) = rows(&mut expand(blocks)) else {
-            panic!("answered: the chain's 2,000 live segments pass two blocks");
-        };
-        assert!(path_budget_message(&error).is_some(), "{error}");
+        // With room for half the chain too, still refused
+        for budget in [blocks, blocks + LENGTH / 2 * segment] {
+            let Err(error) = rows(&mut expand(budget)) else {
+                panic!("answered at {budget}: the chain's 2,000 live segments do not fit");
+            };
+            assert!(path_budget_message(&error).is_some(), "{error}");
+        }
+        // The chain's segments, a block of them partly filled and their index
         assert_eq!(
-            rows(&mut expand(blocks + (LENGTH + 1) * segment))
+            rows(&mut expand(blocks + (LENGTH + 1) * segment + 2 * block))
                 .unwrap()
                 .len(),
             LENGTH
@@ -3393,10 +3258,11 @@ mod tests {
     #[test]
     fn a_search_gives_back_the_segments_of_the_paths_it_is_done_with() {
         // TRAIL from a source to 1,000 leaves, the last of which leads on
-        // along a chain of 1,000 edges. The leaves' segments go back as their
-        // paths are done, before the chain's are made, so the search holds
-        // one of the two at a time: room for 1,200 segments and nine of the
-        // queue's blocks is enough, where the two together are not
+        // along a chain of 1,000 edges. The leaves' segments are freed as
+        // their paths are done, before the chain's are made in their slots,
+        // so the search holds one of the two at a time: room for 1,200
+        // segments and nine of the queue's blocks is enough, where the two
+        // together (twice the blocks of segments) are not
         const LEAVES: usize = 1_000;
         let store = Arc::new(RowGroupStore::new());
         let source = store.create_node(&["Source"]);
@@ -3410,14 +3276,19 @@ mod tests {
             store.create_edge(last, next, "NEXT");
             last = next;
         }
-        let blocks = 9 * crate::execution::path_queue::BLOCK_BYTES;
-        assert!(1_200 * SEGMENT_BYTES + blocks < 2 * LEAVES * SEGMENT_BYTES + 4_096);
+        let block = crate::execution::path_queue::BLOCK_BYTES;
+        let blocks = 9 * block;
+        let budget = 1_200 * SEGMENT_BYTES + blocks;
+        let per_block = block / SEGMENT_BYTES;
+        let together = (2 * LEAVES + 1).div_ceil(per_block) * per_block * SEGMENT_BYTES
+            + LEAVES * PATH_QUEUE_ENTRY_BYTES;
+        assert!(budget < together, "{budget} {together}");
         let mut expand = from_sources(&store, 1, 2_000)
             .with_path_mode(PathMode::Trail)
-            .with_memory_budget(1_200 * SEGMENT_BYTES + blocks);
+            .with_memory_budget(budget);
         assert_eq!(rows(&mut expand).unwrap().len(), 2 * LEAVES);
         assert!(
-            expand.path_budget.used() <= crate::execution::path_queue::BLOCK_BYTES + 512,
+            expand.path_budget.used() <= block + 512,
             "the queue's spare and its index are left: {}",
             expand.path_budget.used()
         );
@@ -3511,24 +3382,13 @@ mod tests {
     #[test]
     fn a_long_path_is_checked_for_repeats_without_a_frame_per_segment() {
         // The checks of TRAIL, SIMPLE and ACYCLIC walk the whole path
-        let mut segment = Arc::new(PathSegment {
-            node: NodeId(0),
-            edge: None,
-            parent: None,
-        });
-        for i in 1..=300_000 {
-            segment = Arc::new(PathSegment {
-                node: NodeId(i),
-                edge: Some(EdgeId(i)),
-                parent: Some(segment),
-            });
-        }
-        assert!(segment.contains_node(NodeId(0)));
-        assert!(!segment.contains_node(NodeId(300_001)));
-        assert!(segment.contains_edge(EdgeId(1)));
-        assert!(!segment.contains_edge(EdgeId(0)));
-        assert_eq!(segment.collect_edges(300_000).len(), 300_000);
-        drop(segment);
+        let hops: Vec<(u64, u64)> = (1..=300_000).map(|i| (i, i)).collect();
+        let (segments, segment) = path_of(0, &hops);
+        assert!(segments.contains_node(segment, NodeId(0)));
+        assert!(!segments.contains_node(segment, NodeId(300_001)));
+        assert!(segments.contains_edge(segment, EdgeId(1)));
+        assert!(!segments.contains_edge(segment, EdgeId(0)));
+        assert_eq!(segments.collect_edges(segment, 300_000).len(), 300_000);
     }
 
     #[test]
@@ -3821,9 +3681,9 @@ mod tests {
     fn a_path_too_long_for_the_budget_is_refused_before_its_lists_are_built() {
         // One path of 2,000 edges: its 4,001 ids take 32,008 bytes in the
         // output buffer. The search holds the one open path, its 2,001
-        // segments and at most two of the queue's blocks: with room for that
-        // and half the ids it is refused, with room for all of them it
-        // answers
+        // segments (with a block of them partly filled, and their index) and
+        // at most two of the queue's blocks: with room for that and half the
+        // ids it is refused, with room for all of them it answers
         let store = Arc::new(RowGroupStore::new());
         let mut last = store.create_node(&["Source"]);
         for _ in 0..2_000 {
@@ -3831,7 +3691,7 @@ mod tests {
             store.create_edge(last, next, "NEXT");
             last = next;
         }
-        let path = 2 * crate::execution::path_queue::BLOCK_BYTES + 2_001 * SEGMENT_BYTES;
+        let path = 3 * crate::execution::path_queue::BLOCK_BYTES + 2_001 * SEGMENT_BYTES;
         let ids = 4_001 * ID_BYTES;
         let mut expand = from_sources(&store, 2_000, 2_000)
             .with_path_detail_output()
@@ -4038,12 +3898,13 @@ mod tests {
     ];
 
     impl SmallShape {
-        /// What 0.6.3 charged one queued path: its entry, and its segment when
-        /// the search followed paths.
+        /// What 0.6.3 charged one queued path: its entry (32 bytes), and its
+        /// segment (48, with the counts of its `Arc`) when the search
+        /// followed paths.
         fn charged_by_0_6_3(self) -> usize {
             match self.mode {
-                PathMode::Walk => PATH_QUEUE_ENTRY_BYTES,
-                _ => PATH_QUEUE_ENTRY_BYTES + SEGMENT_BYTES,
+                PathMode::Walk => 32,
+                _ => 32 + 48,
             }
         }
 
@@ -4054,16 +3915,19 @@ mod tests {
             budget / self.charged_by_0_6_3()
         }
 
-        /// The leaves 0.6.4 holds at least within `budget`, by what it counts
-        /// that 0.6.3 did not:
+        /// The leaves 0.6.4 holds at least within `budget`: a leaf costs its
+        /// entry, its segment in a search that follows paths, and in a
+        /// two-hop search that follows paths also the segment of the leaf
+        /// taken out while its child is queued. Besides them the search
+        /// holds:
         /// - the queue's blocks, a quarter of the budget each below 16 KiB:
         ///   the last one partly filled, and in a two-hop search also the
         ///   first one partly drained;
-        /// - the block index at its doubled peak with its reservation slack,
-        ///   once there is more than one block;
-        /// - the source's segment, in a search that follows paths;
-        /// - in a two-hop TRAIL search, the segment of each leaf taken out
-        ///   while its child is queued.
+        /// - the queue's block index at its doubled peak with its
+        ///   reservation slack, once there is more than one block;
+        /// - in a search that follows paths, the source's segment, the last
+        ///   block of segments partly filled (blocks of the queue's size),
+        ///   and their index at its doubled peak with its slack.
         fn held_at_least(self, budget: usize) -> usize {
             // A block, by the rule (not by the queue): a quarter of what the
             // budget leaves beside the index of four blocks
@@ -4074,22 +3938,33 @@ mod tests {
                 1,
                 crate::execution::path_queue::BLOCK_BYTES / PATH_QUEUE_ENTRY_BYTES,
             ) * PATH_QUEUE_ENTRY_BYTES;
-            let wasted = if self.two { 2 } else { 1 };
-            let blocks = (self.held_by_0_6_3(budget) * PATH_QUEUE_ENTRY_BYTES).div_ceil(block)
-                + usize::from(self.two);
+            let follows = self.mode != PathMode::Walk;
+            let segments_a_leaf = match (follows, self.two) {
+                (false, _) => 0,
+                (true, false) => 1,
+                (true, true) => 2,
+            };
+            let per_leaf = PATH_QUEUE_ENTRY_BYTES + segments_a_leaf * SEGMENT_BYTES;
+            // The blocks of the most leaves the budget could hold
+            let most = budget / per_leaf;
             let slack =
                 crate::execution::path_budget::RESERVE_SLACK_ENTRIES * budget.min(small) / small;
-            let index = if blocks > 1 {
-                (3 * blocks + slack) * crate::execution::path_queue::INDEX_SLOT_BYTES
+            let doubled = |blocks: usize| (3 * blocks.max(4) + slack) * slot;
+            let queue_blocks =
+                (most * PATH_QUEUE_ENTRY_BYTES).div_ceil(block) + usize::from(self.two);
+            let queue = (1 + usize::from(self.two)) * block
+                + if queue_blocks > 1 {
+                    doubled(queue_blocks)
+                } else {
+                    0
+                };
+            let segments = if follows {
+                let blocks = (1 + most * segments_a_leaf).div_ceil(block / SEGMENT_BYTES);
+                SEGMENT_BYTES + block + doubled(blocks)
             } else {
                 0
             };
-            let (source, per_leaf) = match (self.mode, self.two) {
-                (PathMode::Walk, _) => (0, PATH_QUEUE_ENTRY_BYTES),
-                (_, false) => (SEGMENT_BYTES, PATH_QUEUE_ENTRY_BYTES + SEGMENT_BYTES),
-                (_, true) => (SEGMENT_BYTES, PATH_QUEUE_ENTRY_BYTES + 2 * SEGMENT_BYTES),
-            };
-            budget.saturating_sub(wasted * block + index + source) / per_leaf
+            budget.saturating_sub(queue + segments) / per_leaf
         }
 
         /// The most leaves a search of this shape answers for within
@@ -4137,11 +4012,11 @@ mod tests {
                 let (held, floor) = (shape.held(budget), shape.held_at_least(budget));
                 let by_0_6_3 = shape.held_by_0_6_3(budget);
                 assert!(
-                    held >= floor && floor <= by_0_6_3,
+                    held >= floor,
                     "{} at {kib} KiB: held {held}, 0.6.3 held {by_0_6_3}, at least {floor} \
                      ({} fewer for what 0.6.4 counts more)",
                     shape.name,
-                    by_0_6_3 - floor
+                    by_0_6_3.saturating_sub(floor)
                 );
             }
         }
@@ -4225,13 +4100,17 @@ mod tests {
     fn at_a_refusal_the_popped_paths_with_queued_extensions_are_counted() {
         // A tree: the source, its 8 children, 8 grandchildren under each;
         // TRAIL up to two edges. A budget of 2,784 bytes has blocks of 672
-        // (a quarter of what it leaves beside an index of 96, 21 entries):
-        // the source's segment, the children's block and segments and the
-        // grandchildren's block leave room for 21 grandchildren's segments,
-        // so the 6th grandchild of the 3rd child is refused. The source and
-        // the 3 children taken out are alive then through their queued
-        // extensions: 4 segments besides the 26 queued paths' own (5
-        // children and 21 grandchildren)
+        // bytes, 28 entries or segments (a quarter of what it leaves beside
+        // an index of 96). The first block of segments (with its index of
+        // one) and the queue's block of children hold 1,368 bytes; the
+        // grandchildren of the first 3 children fill the queue's second
+        // block to 24 and the segments' first to 28, so the 4th child's
+        // grandchildren take a second block of segments (its index grown to
+        // two): 2,736 bytes. The 5th of them needs a third block of the queue
+        // and an index for it, past the budget. The source and the 4
+        // children taken out are alive then through their queued extensions:
+        // 5 segments besides the 32 queued paths' own (4 children and 28
+        // grandchildren)
         const WIDTH: usize = 8;
         const BUDGET: usize = 2_784;
         let store = Arc::new(RowGroupStore::new());
@@ -4244,22 +4123,16 @@ mod tests {
                 store.create_edge(child, grandchild, "KNOWS");
             }
         }
+        let slot = crate::execution::path_queue::INDEX_SLOT_BYTES;
         let block = PathQueue::<OpenPath>::block_items_within(BUDGET) * PATH_QUEUE_ENTRY_BYTES;
+        assert_eq!(block, (BUDGET - 4 * slot) / 4);
+        assert_eq!(block / SEGMENT_BYTES, 28);
+        let (queued, live) = (WIDTH - 4 + 28, 1 + 4);
         assert_eq!(
-            block,
-            (BUDGET - 4 * crate::execution::path_queue::INDEX_SLOT_BYTES) / 4
+            4 * block + 2 * slot,
+            2_736,
+            "the blocks held at the refusal"
         );
-        let fixed = SEGMENT_BYTES + 2 * block + WIDTH * SEGMENT_BYTES;
-        let grandchildren = (BUDGET - fixed) / SEGMENT_BYTES;
-        assert_eq!(
-            fixed + grandchildren * SEGMENT_BYTES,
-            BUDGET,
-            "the budget fills"
-        );
-        let (child, nth) = (grandchildren / WIDTH + 1, grandchildren % WIDTH + 1);
-        assert_eq!((grandchildren, child, nth), (21, 3, 6));
-        let queued = WIDTH - child + grandchildren;
-        let live = 1 + child;
 
         let mut expand = from_sources(&store, 1, 2)
             .with_path_mode(PathMode::Trail)
@@ -4277,11 +4150,19 @@ mod tests {
         };
         assert!(path_budget_message(&error).is_some(), "{error}");
         assert_eq!(search.open.len(), queued, "the queued paths");
-        let segments = expand.path_budget.used() - search.open.held_bytes();
         assert_eq!(
-            segments - queued * SEGMENT_BYTES,
-            live * SEGMENT_BYTES,
-            "the segments of the source and the children taken out"
+            search.segments.live(),
+            queued + live,
+            "the segments of the queued paths, the source and the children taken out"
+        );
+        assert_eq!(
+            expand.path_budget.used(),
+            search.open.held_bytes() + search.segments.held_bytes(),
+            "the budget holds the queue and the segments, no more"
+        );
+        assert_eq!(
+            (search.segments.held_bytes(), expand.path_budget.used()),
+            (2 * block + 2 * slot, 2_736)
         );
     }
 }

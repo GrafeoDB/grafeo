@@ -978,8 +978,9 @@ impl RdfPlanner {
             .inputs
             .iter()
             .map(|branch| {
-                union_branch_pattern(branch)
-                    .and_then(|pattern| estimate_operator_cardinality(pattern, &self.store))
+                union_branch_pattern(branch).and_then(|pattern| {
+                    estimate_operator_cardinality(pattern, &self.store, &self.view)
+                })
             })
             .sum()
     }
@@ -2336,8 +2337,8 @@ impl RdfPlanner {
         // until it runs, and is dropped). Of two patterns, the one estimated
         // to match more triples is looked up; a wrong guess costs at most
         // `LOOKUP_ROWS` lookups before the join hashes the scan.
-        let left_estimate = estimate_operator_cardinality(&join.left, &self.store);
-        let right_estimate = estimate_operator_cardinality(&join.right, &self.store);
+        let left_estimate = estimate_operator_cardinality(&join.left, &self.store, &self.view);
+        let right_estimate = estimate_operator_cardinality(&join.right, &self.store, &self.view);
         // A UNION of patterns with a variable the other side binds (an
         // alternative path is one): a lookup per row of that side in each
         // branch, the planned UNION what the join hashes past the limit. Of
@@ -2491,8 +2492,9 @@ impl RdfPlanner {
         }
 
         // Estimate cardinalities for build-side selection
-        let cardinalities = estimate_operator_cardinality(&join.left, &self.store)
-            .zip(estimate_operator_cardinality(&join.right, &self.store));
+        let cardinalities = estimate_operator_cardinality(&join.left, &self.store, &self.view).zip(
+            estimate_operator_cardinality(&join.right, &self.store, &self.view),
+        );
 
         Ok(common::build_inner_join(
             left_op,
@@ -2540,8 +2542,9 @@ impl RdfPlanner {
         if join.condition.is_none()
             && let LogicalOperator::TripleScan(scan) = join.right.as_ref()
         {
-            let left_estimate = estimate_operator_cardinality(&join.left, &self.store);
-            let right_estimate = estimate_operator_cardinality(&join.right, &self.store);
+            let left_estimate = estimate_operator_cardinality(&join.left, &self.store, &self.view);
+            let right_estimate =
+                estimate_operator_cardinality(&join.right, &self.store, &self.view);
             if let Some(parts) = self.triple_lookup(
                 scan,
                 &join.left,
@@ -2569,7 +2572,7 @@ impl RdfPlanner {
         if join.condition.is_none()
             && let LogicalOperator::Union(union) = join.right.as_ref()
         {
-            let left_estimate = estimate_operator_cardinality(&join.left, &self.store);
+            let left_estimate = estimate_operator_cardinality(&join.left, &self.store, &self.view);
             if let Some(plan) = self.union_lookup(
                 union,
                 &right_columns,
@@ -2578,8 +2581,11 @@ impl RdfPlanner {
                 left_estimate,
             ) {
                 let entries = right_entry..self.profile_entries.borrow().len();
-                let cardinalities =
-                    left_estimate.zip(estimate_operator_cardinality(&join.right, &self.store));
+                let cardinalities = left_estimate.zip(estimate_operator_cardinality(
+                    &join.right,
+                    &self.store,
+                    &self.view,
+                ));
                 return Ok(self.union_lookup_join(
                     plan,
                     (left_op, left_columns, left_types),
@@ -2706,7 +2712,8 @@ impl RdfPlanner {
         let mut planned: Vec<Planned> = Vec::new();
         for input in &mwj.inputs {
             let (op, cols, types) = self.plan_operator(input)?;
-            let card = estimate_operator_cardinality(input, &self.store).unwrap_or(1000.0);
+            let card =
+                estimate_operator_cardinality(input, &self.store, &self.view).unwrap_or(1000.0);
             let bound = crate::query::plan::always_bound(input);
             planned.push((op, cols, types, card, bound));
         }
@@ -4955,94 +4962,114 @@ fn column_map(columns: &[String]) -> HashMap<String, usize> {
 ///
 /// Uses store index sizes to estimate how many rows an operator produces,
 /// without collecting full statistics. Returns `None` if estimation is
-/// not possible for this operator type.
+/// not possible for this operator type. A pattern is estimated from the
+/// graphs it reads ([`TripleScanOp::graphs_read`]) as `view` sees them: a
+/// named graph's store keeps its own counts, and `GRAPH ?g` sums the graphs'.
 fn estimate_operator_cardinality(
     op: &crate::query::plan::LogicalOperator,
     store: &RdfStore,
+    view: &RdfView,
 ) -> Option<f64> {
-    use crate::query::plan::LogicalOperator;
+    use crate::query::plan::{GraphsRead, LogicalOperator};
     match op {
         LogicalOperator::RowValues(_) => Some(1.0),
-        LogicalOperator::TripleScan(scan) => {
-            let stats = store.stats();
-            let total = stats.triple_count as f64;
-            if total == 0.0 {
-                return Some(0.0);
-            }
-
-            // Estimate based on which components are bound
-            let s_bound = matches!(
-                scan.subject,
-                crate::query::plan::TripleComponent::Iri(_)
-                    | crate::query::plan::TripleComponent::Literal(_)
-                    | crate::query::plan::TripleComponent::LangLiteral { .. }
-            );
-            let p_bound = matches!(
-                scan.predicate,
-                crate::query::plan::TripleComponent::Iri(_)
-                    | crate::query::plan::TripleComponent::Literal(_)
-                    | crate::query::plan::TripleComponent::LangLiteral { .. }
-            );
-            let o_bound = matches!(
-                scan.object,
-                crate::query::plan::TripleComponent::Iri(_)
-                    | crate::query::plan::TripleComponent::Literal(_)
-                    | crate::query::plan::TripleComponent::LangLiteral { .. }
-            );
-
-            // With a predicate, its own counts from the optimizer's
-            // statistics (cached, see `RdfStore::get_or_collect_statistics`).
-            if let crate::query::plan::TripleComponent::Iri(predicate) = &scan.predicate
-                && let Some(counted) = store
-                    .get_or_collect_statistics()
-                    .get_predicate(&format!("<{predicate}>"))
-            {
-                let triples = counted.triple_count as f64;
-                let estimate = match (s_bound, o_bound) {
-                    (true, true) => 1.0,
-                    (true, false) => triples / counted.distinct_subjects.max(1) as f64,
-                    (false, true) => triples / counted.distinct_objects.max(1) as f64,
-                    (false, false) => triples,
-                };
-                return Some(estimate.max(1.0));
-            }
-            let estimate = match (s_bound, p_bound, o_bound) {
-                (true, true, true) => 1.0,
-                (true, true, false) => total / stats.subject_count.max(1) as f64,
-                (true, false, true) => total / stats.subject_count.max(1) as f64,
-                (false, true, true) => total / stats.predicate_count.max(1) as f64,
-                (true, false, false) => total / stats.subject_count.max(1) as f64,
-                (false, true, false) => total / stats.predicate_count.max(1) as f64,
-                (false, false, true) => total / stats.object_count.max(1) as f64,
-                (false, false, false) => total,
-            };
-            Some(estimate.max(1.0))
-        }
+        LogicalOperator::TripleScan(scan) => Some(match scan.graphs_read() {
+            GraphsRead::Default => scan_estimate(scan, store),
+            GraphsRead::Named(names) => names
+                .into_iter()
+                .filter_map(|name| store.graph_at(view, name))
+                .map(|graph| scan_estimate(scan, &graph))
+                .sum(),
+            GraphsRead::EveryNamed => store
+                .graph_names(view)
+                .iter()
+                .filter_map(|name| store.graph_at(view, name))
+                .map(|graph| scan_estimate(scan, &graph))
+                .sum(),
+        }),
         LogicalOperator::Filter(f) => {
-            estimate_operator_cardinality(&f.input, store).map(|c| (c * 0.33).max(1.0))
+            estimate_operator_cardinality(&f.input, store, view).map(|c| (c * 0.33).max(1.0))
         }
         LogicalOperator::Join(j) => {
-            let left = estimate_operator_cardinality(&j.left, store)?;
-            let right = estimate_operator_cardinality(&j.right, store)?;
+            let left = estimate_operator_cardinality(&j.left, store, view)?;
+            let right = estimate_operator_cardinality(&j.right, store, view)?;
             Some((left * right * 0.1).max(1.0))
         }
         LogicalOperator::Limit(l) => {
             if let crate::query::plan::CountExpr::Literal(n) = l.count {
                 Some(n as f64)
             } else {
-                estimate_operator_cardinality(&l.input, store)
+                estimate_operator_cardinality(&l.input, store, view)
             }
         }
         // A VALUES block is a union of one row each (see the translator).
         LogicalOperator::Empty => Some(1.0),
-        LogicalOperator::Bind(bind) => estimate_operator_cardinality(&bind.input, store),
+        LogicalOperator::Bind(bind) => estimate_operator_cardinality(&bind.input, store, view),
         LogicalOperator::Union(union) => union
             .inputs
             .iter()
-            .map(|input| estimate_operator_cardinality(input, store))
+            .map(|input| estimate_operator_cardinality(input, store, view))
             .sum::<Option<f64>>(),
         _ => None,
     }
+}
+
+/// The rows `scan` is estimated to match in the graph whose store is `store`: from the
+/// predicate's counts when the statistics have it, else from the store's totals.
+fn scan_estimate(scan: &TripleScanOp, store: &RdfStore) -> f64 {
+    let stats = store.stats();
+    let total = stats.triple_count as f64;
+    if total == 0.0 {
+        return 0.0;
+    }
+
+    // Estimate based on which components are bound
+    let s_bound = matches!(
+        scan.subject,
+        crate::query::plan::TripleComponent::Iri(_)
+            | crate::query::plan::TripleComponent::Literal(_)
+            | crate::query::plan::TripleComponent::LangLiteral { .. }
+    );
+    let p_bound = matches!(
+        scan.predicate,
+        crate::query::plan::TripleComponent::Iri(_)
+            | crate::query::plan::TripleComponent::Literal(_)
+            | crate::query::plan::TripleComponent::LangLiteral { .. }
+    );
+    let o_bound = matches!(
+        scan.object,
+        crate::query::plan::TripleComponent::Iri(_)
+            | crate::query::plan::TripleComponent::Literal(_)
+            | crate::query::plan::TripleComponent::LangLiteral { .. }
+    );
+
+    // With a predicate, its own counts from the optimizer's
+    // statistics (cached, see `RdfStore::get_or_collect_statistics`).
+    if let crate::query::plan::TripleComponent::Iri(predicate) = &scan.predicate
+        && let Some(counted) = store
+            .get_or_collect_statistics()
+            .get_predicate(&format!("<{predicate}>"))
+    {
+        let triples = counted.triple_count as f64;
+        let estimate = match (s_bound, o_bound) {
+            (true, true) => 1.0,
+            (true, false) => triples / counted.distinct_subjects.max(1) as f64,
+            (false, true) => triples / counted.distinct_objects.max(1) as f64,
+            (false, false) => triples,
+        };
+        return estimate.max(1.0);
+    }
+    let estimate = match (s_bound, p_bound, o_bound) {
+        (true, true, true) => 1.0,
+        (true, true, false) => total / stats.subject_count.max(1) as f64,
+        (true, false, true) => total / stats.subject_count.max(1) as f64,
+        (false, true, true) => total / stats.predicate_count.max(1) as f64,
+        (true, false, false) => total / stats.subject_count.max(1) as f64,
+        (false, true, false) => total / stats.predicate_count.max(1) as f64,
+        (false, false, true) => total / stats.object_count.max(1) as f64,
+        (false, false, false) => total,
+    };
+    estimate.max(1.0)
 }
 
 /// How many rows of `other` look their triples up in patterns estimated to

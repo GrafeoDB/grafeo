@@ -37,6 +37,10 @@ internal static partial class NativeMethods
     [LibraryImport(LibName)]
     internal static partial int grafeo_options_set_query_memory_limit(OptionsHandle options, ulong bytes);
 
+    /// <summary>Sets the CDC memory limit in bytes, above zero.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int grafeo_options_set_cdc_memory_limit(OptionsHandle options, ulong bytes);
+
     /// <summary>Sets the path search budget in bytes, above zero.</summary>
     [LibraryImport(LibName)]
     internal static partial int grafeo_options_set_path_search_budget(OptionsHandle options, ulong bytes);
@@ -64,6 +68,10 @@ internal static partial class NativeMethods
     /// <summary>Sets the spill limit in bytes; zero means nothing spills.</summary>
     [LibraryImport(LibName)]
     internal static partial int grafeo_options_set_spill_limit(OptionsHandle options, ulong bytes);
+
+    /// <summary>Sets the plan cache limit in bytes; zero keeps no plan.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int grafeo_options_set_plan_cache_limit(OptionsHandle options, ulong bytes);
 
     /// <summary>Lifts the spill limit.</summary>
     [LibraryImport(LibName)]

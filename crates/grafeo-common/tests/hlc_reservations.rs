@@ -51,6 +51,10 @@ fn plus_steps_through_the_raw_encoding_and_carries() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "requires wall clock (SystemTime::now) unavailable under Miri isolation"
+)]
 fn a_reservation_is_a_run_above_everything_before_and_after() {
     let clock = HlcClock::new();
     let before = clock.now();
@@ -64,6 +68,10 @@ fn a_reservation_is_a_run_above_everything_before_and_after() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "requires wall clock (SystemTime::now) unavailable under Miri isolation"
+)]
 fn seventy_thousand_timestamps_in_one_millisecond_never_repeat() {
     let floor = ahead();
     let clock = HlcClock::starting_after(floor);
@@ -86,6 +94,10 @@ fn seventy_thousand_timestamps_in_one_millisecond_never_repeat() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "requires wall clock (SystemTime::now) unavailable under Miri isolation"
+)]
 fn reservations_from_eight_threads_are_disjoint_and_rising() {
     let clock = Arc::new(HlcClock::starting_after(ahead()));
     let runs: Vec<Vec<(u64, u64)>> = (0..8)
@@ -121,6 +133,10 @@ fn reservations_from_eight_threads_are_disjoint_and_rising() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "requires wall clock (SystemTime::now) unavailable under Miri isolation"
+)]
 fn a_clock_started_after_a_floor_gives_only_later_timestamps() {
     for floor in [ahead(), HlcTimestamp::new(wall_ms() + 3_600_000, 65_535)] {
         let clock = HlcClock::starting_after(floor);

@@ -631,6 +631,10 @@ impl PyGrafeoDB {
     /// it they spill to disk where they can, else the statement raises
     /// GRAFEO-S001. For this open only.
     ///
+    /// cdc_memory_limit is how many bytes the in-memory change log may hold:
+    /// past it the oldest commits go. By default a sixteenth of memory_limit,
+    /// and never more than memory_limit. For this open only.
+    ///
     /// path_search_budget is how many bytes one path search may hold:
     /// everything a variable-length, shortest-path or RDF property path search
     /// holds at once (the nodes it visits, its queues and the paths it keeps),
@@ -668,6 +672,13 @@ impl PyGrafeoDB {
     /// half the spill volume's free space by default; unlimited_spill=True
     /// lifts it (and wins over spill_limit). An in-memory database spills
     /// nothing. For this open only.
+    ///
+    /// plan_cache_limit is how many bytes of plans the database keeps for
+    /// repeated statements, by a deep estimate of what each plan holds; 0
+    /// keeps none, so every statement plans. By default a sixty-fourth of
+    /// memory_limit, from 4 MiB to 64 MiB; never more than memory_limit.
+    /// memory_usage()["caches"]["plan_cache_limit_bytes"] reads it back. For
+    /// this open only.
     #[new]
     #[pyo3(signature = (
         path=None,
@@ -683,6 +694,7 @@ impl PyGrafeoDB {
         wal_segment_size=None,
         memory_limit=None,
         query_memory_limit=None,
+        cdc_memory_limit=None,
         path_search_budget=None,
         path_expansion_limit=None,
         max_query_length=None,
@@ -690,7 +702,8 @@ impl PyGrafeoDB {
         snapshot_retention_limit=None,
         history_retention_limit=None,
         spill_limit=None,
-        unlimited_spill=false
+        unlimited_spill=false,
+        plan_cache_limit=None
     ))]
     #[allow(
         clippy::too_many_arguments,
@@ -710,6 +723,7 @@ impl PyGrafeoDB {
         wal_segment_size: Option<u64>,
         memory_limit: Option<usize>,
         query_memory_limit: Option<usize>,
+        cdc_memory_limit: Option<usize>,
         path_search_budget: Option<usize>,
         path_expansion_limit: Option<u64>,
         max_query_length: Option<usize>,
@@ -718,6 +732,7 @@ impl PyGrafeoDB {
         history_retention_limit: Option<u64>,
         spill_limit: Option<u64>,
         unlimited_spill: bool,
+        plan_cache_limit: Option<usize>,
         py: Python<'_>,
     ) -> PyResult<Self> {
         let mut config = if let Some(p) = path {
@@ -752,6 +767,17 @@ impl PyGrafeoDB {
         if let Some(bytes) = query_memory_limit {
             config = config.with_query_memory_limit(bytes);
         }
+        if let Some(bytes) = cdc_memory_limit {
+            #[cfg(feature = "cdc")]
+            {
+                config = config.with_cdc_memory_limit(bytes);
+            }
+            #[cfg(not(feature = "cdc"))]
+            return Err(PyGrafeoError::InvalidArgument(format!(
+                "cdc_memory_limit={bytes} needs the cdc feature, which this build lacks"
+            ))
+            .into());
+        }
         if let Some(bytes) = path_search_budget {
             config = config.with_path_search_budget(bytes);
         }
@@ -774,6 +800,9 @@ impl PyGrafeoDB {
             config = config.with_unlimited_spill();
         } else if let Some(bytes) = spill_limit {
             config = config.with_spill_limit(bytes);
+        }
+        if let Some(bytes) = plan_cache_limit {
+            config = config.with_plan_cache_limit(bytes);
         }
         config = match query_timeout.map(|seconds| timeout_seconds(seconds, "query_timeout")) {
             Some(Some(timeout)) => config.with_query_timeout(timeout?),
@@ -3184,6 +3213,14 @@ impl PyGrafeoDB {
             usage.caches.optimized_plan_cache_bytes,
         )?;
         caches.set_item("cached_plan_count", usage.caches.cached_plan_count)?;
+        caches.set_item(
+            "plan_cache_limit_bytes",
+            usage.caches.plan_cache_limit_bytes,
+        )?;
+        caches.set_item(
+            "session_plan_cache_bytes",
+            usage.caches.session_plan_cache_bytes,
+        )?;
 
         let string_pool = pyo3::types::PyDict::new(py);
         string_pool.set_item("total_bytes", usage.string_pool.total_bytes)?;
@@ -3236,6 +3273,7 @@ impl PyGrafeoDB {
         cdc.set_item("entity_count", usage.cdc.entity_count)?;
         cdc.set_item("event_count", usage.cdc.event_count)?;
         cdc.set_item("granted_bytes", usage.cdc.granted_bytes)?;
+        cdc.set_item("limit_bytes", usage.cdc.limit_bytes)?;
 
         let spill = pyo3::types::PyDict::new(py);
         spill.set_item("total_bytes", usage.spill.total_bytes)?;

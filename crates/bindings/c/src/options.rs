@@ -17,6 +17,8 @@ use crate::types::GrafeoDatabase;
 pub struct GrafeoOptions {
     memory_limit: Option<usize>,
     query_memory_limit: Option<usize>,
+    #[cfg(feature = "cdc")]
+    cdc_memory_limit: Option<usize>,
     path_search_budget: Option<usize>,
     path_expansion_limit: Option<u64>,
     max_query_length: Option<usize>,
@@ -25,6 +27,7 @@ pub struct GrafeoOptions {
     history_retention_limit: Option<u64>,
     spill_limit: Option<u64>,
     unlimited_spill: bool,
+    plan_cache_limit: Option<usize>,
 }
 
 impl GrafeoOptions {
@@ -35,6 +38,10 @@ impl GrafeoOptions {
         }
         if let Some(bytes) = self.query_memory_limit {
             config = config.with_query_memory_limit(bytes);
+        }
+        #[cfg(feature = "cdc")]
+        if let Some(bytes) = self.cdc_memory_limit {
+            config = config.with_cdc_memory_limit(bytes);
         }
         if let Some(bytes) = self.path_search_budget {
             config = config.with_path_search_budget(bytes);
@@ -58,6 +65,9 @@ impl GrafeoOptions {
             config = config.with_unlimited_spill();
         } else if let Some(bytes) = self.spill_limit {
             config = config.with_spill_limit(bytes);
+        }
+        if let Some(bytes) = self.plan_cache_limit {
+            config = config.with_plan_cache_limit(bytes);
         }
         config
     }
@@ -131,6 +141,23 @@ pub extern "C" fn grafeo_options_set_query_memory_limit(
 ) -> GrafeoStatus {
     match options_mut(options).and_then(|options| {
         options.query_memory_limit = Some(positive(bytes, "query_memory_limit")?);
+        Ok(())
+    }) {
+        Ok(()) => GrafeoStatus::Ok,
+        Err(status) => status,
+    }
+}
+
+/// Sets the bytes the in-memory change log may hold, above zero: past it the oldest commits go
+/// (the default is a sixteenth of the memory limit, which it never exceeds).
+#[cfg(feature = "cdc")]
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_options_set_cdc_memory_limit(
+    options: *mut GrafeoOptions,
+    bytes: u64,
+) -> GrafeoStatus {
+    match options_mut(options).and_then(|options| {
+        options.cdc_memory_limit = Some(positive(bytes, "cdc_memory_limit")?);
         Ok(())
     }) {
         Ok(()) => GrafeoStatus::Ok,
@@ -273,6 +300,25 @@ pub extern "C" fn grafeo_options_set_unlimited_spill(options: *mut GrafeoOptions
     match options_mut(options) {
         Ok(options) => {
             options.unlimited_spill = true;
+            GrafeoStatus::Ok
+        }
+        Err(status) => status,
+    }
+}
+
+/// Sets how many bytes of plans the database keeps for repeated statements, by a deep estimate of
+/// what each plan holds; zero keeps none, so every statement plans. The default is a sixty-fourth
+/// of the memory limit, from 4 MiB to 64 MiB; never more than the memory limit. The report's
+/// `caches.plan_cache_limit_bytes` reads it back.
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_options_set_plan_cache_limit(
+    options: *mut GrafeoOptions,
+    bytes: u64,
+) -> GrafeoStatus {
+    match options_mut(options) {
+        Ok(options) => {
+            // Past the platform's size, the bound is the memory limit anyway.
+            options.plan_cache_limit = Some(usize::try_from(bytes).unwrap_or(usize::MAX));
             GrafeoStatus::Ok
         }
         Err(status) => status,

@@ -370,7 +370,7 @@ fn a_merge_between_batches_holds_only_its_open_runs() {
         .unwrap();
     while let Some(batch) = merge.next_batch().unwrap() {
         // The plan's room: the open runs' read buffers and a next row each,
-        // and the next batch's first row; kept to a step.
+        // and the next batch's first row; rounded by the grant rule.
         let planned = merge.open_runs() * (merge.read_buffer() + MERGE_MIN_READ_BUFFER)
             + MERGE_MIN_READ_BUFFER;
         let granted = merge.memory().granted();

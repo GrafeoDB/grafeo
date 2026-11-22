@@ -156,6 +156,13 @@ export interface DatabaseOptions {
    * before it is refused. No limit by default; a positive whole number.
    */
   historyRetentionLimit?: number;
+  /**
+   * How many bytes of plans the database keeps for repeated statements, a whole number, by a deep
+   * estimate of what each plan holds; 0 keeps none, so every statement plans. A sixty-fourth of
+   * `memoryLimit` by default, from 4 MiB to 64 MiB, never more than `memoryLimit`.
+   * `memoryUsage().caches.plan_cache_limit_bytes` reads it back.
+   */
+  planCacheLimit?: number;
 }
 
 /**

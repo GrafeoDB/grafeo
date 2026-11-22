@@ -222,9 +222,13 @@ fn a_statement_without_parameters_looks_its_plan_up_once_per_call() {
     let db = GrafeoDB::new_in_memory();
     db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
     let session = db.session();
+    // A repeat in one session is a hit of the session's own cache.
     let lookups = || {
         let stats = db.query_cache().stats();
-        (stats.optimized_hits, stats.optimized_misses)
+        (
+            stats.optimized_hits + stats.session_hits,
+            stats.optimized_misses,
+        )
     };
 
     let (hits, misses) = lookups();
@@ -570,10 +574,14 @@ fn a_streamed_statement_fails_on_a_missing_parameter_as_execute_does() {
     assert_eq!(rows, [vec![Value::Int64(1)]]);
 }
 
-/// The hits and misses of the optimized-plan cache so far.
+/// The hits and misses of the optimized-plan cache so far; a repeat in one session is a hit of
+/// the session's own cache.
 fn plan_lookups(db: &GrafeoDB) -> (u64, u64) {
     let stats = db.query_cache().stats();
-    (stats.optimized_hits, stats.optimized_misses)
+    (
+        stats.optimized_hits + stats.session_hits,
+        stats.optimized_misses,
+    )
 }
 
 /// An index created or dropped through the API, by the database or by a

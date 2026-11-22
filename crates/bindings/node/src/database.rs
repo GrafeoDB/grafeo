@@ -273,6 +273,10 @@ pub struct CreateOptions {
     /// disk where they can, else the statement throws `GRAFEO-S001`. For
     /// this open only.
     pub query_memory_limit: Option<i64>,
+    /// How many bytes the in-memory change log may hold: past it the oldest
+    /// commits go. By default a sixteenth of `memoryLimit`, and never more
+    /// than `memoryLimit`. For this open only.
+    pub cdc_memory_limit: Option<i64>,
     /// How many bytes one path search may hold: everything a variable-length,
     /// shortest-path or RDF property path search holds at once (the nodes it
     /// visits, its queues and the paths it keeps), which counts against
@@ -313,6 +317,13 @@ pub struct CreateOptions {
     /// Lift the spill limit (default `false`); it wins over `spillLimit`.
     /// For this open only.
     pub unlimited_spill: Option<bool>,
+    /// How many bytes of plans the database keeps for repeated statements,
+    /// by a deep estimate of what each plan holds; 0 keeps none, so every
+    /// statement plans. By default a sixty-fourth of `memoryLimit`, from
+    /// 4 MiB to 64 MiB; never more than `memoryLimit`.
+    /// `memoryUsage().caches.planCacheLimitBytes` reads it back. For this
+    /// open only.
+    pub plan_cache_limit: Option<i64>,
 }
 
 /// The memory settings of `options`, on `config`.
@@ -333,6 +344,18 @@ fn memory_settings(mut config: Config, options: &CreateOptions) -> Result<Config
     }
     if let Some(bytes) = options.query_memory_limit {
         config = config.with_query_memory_limit(positive(bytes, "queryMemoryLimit")?);
+    }
+    if let Some(bytes) = options.cdc_memory_limit {
+        let bytes = positive(bytes, "cdcMemoryLimit")?;
+        #[cfg(feature = "cdc")]
+        {
+            config = config.with_cdc_memory_limit(bytes);
+        }
+        #[cfg(not(feature = "cdc"))]
+        return Err(NodeGrafeoError::InvalidArgument(format!(
+            "cdcMemoryLimit={bytes} needs the cdc feature, which this build lacks"
+        ))
+        .into());
     }
     if let Some(bytes) = options.path_search_budget {
         config = config.with_path_search_budget(positive(bytes, "pathSearchBudget")?);
@@ -365,6 +388,11 @@ fn memory_settings(mut config: Config, options: &CreateOptions) -> Result<Config
         config = config.with_unlimited_spill();
     } else if let Some(bytes) = options.spill_limit {
         config = config.with_spill_limit(size_option(bytes, "spillLimit")?);
+    }
+    if let Some(bytes) = options.plan_cache_limit {
+        // Past the platform's size, the bound is the memory budget anyway.
+        let bytes = usize::try_from(size_option(bytes, "planCacheLimit")?).unwrap_or(usize::MAX);
+        config = config.with_plan_cache_limit(bytes);
     }
     Ok(config)
 }

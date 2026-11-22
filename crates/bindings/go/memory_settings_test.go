@@ -151,3 +151,51 @@ func TestAnOpenOverTheLimitWarnsAndReads(t *testing.T) {
 		t.Error("an open with room warned")
 	}
 }
+
+// The plan cache's limit (#674) reads back as caches.plan_cache_limit_bytes, capped at the
+// memory limit; zero turns the cache off.
+func TestPlanCacheLimitReadsBack(t *testing.T) {
+	for _, c := range []struct{ memory, limit, want uint64 }{
+		{64 * mib, 8 * mib, 8 * mib},
+		{32 * mib, 1024 * mib, 32 * mib},
+		{64 * mib, 0, 0},
+	} {
+		db, err := OpenWithOptions("", &Options{MemoryLimit: ptr(c.memory), PlanCacheLimit: ptr(c.limit)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, ok := usageOf(t, db).Caches["plan_cache_limit_bytes"].(float64)
+		db.Close()
+		if !ok || uint64(got) != c.want {
+			t.Errorf("limit %d under %d: got %v, want %d", c.limit, c.memory, got, c.want)
+		}
+	}
+}
+
+// The change log's memory limit (#679) reads back as cdc.limit_bytes: a sixteenth of the memory
+// limit when unset, capped at the memory limit; zero fails at the open.
+func TestCdcMemoryLimitReadsBack(t *testing.T) {
+	for _, c := range []struct {
+		memory uint64
+		limit  *uint64
+		want   string
+	}{
+		{64 * mib, ptr(512 * 1024), "524288"},
+		{64 * mib, nil, "4194304"},
+		{32 * mib, ptr(1024 * mib), "33554432"},
+	} {
+		db, err := OpenWithOptions("", &Options{MemoryLimit: ptr(c.memory), CdcMemoryLimit: c.limit})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := string(usageOf(t, db).Cdc["limit_bytes"])
+		db.Close()
+		if got != c.want {
+			t.Errorf("limit %v under %d: got %s, want %s", c.limit, c.memory, got, c.want)
+		}
+	}
+	if db, err := OpenWithOptions("", &Options{CdcMemoryLimit: ptr(0)}); err == nil {
+		db.Close()
+		t.Fatal("a zero CDC memory limit opened a database")
+	}
+}

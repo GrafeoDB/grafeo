@@ -540,6 +540,101 @@ fn a_grant_past_the_memory_limit_names_the_memory_limit() {
     assert_eq!(ctx.query().used(), 120 * KIB);
 }
 
+/// An operator's grant follows the buffer manager's grant rule at the
+/// statement's step: a small holder takes the next power of two (at least
+/// 4 KiB), not a whole step; a large one whole steps.
+#[test]
+fn an_operator_grant_follows_the_grant_rule() {
+    let ctx = statement(64 * MIB);
+    let mut memory = OperatorMemory::new(ctx.clone());
+    memory.add(5_000).unwrap();
+    assert_eq!(
+        memory.granted(),
+        8 * KIB,
+        "a power of two below the 1 MiB step"
+    );
+    memory.add(100 * KIB).unwrap();
+    assert_eq!(memory.granted(), 128 * KIB);
+    memory.add(MIB).unwrap();
+    assert_eq!(memory.granted(), 2 * MIB, "whole steps from one step");
+    assert_eq!(ctx.query().used(), 2 * MIB);
+}
+
+/// Under a small cap the rule runs at the statement's own step, a 64th of the
+/// cap, not the buffer manager's: at a 1 MiB cap (a 16 KiB step) the powers of
+/// two stop at the step and whole steps follow; at a cap of 1,000,000 bytes
+/// (a 15,625-byte step, no power of two) the rounding below it stops at the
+/// step.
+#[test]
+fn an_operator_grant_follows_the_rule_at_the_statements_step() {
+    let ctx = statement(MIB);
+    let mut memory = OperatorMemory::new(ctx.clone());
+    for (counted, granted) in [
+        (5_000, 8 * KIB),
+        (10 * KIB, 16 * KIB),
+        (17 * KIB, 32 * KIB),
+        (33 * KIB, 48 * KIB),
+    ] {
+        memory.set(counted).unwrap();
+        assert_eq!(
+            memory.granted(),
+            granted,
+            "{counted} bytes at a 16 KiB step"
+        );
+    }
+    assert_eq!(ctx.query().used(), 48 * KIB);
+
+    let ctx = statement(1_000_000);
+    let mut memory = OperatorMemory::new(ctx.clone());
+    memory.add(10_000).unwrap();
+    assert_eq!(memory.granted(), 15_625, "capped at the 15,625-byte step");
+    assert_eq!(ctx.query().used(), 15_625);
+}
+
+/// A trim gives back down to the rounding of what it keeps, at the
+/// statement's step and without the hysteresis of a settle; to nothing for
+/// nothing kept; and it never grows a grant.
+#[test]
+fn a_trim_gives_back_to_the_rounding_of_what_it_keeps() {
+    let ctx = statement(64 * MIB);
+    let mut memory = OperatorMemory::new(ctx.clone());
+    memory.add(2 * MIB).unwrap();
+    assert_eq!(memory.granted(), 2 * MIB);
+    memory.clear();
+    memory.trim_to(100 * KIB);
+    assert_eq!(memory.granted(), 128 * KIB, "a power of two below the step");
+    assert_eq!(ctx.query().used(), 128 * KIB, "the cap follows");
+    memory.trim_to(0);
+    assert_eq!(memory.granted(), 0);
+    assert_eq!(ctx.query().used(), 0);
+
+    memory.add(5_000).unwrap();
+    assert_eq!(memory.granted(), 8 * KIB);
+    memory.trim_to(MIB);
+    assert_eq!(
+        memory.granted(),
+        8 * KIB,
+        "a trim above what it holds grows nothing"
+    );
+    assert_eq!(ctx.query().used(), 8 * KIB);
+}
+
+/// When the rounding would pass the cap, the exact bytes are asked for: a
+/// first operator whose rounding is past the cap takes its exact bytes, and a
+/// second takes the exact few that are left, where a rounded 4 KiB is not.
+#[test]
+fn past_the_cap_a_grant_takes_the_exact_bytes() {
+    let ctx = statement(MIB + 40);
+    let mut first = OperatorMemory::new(ctx.clone());
+    first.add(MIB + 24).unwrap();
+    assert_eq!(first.granted(), MIB + 24, "65 steps would pass the cap");
+    let mut second = OperatorMemory::new(ctx.clone());
+    second.add(16).unwrap();
+    assert_eq!(second.granted(), 16, "the 16 bytes left, not 4 KiB");
+    assert_eq!(ctx.query().used(), MIB + 40, "the cap is full");
+    assert_refused(second.add(1), LimitBound::QueryMemoryLimit);
+}
+
 /// A query limit above the memory limit is the memory limit.
 #[test]
 fn the_query_limit_never_exceeds_the_budget() {

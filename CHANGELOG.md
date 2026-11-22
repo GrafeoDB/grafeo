@@ -64,7 +64,7 @@ Performance and memory release, in progress: this section lists what has landed 
 
 ### Fixed
 
-- **Small named graphs, stores and transactions count what they hold**: each counts at most about twice its own size against the memory limit (at least 4 KiB).
+- **Small named graphs, stores, transactions and query operators count what they hold**: each counts at most about twice its own size against the memory limit (at least 4 KiB).
 - **SPARQL keeps the sign of a number written with one**: `+1`, `-0.5` and `+05` are numeric literals with the sign in their lexical form, as the SPARQL 1.1 grammar has it. A pattern or `VALUES` entry `+3.5` matches only that term, not `3.5`, as RDF term equality requires; `=` still compares the values.
 - **SHACL's `sh:not`, `sh:and`, `sh:or` and `sh:xone` in a property shape test each value**: every value node the shape's path reaches is tested and a failing one is reported with its `sh:value`, as SHACL 1.0 specifies; their results on a node shape carry `sh:value` too.
 - **A query error's markers stay on its line**: the carets under the shown query line stop at the line's end, and rendering an error takes room in proportion to that line.

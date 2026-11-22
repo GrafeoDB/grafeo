@@ -254,10 +254,19 @@ impl BufferManager {
     /// the next multiple of the step, so a large one takes less than a step more. Saturating.
     #[must_use]
     pub fn grant_size(&self, bytes: usize) -> usize {
-        let step = self.grant_step;
+        Self::grant_size_by(self.grant_step, bytes)
+    }
+
+    /// [`grant_size`](Self::grant_size) under grants that grow by `step` bytes instead of this
+    /// manager's step: the same rule for a holder with a smaller step of its own (a statement
+    /// under a small query memory limit). A step below the 4 KiB floor rounds to the step. The
+    /// step is never 0 (a statement's is at least 1); at 0 every grant would saturate.
+    #[must_use]
+    pub fn grant_size_by(step: usize, bytes: usize) -> usize {
+        debug_assert!(step > 0, "a grant step is never 0");
         match bytes {
             0 => 0,
-            small if small < step => small.next_power_of_two().clamp(GRANT_FLOOR, step),
+            small if small < step => small.next_power_of_two().max(GRANT_FLOOR).min(step),
             large => large.checked_next_multiple_of(step).unwrap_or(usize::MAX),
         }
     }
@@ -813,6 +822,29 @@ mod tests {
         assert_eq!(settled(&manager, (32 << 10) + 1), step);
         assert_eq!(settled(&manager, step + 1), 2 * step);
         assert_eq!(manager.grant_size(usize::MAX), usize::MAX, "it saturates");
+    }
+
+    /// The rule at a step of the caller's: a step below the 4 KiB floor rounds to the step (it
+    /// does not panic), and one that is no power of two caps the rounding below it.
+    #[test]
+    fn the_grant_rule_runs_at_any_step() {
+        for (step, bytes, size) in [
+            (1, 1, 1),
+            (1, 5, 5),
+            (1000, 1, 1000),
+            (1000, 999, 1000),
+            (1000, 1001, 2000),
+            (15_625, 10_000, 15_625),
+            (15_625, 4_000, 4 << 10),
+            (16 << 10, 17 << 10, 32 << 10),
+            (16 << 10, 33 << 10, 48 << 10),
+        ] {
+            assert_eq!(
+                BufferManager::grant_size_by(step, bytes),
+                size,
+                "{bytes} bytes at a step of {step}"
+            );
+        }
     }
 
     /// A small grant shrinks only once it holds more than the rounding of twice its rounded

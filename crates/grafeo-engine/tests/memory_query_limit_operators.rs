@@ -439,8 +439,9 @@ fn concurrent_path_searches_refuse_at_the_memory_limit() {
     let held = execution(&db);
     let manager = db.memory_usage().buffer_manager;
     let room = manager.hard_limit_bytes - manager.allocated_bytes;
-    // A grant grows by the statement's step, a sixty-fourth of the limit: a
-    // stream refused takes at least its peak less a step
+    // A grant is rounded by the grant rule at the statement's step, a
+    // sixty-fourth of the limit: a stream refused takes at least its peak less
+    // a step
     let step = LIMIT / 64;
     let fit = room / held;
     assert!(

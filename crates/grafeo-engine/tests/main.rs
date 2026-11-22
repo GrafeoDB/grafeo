@@ -283,6 +283,7 @@ mod planner_rules_results;
 mod post_compact_index;
 mod post_compact_numeric_content;
 mod post_compact_overlay_visibility;
+mod prepared_filters;
 mod prepared_plans;
 mod prepared_recipes;
 mod procedure_arguments;

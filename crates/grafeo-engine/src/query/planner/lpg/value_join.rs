@@ -295,20 +295,27 @@ fn reads_property(expr: &LogicalExpression) -> bool {
 impl super::Planner {
     /// [`FilterRoute::ValueJoin`] for a filter that runs as a value join (see [`value_join`]),
     /// when the rules allow one.
-    pub(super) fn value_join_route<'a>(&self, filter: &'a FilterOp) -> Option<FilterRoute<'a>> {
-        if !self
-            .rules
+    pub(super) fn value_join_route<'a, R: super::filter::FilterRouteReads>(
+        reads: &R,
+        filter: &'a FilterOp,
+    ) -> super::filter::Guarded<'a, R> {
+        if !reads
+            .rules()
             .has(crate::query::optimizer::PlannerRule::ValueJoin)
         {
             return None;
         }
+        // Its shape before the statement's writes: a scan per input row (see `value_join`).
+        checked_scan(filter)?.scan.input.as_ref()?;
+        let planner = super::filter::planner_of!(reads);
         value_join(
             filter,
-            self.statement_writes
+            planner
+                .statement_writes
                 .get()
                 .is_none_or(|writes| writes.per_row),
         )
-        .map(FilterRoute::ValueJoin)
+        .map(|join| Ok(FilterRoute::ValueJoin(join)))
     }
 
     /// Plans a filter that runs as a value join (see [`value_join`]): the

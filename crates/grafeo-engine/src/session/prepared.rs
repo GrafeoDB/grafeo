@@ -345,6 +345,14 @@ mod tests {
                 "MATCH (n:Person {id: $personId})-[:KNOWS]-{1,2}(f:Person) RETURN f.id AS id",
                 "VariableLengthExpand",
             ),
+            (
+                "MATCH (n:Person) WHERE n.id + 1 = $personId RETURN n.id AS id",
+                "FilterReadsTheStore",
+            ),
+            (
+                "MATCH (n:Person {id: $personId})-[:KNOWS]-(f:Person) WHERE EXISTS { MATCH (f)-[:KNOWS]->(:Person) } RETURN f.id AS id",
+                "FilterReadsTheStore",
+            ),
         ] {
             let plan = prepared_plan(query, &params);
             match recipe_of(plan.plan(), inputs()) {
@@ -354,8 +362,8 @@ mod tests {
         }
     }
 
-    /// The kinds the recipes of IS1's shape and of an unpinned hop hold are the pinned covered
-    /// set: a step added without being named there fails here.
+    /// The kinds the recipes of IS1's shape, of an unpinned hop and of a triangle hold are the
+    /// pinned covered set: a step added without being named there fails here.
     #[test]
     fn the_covered_set_is_pinned() {
         use crate::query::planner::lpg::recipe::{COVERED, recipe_of};
@@ -369,6 +377,7 @@ mod tests {
             "MATCH (n:Person)-[:LIVES_IN]->(c:City) RETURN c.id AS cityId",
             "MATCH (n:Person)-[:LIVES_IN]->(c:City) RETURN c.id AS cityId ORDER BY cityId SKIP 1 LIMIT 2",
             "MATCH (n:Person {id: $personId})-[:KNOWS]-(f:Person) RETURN count(f) AS friends",
+            "MATCH (a:Person {id: $personId})-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person)-[:KNOWS]-(a) WHERE b.id < c.id RETURN count(*) AS triangles",
         ]
         .into_iter()
         .flat_map(|query| recipe_of(prepared_plan(query, &params).plan(), inputs()).unwrap().kinds())
@@ -378,6 +387,95 @@ mod tests {
         let mut covered = COVERED.to_vec();
         covered.sort_unstable();
         assert_eq!(kinds, covered);
+
+        // The filters over hops make a recipe, in a run without work counters too: the square,
+        // common friends with the far end's key indexed, and a bound zone maps decide (Cypher's
+        // two-hop chain: `the_cypher_chain_is_pinned`).
+        let person = |id: i64| {
+            (
+                "personId".to_string(),
+                grafeo_common::types::Value::Int64(id),
+            )
+        };
+        let pins: [(&str, std::collections::HashMap<String, _>); 3] = [
+            (
+                "MATCH (a:Person {id: $personId})-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person)-[:KNOWS]-(d:Person)-[:KNOWS]-(a) WHERE b.id < d.id AND c.id <> $personId RETURN count(*) AS cycles",
+                std::collections::HashMap::from([person(1)]),
+            ),
+            (
+                "MATCH (a:Person {id: $person1Id})-[:KNOWS]-(c:Person)-[:KNOWS]-(b:Person {id: $person2Id}) RETURN count(DISTINCT c.id) AS common",
+                std::collections::HashMap::from([
+                    (
+                        "person1Id".to_string(),
+                        grafeo_common::types::Value::Int64(1),
+                    ),
+                    (
+                        "person2Id".to_string(),
+                        grafeo_common::types::Value::Int64(2),
+                    ),
+                ]),
+            ),
+            (
+                "MATCH (a:Person {id: $personId})-[:KNOWS]-(b:Person) WHERE b.age > $min RETURN b.id AS id",
+                std::collections::HashMap::from([
+                    person(1),
+                    ("min".to_string(), grafeo_common::types::Value::Int64(100)),
+                ]),
+            ),
+        ];
+        for (query, params) in pins {
+            assert_a_recipe(QueryLanguage::Gql, "gql", true, query, params);
+        }
+    }
+
+    /// Cypher's two-hop chain with its check that the edges differ (factorized execution off)
+    /// makes a recipe, in a run without work counters too.
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn the_cypher_chain_is_pinned() {
+        assert_a_recipe(
+            QueryLanguage::Cypher,
+            "cypher",
+            false,
+            "MATCH (a:Person)-[:KNOWS]->(m:Person)-[:KNOWS]->(b:Person) RETURN count(*) AS paths",
+            std::collections::HashMap::from([(
+                "personId".to_string(),
+                grafeo_common::types::Value::Int64(1),
+            )]),
+        );
+    }
+
+    /// `query` with `params` in `language` (named `name`), run once on two people with a
+    /// property index on `id` (factorized execution as `factorized` says), caches a prepared
+    /// plan that makes a recipe.
+    fn assert_a_recipe(
+        language: QueryLanguage,
+        name: &str,
+        factorized: bool,
+        query: &str,
+        params: std::collections::HashMap<String, grafeo_common::types::Value>,
+    ) {
+        use crate::query::planner::lpg::recipe::recipe_of;
+
+        let config = crate::config::Config::in_memory();
+        let config = if factorized {
+            config
+        } else {
+            config.without_factorized_execution()
+        };
+        let db = crate::GrafeoDB::with_config(config).unwrap();
+        db.execute("INSERT (:Person {id: 1, age: 30})-[:KNOWS]->(:Person {id: 2, age: 40})")
+            .unwrap();
+        db.create_property_index("id").unwrap();
+        let session = db.session();
+        session.execute_language(query, name, Some(params)).unwrap();
+        let key = session.plan_cache_key(query, language);
+        let cached = session
+            .plan_cache()
+            .get(&key.prepared(), crate::query::cache::Stage::Optimized)
+            .expect("the first call caches its prepared plan");
+        let recipe = recipe_of(cached.plan(), session.route_inputs(&key));
+        assert!(recipe.is_ok(), "{query}: {recipe:?}");
     }
 
     /// Opening IS1's recipe gives, for every id, the rows of today's plan of the filled

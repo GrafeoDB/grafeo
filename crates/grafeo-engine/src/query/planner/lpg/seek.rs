@@ -649,7 +649,10 @@ fn collect_value_variables(expr: &LogicalExpression, out: &mut HashSet<String>) 
 impl super::Planner {
     /// [`FilterRoute::NodeSeek`] for a filter over a node scan (see [`checked_scan`]) when
     /// [`chain_seek`] finds a seek.
-    pub(super) fn node_seek_route<'a>(&self, filter: &'a FilterOp) -> Option<FilterRoute<'a>> {
+    pub(super) fn node_seek_route<'a, R: super::filter::FilterRouteReads>(
+        reads: &R,
+        filter: &'a FilterOp,
+    ) -> super::filter::Guarded<'a, R> {
         let below = checked_scan(filter)?;
         let scan = below.scan;
         // A seek looks a key up when its input row arrives: after a write in
@@ -662,27 +665,29 @@ impl super::Planner {
         {
             return None;
         }
+        let planner = super::filter::planner_of!(reads);
         // A property index looks values up at the query's view; an ID is no
         // index.
-        let after_a_write = !self.reads_the_store_as_planned();
+        let after_a_write = !planner.reads_the_store_as_planned();
         let labels = LookupLabels::of(filter, &scan.variable);
         // Many rows against a small label join faster than they seek.
         let seek = chain_seek(
             filter,
             &below,
             &labels,
-            self.store.as_ref(),
-            self.rules,
+            planner.store.as_ref(),
+            planner.rules,
             after_a_write,
-            self.statement_writes
+            planner
+                .statement_writes
                 .get()
                 .is_none_or(|writes| writes.per_row),
         )?;
-        Some(FilterRoute::NodeSeek {
+        Some(Ok(FilterRoute::NodeSeek {
             below,
             labels,
             seek,
-        })
+        }))
     }
 
     /// Plans [`FilterRoute::NodeSeek`] as a seek: the scan's input rows, each joined with the

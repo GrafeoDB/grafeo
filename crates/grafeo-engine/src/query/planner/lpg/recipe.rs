@@ -14,22 +14,25 @@ use grafeo_common::utils::error::{Error, Result};
 
 use super::Planner;
 use super::aggregate::{self, EdgeCountShape, RangeRead, Route, RouteInputs, route};
+use super::expand::HopTarget;
+use super::filter::{FilterRoute, FilterRouteReads, filter_route};
 use super::project::{limit_over, sort_input, takes_top_k};
 use crate::query::optimizer::PlannerRule;
 use crate::query::plan::{AggregateOp, RangeFoldShape};
 use crate::query::plan::{
-    BinaryOp, BuiltinFunction, Callee, CountClauses, CountExpr, FilterOp, LimitOp,
-    LogicalExpression, LogicalOperator, LogicalPlan, SkipOp,
+    BinaryOp, CountClauses, CountExpr, FilterOp, LimitOp, LogicalExpression, LogicalOperator,
+    LogicalPlan, SkipOp,
 };
 use crate::query::planner::PhysicalPlan;
 use grafeo_common::types::StatementLanguage;
 
 /// The kinds a recipe covers, by name: the set a test pins, so it grows only on purpose.
 #[cfg(test)]
-pub(crate) const COVERED: [&str; 9] = [
+pub(crate) const COVERED: [&str; 10] = [
     "Return",
     "Expand",
     "Filter",
+    "Closing",
     "Seek",
     "NodeScan",
     "Sort",
@@ -44,7 +47,7 @@ pub(crate) const COVERED: [&str; 9] = [
 pub(crate) struct Recipe {
     root: Step,
     names: HashSet<String>,
-    /// The parameters the plan reads: its seek's key and its counts.
+    /// The parameters the plan reads: in its filters (its seek's key among them) and its counts.
     parameters: Vec<String>,
     /// The parameters of its LIMIT and SKIP counts, which a call checks before it opens.
     counts: Vec<String>,
@@ -58,10 +61,22 @@ pub(crate) struct Recipe {
 enum Step {
     /// A `RETURN` of plain properties and variables over its input.
     Return(Box<Step>),
-    /// One hop over its input.
+    /// One hop over its input, and, when a filter above noted its target at the call (see
+    /// `note_hop_target`), with that target as `plan_expand` builds it: an intersection with the
+    /// hop below, a check of a column, or a key the hop finds first.
     Expand(Box<Step>),
-    /// A check of labels alone over its input.
-    Filter(Box<Step>),
+    /// A filter whose route is its predicate checked on each row (see `filter_route`), over its
+    /// input, with the call's values when it `reads_values`. With `zone_maps` its route takes
+    /// them first: when they prove, against the store at the call, that no row matches, it is
+    /// no rows.
+    Filter {
+        zone_maps: bool,
+        reads_values: bool,
+        input: Box<Step>,
+    },
+    /// The closing equality of an intersection, whose route is its input alone: the expand below
+    /// builds the intersection, which meets the equality already.
+    Closing(Box<Step>),
     /// A start a key pins: a filter that equates a property of a scanned node with a value or
     /// a parameter, over the scan, read by the planner's lookup.
     Seek,
@@ -90,7 +105,8 @@ impl Step {
         match self {
             Self::Return(_) => "Return",
             Self::Expand(_) => "Expand",
-            Self::Filter(_) => "Filter",
+            Self::Filter { .. } => "Filter",
+            Self::Closing(_) => "Closing",
             Self::Seek => "Seek",
             Self::NodeScan => "NodeScan",
             Self::Sort(_) => "Sort",
@@ -106,7 +122,8 @@ impl Step {
         into.push(self.kind());
         if let Self::Return(input)
         | Self::Expand(input)
-        | Self::Filter(input)
+        | Self::Filter { input, .. }
+        | Self::Closing(input)
         | Self::Sort(input)
         | Self::Limit(input)
         | Self::Skip(input)
@@ -133,6 +150,26 @@ pub(crate) struct OpenContext<'a> {
     pub(crate) planner: &'a Planner,
     /// The call's values, by parameter name.
     pub(crate) values: &'a HashMap<String, Value>,
+}
+
+/// What a recipe knows of a filter's route (see [`filter_route`]): the rules, and no store,
+/// session or planner. A covered plan writes nothing, so none of its filters runs after a write.
+struct RecipeReads(RouteInputs);
+
+impl FilterRouteReads for RecipeReads {
+    type Unknown = ();
+
+    fn rules(&self) -> crate::query::optimizer::PlannerRules {
+        self.0.rules
+    }
+
+    fn reads_the_store_as_planned(&self) -> bool {
+        true
+    }
+
+    fn planner(&self) -> std::result::Result<&Planner, ()> {
+        Err(())
+    }
 }
 
 /// The way an aggregate is built ([`aggregate::route`]).
@@ -291,7 +328,7 @@ pub(crate) fn recipe_of(
     crate::query::optimizer::plan_names(&plan.root, &mut names);
     let mut parameters = Vec::new();
     let mut counts = Vec::new();
-    parameters_of(&plan.root, &mut parameters, &mut counts);
+    parameters_of(&plan.root, plan.count_clauses, &mut parameters, &mut counts)?;
     Ok(Recipe {
         root,
         names,
@@ -301,18 +338,22 @@ pub(crate) fn recipe_of(
     })
 }
 
-/// The parameters `op` reads, in the places a covered plan reads one: the seek's key, and the
-/// counts of its LIMITs and SKIPs, which also go in `counts`.
-fn parameters_of(op: &LogicalOperator, parameters: &mut Vec<String>, counts: &mut Vec<String>) {
+/// The parameters `op`, of a plan whose counts' errors name `clauses`, reads in the places a
+/// covered plan reads one: its filters, and the counts of its LIMITs and SKIPs, which also go in
+/// `counts`.
+fn parameters_of(
+    op: &LogicalOperator,
+    clauses: CountClauses,
+    parameters: &mut Vec<String>,
+    counts: &mut Vec<String>,
+) -> std::result::Result<(), Uncovered> {
     match op {
         LogicalOperator::Filter(filter) => {
-            if let LogicalExpression::Binary { left, right, .. } = &filter.predicate {
-                for side in [left, right] {
-                    if let LogicalExpression::Parameter(name) = side.as_ref() {
-                        parameters.push(name.clone());
-                    }
-                }
-            }
+            let read = crate::query::processor::expression_parameters(&filter.predicate, clauses)
+                .map_err(|_| Uncovered {
+                kind: "FilterCount",
+            })?;
+            parameters.extend(read);
         }
         LogicalOperator::Limit(LimitOp {
             count: CountExpr::Parameter(name),
@@ -328,8 +369,9 @@ fn parameters_of(op: &LogicalOperator, parameters: &mut Vec<String>, counts: &mu
         _ => {}
     }
     for child in op.children() {
-        parameters_of(child, parameters, counts);
+        parameters_of(child, clauses, parameters, counts)?;
     }
+    Ok(())
 }
 
 fn step_of(op: &LogicalOperator, inputs: RouteInputs) -> std::result::Result<Step, Uncovered> {
@@ -397,13 +439,36 @@ fn step_of(op: &LogicalOperator, inputs: RouteInputs) -> std::result::Result<Ste
             if filter.pushdown_hint.is_none() && pins_its_scan(filter) {
                 return Ok(Step::Seek);
             }
-            if filter.pushdown_hint.is_some()
-                || matches!(filter.input.as_ref(), LogicalOperator::NodeScan(_))
-                || !checks_labels_alone(&filter.predicate)
-            {
-                return uncovered("FilterOther");
+            // The route today's planner takes, from what the recipe knows: a route that needs
+            // the store, the session or the planner answers that it cannot tell.
+            let reads = RecipeReads(inputs);
+            let kind = |route: &std::result::Result<FilterRoute<'_>, ()>| match route {
+                Ok(route) => route.name(),
+                Err(()) => "FilterReadsTheStore",
+            };
+            let filter_step = |zone_maps| -> std::result::Result<Step, Uncovered> {
+                let reads_values = !crate::query::processor::expression_parameters(
+                    &filter.predicate,
+                    CountClauses::default(),
+                )
+                .is_ok_and(|names| names.is_empty());
+                Ok(Step::Filter {
+                    zone_maps,
+                    reads_values,
+                    input: below(&filter.input)?,
+                })
+            };
+            match filter_route(&reads, filter, None) {
+                Ok(FilterRoute::IntersectionClosing) => Ok(Step::Closing(below(&filter.input)?)),
+                Ok(FilterRoute::Generic) => filter_step(false),
+                Ok(FilterRoute::ZoneMapEmpty) => {
+                    match filter_route(&reads, filter, Some(&FilterRoute::ZoneMapEmpty)) {
+                        Ok(FilterRoute::Generic) => filter_step(true),
+                        other => uncovered(kind(&other)),
+                    }
+                }
+                other => uncovered(kind(&other)),
             }
-            Ok(Step::Filter(below(&filter.input)?))
         }
         LogicalOperator::NodeScan(scan) if scan.input.is_none() => Ok(Step::NodeScan),
         other => uncovered(kind_name(other)),
@@ -450,28 +515,6 @@ fn pins_its_scan(filter: &FilterOp) -> bool {
         )
     };
     (is_key(left) && is_value(right)) || (is_value(left) && is_key(right))
-}
-
-/// Whether `predicate` is label checks alone, joined by `AND`.
-fn checks_labels_alone(predicate: &LogicalExpression) -> bool {
-    match predicate {
-        LogicalExpression::Binary {
-            left,
-            op: BinaryOp::And,
-            right,
-        } => checks_labels_alone(left) && checks_labels_alone(right),
-        LogicalExpression::FunctionCall {
-            callee: Callee::Builtin(BuiltinFunction::HasLabel),
-            args,
-            ..
-        } => args.iter().all(|arg| {
-            matches!(
-                arg,
-                LogicalExpression::Variable(_) | LogicalExpression::Literal(Value::String(_))
-            )
-        }),
-        _ => false,
-    }
 }
 
 /// The name of `op`'s kind, as [`Uncovered`] reports it.
@@ -590,30 +633,106 @@ fn open_step(
                 .map(Some)
         }
         (Step::Expand(input), LogicalOperator::Expand(expand)) => {
+            // The target a filter above noted at this call, read as `plan_expand` reads it.
+            let hop_target = planner.hop_targets.borrow_mut().remove(&expand.to_variable);
+            if let Some(HopTarget::Intersect(target)) = &hop_target
+                && let LogicalOperator::Expand(near) = expand.input.as_ref()
+            {
+                let Step::Expand(near_input) = input.as_ref() else {
+                    return Err(mismatch());
+                };
+                let Some((input_op, columns)) = open(near_input, &near.input)? else {
+                    return Ok(None);
+                };
+                return planner
+                    .intersection_over(near, expand, target, input_op, columns)
+                    .map(Some);
+            }
             let Some((input_op, columns)) = open(input, &expand.input)? else {
                 return Ok(None);
             };
             planner
-                .expand_over(expand, None, input_op, columns)
+                .expand_over(expand, hop_target, input_op, columns)
                 .map(Some)
         }
-        (Step::Filter(input), LogicalOperator::Filter(filter)) => {
+        (
+            Step::Filter {
+                zone_maps,
+                reads_values,
+                input,
+            },
+            LogicalOperator::Filter(filter),
+        ) => {
+            // As `plan_filter` takes it: a LIMIT's hint reaches this filter and none below.
+            planner.limit_hint.take();
+            let filled;
+            let predicate = if *reads_values {
+                let mut copy = filter.predicate.clone();
+                crate::query::processor::substitute_expression_params(
+                    &mut copy, ctx.values, clauses,
+                )?;
+                filled = copy;
+                &filled
+            } else {
+                &filter.predicate
+            };
+            let noted = planner.note_hop_target(filter, predicate);
+            let excluded = *zone_maps
+                && planner.check_zone_map_for_predicate(predicate, &filter.input) == Some(false);
+            #[cfg(debug_assertions)]
+            assert_the_planners_route(planner, step, filter, predicate, excluded);
             let Some((input_op, columns)) = open(input, &filter.input)? else {
                 return Ok(None);
             };
-            planner.filter_over(filter, input_op, columns).map(Some)
+            #[cfg(debug_assertions)]
+            assert_the_target_is_taken(planner, filter, noted);
+            #[cfg(not(debug_assertions))]
+            let _ = noted;
+            if excluded {
+                return Ok(Some(planner.empty_over(columns)));
+            }
+            planner
+                .filter_over(filter, predicate, input_op, columns)
+                .map(Some)
+        }
+        (Step::Closing(input), LogicalOperator::Filter(filter)) => {
+            planner.limit_hint.take();
+            let noted = planner.note_hop_target(filter, &filter.predicate);
+            #[cfg(debug_assertions)]
+            assert_the_planners_route(planner, step, filter, &filter.predicate, false);
+            let opened = open(input, &filter.input)?;
+            #[cfg(debug_assertions)]
+            assert_the_target_is_taken(planner, filter, noted);
+            #[cfg(not(debug_assertions))]
+            let _ = noted;
+            Ok(opened)
         }
         (Step::Seek, LogicalOperator::Filter(filter)) => {
+            // As `plan_filter` takes it: a LIMIT's hint reaches this filter, and its index
+            // route reads no hint.
+            planner.limit_hint.take();
             let Some(filled) = with_the_calls_key(filter, ctx.values)? else {
                 return Ok(None);
             };
-            let Some(super::filter::FilterRoute::PropertyIndex {
+            // As today's route takes it, the zone maps first (`FilterRoute::ZoneMapEmpty`): a
+            // key they exclude gives no rows and no operators past the scan.
+            if planner.rules.has(PlannerRule::ZoneMaps)
+                && planner.reads_the_store_as_planned()
+                && let Some(empty) = planner.plan_filter_with_zone_maps(&filled)?
+            {
+                #[cfg(debug_assertions)]
+                assert_the_seeks_route(planner, &filled, true);
+                return Ok(Some(empty));
+            }
+            let Some(Ok(super::filter::FilterRoute::PropertyIndex {
                 checked,
                 conditions,
-            }) = planner.property_index_route(&filled)
+            })) = Planner::property_index_route(planner, &filled)
             else {
                 return Ok(None);
             };
+            #[cfg(debug_assertions)]
+            assert_the_seeks_route(planner, &filled, false);
             planner.plan_filter_with_property_index(&filled, &checked, &conditions)
         }
         (Step::NodeScan, LogicalOperator::NodeScan(scan)) => planner.plan_node_scan(scan).map(Some),
@@ -667,6 +786,101 @@ fn open_step(
             )))
         }
         _ => Err(mismatch()),
+    }
+}
+
+/// The route drift guard: that today's planner takes, for `filter` with `predicate` at this
+/// call, the route the recipe's `step` holds. That is the closing, the zone maps that exclude
+/// (`excluded`) or let the generic filter through, or the generic filter.
+#[cfg(debug_assertions)]
+fn assert_the_planners_route(
+    planner: &Planner,
+    step: &Step,
+    filter: &FilterOp,
+    predicate: &LogicalExpression,
+    excluded: bool,
+) {
+    let filled = FilterOp {
+        predicate: predicate.clone(),
+        pushdown_hint: filter.pushdown_hint.clone(),
+        input: filter.input.clone(),
+    };
+    let Ok(first) = filter_route(planner, &filled, None);
+    let holds = match (step, &first) {
+        (Step::Closing(_), FilterRoute::IntersectionClosing)
+        | (
+            Step::Filter {
+                zone_maps: false, ..
+            },
+            FilterRoute::Generic,
+        ) => true,
+        (
+            Step::Filter {
+                zone_maps: true, ..
+            },
+            FilterRoute::ZoneMapEmpty,
+        ) => {
+            excluded
+                || matches!(
+                    filter_route(planner, &filled, Some(&first)),
+                    Ok(FilterRoute::Generic)
+                )
+        }
+        _ => false,
+    };
+    assert!(
+        holds,
+        "a recipe's filter takes another route than today's planner ({}): {step:?} over {filter:?}",
+        first.name()
+    );
+}
+
+/// That a seek opened with the call's key (`filled`) takes today's route: the zone maps first
+/// when the rule is on and the store is read as planned, empty exactly when they exclude the
+/// key (the seek gave the empty tree when `excluded`), else the property index.
+#[cfg(debug_assertions)]
+fn assert_the_seeks_route(planner: &Planner, filled: &FilterOp, excluded: bool) {
+    let Ok(first) = filter_route(planner, filled, None);
+    let holds = match &first {
+        // Today's planner checks the zone maps itself here: the seek must agree.
+        FilterRoute::ZoneMapEmpty => {
+            let today_excludes = planner
+                .check_zone_map_for_predicate(&filled.predicate, &filled.input)
+                == Some(false);
+            excluded == today_excludes
+                && (today_excludes
+                    || matches!(
+                        filter_route(planner, filled, Some(&first)),
+                        Ok(FilterRoute::PropertyIndex { .. })
+                    ))
+        }
+        FilterRoute::PropertyIndex { .. } => !excluded,
+        _ => false,
+    };
+    assert!(
+        holds,
+        "a recipe's seek takes another route than today's planner ({}, excluded {excluded}): \
+         {filled:?}",
+        first.name()
+    );
+}
+
+/// That the target `filter` noted at this call (`noted`) is gone once its input is opened: the
+/// expand below took it, as the hop `plan_filter` notes it for does.
+#[cfg(debug_assertions)]
+fn assert_the_target_is_taken(planner: &Planner, filter: &FilterOp, noted: bool) {
+    let mut below = filter.input.as_ref();
+    while let LogicalOperator::Filter(check) = below {
+        below = &check.input;
+    }
+    if noted && let LogicalOperator::Expand(expand) = below {
+        assert!(
+            !planner
+                .hop_targets
+                .borrow()
+                .contains_key(&expand.to_variable),
+            "a recipe's expand did not take the target its filter noted: {filter:?}"
+        );
     }
 }
 

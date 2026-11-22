@@ -43,10 +43,10 @@ impl super::Planner {
     /// - `text_match(n.body, "search terms")`  (standalone boolean)
     ///
     /// `None` falls through to per-row evaluation, also when the text index is absent (D1).
-    pub(super) fn text_index_route<'a>(
-        &self,
+    pub(super) fn text_index_route<'a, R: super::filter::FilterRouteReads>(
+        reads: &R,
         filter: &'a super::FilterOp,
-    ) -> Option<FilterRoute<'a>> {
+    ) -> super::filter::Guarded<'a, R> {
         // Only push down when input is a full label scan (no nested input):
         // the search finds the nodes alone, so a scan per input row (a later
         // MATCH, an UNWIND) checks the predicate per row instead.
@@ -57,9 +57,10 @@ impl super::Planner {
             return None;
         }
         let label = scan.label.as_deref()?;
+        let planner = super::filter::planner_of!(reads);
 
         // Extract a text predicate from the filter expression
-        let extracted = self.extract_text_predicate(&filter.predicate)?;
+        let extracted = planner.extract_text_predicate(&filter.predicate)?;
 
         // Ensure the predicate references the same variable as the scan being planned
         if extracted.variable != scan.variable {
@@ -68,14 +69,14 @@ impl super::Planner {
 
         // No text index: fall through to per-row evaluation, same as vector behavior.
         // text_score returns 0.0 and text_match returns false for every row.
-        if !self.store.has_text_index(label, &extracted.property) {
+        if !planner.store.has_text_index(label, &extracted.property) {
             return None;
         }
-        Some(FilterRoute::TextIndex {
+        Some(Ok(FilterRoute::TextIndex {
             scan,
             label,
             extracted,
-        })
+        }))
     }
 
     /// Plans [`FilterRoute::TextIndex`]: a `TextScan` of the nodes of `label` in place of
@@ -246,10 +247,10 @@ impl super::Planner {
     /// to be a pure vector or text predicate (no mixed scalar conditions).
     ///
     /// Falls through when only one predicate is present or an index is missing (D1).
-    pub(super) fn compound_hybrid_route<'a>(
-        &self,
+    pub(super) fn compound_hybrid_route<'a, R: super::filter::FilterRouteReads>(
+        reads: &R,
         filter: &'a FilterOp,
-    ) -> Option<FilterRoute<'a>> {
+    ) -> super::filter::Guarded<'a, R> {
         // A full label scan only: a scan per input row checks the predicate
         // per row (see `text_index_route`).
         let LogicalOperator::NodeScan(scan) = filter.input.as_ref() else {
@@ -259,6 +260,7 @@ impl super::Planner {
             return None;
         }
         let label = scan.label.as_deref()?;
+        let planner = super::filter::planner_of!(reads);
 
         // Extract vector and text predicates. Strategy depends on AND vs OR.
         let (vector_pred, text_pred, is_or) = if let LogicalExpression::Binary {
@@ -269,18 +271,19 @@ impl super::Planner {
         {
             // OR: extract from each operand independently.
             // Try vector-left + text-right, then vector-right + text-left.
-            let (v, t) = self
+            let (v, t) = planner
                 .extract_vector_predicate(left)
-                .zip(self.extract_text_predicate(right))
+                .zip(planner.extract_text_predicate(right))
                 .or_else(|| {
-                    self.extract_vector_predicate(right)
-                        .zip(self.extract_text_predicate(left))
+                    planner
+                        .extract_vector_predicate(right)
+                        .zip(planner.extract_text_predicate(left))
                 })?;
             (v, t, true)
         } else {
             // AND: extractors recurse into the AND tree (existing behavior).
-            let vector = self.extract_vector_predicate(&filter.predicate);
-            let text = self.extract_text_predicate(&filter.predicate);
+            let vector = planner.extract_vector_predicate(&filter.predicate);
+            let text = planner.extract_text_predicate(&filter.predicate);
             match (vector, text) {
                 (Some(v), Some(t)) => (v, t, false),
                 _ => return None,
@@ -293,27 +296,27 @@ impl super::Planner {
         }
 
         // If either index is missing, fall through to per-row evaluation (D1).
-        if !self.store.has_vector_index(label, &vector_pred.property) {
+        if !planner.store.has_vector_index(label, &vector_pred.property) {
             return None;
         }
-        if !self.store.has_text_index(label, &text_pred.property) {
+        if !planner.store.has_text_index(label, &text_pred.property) {
             return None;
         }
 
         // Pushdown needs a resolvable query vector. Fall through otherwise.
-        if self
+        if planner
             .resolve_vector_literal(&vector_pred.query_vector)
             .is_err()
         {
             return None;
         }
-        Some(FilterRoute::CompoundHybrid {
+        Some(Ok(FilterRoute::CompoundHybrid {
             scan,
             label,
             vector: vector_pred,
             text: text_pred,
             is_or,
-        })
+        }))
     }
 
     /// Plans [`FilterRoute::CompoundHybrid`]: runs both index scans of the nodes of `label`
@@ -827,7 +830,7 @@ mod text_extract_tests {
             input: Box::new(LogicalOperator::Filter(inner_filter)),
             pushdown_hint: None,
         };
-        let planned = planner.text_index_route(&outer_filter);
+        let planned = super::super::Planner::text_index_route(&planner, &outer_filter);
         assert!(planned.is_none());
     }
 
@@ -849,7 +852,7 @@ mod text_extract_tests {
             })),
             pushdown_hint: None,
         };
-        let planned = planner.text_index_route(&filter);
+        let planned = super::super::Planner::text_index_route(&planner, &filter);
         assert!(planned.is_none());
     }
 
@@ -871,7 +874,7 @@ mod text_extract_tests {
             })),
             pushdown_hint: None,
         };
-        let planned = planner.text_index_route(&filter);
+        let planned = super::super::Planner::text_index_route(&planner, &filter);
         assert!(planned.is_none());
     }
 
@@ -893,7 +896,7 @@ mod text_extract_tests {
             })),
             pushdown_hint: None,
         };
-        let planned = planner.text_index_route(&filter);
+        let planned = super::super::Planner::text_index_route(&planner, &filter);
         assert!(planned.is_none());
     }
 
@@ -915,7 +918,7 @@ mod text_extract_tests {
             })),
             pushdown_hint: None,
         };
-        let planned = planner.text_index_route(&filter);
+        let planned = super::super::Planner::text_index_route(&planner, &filter);
         assert!(planned.is_none());
     }
 }
@@ -1029,7 +1032,7 @@ mod compound_hybrid_tests {
             })),
             pushdown_hint: None,
         };
-        let planned = planner.compound_hybrid_route(&filter);
+        let planned = super::super::Planner::compound_hybrid_route(&planner, &filter);
         assert!(planned.is_none());
     }
 
@@ -1046,7 +1049,7 @@ mod compound_hybrid_tests {
             })),
             pushdown_hint: None,
         };
-        let planned = planner.compound_hybrid_route(&filter);
+        let planned = super::super::Planner::compound_hybrid_route(&planner, &filter);
         assert!(planned.is_none());
     }
 
@@ -1077,7 +1080,7 @@ mod compound_hybrid_tests {
             })),
             pushdown_hint: None,
         };
-        let planned = planner.compound_hybrid_route(&filter);
+        let planned = super::super::Planner::compound_hybrid_route(&planner, &filter);
         assert!(planned.is_none());
     }
 
@@ -1109,7 +1112,7 @@ mod compound_hybrid_tests {
             })),
             pushdown_hint: None,
         };
-        let planned = planner.compound_hybrid_route(&filter);
+        let planned = super::super::Planner::compound_hybrid_route(&planner, &filter);
         assert!(planned.is_none());
     }
 
@@ -1137,7 +1140,7 @@ mod compound_hybrid_tests {
             })),
             pushdown_hint: None,
         };
-        let planned = planner.compound_hybrid_route(&filter);
+        let planned = super::super::Planner::compound_hybrid_route(&planner, &filter);
         assert!(planned.is_none());
     }
 
@@ -1155,7 +1158,7 @@ mod compound_hybrid_tests {
             })),
             pushdown_hint: None,
         };
-        let planned = planner.compound_hybrid_route(&filter);
+        let planned = super::super::Planner::compound_hybrid_route(&planner, &filter);
         assert!(planned.is_none());
     }
 

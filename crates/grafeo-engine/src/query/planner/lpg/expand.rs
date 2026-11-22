@@ -39,14 +39,27 @@ pub(super) enum HopTarget {
 impl super::Planner {
     /// The hops `near` and `closing` as one intersection of the lists of `near`'s
     /// source and `target`, with the columns the two expands give.
-    #[inline(never)]
     fn plan_intersection(
         &self,
         near: &ExpandOp,
         closing: &ExpandOp,
         target: &str,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (input, mut columns) = self.plan_operator(&near.input)?;
+        let (input, columns) = self.plan_operator(&near.input)?;
+        self.intersection_over(near, closing, target, input, columns)
+    }
+
+    /// [`plan_intersection`](Self::plan_intersection) over `input`, the planned input of `near`,
+    /// with its `columns`.
+    #[inline(never)]
+    pub(super) fn intersection_over(
+        &self,
+        near: &ExpandOp,
+        closing: &ExpandOp,
+        target: &str,
+        input: Box<dyn Operator>,
+        mut columns: Vec<String>,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let column_of = |name: &str| {
             columns
                 .iter()
@@ -115,17 +128,19 @@ impl super::Planner {
     }
 
     /// Hands the expand below `filter` what the filter's hint says of its
-    /// target. A key needs a literal value (parameters are filled in by now)
-    /// and a statement that reads the store as planned and whose writes see no
-    /// row of it while it runs: the expand finds the key once, through the
-    /// indexes the hint names, and lists every edge if one has gone since.
-    pub(super) fn note_hop_target(&self, filter: &FilterOp) {
+    /// target, with `predicate` as the filter's (its own, or a recipe's filled
+    /// with a call's values). A key needs a literal value (parameters are
+    /// filled in by now) and a statement that reads the store as planned and
+    /// whose writes see no row of it while it runs: the expand finds the key
+    /// once, through the indexes the hint names, and lists every edge if one
+    /// has gone since. Whether a target was noted.
+    pub(super) fn note_hop_target(&self, filter: &FilterOp, predicate: &LogicalExpression) -> bool {
         let mut below = filter.input.as_ref();
         while let LogicalOperator::Filter(check) = below {
             below = &check.input;
         }
         let LogicalOperator::Expand(expand) = below else {
-            return;
+            return false;
         };
         let target = match &filter.pushdown_hint {
             Some(PushdownHint::ExpandInto { target }) => Some(HopTarget::Column(target.clone())),
@@ -139,23 +154,24 @@ impl super::Planner {
                         .get()
                         .is_some_and(|writes| !writes.per_row) =>
             {
-                constant_seek(&filter.predicate, &expand.to_variable, |property| {
-                    property == key
-                })
-                .and_then(|seek| match seek.value {
-                    LogicalExpression::Literal(value) => {
-                        Some(HopTarget::Key(seek.key, value.clone(), labels.clone()))
-                    }
-                    _ => None,
-                })
+                constant_seek(predicate, &expand.to_variable, |property| property == key).and_then(
+                    |seek| match seek.value {
+                        LogicalExpression::Literal(value) => {
+                            Some(HopTarget::Key(seek.key, value.clone(), labels.clone()))
+                        }
+                        _ => None,
+                    },
+                )
             }
             _ => None,
         };
-        if let Some(target) = target {
-            self.hop_targets
-                .borrow_mut()
-                .insert(expand.to_variable.clone(), target);
-        }
+        let Some(target) = target else {
+            return false;
+        };
+        self.hop_targets
+            .borrow_mut()
+            .insert(expand.to_variable.clone(), target);
+        true
     }
 
     /// Plans an expand operator.

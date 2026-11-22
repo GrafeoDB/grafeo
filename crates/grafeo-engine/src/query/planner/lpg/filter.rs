@@ -56,7 +56,7 @@ use crate::query::plan::PushdownHint;
 use crate::query::plan::{BuiltinFunction, Callee};
 
 /// A route [`plan_filter`](super::Planner::plan_filter) builds a filter by, with what its
-/// guard found that the build reads (see [`filter_route`](super::Planner::filter_route)). The
+/// guard found that the build reads (see [`filter_route`]). The
 /// variants are in the order their guards are checked.
 pub(super) enum FilterRoute<'a> {
     /// An `EXISTS` subquery as a semi-join (`NOT EXISTS`: an anti-join), and the rest of the
@@ -140,9 +140,10 @@ pub(super) enum FilterRoute<'a> {
     Generic,
 }
 
-#[cfg(test)]
+#[cfg(any(test, prepared_plans))]
 impl FilterRoute<'_> {
-    /// The variant's name, as a test records the routes taken.
+    /// The variant's name, as a test records the routes taken and a recipe names a route it
+    /// does not cover.
     pub(super) fn name(&self) -> &'static str {
         match self {
             Self::ExistsJoin { .. } => "ExistsJoin",
@@ -167,6 +168,178 @@ impl FilterRoute<'_> {
     }
 }
 
+/// What [`filter_route`] reads besides the plan: the planner that plans the filter, or what a
+/// prepared plan's recipe holds, which knows the rules and no store.
+pub(super) trait FilterRouteReads {
+    /// What a guard answers that needs more than this holds (nothing, for the planner).
+    type Unknown;
+
+    /// The planner's rules.
+    fn rules(&self) -> crate::query::optimizer::PlannerRules;
+
+    /// Whether the filter reads the store as it is while the plan is built (see `after_write`).
+    fn reads_the_store_as_planned(&self) -> bool;
+
+    /// The planner, for a guard's reads of the store's schema and statistics, of the session and
+    /// of the planner's own state.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::Unknown`] when this holds no planner.
+    fn planner(&self) -> std::result::Result<&super::Planner, Self::Unknown>;
+}
+
+impl FilterRouteReads for super::Planner {
+    type Unknown = std::convert::Infallible;
+
+    fn rules(&self) -> crate::query::optimizer::PlannerRules {
+        self.rules
+    }
+
+    fn reads_the_store_as_planned(&self) -> bool {
+        !self.after_a_write.get()
+    }
+
+    fn planner(&self) -> std::result::Result<&super::Planner, Self::Unknown> {
+        Ok(self)
+    }
+}
+
+/// What a guard of [`filter_route`] answers: `None` when its route does not apply, else the
+/// route, or what `R` answers when the guard needs more than `R` holds.
+pub(super) type Guarded<'a, R> =
+    Option<std::result::Result<FilterRoute<'a>, <R as FilterRouteReads>::Unknown>>;
+
+/// The planner of a guard's reads, or the guard's answer that they cannot tell.
+macro_rules! planner_of {
+    ($reads:expr) => {
+        match $reads.planner() {
+            Ok(planner) => planner,
+            Err(unknown) => return Some(Err(unknown)),
+        }
+    };
+}
+pub(super) use planner_of;
+
+/// The route `filter` is built by: of the routes after `after`, a route whose build declined,
+/// the first in the order of [`FilterRoute`]'s variants whose guard holds. It plans nothing and
+/// writes no planner state: a guard reads the plan, the rules, the store's schema and
+/// statistics, and may fill the cache of edge type names.
+///
+/// Each guard checks the plan's shape before it asks `reads` for anything else, so a route
+/// that cannot apply by its shape answers so whatever `reads` holds.
+///
+/// Only the builds of [`FilterRoute::ZoneMapEmpty`], [`FilterRoute::PropertyIndex`] and
+/// [`FilterRoute::InListIndex`] decline: what they read of the store decides.
+///
+/// # Errors
+///
+/// What `reads` answers when a guard needs more than it holds.
+pub(super) fn filter_route<'a, R: FilterRouteReads>(
+    reads: &R,
+    filter: &'a FilterOp,
+    after: Option<&FilterRoute<'a>>,
+) -> std::result::Result<FilterRoute<'a>, R::Unknown> {
+    use super::Planner;
+    if after.is_none() {
+        let input_writes = filter.input.has_mutations();
+        if let Some(route) = Planner::subquery_route(reads, filter, input_writes) {
+            return route;
+        }
+
+        // An intersection makes only rows that meet at its target (see
+        // `plan_intersection`): its closing equality, the whole predicate of the
+        // filter the optimizer marks (`intersect_hops`), is not checked again.
+        if let Some(PushdownHint::IntersectExpand { target }) = &filter.pushdown_hint
+            && let LogicalOperator::Expand(closing) = filter.input.as_ref()
+            && matches!(closing.input.as_ref(), LogicalOperator::Expand(_))
+            && crate::query::optimizer::without_check(
+                filter.predicate.clone(),
+                &closing.to_variable,
+                target,
+            )
+            .is_none()
+        {
+            return Ok(FilterRoute::IntersectionClosing);
+        }
+
+        // Check zone maps for simple property predicates before scanning
+        // If zone map says "definitely no matches", we can short-circuit.
+        // Not below a mutation, nor after one (see `after_write`): zone maps
+        // describe the store as it is before this query runs, not values the
+        // query writes first.
+        if !input_writes
+            && reads
+                .rules()
+                .has(crate::query::optimizer::PlannerRule::ZoneMaps)
+            && reads.reads_the_store_as_planned()
+        {
+            return Ok(FilterRoute::ZoneMapEmpty);
+        }
+    }
+
+    if !matches!(
+        after,
+        Some(FilterRoute::PropertyIndex { .. } | FilterRoute::InListIndex { .. })
+    ) {
+        // A condition on every edge of a variable-length path: checked during
+        // the expand's search
+        if let Some(route) = Planner::edge_condition_route(reads, filter) {
+            return route;
+        }
+        // A key from the input row, or an ID: look the node up per row
+        if let Some(route) = Planner::node_seek_route(reads, filter) {
+            return route;
+        }
+        // Values of the input row equal to values of the node: scan once and
+        // join on them
+        if let Some(route) = Planner::value_join_route(reads, filter) {
+            return route;
+        }
+        // Try to use property index for equality predicates on indexed properties
+        if let Some(route) = Planner::property_index_route(reads, filter) {
+            return route;
+        }
+    }
+
+    // Try to use property index for `var.prop IN [literals]` predicates,
+    // unioning per-value index lookups instead of falling back to a full
+    // scan + filter. Empirically this is the difference between ~10ms
+    // and multiple seconds on a few thousand reviews when an `id` index
+    // exists.
+    if !matches!(after, Some(FilterRoute::InListIndex { .. }))
+        && let Some(route) = Planner::in_list_route(reads, filter)
+    {
+        return route;
+    }
+
+    // Try to use range optimization for range predicates (>, <, >=, <=)
+    if let Some(route) = Planner::range_route(reads, filter) {
+        return route;
+    }
+
+    // Try compound hybrid first (both vector AND/OR text in same predicate)
+    #[cfg(all(feature = "vector-index", feature = "text-index"))]
+    if let Some(route) = Planner::compound_hybrid_route(reads, filter) {
+        return route;
+    }
+
+    // Try to use vector index for similarity/distance predicates
+    #[cfg(feature = "vector-index")]
+    if let Some(route) = Planner::vector_index_route(reads, filter) {
+        return route;
+    }
+
+    // Try to use text index for text_score/text_match predicates
+    #[cfg(feature = "text-index")]
+    if let Some(route) = Planner::text_index_route(reads, filter) {
+        return route;
+    }
+
+    // An `OR` of labels: the scan reads the nodes of those labels only
+    Planner::label_union_route(reads, filter).unwrap_or(Ok(FilterRoute::Generic))
+}
+
 impl super::Planner {
     /// Whether node `id` is visible to this query and, when `label` is given,
     /// carries it. An index lookup checks its few results this way, instead of
@@ -179,7 +352,7 @@ impl super::Planner {
         })
     }
 
-    /// Plans a filter operator by its route (see [`Self::filter_route`]).
+    /// Plans a filter operator by its route (see [`filter_route`]).
     ///
     /// Uses zone map pre-filtering to potentially skip scans when predicates
     /// definitely won't match any data. Also uses property indexes when available
@@ -193,18 +366,17 @@ impl super::Planner {
         // other: a scan below another operator under it (an expand, a second filter) feeds rows
         // that may still be dropped, so it reads them all.
         let limit = self.limit_hint.take();
-        let mut route = self.filter_route(filter, None);
+        let Ok(mut route) = filter_route(self, filter, None);
         // A hop that knows its target: this filter stays over it and decides. The subquery
         // routes come before it and plan without it.
         if !matches!(
             route,
             FilterRoute::ExistsJoin { .. } | FilterRoute::LiftedSubqueries
         ) {
+            #[cfg(not(test))]
+            self.note_hop_target(filter, &filter.predicate);
             #[cfg(test)]
-            let targets = self.hop_targets.borrow().len();
-            self.note_hop_target(filter);
-            #[cfg(test)]
-            if self.hop_targets.borrow().len() > targets {
+            if self.note_hop_target(filter, &filter.predicate) {
                 self.filter_routes_taken
                     .borrow_mut()
                     .push("hop target".to_string());
@@ -293,7 +465,7 @@ impl super::Planner {
                 }
                 FilterRoute::Generic => {
                     let (input_op, columns) = self.plan_input(&filter.input)?;
-                    return self.filter_over(filter, input_op, columns);
+                    return self.filter_over(filter, &filter.predicate, input_op, columns);
                 }
             };
             if let Some(built) = built {
@@ -303,128 +475,17 @@ impl super::Planner {
             self.filter_routes_taken
                 .borrow_mut()
                 .push(format!("{} declined", route.name()));
-            route = self.filter_route(filter, Some(&route));
+            let Ok(next) = filter_route(self, filter, Some(&route));
+            route = next;
         }
-    }
-
-    /// The route `filter` is built by: of the routes after `after`, a route whose build
-    /// declined, the first in the order of [`FilterRoute`]'s variants whose guard holds. It
-    /// plans nothing and writes no planner state: a guard reads the plan, the rules, the
-    /// store's schema and statistics, and may fill the cache of edge type names.
-    ///
-    /// Only the builds of [`FilterRoute::ZoneMapEmpty`], [`FilterRoute::PropertyIndex`] and
-    /// [`FilterRoute::InListIndex`] decline: what they read of the store decides.
-    pub(super) fn filter_route<'a>(
-        &self,
-        filter: &'a FilterOp,
-        after: Option<&FilterRoute<'a>>,
-    ) -> FilterRoute<'a> {
-        if after.is_none() {
-            let input_writes = filter.input.has_mutations();
-            if let Some(route) = self.subquery_route(filter, input_writes) {
-                return route;
-            }
-
-            // An intersection makes only rows that meet at its target (see
-            // `plan_intersection`): its closing equality, the whole predicate of the
-            // filter the optimizer marks (`intersect_hops`), is not checked again.
-            if let Some(PushdownHint::IntersectExpand { target }) = &filter.pushdown_hint
-                && let LogicalOperator::Expand(closing) = filter.input.as_ref()
-                && matches!(closing.input.as_ref(), LogicalOperator::Expand(_))
-                && crate::query::optimizer::without_check(
-                    filter.predicate.clone(),
-                    &closing.to_variable,
-                    target,
-                )
-                .is_none()
-            {
-                return FilterRoute::IntersectionClosing;
-            }
-
-            // Check zone maps for simple property predicates before scanning
-            // If zone map says "definitely no matches", we can short-circuit.
-            // Not below a mutation, nor after one (see `after_write`): zone maps
-            // describe the store as it is before this query runs, not values the
-            // query writes first.
-            if !input_writes
-                && self
-                    .rules
-                    .has(crate::query::optimizer::PlannerRule::ZoneMaps)
-                && self.reads_the_store_as_planned()
-            {
-                return FilterRoute::ZoneMapEmpty;
-            }
-        }
-
-        if !matches!(
-            after,
-            Some(FilterRoute::PropertyIndex { .. } | FilterRoute::InListIndex { .. })
-        ) {
-            // A condition on every edge of a variable-length path: checked during
-            // the expand's search
-            if let Some(route) = self.edge_condition_route(filter) {
-                return route;
-            }
-            // A key from the input row, or an ID: look the node up per row
-            if let Some(route) = self.node_seek_route(filter) {
-                return route;
-            }
-            // Values of the input row equal to values of the node: scan once and
-            // join on them
-            if let Some(route) = self.value_join_route(filter) {
-                return route;
-            }
-            // Try to use property index for equality predicates on indexed properties
-            if let Some(route) = self.property_index_route(filter) {
-                return route;
-            }
-        }
-
-        // Try to use property index for `var.prop IN [literals]` predicates,
-        // unioning per-value index lookups instead of falling back to a full
-        // scan + filter. Empirically this is the difference between ~10ms
-        // and multiple seconds on a few thousand reviews when an `id` index
-        // exists.
-        if !matches!(after, Some(FilterRoute::InListIndex { .. }))
-            && let Some(route) = self.in_list_route(filter)
-        {
-            return route;
-        }
-
-        // Try to use range optimization for range predicates (>, <, >=, <=)
-        if let Some(route) = self.range_route(filter) {
-            return route;
-        }
-
-        // Try compound hybrid first (both vector AND/OR text in same predicate)
-        #[cfg(all(feature = "vector-index", feature = "text-index"))]
-        if let Some(route) = self.compound_hybrid_route(filter) {
-            return route;
-        }
-
-        // Try to use vector index for similarity/distance predicates
-        #[cfg(feature = "vector-index")]
-        if let Some(route) = self.vector_index_route(filter) {
-            return route;
-        }
-
-        // Try to use text index for text_score/text_match predicates
-        #[cfg(feature = "text-index")]
-        if let Some(route) = self.text_index_route(filter) {
-            return route;
-        }
-
-        // An `OR` of labels: the scan reads the nodes of those labels only
-        self.label_union_route(filter)
-            .unwrap_or(FilterRoute::Generic)
     }
 
     /// The subquery routes of `filter`, whose input writes when `input_writes`.
-    fn subquery_route<'a>(
-        &self,
+    fn subquery_route<'a, R: FilterRouteReads>(
+        reads: &R,
         filter: &'a FilterOp,
         input_writes: bool,
-    ) -> Option<FilterRoute<'a>> {
+    ) -> Guarded<'a, R> {
         // Check for complex EXISTS/NOT EXISTS patterns and rewrite as semi/anti join.
         // Simple single-hop EXISTS patterns from a node of the row are handled
         // by the fast path in convert_expression() -> extract_exists_pattern().
@@ -436,16 +497,17 @@ impl super::Planner {
         if !crate::query::plan::has_subquery(&filter.predicate) {
             return None;
         }
+        let planner = planner_of!(reads);
         let outer = filter.input.bound_variables(None);
         if !input_writes
             && let Some((subquery, negated, remaining)) =
-                self.extract_complex_exists(&filter.predicate, outer.as_ref())
+                planner.extract_complex_exists(&filter.predicate, outer.as_ref())
         {
-            return Some(FilterRoute::ExistsJoin {
+            return Some(Ok(FilterRoute::ExistsJoin {
                 subquery,
                 negated,
                 remaining,
-            });
+            }));
         }
 
         // EXISTS and COUNT subqueries the edge check cannot answer run per
@@ -454,36 +516,43 @@ impl super::Planner {
         // shares none of them is lifted too (counted once instead of per
         // row).
         let input_columns: Option<Vec<String>> = outer.map(|names| names.into_iter().collect());
-        self.has_subquery_to_lift(&filter.predicate, input_columns.as_deref(), input_writes)
-            .then_some(FilterRoute::LiftedSubqueries)
+        planner
+            .has_subquery_to_lift(&filter.predicate, input_columns.as_deref(), input_writes)
+            .then_some(Ok(FilterRoute::LiftedSubqueries))
     }
 
     /// The empty result of `filter` when its zone maps prove that no row matches; `None` when
     /// a row may match, or the zone maps cannot tell.
-    fn plan_filter_with_zone_maps(
+    pub(super) fn plan_filter_with_zone_maps(
         &self,
         filter: &FilterOp,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
         if let Some(false) = self.check_zone_map_for_predicate(&filter.predicate, &filter.input) {
             // Zone map says no matches possible - return empty result
             let (_, columns) = self.plan_input(&filter.input)?;
-            let schema = self.derive_schema_from_columns(&columns);
-            let empty_op = Box::new(EmptyOperator::new(schema));
-            return Ok(Some((empty_op, columns)));
+            return Ok(Some(self.empty_over(columns)));
         }
         Ok(None)
     }
 
-    /// The filter `filter` over its planned input, as a predicate checked on each row. A
-    /// predicate that reads the graph after a write (`... SET h.c = i WITH h WHERE h.c = 4`)
-    /// reads what the whole write left (see `after_write`).
+    /// No rows, with the `columns` of the input it takes the place of.
+    pub(super) fn empty_over(&self, columns: Vec<String>) -> (Box<dyn Operator>, Vec<String>) {
+        let schema = self.derive_schema_from_columns(&columns);
+        (Box::new(EmptyOperator::new(schema)), columns)
+    }
+
+    /// The filter `filter` over its planned input, as `predicate` (its own, or a recipe's filled
+    /// with a call's values) checked on each row. A predicate that reads the graph after a write
+    /// (`... SET h.c = i WITH h WHERE h.c = 4`) reads what the whole write left (see
+    /// `after_write`).
     pub(super) fn filter_over(
         &self,
         filter: &FilterOp,
+        predicate: &LogicalExpression,
         mut input_op: Box<dyn Operator>,
         columns: Vec<String>,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        if super::after_write::reads_the_graph(&filter.predicate) {
+        if super::after_write::reads_the_graph(predicate) {
             input_op = super::mutation::read_first_after_a_write(input_op, &filter.input);
         }
 
@@ -495,7 +564,7 @@ impl super::Planner {
             .collect();
 
         // Convert logical expression to filter expression
-        let filter_expr = self.convert_expression(&filter.predicate)?;
+        let filter_expr = self.convert_expression(predicate)?;
 
         // Create the predicate
         let predicate = ExpressionPredicate::new(
@@ -516,12 +585,18 @@ impl super::Planner {
     /// conjuncts of a filter right over the variable-length expand that binds `path`, whose
     /// condition reads the one edge and the input row only (a conjunct that reads anything else
     /// stays in the filter). `None` when no conjunct qualifies.
-    fn edge_condition_route<'a>(&self, filter: &'a FilterOp) -> Option<FilterRoute<'a>> {
+    fn edge_condition_route<'a, R: FilterRouteReads>(
+        reads: &R,
+        filter: &'a FilterOp,
+    ) -> Guarded<'a, R> {
         let LogicalOperator::Expand(expand) = filter.input.as_ref() else {
             return None;
         };
         let path = expand.path_alias.as_deref()?;
-        if !expand.is_variable_length() || self.reachability_mode(expand).is_some() {
+        if !expand.is_variable_length() {
+            return None;
+        }
+        if planner_of!(reads).reachability_mode(expand).is_some() {
             return None;
         }
         let row = expand.input.bound_variables(None)?;
@@ -542,7 +617,7 @@ impl super::Planner {
         if taken.is_empty() {
             return None;
         }
-        Some(FilterRoute::EdgeConditionIntoPath { path, taken, kept })
+        Some(Ok(FilterRoute::EdgeConditionIntoPath { path, taken, kept }))
     }
 
     /// Plans the conditions `taken` of a filter right over the variable-length expand that binds
@@ -1067,10 +1142,10 @@ impl super::Planner {
     /// An index's lookup not after a write of the statement (see
     /// [`Self::reads_the_store_as_planned`]): it finds the nodes while
     /// planning. A read of the key's column reads as it runs.
-    pub(super) fn property_index_route<'a>(&self, filter: &'a FilterOp) -> Option<FilterRoute<'a>> {
-        if !self.reads_by_key() {
-            return None;
-        }
+    pub(super) fn property_index_route<'a, R: FilterRouteReads>(
+        reads: &R,
+        filter: &'a FilterOp,
+    ) -> Guarded<'a, R> {
         // A scan without input, directly below or below filters that check
         // the scanned node alone (`MATCH (m {id: $id}) WHERE m:Post OR
         // m:Comment`): the lookup takes their place, and the nodes it finds
@@ -1078,6 +1153,10 @@ impl super::Planner {
         let checked = super::seek::checked_scan(filter)?;
         let scan = checked.scan;
         if scan.input.is_some() {
+            return None;
+        }
+        let planner = planner_of!(reads);
+        if !planner.reads_by_key() {
             return None;
         }
 
@@ -1096,7 +1175,7 @@ impl super::Planner {
         let conditions: Vec<(String, Value, LookupRead<'a>)> = conditions
             .into_iter()
             .map(|(property, value)| {
-                let read = labels.lookup_read(self.store.as_ref(), &property, self.rules);
+                let read = labels.lookup_read(planner.store.as_ref(), &property, planner.rules);
                 (property, value, read)
             })
             .collect();
@@ -1105,17 +1184,17 @@ impl super::Planner {
         // key's column it can: it declines only when no index answers and no column can be read.
         let readable = conditions.iter().any(|(_, value, read)| {
             let read_by_key = match read {
-                LookupRead::Index(_) => self.reads_the_store_as_planned(),
+                LookupRead::Index(_) => planner.reads_the_store_as_planned(),
                 LookupRead::IndexesAndRemainder { .. } | LookupRead::Column { .. } => true,
                 LookupRead::Scan => false,
             };
             read_by_key
-                && equality_probes(value, self.session_context.temporal_comparison).is_some()
+                && equality_probes(value, planner.session_context.temporal_comparison).is_some()
         });
-        readable.then_some(FilterRoute::PropertyIndex {
+        readable.then_some(Ok(FilterRoute::PropertyIndex {
             checked,
             conditions,
-        })
+        }))
     }
 
     /// Plans [`FilterRoute::PropertyIndex`]: the nodes the indexes find for the `conditions`
@@ -1193,12 +1272,16 @@ impl super::Planner {
 
     /// [`FilterRoute::LabelUnion`] for a filter whose predicate requires one of several labels
     /// of the node a scan of every node reads (see [`label_union`](super::scan::label_union)).
-    fn label_union_route<'a>(&self, filter: &'a FilterOp) -> Option<FilterRoute<'a>> {
+    fn label_union_route<'a, R: FilterRouteReads>(
+        reads: &R,
+        filter: &'a FilterOp,
+    ) -> Guarded<'a, R> {
         let LogicalOperator::NodeScan(scan) = filter.input.as_ref() else {
             return None;
         };
-        let labels = super::scan::label_union(&filter.predicate, scan, self.store.as_ref())?;
-        Some(FilterRoute::LabelUnion { scan, labels })
+        let planner = planner_of!(reads);
+        let labels = super::scan::label_union(&filter.predicate, scan, planner.store.as_ref())?;
+        Some(Ok(FilterRoute::LabelUnion { scan, labels }))
     }
 
     /// Plans [`FilterRoute::LabelUnion`] as a scan of the nodes of `labels`, each once and in
@@ -1289,10 +1372,10 @@ impl super::Planner {
     /// filters (see [`checked_scan`](super::seek::checked_scan)), no conjunct is such an `IN`
     /// list, an index's lookup would run after a write of the statement, or a value has no
     /// probes for a read of the column (see [`equality_probes`]).
-    pub(super) fn in_list_route<'a>(&self, filter: &'a FilterOp) -> Option<FilterRoute<'a>> {
-        if !self.reads_by_key() {
-            return None;
-        }
+    pub(super) fn in_list_route<'a, R: FilterRouteReads>(
+        reads: &R,
+        filter: &'a FilterOp,
+    ) -> Guarded<'a, R> {
         // A scan without input, directly below or below filters that check the scanned node
         // alone, which the lookup takes over: the list may be in any of them.
         let checked = super::seek::checked_scan(filter)?;
@@ -1300,9 +1383,13 @@ impl super::Planner {
         if scan.input.is_some() {
             return None;
         }
+        let planner = planner_of!(reads);
+        if !planner.reads_by_key() {
+            return None;
+        }
 
         let labels = LookupLabels::of(filter, &scan.variable);
-        let lookup_read = |p: &str| labels.lookup_read(self.store.as_ref(), p, self.rules);
+        let lookup_read = |p: &str| labels.lookup_read(planner.store.as_ref(), p, planner.rules);
         let (property, values) = std::iter::once(&filter.predicate)
             .chain(checked.checks.iter().map(|(_, check)| *check))
             .find_map(|predicate| {
@@ -1316,18 +1403,18 @@ impl super::Planner {
         // reads the values' probes.
         let readable = values.is_empty()
             || match read {
-                LookupRead::Index(_) => self.reads_the_store_as_planned(),
+                LookupRead::Index(_) => planner.reads_the_store_as_planned(),
                 _ => values.iter().all(|value| {
-                    equality_probes(value, self.session_context.temporal_comparison).is_some()
+                    equality_probes(value, planner.session_context.temporal_comparison).is_some()
                 }),
             };
-        readable.then_some(FilterRoute::InListIndex {
+        readable.then_some(Ok(FilterRoute::InListIndex {
             checked,
             labels,
             property,
             values,
             read,
-        })
+        }))
     }
 
     /// Plans [`FilterRoute::InListIndex`]: the nodes a lookup of `property` that reads `read`
@@ -1536,9 +1623,9 @@ impl super::Planner {
     ///
     /// Handles both simple range predicates (`n.age > 30`) and `BETWEEN`
     /// patterns (`n.age >= 30 AND n.age <= 50`).
-    fn range_route<'a>(&self, filter: &'a FilterOp) -> Option<FilterRoute<'a>> {
-        if !self
-            .rules
+    fn range_route<'a, R: FilterRouteReads>(reads: &R, filter: &'a FilterOp) -> Guarded<'a, R> {
+        if !reads
+            .rules()
             .has(crate::query::optimizer::PlannerRule::IndexRange)
         {
             return None;
@@ -1550,12 +1637,13 @@ impl super::Planner {
             _ => return None,
         };
 
-        let (property, range) = self.filter_range(&filter.predicate, &scan.variable)?;
-        Some(FilterRoute::RangeIndex {
+        let (property, range) =
+            planner_of!(reads).filter_range(&filter.predicate, &scan.variable)?;
+        Some(Ok(FilterRoute::RangeIndex {
             scan,
             property,
             range,
-        })
+        }))
     }
 
     /// Plans [`FilterRoute::RangeIndex`]: a range scan of `property` over `range` in place of
@@ -2257,10 +2345,10 @@ impl super::Planner {
     /// Recognizes patterns like:
     /// - `cosine_similarity(n.embedding, $qv) > 0.8`
     /// - `euclidean_distance(n.embedding, $qv) < 0.5`
-    pub(super) fn vector_index_route<'a>(
-        &self,
+    pub(super) fn vector_index_route<'a, R: FilterRouteReads>(
+        reads: &R,
         filter: &'a super::FilterOp,
-    ) -> Option<FilterRoute<'a>> {
+    ) -> Guarded<'a, R> {
         // Only push down when input is a full label scan (no nested input):
         // the search finds the nodes alone, so a scan per input row (a later
         // MATCH, an UNWIND) checks the predicate per row instead.
@@ -2271,9 +2359,10 @@ impl super::Planner {
             return None;
         }
         let label = scan.label.as_deref()?;
+        let planner = planner_of!(reads);
 
         // Extract a vector predicate from the filter expression
-        let extracted = self.extract_vector_predicate(&filter.predicate)?;
+        let extracted = planner.extract_vector_predicate(&filter.predicate)?;
 
         // Ensure the predicate references the same variable as the scan being planned
         if extracted.variable != scan.variable {
@@ -2281,24 +2370,24 @@ impl super::Planner {
         }
 
         // Check that a vector index exists (or fall through to brute-force eval)
-        if !self.store.has_vector_index(label, &extracted.property) {
+        if !planner.store.has_vector_index(label, &extracted.property) {
             return None;
         }
 
         // The pushdown requires a query vector resolvable at plan time. If the
         // expression is something like a property access or non-literal, fall
         // through so per-row Filter evaluation handles it.
-        if self
+        if planner
             .resolve_vector_literal(&extracted.query_vector)
             .is_err()
         {
             return None;
         }
-        Some(FilterRoute::VectorIndex {
+        Some(Ok(FilterRoute::VectorIndex {
             scan,
             label,
             extracted,
-        })
+        }))
     }
 
     /// Plans [`FilterRoute::VectorIndex`]: a VectorScan of the nodes of `label` in place of

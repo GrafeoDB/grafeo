@@ -1241,6 +1241,7 @@ pub fn substitute_params(plan: &mut LogicalPlan, params: &QueryParams) -> Result
         values: params,
         clauses: plan.count_clauses,
         renamed_keys: std::cell::RefCell::new(HashMap::new()),
+        missing: None,
     };
     substitute_in_operator(&mut plan.root, &params)?;
     // A grouping key is a column named by its text, which the operators above read it by: a key
@@ -1251,6 +1252,52 @@ pub fn substitute_params(plan: &mut LogicalPlan, params: &QueryParams) -> Result
     Ok(())
 }
 
+/// Substitutes the parameters of `expression`, an expression of a plan whose counts' errors
+/// name `clauses`, with `params`, as [`substitute_params`] does in the whole plan.
+///
+/// # Errors
+///
+/// As [`substitute_params`]: a referenced parameter that is not in `params`.
+#[cfg(prepared_plans)]
+pub(crate) fn substitute_expression_params(
+    expression: &mut crate::query::plan::LogicalExpression,
+    params: &QueryParams,
+    clauses: crate::query::plan::CountClauses,
+) -> Result<()> {
+    substitute_in_expression(
+        expression,
+        &Substitution {
+            values: params,
+            clauses,
+            renamed_keys: std::cell::RefCell::new(HashMap::new()),
+            missing: None,
+        },
+    )
+}
+
+/// The parameters `expression` reads, where [`substitute_expression_params`] fills them, in
+/// the order it meets them.
+///
+/// # Errors
+///
+/// A count in a subquery of `expression` that names no value.
+#[cfg(prepared_plans)]
+pub(crate) fn expression_parameters(
+    expression: &crate::query::plan::LogicalExpression,
+    clauses: crate::query::plan::CountClauses,
+) -> Result<Vec<String>> {
+    let params = Substitution {
+        values: &QueryParams::new(),
+        clauses,
+        renamed_keys: std::cell::RefCell::new(HashMap::new()),
+        missing: Some(std::cell::RefCell::new(Vec::new())),
+    };
+    substitute_in_expression(&mut expression.clone(), &params)?;
+    Ok(params
+        .missing
+        .map_or_else(Vec::new, std::cell::RefCell::into_inner))
+}
+
 /// The values a plan's parameters take, and what its statement calls the
 /// clauses that skip and limit rows, which the error of a bad count names.
 struct Substitution<'a> {
@@ -1258,6 +1305,8 @@ struct Substitution<'a> {
     clauses: crate::query::plan::CountClauses,
     /// The grouping keys whose text the values changed: the old column name, then the new.
     renamed_keys: std::cell::RefCell<HashMap<String, String>>,
+    /// With a list, a parameter without a value is listed here instead of failing.
+    missing: Option<std::cell::RefCell<Vec<String>>>,
 }
 
 /// Recursively substitutes parameters in an operator.
@@ -1577,6 +1626,8 @@ fn substitute_in_expression(expr: &mut LogicalExpression, params: &Substitution<
         LogicalExpression::Parameter(name) => {
             if let Some(value) = params.values.get(name) {
                 *expr = LogicalExpression::Literal(value.clone());
+            } else if let Some(missing) = &params.missing {
+                missing.borrow_mut().push(name.clone());
             } else {
                 return Err(Error::from(grafeo_common::utils::error::QueryError::new(
                     grafeo_common::utils::error::QueryErrorKind::InvalidReference,

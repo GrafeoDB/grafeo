@@ -639,9 +639,9 @@ fn covered_aggregates() -> Vec<&'static str> {
 }
 
 /// Each covered aggregate gives today's rows for every key, in GQL and Cypher, and (with work
-/// counters) no call plans. With factorized execution off the rows are today's too; there a
-/// count over a chain runs over its rows, and Cypher's check that the chain's edges differ is a
-/// filter no recipe covers, so that statement alone plans each call.
+/// counters) no call plans. With factorized execution off the rows are today's too, and no call
+/// plans either: there a count over a chain runs over its rows, through Cypher's check that the
+/// chain's edges differ.
 #[test]
 fn aggregates_give_todays_rows() {
     let db = people(Config::in_memory());
@@ -653,8 +653,6 @@ fn aggregates_give_todays_rows() {
     let plain = people(Config::in_memory().without_factorized_execution());
     for cypher in [false, true] {
         for query in covered_aggregates() {
-            // Cypher's chain of two hops checks that its edges differ, a filter no recipe covers.
-            let opens = !(cypher && query.contains("(m:Person)-[:KNOWS]->(b:Person)"));
             for id in keys() {
                 #[cfg(grafeo_work_counters)]
                 let _ = grafeo_common::work::take();
@@ -663,12 +661,12 @@ fn aggregates_give_todays_rows() {
                 if matches!(id, Value::Int64(_) | Value::String(_)) {
                     let built =
                         grafeo_common::work::take().get(grafeo_common::work::Work::PlanBuilt);
-                    assert_eq!(built == 0, opens, "{query} with {id:?}, cypher {cypher}");
+                    assert_eq!(built, 0, "{query} with {id:?}, cypher {cypher}");
                 }
                 assert_eq!(
                     rows,
                     today(&plain, cypher, query, &id),
-                    "{query} with {id:?}, cypher {cypher}, factorized off, opens {opens}"
+                    "{query} with {id:?}, cypher {cypher}, factorized off"
                 );
             }
         }

@@ -474,6 +474,8 @@ pub(crate) struct SessionInner {
     transaction_manager: Arc<TransactionManager>,
     /// Query cache shared across sessions.
     query_cache: Arc<QueryCache>,
+    /// The session's own plan cache, in front of the shared one.
+    session_plans: crate::query::cache::SessionPlans,
     /// Where the session's streams are listed (#712).
     #[cfg(feature = "gql")]
     pub(crate) slots: Arc<Slots>,
@@ -662,6 +664,7 @@ impl SessionInner {
             },
             catalog: cfg.catalog,
             transaction_manager: cfg.transaction_manager,
+            session_plans: crate::query::cache::SessionPlans::new(Arc::clone(&cfg.query_cache)),
             query_cache: cfg.query_cache,
             #[cfg(feature = "gql")]
             slots: cfg.slots,
@@ -782,6 +785,12 @@ impl SessionInner {
         wal || cdc
     }
 
+    /// Turns the session's own plan cache off, for a session of one call: it ends before a
+    /// repeat could hit it. Its statements read the shared cache.
+    pub(crate) fn turn_off_session_plans(&mut self) {
+        self.session_plans.turn_off();
+    }
+
     /// Sets the WAL for this session (shared with the database).
     ///
     /// Each commit writes one group: the records of its change set (see
@@ -863,6 +872,7 @@ impl SessionInner {
             #[cfg(feature = "triple-store")]
             rdf_store: Arc::new(RdfStore::new()),
             transaction_manager: cfg.transaction_manager,
+            session_plans: crate::query::cache::SessionPlans::new(Arc::clone(&cfg.query_cache)),
             query_cache: cfg.query_cache,
             #[cfg(feature = "gql")]
             slots: cfg.slots,

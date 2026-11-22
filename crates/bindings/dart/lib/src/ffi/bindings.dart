@@ -1254,6 +1254,12 @@ final class GrafeoBindings {
       Int32 Function(Pointer<Void>, Uint64),
       int Function(Pointer<Void>, int)>('grafeo_options_set_spill_limit');
 
+  /// Sets the plan cache limit in bytes; zero keeps no plan. Returns
+  /// GrafeoStatus.
+  late final grafeoOptionsSetPlanCacheLimit = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64),
+      int Function(Pointer<Void>, int)>('grafeo_options_set_plan_cache_limit');
+
   /// Lifts the spill limit. Returns GrafeoStatus.
   late final grafeoOptionsSetUnlimitedSpill = library.lookupFunction<
       Int32 Function(Pointer<Void>),

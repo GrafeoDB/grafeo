@@ -114,6 +114,7 @@ impl super::Open {
             optimized_plan_cache_bytes: optimized_bytes,
             cached_plan_count,
             plan_cache_limit_bytes: self.query_cache.limit(),
+            session_plan_cache_bytes: self.query_cache.session_bytes(),
             ..Default::default()
         };
         caches.compute_total();

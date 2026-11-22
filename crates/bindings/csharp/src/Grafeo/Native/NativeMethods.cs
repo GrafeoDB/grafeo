@@ -65,6 +65,10 @@ internal static partial class NativeMethods
     [LibraryImport(LibName)]
     internal static partial int grafeo_options_set_spill_limit(OptionsHandle options, ulong bytes);
 
+    /// <summary>Sets the plan cache limit in bytes; zero keeps no plan.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int grafeo_options_set_plan_cache_limit(OptionsHandle options, ulong bytes);
+
     /// <summary>Lifts the spill limit.</summary>
     [LibraryImport(LibName)]
     internal static partial int grafeo_options_set_unlimited_spill(OptionsHandle options);

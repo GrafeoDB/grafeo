@@ -85,6 +85,13 @@ class GrafeoOptions {
   /// spills nothing whatever the settings.
   final bool unlimitedSpill;
 
+  /// How many bytes of plans the database keeps for repeated statements, by a
+  /// deep estimate of what each plan holds; zero keeps none, so every
+  /// statement plans. By default a sixty-fourth of [memoryLimit], from 4 MiB
+  /// to 64 MiB; never more than [memoryLimit]. The report's
+  /// `caches.plan_cache_limit_bytes` reads it back.
+  final int? planCacheLimit;
+
   const GrafeoOptions({
     this.memoryLimit,
     this.queryMemoryLimit,
@@ -96,6 +103,7 @@ class GrafeoOptions {
     this.historyRetentionLimit,
     this.spillLimit,
     this.unlimitedSpill = false,
+    this.planCacheLimit,
   });
 
   /// Sets these settings on the native options object [native].
@@ -166,6 +174,13 @@ class GrafeoOptions {
             history, 'historyRetentionLimit', 'must not be negative');
       }
       check(bindings.grafeoOptionsSetHistoryRetentionLimit(native, history));
+    }
+    final plans = planCacheLimit;
+    if (plans != null) {
+      if (plans < 0) {
+        throw ArgumentError.value(plans, 'planCacheLimit', 'must not be negative');
+      }
+      check(bindings.grafeoOptionsSetPlanCacheLimit(native, plans));
     }
     final spill = spillLimit;
     if (unlimitedSpill) {

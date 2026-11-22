@@ -150,4 +150,30 @@ public sealed class MemorySettingsTests
             Cleanup(path);
         }
     }
+
+    /// <summary>
+    /// The plan cache's limit (#674) reads back as <c>caches.plan_cache_limit_bytes</c>, capped at
+    /// the memory limit; zero turns the cache off.
+    /// </summary>
+    [Theory]
+    [InlineData(64 * MiB, 8 * MiB, 8 * MiB)]
+    [InlineData(32 * MiB, 1024 * MiB, 32 * MiB)]
+    [InlineData(64 * MiB, 0L, 0L)]
+    public void ThePlanCacheLimitReadsBack(long memory, long limit, long expected)
+    {
+        using var options = new GrafeoOptions();
+        options.SetMemoryLimit(memory);
+        options.SetPlanCacheLimit(limit);
+        using var db = GrafeoDB.Open(null, options);
+        var caches = (IReadOnlyDictionary<string, object?>)db.MemoryUsage()["caches"]!;
+        Assert.Equal(expected, Bytes(caches["plan_cache_limit_bytes"]));
+    }
+
+    /// <summary>A negative plan cache limit is refused.</summary>
+    [Fact]
+    public void ANegativePlanCacheLimitIsRefused()
+    {
+        using var options = new GrafeoOptions();
+        Assert.Throws<ArgumentOutOfRangeException>(() => options.SetPlanCacheLimit(-1));
+    }
 }

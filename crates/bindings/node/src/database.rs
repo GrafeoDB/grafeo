@@ -313,6 +313,13 @@ pub struct CreateOptions {
     /// Lift the spill limit (default `false`); it wins over `spillLimit`.
     /// For this open only.
     pub unlimited_spill: Option<bool>,
+    /// How many bytes of plans the database keeps for repeated statements,
+    /// by a deep estimate of what each plan holds; 0 keeps none, so every
+    /// statement plans. By default a sixty-fourth of `memoryLimit`, from
+    /// 4 MiB to 64 MiB; never more than `memoryLimit`.
+    /// `memoryUsage().caches.planCacheLimitBytes` reads it back. For this
+    /// open only.
+    pub plan_cache_limit: Option<i64>,
 }
 
 /// The memory settings of `options`, on `config`.
@@ -365,6 +372,11 @@ fn memory_settings(mut config: Config, options: &CreateOptions) -> Result<Config
         config = config.with_unlimited_spill();
     } else if let Some(bytes) = options.spill_limit {
         config = config.with_spill_limit(size_option(bytes, "spillLimit")?);
+    }
+    if let Some(bytes) = options.plan_cache_limit {
+        // Past the platform's size, the bound is the memory budget anyway.
+        let bytes = usize::try_from(size_option(bytes, "planCacheLimit")?).unwrap_or(usize::MAX);
+        config = config.with_plan_cache_limit(bytes);
     }
     Ok(config)
 }

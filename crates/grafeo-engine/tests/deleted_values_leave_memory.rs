@@ -888,6 +888,96 @@ fn history_kept_forever_keeps_deleted_values() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The plan caches of open sessions (#674): a session's cache holds weak references, so it keeps
+// no plan alive, and `compact()` and `close()` clear the shared cache at once.
+// ---------------------------------------------------------------------------------------------
+
+/// Runs a read whose text holds the marker as a literal twice in one session (the second run is
+/// a session hit), with no item holding the marker, so only the plan caches keep it. Then runs
+/// `step` while that session stays open and idle, and returns the marker's count before and
+/// after the step.
+fn a_sessions_plan_after(config: Config, step: impl FnOnce(&mut GrafeoDB)) -> (usize, usize) {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut marker = Marker::BLANK;
+    marker.fill();
+    let needle = &marker.bytes[..marker.len];
+    let mut db = GrafeoDB::with_config(config).expect("the database opens");
+    for item in 0..10 {
+        run(
+            &db,
+            "INSERT (:Item {id: $id, text: $text})",
+            vec![
+                ("id", Value::from(format!("I{item}"))),
+                ("text", Value::from(format!("Item {item}: Mia asked."))),
+            ],
+        );
+    }
+    assert_eq!(heap::copies(needle), 0, "the negative control: no copy yet");
+    let session = db.session();
+    for _ in 0..2 {
+        run_literal(
+            |text| {
+                session.execute(text).expect("the read");
+            },
+            format!(
+                "MATCH (n:Item) WHERE n.text = 'Mia asked about {}' RETURN n.id AS id",
+                marker.word()
+            ),
+        );
+    }
+    let cached = heap::copies(needle);
+    assert!(
+        cached > 0,
+        "the positive control: the plan caches hold the literal"
+    );
+    step(&mut db);
+    let after = heap::copies(needle);
+    drop(session);
+    drop(db);
+    (cached, after)
+}
+
+/// `compact()` frees a plan an open session cached, before that session runs anything.
+#[test]
+fn a_plan_an_open_session_cached_is_freed_by_compact() {
+    let dir = tempfile::tempdir().expect("a temporary folder");
+    let (cached, after) =
+        a_sessions_plan_after(config(Open::File, &dir.path().join("plans.grafeo")), |db| {
+            db.compact().expect("compact()");
+        });
+    assert_eq!(after, 0, "after compact(), {cached} copies before it");
+}
+
+/// `close()` frees a plan an open session cached, before the drop.
+#[test]
+fn a_plan_an_open_session_cached_is_freed_by_close() {
+    let dir = tempfile::tempdir().expect("a temporary folder");
+    let (cached, after) =
+        a_sessions_plan_after(config(Open::File, &dir.path().join("plans.grafeo")), |db| {
+            db.close().expect("close()");
+        });
+    assert_eq!(after, 0, "after close(), {cached} copies before it");
+}
+
+/// A session's cache keeps no plan alive: once the shared cache evicts the plan (the statements
+/// after it fill a 64 KiB limit many times over), its memory is freed though the session that
+/// cached it is still open.
+#[test]
+fn a_plan_the_shared_cache_evicts_is_freed_though_a_session_cached_it() {
+    let (cached, after) =
+        a_sessions_plan_after(Config::in_memory().with_plan_cache_limit(64 * 1024), |db| {
+            for i in 0..400 {
+                run(
+                    db,
+                    &format!("RETURN {i} AS i, '{}' AS s", "y".repeat(1000)),
+                    vec![],
+                );
+            }
+        });
+    assert_eq!(after, 0, "after the eviction, {cached} copies before it");
+}
+
+// ---------------------------------------------------------------------------------------------
 // close().
 // ---------------------------------------------------------------------------------------------
 
@@ -1137,8 +1227,11 @@ fn rolled_back() -> Case {
     }
 }
 
+/// The texts below the larger seed's, so the column's bound keeps none of them and only the
+/// plan cache holds the literals.
 fn literal_insert() -> Case {
     Case {
+        setup: larger_seed,
         write: |db, marker| {
             for item in 0..3 {
                 run_literal(

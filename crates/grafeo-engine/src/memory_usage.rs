@@ -161,7 +161,10 @@ pub struct CacheMemory {
     pub cached_plan_count: usize,
     /// The plan cache's bound in force (see `Config::with_plan_cache_limit`).
     pub plan_cache_limit_bytes: usize,
-    /// What the sessions' own plan caches hold besides the shared plans.
+    /// The open sessions' own plan caches: their maps, which hold a hash and
+    /// a weak reference per plan, never a plan (each plan counts once, in
+    /// the parsed and optimized bytes). After `compact()` a map is empty but
+    /// keeps its table, so a few bytes per open session remain.
     pub session_plan_cache_bytes: usize,
 }
 

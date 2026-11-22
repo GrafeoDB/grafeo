@@ -100,9 +100,23 @@ fn positive_count(options: Option<&js_sys::Object>, key: &str) -> Result<Option<
     }
 }
 
+/// The plan cache's limit `options.planCacheLimit` sets: 0 keeps no plan, else as
+/// [`positive_bytes`].
+fn plan_cache_limit(options: Option<&js_sys::Object>) -> Result<Option<usize>, JsValue> {
+    const KEY: &str = "planCacheLimit";
+    if let Some(options) = options
+        && js_sys::Reflect::get(options, &JsValue::from_str(KEY))?.as_f64() == Some(0.0)
+    {
+        return Ok(Some(0));
+    }
+    positive_bytes(options, KEY)
+        .map_err(|_| js_error(&format!("{KEY} must be a whole number of bytes, 0 or more")))
+}
+
 /// The in-memory configuration `options` set (`historyRetention`, `memoryLimit`,
 /// `pathSearchBudget`, `pathExpansionLimit`, `maxQueryLength`, `maxIdentifierLength`,
-/// `snapshotRetentionLimit`, `historyRetentionLimit`), the defaults for `None`.
+/// `snapshotRetentionLimit`, `historyRetentionLimit`, `planCacheLimit`), the defaults for
+/// `None`.
 fn in_memory_config(options: Option<&js_sys::Object>) -> Result<grafeo_engine::Config, JsValue> {
     let mut config = grafeo_engine::Config::in_memory();
     if let Some(options) = options
@@ -130,6 +144,9 @@ fn in_memory_config(options: Option<&js_sys::Object>) -> Result<grafeo_engine::C
     }
     if let Some(bytes) = positive_bytes(options, "historyRetentionLimit")? {
         config = config.with_history_retention_limit(bytes as u64);
+    }
+    if let Some(bytes) = plan_cache_limit(options)? {
+        config = config.with_plan_cache_limit(bytes);
     }
     Ok(config)
 }

@@ -3,14 +3,61 @@
 //! (DuckDB's prepared statements). See [`Session::plan_with_values`].
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::Result;
 use grafeo_core::graph::GraphStore;
 
 use super::SessionInner;
-use crate::query::cache::{CacheKey, CachedPlan, Stage};
+use crate::query::cache::{CacheKey, CachedPlan, QueryCache, SessionPlans, Stage};
 use crate::query::plan::LogicalPlan;
+
+/// Where a session's statements find and store their plans
+/// (`SessionInner::plan_cache`).
+pub(super) enum PlanCache<'a> {
+    /// The open transaction's private cache: it changed the catalog it plans with.
+    Private(Arc<QueryCache>),
+    /// The session's own cache, in front of the shared one.
+    Session(&'a SessionPlans),
+}
+
+impl PlanCache<'_> {
+    fn cache(&self) -> &QueryCache {
+        match self {
+            Self::Private(private) => private,
+            Self::Session(session) => session.shared(),
+        }
+    }
+
+    /// The planning generation now: a statement reads it before it plans.
+    pub(super) fn generation(&self) -> u64 {
+        self.cache().generation()
+    }
+
+    /// The plan cached for `key` at `stage`.
+    pub(super) fn get(&self, key: &CacheKey, stage: Stage) -> Option<Arc<CachedPlan>> {
+        match self {
+            Self::Private(private) => private.get(key, stage),
+            Self::Session(session) => session.get(key, stage),
+        }
+    }
+
+    /// Stores `plan`, planned under `generation`, and returns it shared (see
+    /// [`QueryCache::put`]).
+    pub(super) fn put(
+        &self,
+        key: CacheKey,
+        stage: Stage,
+        plan: LogicalPlan,
+        generation: u64,
+    ) -> Arc<CachedPlan> {
+        match self {
+            Self::Private(private) => private.put(key, stage, plan, generation),
+            Self::Session(session) => session.put(key, stage, plan, generation),
+        }
+    }
+}
 
 /// The plan a statement runs: a cached plan, shared, or one made for this
 /// run (filled with its values). Either reads as a [`LogicalPlan`].
@@ -33,6 +80,16 @@ impl std::ops::Deref for RunPlan {
 }
 
 impl SessionInner {
+    /// The cache of this session's plans: its own cache in front of the shared one, or,
+    /// while the open transaction has its own view, the transaction's private cache, whose
+    /// plans no other session may run, nor it theirs.
+    pub(super) fn plan_cache(&self) -> PlanCache<'_> {
+        match &*self.pending_schema.lock() {
+            Some(pending) => PlanCache::Private(Arc::clone(&pending.plans)),
+            None => PlanCache::Session(&self.session_plans),
+        }
+    }
+
     /// The plan cache's key for `query` in `language` in this session: its
     /// current schema and graph and its planner rules, which the plan is made
     /// for.

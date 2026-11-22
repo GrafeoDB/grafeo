@@ -32,6 +32,7 @@ public sealed class GrafeoOptions : IDisposable
     private ulong? _historyRetentionLimit;
     private ulong? _spillLimit;
     private bool _unlimitedSpill;
+    private ulong? _planCacheLimit;
 
     /// <summary>
     /// How many bytes the database may hold. A zero or negative limit fails at the open.
@@ -136,6 +137,19 @@ public sealed class GrafeoOptions : IDisposable
         return this;
     }
 
+    /// <summary>
+    /// How many bytes of plans the database keeps for repeated statements, by a deep estimate of
+    /// what each plan holds; zero keeps none, so every statement plans. By default a sixty-fourth
+    /// of the memory limit, from 4 MiB to 64 MiB; never more than the memory limit. The report's
+    /// <c>caches.plan_cache_limit_bytes</c> reads it back.
+    /// </summary>
+    public GrafeoOptions SetPlanCacheLimit(long bytes)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(bytes);
+        _planCacheLimit = (ulong)bytes;
+        return this;
+    }
+
     /// <summary>Nothing to release (see the remarks).</summary>
     public void Dispose()
     {
@@ -163,6 +177,8 @@ public sealed class GrafeoOptions : IDisposable
             GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_snapshot_retention_limit(native, snapshots));
         if (_historyRetentionLimit is { } history)
             GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_history_retention_limit(native, history));
+        if (_planCacheLimit is { } plans)
+            GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_plan_cache_limit(native, plans));
         if (_unlimitedSpill)
             GrafeoException.ThrowIfFailed(NativeMethods.grafeo_options_set_unlimited_spill(native));
         else if (_spillLimit is { } spill)

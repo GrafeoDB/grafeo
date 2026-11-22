@@ -668,6 +668,13 @@ impl PyGrafeoDB {
     /// half the spill volume's free space by default; unlimited_spill=True
     /// lifts it (and wins over spill_limit). An in-memory database spills
     /// nothing. For this open only.
+    ///
+    /// plan_cache_limit is how many bytes of plans the database keeps for
+    /// repeated statements, by a deep estimate of what each plan holds; 0
+    /// keeps none, so every statement plans. By default a sixty-fourth of
+    /// memory_limit, from 4 MiB to 64 MiB; never more than memory_limit.
+    /// memory_usage()["caches"]["plan_cache_limit_bytes"] reads it back. For
+    /// this open only.
     #[new]
     #[pyo3(signature = (
         path=None,
@@ -690,7 +697,8 @@ impl PyGrafeoDB {
         snapshot_retention_limit=None,
         history_retention_limit=None,
         spill_limit=None,
-        unlimited_spill=false
+        unlimited_spill=false,
+        plan_cache_limit=None
     ))]
     #[allow(
         clippy::too_many_arguments,
@@ -718,6 +726,7 @@ impl PyGrafeoDB {
         history_retention_limit: Option<u64>,
         spill_limit: Option<u64>,
         unlimited_spill: bool,
+        plan_cache_limit: Option<usize>,
         py: Python<'_>,
     ) -> PyResult<Self> {
         let mut config = if let Some(p) = path {
@@ -774,6 +783,9 @@ impl PyGrafeoDB {
             config = config.with_unlimited_spill();
         } else if let Some(bytes) = spill_limit {
             config = config.with_spill_limit(bytes);
+        }
+        if let Some(bytes) = plan_cache_limit {
+            config = config.with_plan_cache_limit(bytes);
         }
         config = match query_timeout.map(|seconds| timeout_seconds(seconds, "query_timeout")) {
             Some(Some(timeout)) => config.with_query_timeout(timeout?),
@@ -3184,6 +3196,14 @@ impl PyGrafeoDB {
             usage.caches.optimized_plan_cache_bytes,
         )?;
         caches.set_item("cached_plan_count", usage.caches.cached_plan_count)?;
+        caches.set_item(
+            "plan_cache_limit_bytes",
+            usage.caches.plan_cache_limit_bytes,
+        )?;
+        caches.set_item(
+            "session_plan_cache_bytes",
+            usage.caches.session_plan_cache_bytes,
+        )?;
 
         let string_pool = pyo3::types::PyDict::new(py);
         string_pool.set_item("total_bytes", usage.string_pool.total_bytes)?;

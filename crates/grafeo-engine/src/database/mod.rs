@@ -2188,7 +2188,9 @@ impl Open {
     /// A session for one call of the database, not listed with the slots: it ends with the
     /// call, which holds the open state while it runs.
     pub(crate) fn session_unlisted(&self) -> crate::session::SessionInner {
-        self.create_session_inner(None)
+        let mut session = self.create_session_inner(None);
+        session.turn_off_session_plans();
+        session
     }
 
     #[must_use]
@@ -2388,7 +2390,8 @@ impl Open {
 
         // Augment with cache stats from the query cache (not tracked in the registry)
         let cache_stats = self.query_cache.stats();
-        snapshot.cache_hits = cache_stats.parsed_hits + cache_stats.optimized_hits;
+        snapshot.cache_hits =
+            cache_stats.parsed_hits + cache_stats.optimized_hits + cache_stats.session_hits;
         snapshot.cache_misses = cache_stats.parsed_misses + cache_stats.optimized_misses;
         snapshot.cache_size = cache_stats.parsed_size + cache_stats.optimized_size;
         snapshot.cache_invalidations = cache_stats.invalidations;

@@ -25,12 +25,8 @@ use crate::database::standalone::{
     Applying, apply, apply_to_catalog, claims_of, copy_of_catalog, index_key,
     refuse_drop_with_changes_in,
 };
-use crate::query::cache::QueryCache;
+use crate::query::cache::{QueryCache, SESSION_SHARE};
 use crate::transaction::{BuiltIndex, QueuedSchemaOp, StandaloneChange};
-
-/// The share of the plan cache's bound a transaction with its own catalog
-/// plans in, kept from every other session.
-const PRIVATE_SHARE: usize = 16;
 
 /// A transaction's own view of the catalog.
 pub(super) struct PendingSchema {
@@ -40,7 +36,7 @@ pub(super) struct PendingSchema {
     /// The base with the queue applied.
     overlay: Arc<Catalog>,
     /// The plans it makes, which read the overlay.
-    plans: Arc<QueryCache>,
+    pub(super) plans: Arc<QueryCache>,
 }
 
 /// The property indexes that serve a label and a key in a graph.
@@ -66,15 +62,6 @@ impl SessionInner {
         match &*self.pending_schema.lock() {
             Some(pending) => Arc::clone(&pending.overlay),
             None => Arc::clone(&self.catalog),
-        }
-    }
-
-    /// The cache of this session's plans: one of its own while the open transaction has
-    /// its own view, whose plans no other session may run, nor it theirs.
-    pub(super) fn plan_cache(&self) -> Arc<QueryCache> {
-        match &*self.pending_schema.lock() {
-            Some(pending) => Arc::clone(&pending.plans),
-            None => Arc::clone(&self.query_cache),
         }
     }
 
@@ -105,19 +92,20 @@ impl SessionInner {
             }
         }
         let mut pending = self.pending_schema.lock();
-        let overlay = match &*pending {
-            Some(pending) => Arc::clone(&pending.overlay),
+        let (overlay, plans) = match &*pending {
+            Some(pending) => (Arc::clone(&pending.overlay), Arc::clone(&pending.plans)),
             None => {
                 let base = Arc::new(copy_of_catalog(&self.catalog)?);
                 let overlay = Arc::new(copy_of_catalog(&base)?);
+                let plans = Arc::new(QueryCache::with_limit(
+                    self.query_cache.limit() / SESSION_SHARE,
+                ));
                 *pending = Some(PendingSchema {
                     base,
                     overlay: Arc::clone(&overlay),
-                    plans: Arc::new(QueryCache::with_limit(
-                        self.query_cache.limit() / PRIVATE_SHARE,
-                    )),
+                    plans: Arc::clone(&plans),
                 });
-                overlay
+                (overlay, plans)
             }
         };
         drop(pending);
@@ -137,7 +125,7 @@ impl SessionInner {
         }
         self.refresh_pending_graphs(&changes);
         // The transaction's own plans only: the change is not committed.
-        self.plan_cache().advance();
+        plans.advance();
         Ok(())
     }
 
@@ -185,7 +173,7 @@ impl SessionInner {
             })?;
             pending.overlay = Arc::new(overlay);
             pending.plans = Arc::new(QueryCache::with_limit(
-                self.query_cache.limit() / PRIVATE_SHARE,
+                self.query_cache.limit() / SESSION_SHARE,
             ));
         }
         drop(pending);

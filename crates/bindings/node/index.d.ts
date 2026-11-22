@@ -1049,6 +1049,15 @@ export interface CreateOptions {
    * For this open only.
    */
   unlimitedSpill?: boolean
+  /**
+   * How many bytes of plans the database keeps for repeated statements,
+   * by a deep estimate of what each plan holds; 0 keeps none, so every
+   * statement plans. By default a sixty-fourth of `memoryLimit`, from
+   * 4 MiB to 64 MiB; never more than `memoryLimit`.
+   * `memoryUsage().caches.planCacheLimitBytes` reads it back. For this
+   * open only.
+   */
+  planCacheLimit?: number
 }
 
 /** Options for CSV import. */

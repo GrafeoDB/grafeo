@@ -151,3 +151,23 @@ func TestAnOpenOverTheLimitWarnsAndReads(t *testing.T) {
 		t.Error("an open with room warned")
 	}
 }
+
+// The plan cache's limit (#674) reads back as caches.plan_cache_limit_bytes, capped at the
+// memory limit; zero turns the cache off.
+func TestPlanCacheLimitReadsBack(t *testing.T) {
+	for _, c := range []struct{ memory, limit, want uint64 }{
+		{64 * mib, 8 * mib, 8 * mib},
+		{32 * mib, 1024 * mib, 32 * mib},
+		{64 * mib, 0, 0},
+	} {
+		db, err := OpenWithOptions("", &Options{MemoryLimit: ptr(c.memory), PlanCacheLimit: ptr(c.limit)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, ok := usageOf(t, db).Caches["plan_cache_limit_bytes"].(float64)
+		db.Close()
+		if !ok || uint64(got) != c.want {
+			t.Errorf("limit %d under %d: got %v, want %d", c.limit, c.memory, got, c.want)
+		}
+	}
+}

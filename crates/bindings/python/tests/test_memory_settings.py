@@ -106,3 +106,24 @@ def test_an_open_over_the_limit_warns_and_reads(tmp_path):
         roomy = grafeo.GrafeoDB(path)
     roomy.close()
     assert not [w for w in caught if "MEMORY_LIMIT_PASSED" in str(w.message)]
+
+
+def test_the_plan_cache_limit_reads_back():
+    """#674: `plan_cache_limit` reads back as the report's `caches.plan_cache_limit_bytes`;
+    it is capped at the memory limit, and 0 turns the cache off."""
+
+    def caches(db):
+        return db.memory_usage()["caches"]
+
+    db = grafeo.GrafeoDB(memory_limit=64 * MIB, plan_cache_limit=8 * MIB)
+    assert caches(db)["plan_cache_limit_bytes"] == 8 * MIB
+    capped = grafeo.GrafeoDB(memory_limit=32 * MIB, plan_cache_limit=1024 * MIB)
+    assert caches(capped)["plan_cache_limit_bytes"] == 32 * MIB
+    assert caches(grafeo.GrafeoDB())["plan_cache_limit_bytes"] > 0, "the default is a share"
+    off = grafeo.GrafeoDB(plan_cache_limit=0)
+    for _ in range(2):
+        off.execute("RETURN 1 AS one")
+    assert caches(off)["plan_cache_limit_bytes"] == 0
+    assert caches(off)["cached_plan_count"] == 0
+    with pytest.raises((OverflowError, ValueError, TypeError)):
+        grafeo.GrafeoDB(plan_cache_limit=-1)

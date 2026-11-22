@@ -25,6 +25,7 @@ pub struct GrafeoOptions {
     history_retention_limit: Option<u64>,
     spill_limit: Option<u64>,
     unlimited_spill: bool,
+    plan_cache_limit: Option<usize>,
 }
 
 impl GrafeoOptions {
@@ -58,6 +59,9 @@ impl GrafeoOptions {
             config = config.with_unlimited_spill();
         } else if let Some(bytes) = self.spill_limit {
             config = config.with_spill_limit(bytes);
+        }
+        if let Some(bytes) = self.plan_cache_limit {
+            config = config.with_plan_cache_limit(bytes);
         }
         config
     }
@@ -273,6 +277,25 @@ pub extern "C" fn grafeo_options_set_unlimited_spill(options: *mut GrafeoOptions
     match options_mut(options) {
         Ok(options) => {
             options.unlimited_spill = true;
+            GrafeoStatus::Ok
+        }
+        Err(status) => status,
+    }
+}
+
+/// Sets how many bytes of plans the database keeps for repeated statements, by a deep estimate of
+/// what each plan holds; zero keeps none, so every statement plans. The default is a sixty-fourth
+/// of the memory limit, from 4 MiB to 64 MiB; never more than the memory limit. The report's
+/// `caches.plan_cache_limit_bytes` reads it back.
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_options_set_plan_cache_limit(
+    options: *mut GrafeoOptions,
+    bytes: u64,
+) -> GrafeoStatus {
+    match options_mut(options) {
+        Ok(options) => {
+            // Past the platform's size, the bound is the memory limit anyway.
+            options.plan_cache_limit = Some(usize::try_from(bytes).unwrap_or(usize::MAX));
             GrafeoStatus::Ok
         }
         Err(status) => status,

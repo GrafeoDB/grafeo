@@ -127,5 +127,41 @@ void main() {
         }
       }
     });
+
+    test(
+      'the plan cache limit reads back, capped, 0 turning it off (#674)',
+      () {
+        for (final (memory, limit, want) in [
+          (64 * mib, 8 * mib, 8 * mib),
+          (32 * mib, 1024 * mib, 32 * mib),
+          (64 * mib, 0, 0),
+        ]) {
+          final db = GrafeoDB.openWithOptions(
+            null,
+            GrafeoOptions(memoryLimit: memory, planCacheLimit: limit),
+          );
+          try {
+            final caches = db.memoryUsage()['caches'] as Map<String, dynamic>;
+            expect(
+              caches['plan_cache_limit_bytes'],
+              equals(want),
+              reason: '$limit under $memory',
+            );
+          } finally {
+            db.close();
+          }
+        }
+      },
+    );
+
+    test('a negative plan cache limit is refused (#674)', () {
+      expect(
+        () => GrafeoDB.openWithOptions(
+          null,
+          const GrafeoOptions(planCacheLimit: -1),
+        ),
+        throwsArgumentError,
+      );
+    });
   });
 }

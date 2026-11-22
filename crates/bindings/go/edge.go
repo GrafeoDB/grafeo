@@ -14,6 +14,10 @@ import (
 // CreateEdge creates an edge between two nodes.
 func (db *Database) CreateEdge(sourceID, targetID uint64, edgeType string, properties map[string]any) (*Edge, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 *Edge
+		return zero0, err
+	}
 	cType := C.CString(edgeType)
 	defer C.free(unsafe.Pointer(cType))
 
@@ -52,6 +56,10 @@ func (db *Database) CreateEdge(sourceID, targetID uint64, edgeType string, prope
 // another error for a read that fails.
 func (db *Database) GetEdge(id uint64) (*Edge, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 *Edge
+		return zero0, err
+	}
 	var cEdge *C.GrafeoEdge
 	if err := lockAndCheckStatus(func() C.GrafeoStatus {
 		return C.grafeo_get_edge(db.handle, C.uint64_t(id), &cEdge)
@@ -95,6 +103,10 @@ func edgeFromC(cEdge *C.GrafeoEdge) *Edge {
 // DeleteEdge deletes an edge by ID. Returns true if the edge existed.
 func (db *Database) DeleteEdge(id uint64) (bool, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 bool
+		return zero0, err
+	}
 	runtime.LockOSThread()
 	result := int(C.grafeo_delete_edge(db.handle, C.uint64_t(id)))
 	if result < 0 {
@@ -109,6 +121,9 @@ func (db *Database) DeleteEdge(id uint64) (bool, error) {
 // SetEdgeProperty sets a property on an edge.
 func (db *Database) SetEdgeProperty(id uint64, key string, value any) error {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		return err
+	}
 	cKey := C.CString(key)
 	defer C.free(unsafe.Pointer(cKey))
 	valueJSON, err := marshalJSON(value)
@@ -125,6 +140,10 @@ func (db *Database) SetEdgeProperty(id uint64, key string, value any) error {
 // RemoveEdgeProperty removes a property from an edge.
 func (db *Database) RemoveEdgeProperty(id uint64, key string) (bool, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 bool
+		return zero0, err
+	}
 	cKey := C.CString(key)
 	defer C.free(unsafe.Pointer(cKey))
 	runtime.LockOSThread()

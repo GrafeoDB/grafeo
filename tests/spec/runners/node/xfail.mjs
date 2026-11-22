@@ -38,8 +38,9 @@ export function summaryLine() {
  * Runs `run`, the case `tc`: as it is without an `xfail:`; with one, a spec failure is the
  * expected failure, a pass an XPASS, and any other error goes on.
  */
-export async function runMarked(tc, run) {
-  if (tc.xfail == null) return run()
+export async function runMarked(tc, run, runner = 'node') {
+  // An xfail that names this runner in `passes_in` does not hold here: the case runs
+  if (tc.xfail == null || tc.xfail.passesIn?.includes(runner)) return run()
   try {
     await run()
   } catch (err) {
@@ -54,8 +55,8 @@ export async function runMarked(tc, run) {
 }
 
 /** `runMarked` for a runner whose cases run synchronously (WASM). */
-export function runMarkedSync(tc, run) {
-  if (tc.xfail == null) return run()
+export function runMarkedSync(tc, run, runner = 'wasm') {
+  if (tc.xfail == null || tc.xfail.passesIn?.includes(runner)) return run()
   try {
     run()
   } catch (err) {

@@ -199,6 +199,10 @@ fn the_epoch_continues_after_close_and_reopen() {
 }
 
 #[test]
+#[expect(
+    deprecated,
+    reason = "reads the database's file directly; the accessor goes in 0.7.0"
+)]
 fn a_checkpoint_records_the_epoch_in_the_database_header() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("people.grafeo");

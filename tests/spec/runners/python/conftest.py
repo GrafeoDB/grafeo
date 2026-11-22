@@ -39,8 +39,11 @@ from comparator import (
     assert_rows_ordered,
     assert_rows_sorted,
     assert_rows_with_precision,
+    assert_side_effects,
     assert_terms,
+    assert_values,
     assert_warnings,
+    observe_graph,
 )
 from parser import GtestFile, TestCase, coerce_params, parse_gtest_file
 
@@ -191,7 +194,8 @@ class GtestItem(pytest.Item):
             summary["skipped"] += 1
             pytest.skip(f"skipped in .gtest: {tc.skip}")
 
-        if tc.xfail is None:
+        # An xfail that names this runner in `passes_in` does not hold here: the case runs
+        if tc.xfail is None or "python" in tc.xfail.passes_in:
             self._run_case()
             return
         try:
@@ -235,6 +239,10 @@ class GtestItem(pytest.Item):
             elif key not in features and key not in _RUNNER_CAPABILITIES:
                 pytest.skip(f"grafeo build does not include '{key}' feature")
 
+        # A gap of this binding: the case runs where the binding has what it needs
+        if tc.runner_gap is not None and "python" in tc.runner_gap.runners:
+            pytest.skip(f"runner gap: {tc.runner_gap.reason} ({tc.runner_gap.issue})")
+
         # Fresh database per test
         db = grafeo.GrafeoDB()
 
@@ -243,7 +251,10 @@ class GtestItem(pytest.Item):
         if effective_dataset and effective_dataset != "empty":
             _load_dataset(db, effective_dataset)
 
-        # Run setup queries in the file's declared language
+        # GQL statements first (the TCK's test procedures), then the setup queries in
+        # the file's declared language
+        for statement in tc.setup_gql:
+            _execute(db, "gql", statement)
         setup_language = meta.language or "gql"
         for setup_q in tc.setup:
             _execute(db, setup_language, setup_q)
@@ -266,11 +277,16 @@ class GtestItem(pytest.Item):
         # Type the params (every statement gets them)
         params = coerce_params(tc.params)
 
+        # The graph before the statements, when their side effects are checked
+        before = observe_graph(db) if expect.side_effects is not None else None
+
         # Error tests
         if expect.error is not None or expect.gql_status is not None:
             self._run_error_test(
                 db, language, queries, expect.error, expect.gql_status, params
             )
+            if before is not None:
+                assert_side_effects(before, observe_graph(db), expect.side_effects)
             return
 
         # Execute all-but-last as fire-and-forget (with params, so
@@ -281,6 +297,9 @@ class GtestItem(pytest.Item):
         # Last query: capture result (with params if present)
         result = _execute(db, language, queries[-1], params)
 
+        if before is not None:
+            assert_side_effects(before, observe_graph(db), expect.side_effects)
+
         # The warnings, also when none are expected
         assert_warnings(result, expect.warnings)
 
@@ -289,7 +308,16 @@ class GtestItem(pytest.Item):
             assert_columns(result, expect.columns)
 
         # Value assertions
-        if expect.empty:
+        if expect.values is not None:
+            assert_values(
+                db,
+                result,
+                expect.values,
+                expect.ordered,
+                expect.unordered_lists,
+                meta.values_dialect == "tck",
+            )
+        elif expect.empty:
             assert_empty(result)
         elif expect.count is not None:
             assert_count(result, expect.count)

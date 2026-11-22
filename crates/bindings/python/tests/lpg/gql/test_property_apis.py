@@ -433,13 +433,14 @@ class TestTypeRoundtrips:
         assert v is not None
 
     def test_datetime_roundtrip(self, db):
+        # An aware datetime keeps its offset: it comes back aware, as given.
         dt = datetime(2024, 6, 15, 12, 30, 0, tzinfo=UTC)
         node = db.create_node(["T"])
         db.set_node_property(node.id, "val", dt)
         result = db.execute(f"MATCH (n) WHERE id(n) = {node.id} RETURN n.val AS v")
         v = list(result)[0]["v"]
-        assert v == datetime(2024, 6, 15, 12, 30, 0)
-        assert v.tzinfo is None
+        assert v == dt
+        assert v.utcoffset() == timedelta(0)
 
     def test_list_roundtrip(self, db):
         node = db.create_node(["T"], {"val": [1, "two", True]})
@@ -505,7 +506,8 @@ def non_utc_local_time():
 
 
 class TestDatetimeConversion:
-    """Python datetime <-> Grafeo timestamp: naive values are UTC both ways."""
+    """Python datetime <-> Grafeo: a naive value is a timestamp read as UTC
+    both ways, an aware one a zoned datetime that keeps its offset."""
 
     @staticmethod
     def roundtrip(db, value):
@@ -527,31 +529,28 @@ class TestDatetimeConversion:
         result = db.execute("MATCH (n:T) RETURN n.val = $t AS eq", {"t": utc})
         assert list(result)[0]["eq"] is True
 
-    def test_aware_datetime_is_converted_to_utc(self, db):
+    def test_aware_datetime_keeps_its_offset(self, db):
         amsterdam_summer = timezone(timedelta(hours=2))
         dt = datetime(2024, 6, 15, 14, 30, 0, tzinfo=amsterdam_summer)
-        assert self.roundtrip(db, dt) == datetime(2024, 6, 15, 12, 30, 0)
-
-    def test_aware_datetime_near_the_limits_roundtrips(self, db):
-        dt = datetime(1, 1, 1, 2, 30, 0, tzinfo=timezone(timedelta(hours=1)))
-        assert self.roundtrip(db, dt) == datetime(1, 1, 1, 1, 30, 0)
-        dt = datetime(9999, 12, 31, 21, 30, 0, tzinfo=timezone(timedelta(hours=-2)))
-        assert self.roundtrip(db, dt) == datetime(9999, 12, 31, 23, 30, 0)
+        back = self.roundtrip(db, dt)
+        assert back == dt
+        assert back.utcoffset() == timedelta(hours=2)
 
     @pytest.mark.parametrize(
         "dt",
         [
+            datetime(1, 1, 1, 2, 30, 0, tzinfo=timezone(timedelta(hours=1))),
+            datetime(9999, 12, 31, 21, 30, 0, tzinfo=timezone(timedelta(hours=-2))),
+            # Their UTC times fall in year 0 and 10000; a zoned datetime holds
+            # the local time with its offset, so they come back as they were.
             datetime(1, 1, 1, 0, 30, 0, tzinfo=timezone(timedelta(hours=1))),
             datetime(9999, 12, 31, 23, 30, 0, tzinfo=timezone(timedelta(hours=-1))),
         ],
     )
-    def test_aware_datetime_outside_python_range_is_rejected(self, db, dt):
-        # Its UTC time falls in year 0 or 10000: it could never be read back.
-        with pytest.raises(ValueError, match="year 1 to 9999"):
-            db.create_node(["T"], {"val": dt})
-        with pytest.raises(ValueError, match="year 1 to 9999"):
-            db.execute("RETURN $t AS t", {"t": dt})
-        assert db.node_count == 0
+    def test_aware_datetime_near_the_limits_roundtrips(self, db, dt):
+        back = self.roundtrip(db, dt)
+        assert back == dt
+        assert back.utcoffset() == dt.utcoffset()
 
     def test_microseconds_are_kept(self, db):
         dt = datetime(2024, 6, 15, 12, 30, 0, 123457)
@@ -579,9 +578,9 @@ class TestErrorHandling:
 
     def test_execute_on_closed_in_memory_db(self, db):
         db.close()
-        # In-memory DB close is a no-op; operations still work
-        result = db.execute("MATCH (n) RETURN n")
-        assert list(result) == []
+        # close() releases an in-memory database too: a later call fails.
+        with pytest.raises(grafeo.DatabaseClosedError):
+            db.execute("MATCH (n) RETURN n")
 
     def test_get_node_nonexistent(self, db):
         node = db.get_node(999999)

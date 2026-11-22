@@ -1,0 +1,1804 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/with-orderBy/WithOrderBy2.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.WithOrderBy2"
+  title: "WithOrderBy2 - Order by a single expression"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Sort by a boolean expression in ascending order #1
+  - name: s1_sort_by_a_boolean_expression_in_ascending_order_1
+    setup:
+      - |
+        CREATE (:A {bool: true, bool2: true}),
+               (:B {bool: false, bool2: false}),
+               (:C {bool: false, bool2: true}),
+               (:D {bool: true, bool2: true}),
+               (:E {bool: true, bool2: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY NOT (a.bool AND a.bool2)
+        LIMIT 2
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A {bool: true, bool2: true}) |
+        | (:D {bool: true, bool2: true}) |
+      side_effects: {}
+
+  # [1] Sort by a boolean expression in ascending order #2
+  - name: s1_sort_by_a_boolean_expression_in_ascending_order_2
+    setup:
+      - |
+        CREATE (:A {bool: true, bool2: true}),
+               (:B {bool: false, bool2: false}),
+               (:C {bool: false, bool2: true}),
+               (:D {bool: true, bool2: true}),
+               (:E {bool: true, bool2: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY NOT (a.bool AND a.bool2) ASC
+        LIMIT 2
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A {bool: true, bool2: true}) |
+        | (:D {bool: true, bool2: true}) |
+      side_effects: {}
+
+  # [1] Sort by a boolean expression in ascending order #3
+  - name: s1_sort_by_a_boolean_expression_in_ascending_order_3
+    setup:
+      - |
+        CREATE (:A {bool: true, bool2: true}),
+               (:B {bool: false, bool2: false}),
+               (:C {bool: false, bool2: true}),
+               (:D {bool: true, bool2: true}),
+               (:E {bool: true, bool2: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY NOT (a.bool AND a.bool2) ASCENDING
+        LIMIT 2
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A {bool: true, bool2: true}) |
+        | (:D {bool: true, bool2: true}) |
+      side_effects: {}
+
+  # [2] Sort by a boolean expression in descending order #1
+  - name: s2_sort_by_a_boolean_expression_in_descending_order_1
+    setup:
+      - |
+        CREATE (:A {bool: true, bool2: true}),
+               (:B {bool: false, bool2: false}),
+               (:C {bool: false, bool2: true}),
+               (:D {bool: true, bool2: true}),
+               (:E {bool: true, bool2: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY NOT (a.bool AND a.bool2) DESC
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:B {bool: false, bool2: false}) |
+        | (:C {bool: false, bool2: true}) |
+        | (:E {bool: true, bool2: false}) |
+      side_effects: {}
+
+  # [2] Sort by a boolean expression in descending order #2
+  - name: s2_sort_by_a_boolean_expression_in_descending_order_2
+    setup:
+      - |
+        CREATE (:A {bool: true, bool2: true}),
+               (:B {bool: false, bool2: false}),
+               (:C {bool: false, bool2: true}),
+               (:D {bool: true, bool2: true}),
+               (:E {bool: true, bool2: false})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY NOT (a.bool AND a.bool2) DESCENDING
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:B {bool: false, bool2: false}) |
+        | (:C {bool: false, bool2: true}) |
+        | (:E {bool: true, bool2: false}) |
+      side_effects: {}
+
+  # [3] Sort by an integer expression in ascending order #1
+  - name: s3_sort_by_an_integer_expression_in_ascending_order_1
+    setup:
+      - |
+        CREATE (:A {num: 9, num2: 5}),
+               (:B {num: 5, num2: 4}),
+               (:C {num: 30, num2: 3}),
+               (:D {num: -11, num2: 2}),
+               (:E {num: 7054, num2: 1})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY (a.num2 + (a.num * 2)) * -1
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:E {num: 7054, num2: 1}) |
+        | (:C {num: 30, num2: 3}) |
+        | (:A {num: 9, num2: 5}) |
+      side_effects: {}
+
+  # [3] Sort by an integer expression in ascending order #2
+  - name: s3_sort_by_an_integer_expression_in_ascending_order_2
+    setup:
+      - |
+        CREATE (:A {num: 9, num2: 5}),
+               (:B {num: 5, num2: 4}),
+               (:C {num: 30, num2: 3}),
+               (:D {num: -11, num2: 2}),
+               (:E {num: 7054, num2: 1})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY (a.num2 + (a.num * 2)) * -1 ASC
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:E {num: 7054, num2: 1}) |
+        | (:C {num: 30, num2: 3}) |
+        | (:A {num: 9, num2: 5}) |
+      side_effects: {}
+
+  # [3] Sort by an integer expression in ascending order #3
+  - name: s3_sort_by_an_integer_expression_in_ascending_order_3
+    setup:
+      - |
+        CREATE (:A {num: 9, num2: 5}),
+               (:B {num: 5, num2: 4}),
+               (:C {num: 30, num2: 3}),
+               (:D {num: -11, num2: 2}),
+               (:E {num: 7054, num2: 1})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY (a.num2 + (a.num * 2)) * -1 ASCENDING
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:E {num: 7054, num2: 1}) |
+        | (:C {num: 30, num2: 3}) |
+        | (:A {num: 9, num2: 5}) |
+      side_effects: {}
+
+  # [4] Sort by an integer expression in descending order #1
+  - name: s4_sort_by_an_integer_expression_in_descending_order_1
+    setup:
+      - |
+        CREATE (:A {num: 9, num2: 5}),
+               (:B {num: 5, num2: 4}),
+               (:C {num: 30, num2: 3}),
+               (:D {num: -11, num2: 2}),
+               (:E {num: 7054, num2: 1})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY (a.num2 + (a.num * 2)) * -1 DESC
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:D {num: -11, num2: 2}) |
+        | (:B {num: 5, num2: 4}) |
+        | (:A {num: 9, num2: 5}) |
+      side_effects: {}
+
+  # [4] Sort by an integer expression in descending order #2
+  - name: s4_sort_by_an_integer_expression_in_descending_order_2
+    setup:
+      - |
+        CREATE (:A {num: 9, num2: 5}),
+               (:B {num: 5, num2: 4}),
+               (:C {num: 30, num2: 3}),
+               (:D {num: -11, num2: 2}),
+               (:E {num: 7054, num2: 1})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY (a.num2 + (a.num * 2)) * -1 DESCENDING
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:D {num: -11, num2: 2}) |
+        | (:B {num: 5, num2: 4}) |
+        | (:A {num: 9, num2: 5}) |
+      side_effects: {}
+
+  # [5] Sort by a float expression in ascending order #1
+  - name: s5_sort_by_a_float_expression_in_ascending_order_1
+    setup:
+      - |
+        CREATE (:A {num: 5.025648, num2: 1.96357}),
+               (:B {num: 30.94857, num2: 0.00002}),
+               (:C {num: 30.94856, num2: 0.00002}),
+               (:D {num: -11.2943, num2: -8.5007}),
+               (:E {num: 7054.008, num2: 948.841})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY (a.num + a.num2 * 2) * -1.01
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:E {num: 7054.008, num2: 948.841}) |
+        | (:B {num: 30.94857, num2: 0.00002}) |
+        | (:C {num: 30.94856, num2: 0.00002}) |
+      side_effects: {}
+
+  # [5] Sort by a float expression in ascending order #2
+  - name: s5_sort_by_a_float_expression_in_ascending_order_2
+    setup:
+      - |
+        CREATE (:A {num: 5.025648, num2: 1.96357}),
+               (:B {num: 30.94857, num2: 0.00002}),
+               (:C {num: 30.94856, num2: 0.00002}),
+               (:D {num: -11.2943, num2: -8.5007}),
+               (:E {num: 7054.008, num2: 948.841})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY (a.num + a.num2 * 2) * -1.01 ASC
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:E {num: 7054.008, num2: 948.841}) |
+        | (:B {num: 30.94857, num2: 0.00002}) |
+        | (:C {num: 30.94856, num2: 0.00002}) |
+      side_effects: {}
+
+  # [5] Sort by a float expression in ascending order #3
+  - name: s5_sort_by_a_float_expression_in_ascending_order_3
+    setup:
+      - |
+        CREATE (:A {num: 5.025648, num2: 1.96357}),
+               (:B {num: 30.94857, num2: 0.00002}),
+               (:C {num: 30.94856, num2: 0.00002}),
+               (:D {num: -11.2943, num2: -8.5007}),
+               (:E {num: 7054.008, num2: 948.841})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY (a.num + a.num2 * 2) * -1.01 ASCENDING
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:E {num: 7054.008, num2: 948.841}) |
+        | (:B {num: 30.94857, num2: 0.00002}) |
+        | (:C {num: 30.94856, num2: 0.00002}) |
+      side_effects: {}
+
+  # [6] Sort by a float expression in descending order #1
+  - name: s6_sort_by_a_float_expression_in_descending_order_1
+    setup:
+      - |
+        CREATE (:A {num: 5.025648, num2: 1.96357}),
+               (:B {num: 30.94857, num2: 0.00002}),
+               (:C {num: 30.94856, num2: 0.00002}),
+               (:D {num: -11.2943, num2: -8.5007}),
+               (:E {num: 7054.008, num2: 948.841})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY (a.num + a.num2 * 2) * -1.01 DESC
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:D {num: -11.2943, num2: -8.5007}) |
+        | (:A {num: 5.025648, num2: 1.96357}) |
+        | (:C {num: 30.94856, num2: 0.00002}) |
+      side_effects: {}
+
+  # [6] Sort by a float expression in descending order #2
+  - name: s6_sort_by_a_float_expression_in_descending_order_2
+    setup:
+      - |
+        CREATE (:A {num: 5.025648, num2: 1.96357}),
+               (:B {num: 30.94857, num2: 0.00002}),
+               (:C {num: 30.94856, num2: 0.00002}),
+               (:D {num: -11.2943, num2: -8.5007}),
+               (:E {num: 7054.008, num2: 948.841})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY (a.num + a.num2 * 2) * -1.01 DESCENDING
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:D {num: -11.2943, num2: -8.5007}) |
+        | (:A {num: 5.025648, num2: 1.96357}) |
+        | (:C {num: 30.94856, num2: 0.00002}) |
+      side_effects: {}
+
+  # [7] Sort by a string expression in ascending order #1
+  - name: s7_sort_by_a_string_expression_in_ascending_order_1
+    setup:
+      - |
+        CREATE (:A {name: 'lorem', title: 'dr.'}),
+               (:B {name: 'ipsum', title: 'dr.'}),
+               (:C {name: 'dolor', title: 'prof.'}),
+               (:D {name: 'sit', title: 'dr.'}),
+               (:E {name: 'amet', title: 'prof.'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.title + ' ' + a.name
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A {name: 'lorem', title: 'dr.'}) |
+        | (:B {name: 'ipsum', title: 'dr.'}) |
+        | (:D {name: 'sit', title: 'dr.'}) |
+      side_effects: {}
+
+  # [7] Sort by a string expression in ascending order #2
+  - name: s7_sort_by_a_string_expression_in_ascending_order_2
+    setup:
+      - |
+        CREATE (:A {name: 'lorem', title: 'dr.'}),
+               (:B {name: 'ipsum', title: 'dr.'}),
+               (:C {name: 'dolor', title: 'prof.'}),
+               (:D {name: 'sit', title: 'dr.'}),
+               (:E {name: 'amet', title: 'prof.'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.title + ' ' + a.name ASC
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A {name: 'lorem', title: 'dr.'}) |
+        | (:B {name: 'ipsum', title: 'dr.'}) |
+        | (:D {name: 'sit', title: 'dr.'}) |
+      side_effects: {}
+
+  # [7] Sort by a string expression in ascending order #3
+  - name: s7_sort_by_a_string_expression_in_ascending_order_3
+    setup:
+      - |
+        CREATE (:A {name: 'lorem', title: 'dr.'}),
+               (:B {name: 'ipsum', title: 'dr.'}),
+               (:C {name: 'dolor', title: 'prof.'}),
+               (:D {name: 'sit', title: 'dr.'}),
+               (:E {name: 'amet', title: 'prof.'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.title + ' ' + a.name ASCENDING
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A {name: 'lorem', title: 'dr.'}) |
+        | (:B {name: 'ipsum', title: 'dr.'}) |
+        | (:D {name: 'sit', title: 'dr.'}) |
+      side_effects: {}
+
+  # [8] Sort by a string expression in descending order #1
+  - name: s8_sort_by_a_string_expression_in_descending_order_1
+    setup:
+      - |
+        CREATE (:A {name: 'lorem', title: 'dr.'}),
+               (:B {name: 'ipsum', title: 'dr.'}),
+               (:C {name: 'dolor', title: 'prof.'}),
+               (:D {name: 'sit', title: 'dr.'}),
+               (:E {name: 'amet', title: 'prof.'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.title + ' ' + a.name DESC
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {name: 'dolor', title: 'prof.'}) |
+        | (:E {name: 'amet', title: 'prof.'}) |
+        | (:D {name: 'sit', title: 'dr.'}) |
+      side_effects: {}
+
+  # [8] Sort by a string expression in descending order #2
+  - name: s8_sort_by_a_string_expression_in_descending_order_2
+    setup:
+      - |
+        CREATE (:A {name: 'lorem', title: 'dr.'}),
+               (:B {name: 'ipsum', title: 'dr.'}),
+               (:C {name: 'dolor', title: 'prof.'}),
+               (:D {name: 'sit', title: 'dr.'}),
+               (:E {name: 'amet', title: 'prof.'})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.title + ' ' + a.name DESCENDING
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {name: 'dolor', title: 'prof.'}) |
+        | (:E {name: 'amet', title: 'prof.'}) |
+        | (:D {name: 'sit', title: 'dr.'}) |
+      side_effects: {}
+
+  # [9] Sort by a list expression in ascending order #1
+  - name: s9_sort_by_a_list_expression_in_ascending_order_1
+    setup:
+      - |
+        CREATE (:A {list: [2, -2], list2: [3, -2]}),
+               (:B {list: [1, 2], list2: [2, -2]}),
+               (:C {list: [300, 0], list2: [1, -2]}),
+               (:D {list: [1, -20], list2: [4, -2]}),
+               (:E {list: [2, -2, 100], list2: [5, -2]})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY [a.list2[1], a.list2[0], a.list[1]] + a.list + a.list2
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {list: [300, 0], list2: [1, -2]}) |
+        | (:B {list: [1, 2], list2: [2, -2]}) |
+        | (:A {list: [2, -2], list2: [3, -2]}) |
+      side_effects: {}
+
+  # [9] Sort by a list expression in ascending order #2
+  - name: s9_sort_by_a_list_expression_in_ascending_order_2
+    setup:
+      - |
+        CREATE (:A {list: [2, -2], list2: [3, -2]}),
+               (:B {list: [1, 2], list2: [2, -2]}),
+               (:C {list: [300, 0], list2: [1, -2]}),
+               (:D {list: [1, -20], list2: [4, -2]}),
+               (:E {list: [2, -2, 100], list2: [5, -2]})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY [a.list2[1], a.list2[0], a.list[1]] + a.list + a.list2 ASC
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {list: [300, 0], list2: [1, -2]}) |
+        | (:B {list: [1, 2], list2: [2, -2]}) |
+        | (:A {list: [2, -2], list2: [3, -2]}) |
+      side_effects: {}
+
+  # [9] Sort by a list expression in ascending order #3
+  - name: s9_sort_by_a_list_expression_in_ascending_order_3
+    setup:
+      - |
+        CREATE (:A {list: [2, -2], list2: [3, -2]}),
+               (:B {list: [1, 2], list2: [2, -2]}),
+               (:C {list: [300, 0], list2: [1, -2]}),
+               (:D {list: [1, -20], list2: [4, -2]}),
+               (:E {list: [2, -2, 100], list2: [5, -2]})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY [a.list2[1], a.list2[0], a.list[1]] + a.list + a.list2 ASCENDING
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {list: [300, 0], list2: [1, -2]}) |
+        | (:B {list: [1, 2], list2: [2, -2]}) |
+        | (:A {list: [2, -2], list2: [3, -2]}) |
+      side_effects: {}
+
+  # [10] Sort by a list expression in descending order #1
+  - name: s10_sort_by_a_list_expression_in_descending_order_1
+    setup:
+      - |
+        CREATE (:A {list: [2, -2], list2: [3, -2]}),
+               (:B {list: [1, 2], list2: [2, -2]}),
+               (:C {list: [300, 0], list2: [1, -2]}),
+               (:D {list: [1, -20], list2: [4, -2]}),
+               (:E {list: [2, -2, 100], list2: [5, -2]})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY [a.list2[1], a.list2[0], a.list[1]] + a.list + a.list2 DESC
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:E {list: [2, -2, 100], list2: [5, -2]}) |
+        | (:D {list: [1, -20], list2: [4, -2]}) |
+        | (:A {list: [2, -2], list2: [3, -2]}) |
+      side_effects: {}
+
+  # [10] Sort by a list expression in descending order #2
+  - name: s10_sort_by_a_list_expression_in_descending_order_2
+    setup:
+      - |
+        CREATE (:A {list: [2, -2], list2: [3, -2]}),
+               (:B {list: [1, 2], list2: [2, -2]}),
+               (:C {list: [300, 0], list2: [1, -2]}),
+               (:D {list: [1, -20], list2: [4, -2]}),
+               (:E {list: [2, -2, 100], list2: [5, -2]})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY [a.list2[1], a.list2[0], a.list[1]] + a.list + a.list2 DESCENDING
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:E {list: [2, -2, 100], list2: [5, -2]}) |
+        | (:D {list: [1, -20], list2: [4, -2]}) |
+        | (:A {list: [2, -2], list2: [3, -2]}) |
+      side_effects: {}
+
+  # [11] Sort by a date expression in ascending order #1
+  - name: s11_sort_by_a_date_expression_in_ascending_order_1
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {date: date({year: 1910, month: 5, day: 6})}),
+               (:B {date: date({year: 1980, month: 12, day: 24})}),
+               (:C {date: date({year: 1984, month: 10, day: 12})}),
+               (:D {date: date({year: 1985, month: 5, day: 6})}),
+               (:E {date: date({year: 1980, month: 10, day: 24})}),
+               (:F {date: date({year: 1984, month: 10, day: 11})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.date + duration({months: 1, days: 2})
+        LIMIT 2
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A {date: '1910-05-06'}) |
+        | (:E {date: '1980-10-24'}) |
+      side_effects: {}
+
+  # [11] Sort by a date expression in ascending order #2
+  - name: s11_sort_by_a_date_expression_in_ascending_order_2
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {date: date({year: 1910, month: 5, day: 6})}),
+               (:B {date: date({year: 1980, month: 12, day: 24})}),
+               (:C {date: date({year: 1984, month: 10, day: 12})}),
+               (:D {date: date({year: 1985, month: 5, day: 6})}),
+               (:E {date: date({year: 1980, month: 10, day: 24})}),
+               (:F {date: date({year: 1984, month: 10, day: 11})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.date + duration({months: 1, days: 2}) ASC
+        LIMIT 2
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A {date: '1910-05-06'}) |
+        | (:E {date: '1980-10-24'}) |
+      side_effects: {}
+
+  # [11] Sort by a date expression in ascending order #3
+  - name: s11_sort_by_a_date_expression_in_ascending_order_3
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {date: date({year: 1910, month: 5, day: 6})}),
+               (:B {date: date({year: 1980, month: 12, day: 24})}),
+               (:C {date: date({year: 1984, month: 10, day: 12})}),
+               (:D {date: date({year: 1985, month: 5, day: 6})}),
+               (:E {date: date({year: 1980, month: 10, day: 24})}),
+               (:F {date: date({year: 1984, month: 10, day: 11})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.date + duration({months: 1, days: 2}) ASCENDING
+        LIMIT 2
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A {date: '1910-05-06'}) |
+        | (:E {date: '1980-10-24'}) |
+      side_effects: {}
+
+  # [12] Sort by a date expression in descending order #1
+  - name: s12_sort_by_a_date_expression_in_descending_order_1
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {date: date({year: 1910, month: 5, day: 6})}),
+               (:B {date: date({year: 1980, month: 12, day: 24})}),
+               (:C {date: date({year: 1984, month: 10, day: 12})}),
+               (:D {date: date({year: 1985, month: 5, day: 6})}),
+               (:E {date: date({year: 1980, month: 10, day: 24})}),
+               (:F {date: date({year: 1984, month: 10, day: 11})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.date + duration({months: 1, days: 2}) DESC
+        LIMIT 2
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:D {date: '1985-05-06'}) |
+        | (:C {date: '1984-10-12'}) |
+      side_effects: {}
+
+  # [12] Sort by a date expression in descending order #2
+  - name: s12_sort_by_a_date_expression_in_descending_order_2
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {date: date({year: 1910, month: 5, day: 6})}),
+               (:B {date: date({year: 1980, month: 12, day: 24})}),
+               (:C {date: date({year: 1984, month: 10, day: 12})}),
+               (:D {date: date({year: 1985, month: 5, day: 6})}),
+               (:E {date: date({year: 1980, month: 10, day: 24})}),
+               (:F {date: date({year: 1984, month: 10, day: 11})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.date + duration({months: 1, days: 2}) DESCENDING
+        LIMIT 2
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:D {date: '1985-05-06'}) |
+        | (:C {date: '1984-10-12'}) |
+      side_effects: {}
+
+  # [13] Sort by a local time expression in ascending order #1
+  - name: s13_sort_by_a_local_time_expression_in_ascending_order_1
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy2: [13] Sort by a local time expression in ascending order #1"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {time: localtime({hour: 10, minute: 35})}),
+               (:B {time: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123})}),
+               (:C {time: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876124})}),
+               (:D {time: localtime({hour: 12, minute: 30, second: 14, nanosecond: 645876123})}),
+               (:E {time: localtime({hour: 12, minute: 31, second: 15})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.time + duration({minutes: 6})
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A {time: '10:35'}) |
+        | (:D {time: '12:30:14.645876123'}) |
+        | (:B {time: '12:31:14.645876123'}) |
+      side_effects: {}
+
+  # [13] Sort by a local time expression in ascending order #2
+  - name: s13_sort_by_a_local_time_expression_in_ascending_order_2
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy2: [13] Sort by a local time expression in ascending order #2"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {time: localtime({hour: 10, minute: 35})}),
+               (:B {time: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123})}),
+               (:C {time: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876124})}),
+               (:D {time: localtime({hour: 12, minute: 30, second: 14, nanosecond: 645876123})}),
+               (:E {time: localtime({hour: 12, minute: 31, second: 15})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.time + duration({minutes: 6}) ASC
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A {time: '10:35'}) |
+        | (:D {time: '12:30:14.645876123'}) |
+        | (:B {time: '12:31:14.645876123'}) |
+      side_effects: {}
+
+  # [13] Sort by a local time expression in ascending order #3
+  - name: s13_sort_by_a_local_time_expression_in_ascending_order_3
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy2: [13] Sort by a local time expression in ascending order #3"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {time: localtime({hour: 10, minute: 35})}),
+               (:B {time: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123})}),
+               (:C {time: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876124})}),
+               (:D {time: localtime({hour: 12, minute: 30, second: 14, nanosecond: 645876123})}),
+               (:E {time: localtime({hour: 12, minute: 31, second: 15})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.time + duration({minutes: 6}) ASCENDING
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A {time: '10:35'}) |
+        | (:D {time: '12:30:14.645876123'}) |
+        | (:B {time: '12:31:14.645876123'}) |
+      side_effects: {}
+
+  # [14] Sort by a local time expression in descending order #1
+  - name: s14_sort_by_a_local_time_expression_in_descending_order_1
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {time: localtime({hour: 10, minute: 35})}),
+               (:B {time: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123})}),
+               (:C {time: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876124})}),
+               (:D {time: localtime({hour: 12, minute: 30, second: 14, nanosecond: 645876123})}),
+               (:E {time: localtime({hour: 12, minute: 31, second: 15})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.time + duration({minutes: 6}) DESC
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:E {time: '12:31:15'}) |
+        | (:C {time: '12:31:14.645876124'}) |
+        | (:B {time: '12:31:14.645876123'}) |
+      side_effects: {}
+
+  # [14] Sort by a local time expression in descending order #2
+  - name: s14_sort_by_a_local_time_expression_in_descending_order_2
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {time: localtime({hour: 10, minute: 35})}),
+               (:B {time: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123})}),
+               (:C {time: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876124})}),
+               (:D {time: localtime({hour: 12, minute: 30, second: 14, nanosecond: 645876123})}),
+               (:E {time: localtime({hour: 12, minute: 31, second: 15})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.time + duration({minutes: 6}) DESCENDING
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:E {time: '12:31:15'}) |
+        | (:C {time: '12:31:14.645876124'}) |
+        | (:B {time: '12:31:14.645876123'}) |
+      side_effects: {}
+
+  # [15] Sort by a time expression in ascending order #1
+  - name: s15_sort_by_a_time_expression_in_ascending_order_1
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {time: time({hour: 10, minute: 35, timezone: '-08:00'})}),
+               (:B {time: time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'})}),
+               (:C {time: time({hour: 12, minute: 31, second: 14, nanosecond: 645876124, timezone: '+01:00'})}),
+               (:D {time: time({hour: 12, minute: 35, second: 15, timezone: '+05:00'})}),
+               (:E {time: time({hour: 12, minute: 30, second: 14, nanosecond: 645876123, timezone: '+01:01'})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.time + duration({minutes: 6})
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:D {time: '12:35:15+05:00'}) |
+        | (:E {time: '12:30:14.645876123+01:01'}) |
+        | (:B {time: '12:31:14.645876123+01:00'}) |
+      side_effects: {}
+
+  # [15] Sort by a time expression in ascending order #2
+  - name: s15_sort_by_a_time_expression_in_ascending_order_2
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {time: time({hour: 10, minute: 35, timezone: '-08:00'})}),
+               (:B {time: time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'})}),
+               (:C {time: time({hour: 12, minute: 31, second: 14, nanosecond: 645876124, timezone: '+01:00'})}),
+               (:D {time: time({hour: 12, minute: 35, second: 15, timezone: '+05:00'})}),
+               (:E {time: time({hour: 12, minute: 30, second: 14, nanosecond: 645876123, timezone: '+01:01'})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.time + duration({minutes: 6}) ASC
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:D {time: '12:35:15+05:00'}) |
+        | (:E {time: '12:30:14.645876123+01:01'}) |
+        | (:B {time: '12:31:14.645876123+01:00'}) |
+      side_effects: {}
+
+  # [15] Sort by a time expression in ascending order #3
+  - name: s15_sort_by_a_time_expression_in_ascending_order_3
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {time: time({hour: 10, minute: 35, timezone: '-08:00'})}),
+               (:B {time: time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'})}),
+               (:C {time: time({hour: 12, minute: 31, second: 14, nanosecond: 645876124, timezone: '+01:00'})}),
+               (:D {time: time({hour: 12, minute: 35, second: 15, timezone: '+05:00'})}),
+               (:E {time: time({hour: 12, minute: 30, second: 14, nanosecond: 645876123, timezone: '+01:01'})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.time + duration({minutes: 6}) ASCENDING
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:D {time: '12:35:15+05:00'}) |
+        | (:E {time: '12:30:14.645876123+01:01'}) |
+        | (:B {time: '12:31:14.645876123+01:00'}) |
+      side_effects: {}
+
+  # [16] Sort by a time expression in descending order #1
+  - name: s16_sort_by_a_time_expression_in_descending_order_1
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy2: [16] Sort by a time expression in descending order #1"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {time: time({hour: 10, minute: 35, timezone: '-08:00'})}),
+               (:B {time: time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'})}),
+               (:C {time: time({hour: 12, minute: 31, second: 14, nanosecond: 645876124, timezone: '+01:00'})}),
+               (:D {time: time({hour: 12, minute: 35, second: 15, timezone: '+05:00'})}),
+               (:E {time: time({hour: 12, minute: 30, second: 14, nanosecond: 645876123, timezone: '+01:01'})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.time + duration({minutes: 6}) DESC
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A {time: '10:35-08:00'}) |
+        | (:C {time: '12:31:14.645876124+01:00'}) |
+        | (:B {time: '12:31:14.645876123+01:00'}) |
+      side_effects: {}
+
+  # [16] Sort by a time expression in descending order #2
+  - name: s16_sort_by_a_time_expression_in_descending_order_2
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy2: [16] Sort by a time expression in descending order #2"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {time: time({hour: 10, minute: 35, timezone: '-08:00'})}),
+               (:B {time: time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'})}),
+               (:C {time: time({hour: 12, minute: 31, second: 14, nanosecond: 645876124, timezone: '+01:00'})}),
+               (:D {time: time({hour: 12, minute: 35, second: 15, timezone: '+05:00'})}),
+               (:E {time: time({hour: 12, minute: 30, second: 14, nanosecond: 645876123, timezone: '+01:01'})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.time + duration({minutes: 6}) DESCENDING
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A {time: '10:35-08:00'}) |
+        | (:C {time: '12:31:14.645876124+01:00'}) |
+        | (:B {time: '12:31:14.645876123+01:00'}) |
+      side_effects: {}
+
+  # [17] Sort by a local date time expression in ascending order #1
+  - name: s17_sort_by_a_local_date_time_expression_in_ascending_order_1
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy2: [17] Sort by a local date time expression in ascending order #1"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12})}),
+               (:B {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123})}),
+               (:C {datetime: localdatetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1})}),
+               (:D {datetime: localdatetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999})}),
+               (:E {datetime: localdatetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.datetime + duration({days: 4, minutes: 6})
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {datetime: '0001-01-01T01:01:01.000000001'}) |
+        | (:E {datetime: '1980-12-11T12:31:14'}) |
+        | (:A {datetime: '1984-10-11T12:30:14.000000012'}) |
+      side_effects: {}
+
+  # [17] Sort by a local date time expression in ascending order #2
+  - name: s17_sort_by_a_local_date_time_expression_in_ascending_order_2
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy2: [17] Sort by a local date time expression in ascending order #2"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12})}),
+               (:B {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123})}),
+               (:C {datetime: localdatetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1})}),
+               (:D {datetime: localdatetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999})}),
+               (:E {datetime: localdatetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.datetime + duration({days: 4, minutes: 6}) ASC
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {datetime: '0001-01-01T01:01:01.000000001'}) |
+        | (:E {datetime: '1980-12-11T12:31:14'}) |
+        | (:A {datetime: '1984-10-11T12:30:14.000000012'}) |
+      side_effects: {}
+
+  # [17] Sort by a local date time expression in ascending order #3
+  - name: s17_sort_by_a_local_date_time_expression_in_ascending_order_3
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy2: [17] Sort by a local date time expression in ascending order #3"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12})}),
+               (:B {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123})}),
+               (:C {datetime: localdatetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1})}),
+               (:D {datetime: localdatetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999})}),
+               (:E {datetime: localdatetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.datetime + duration({days: 4, minutes: 6}) ASCENDING
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {datetime: '0001-01-01T01:01:01.000000001'}) |
+        | (:E {datetime: '1980-12-11T12:31:14'}) |
+        | (:A {datetime: '1984-10-11T12:30:14.000000012'}) |
+      side_effects: {}
+
+  # [18] Sort by a local date time expression in descending order #1
+  - name: s18_sort_by_a_local_date_time_expression_in_descending_order_1
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy2: [18] Sort by a local date time expression in descending order #1"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12})}),
+               (:B {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123})}),
+               (:C {datetime: localdatetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1})}),
+               (:D {datetime: localdatetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999})}),
+               (:E {datetime: localdatetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.datetime + duration({days: 4, minutes: 6}) DESC
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:D {datetime: '9999-09-09T09:59:59.999999999'}) |
+        | (:B {datetime: '1984-10-11T12:31:14.645876123'}) |
+        | (:A {datetime: '1984-10-11T12:30:14.000000012'}) |
+      side_effects: {}
+
+  # [18] Sort by a local date time expression in descending order #2
+  - name: s18_sort_by_a_local_date_time_expression_in_descending_order_2
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy2: [18] Sort by a local date time expression in descending order #2"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12})}),
+               (:B {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123})}),
+               (:C {datetime: localdatetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1})}),
+               (:D {datetime: localdatetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999})}),
+               (:E {datetime: localdatetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.datetime + duration({days: 4, minutes: 6}) DESCENDING
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:D {datetime: '9999-09-09T09:59:59.999999999'}) |
+        | (:B {datetime: '1984-10-11T12:31:14.645876123'}) |
+        | (:A {datetime: '1984-10-11T12:30:14.000000012'}) |
+      side_effects: {}
+
+  # [19] Sort by a date time expression in ascending order #1
+  - name: s19_sort_by_a_date_time_expression_in_ascending_order_1
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy2: [19] Sort by a date time expression in ascending order #1"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12, timezone: '+00:15'})}),
+               (:B {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+00:17'})}),
+               (:C {datetime: datetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1, timezone: '-11:59'})}),
+               (:D {datetime: datetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999, timezone: '+11:59'})}),
+               (:E {datetime: datetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14, timezone: '-11:59'})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.datetime + duration({days: 4, minutes: 6})
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {datetime: '0001-01-01T01:01:01.000000001-11:59'}) |
+        | (:E {datetime: '1980-12-11T12:31:14-11:59'}) |
+        | (:B {datetime: '1984-10-11T12:31:14.645876123+00:17'}) |
+      side_effects: {}
+
+  # [19] Sort by a date time expression in ascending order #2
+  - name: s19_sort_by_a_date_time_expression_in_ascending_order_2
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy2: [19] Sort by a date time expression in ascending order #2"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12, timezone: '+00:15'})}),
+               (:B {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+00:17'})}),
+               (:C {datetime: datetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1, timezone: '-11:59'})}),
+               (:D {datetime: datetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999, timezone: '+11:59'})}),
+               (:E {datetime: datetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14, timezone: '-11:59'})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.datetime + duration({days: 4, minutes: 6}) ASC
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {datetime: '0001-01-01T01:01:01.000000001-11:59'}) |
+        | (:E {datetime: '1980-12-11T12:31:14-11:59'}) |
+        | (:B {datetime: '1984-10-11T12:31:14.645876123+00:17'}) |
+      side_effects: {}
+
+  # [19] Sort by a date time expression in ascending order #3
+  - name: s19_sort_by_a_date_time_expression_in_ascending_order_3
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy2: [19] Sort by a date time expression in ascending order #3"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12, timezone: '+00:15'})}),
+               (:B {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+00:17'})}),
+               (:C {datetime: datetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1, timezone: '-11:59'})}),
+               (:D {datetime: datetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999, timezone: '+11:59'})}),
+               (:E {datetime: datetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14, timezone: '-11:59'})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.datetime + duration({days: 4, minutes: 6}) ASCENDING
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:C {datetime: '0001-01-01T01:01:01.000000001-11:59'}) |
+        | (:E {datetime: '1980-12-11T12:31:14-11:59'}) |
+        | (:B {datetime: '1984-10-11T12:31:14.645876123+00:17'}) |
+      side_effects: {}
+
+  # [20] Sort by a date time expression in descending order #1
+  - name: s20_sort_by_a_date_time_expression_in_descending_order_1
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy2: [20] Sort by a date time expression in descending order #1"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12, timezone: '+00:15'})}),
+               (:B {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+00:17'})}),
+               (:C {datetime: datetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1, timezone: '-11:59'})}),
+               (:D {datetime: datetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999, timezone: '+11:59'})}),
+               (:E {datetime: datetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14, timezone: '-11:59'})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.datetime + duration({days: 4, minutes: 6}) DESC
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:D {datetime: '9999-09-09T09:59:59.999999999+11:59'}) |
+        | (:A {datetime: '1984-10-11T12:30:14.000000012+00:15'}) |
+        | (:B {datetime: '1984-10-11T12:31:14.645876123+00:17'}) |
+      side_effects: {}
+
+  # [20] Sort by a date time expression in descending order #2
+  - name: s20_sort_by_a_date_time_expression_in_descending_order_2
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy2: [20] Sort by a date time expression in descending order #2"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12, timezone: '+00:15'})}),
+               (:B {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+00:17'})}),
+               (:C {datetime: datetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1, timezone: '-11:59'})}),
+               (:D {datetime: datetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999, timezone: '+11:59'})}),
+               (:E {datetime: datetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14, timezone: '-11:59'})})
+    query: |
+      MATCH (a)
+      WITH a
+        ORDER BY a.datetime + duration({days: 4, minutes: 6}) DESCENDING
+        LIMIT 3
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:D {datetime: '9999-09-09T09:59:59.999999999+11:59'}) |
+        | (:A {datetime: '1984-10-11T12:30:14.000000012+00:15'}) |
+        | (:B {datetime: '1984-10-11T12:31:14.645876123+00:17'}) |
+      side_effects: {}
+
+  # [21] Sort by an expression that is only partially orderable on a non-distinct binding table #1
+  - name: s21_sort_by_an_expression_that_is_only_partially_orderable_on_a_non_distinct_binding_table_1
+    setup:
+      - |
+        CREATE ({name: 'A'}),
+               ({name: 'A'}),
+               ({name: 'B'}),
+               ({name: 'C'}),
+               ({name: 'C'})
+    query: |
+      MATCH (a)
+      WITH a.name AS name
+        ORDER BY a.name + 'C' ASC
+        LIMIT 2
+      RETURN name
+    expect:
+      values: |
+        | name |
+        | 'A' |
+        | 'A' |
+      side_effects: {}
+
+  # [21] Sort by an expression that is only partially orderable on a non-distinct binding table #2
+  - name: s21_sort_by_an_expression_that_is_only_partially_orderable_on_a_non_distinct_binding_table_2
+    setup:
+      - |
+        CREATE ({name: 'A'}),
+               ({name: 'A'}),
+               ({name: 'B'}),
+               ({name: 'C'}),
+               ({name: 'C'})
+    query: |
+      MATCH (a)
+      WITH a.name AS name
+        ORDER BY a.name + 'C' DESC
+        LIMIT 2
+      RETURN name
+    expect:
+      values: |
+        | name |
+        | 'C' |
+        | 'C' |
+      side_effects: {}
+
+  # [22] Sort by an expression that is only partially orderable on a non-distinct binding table, but used as a grouping key #1
+  - name: s22_sort_by_an_expression_that_is_only_partially_orderable_on_a_non_distinct_binding_table_but_used_as_a_grouping_key_1
+    setup:
+      - |
+        CREATE ({name: 'A'}),
+               ({name: 'A'}),
+               ({name: 'B'}),
+               ({name: 'C'}),
+               ({name: 'C'})
+    query: |
+      MATCH (a)
+      WITH a.name AS name, count(*) AS cnt
+        ORDER BY a.name ASC
+        LIMIT 1
+      RETURN name, cnt
+    expect:
+      values: |
+        | name | cnt |
+        | 'A' | 2 |
+      side_effects: {}
+
+  # [22] Sort by an expression that is only partially orderable on a non-distinct binding table, but used as a grouping key #2
+  - name: s22_sort_by_an_expression_that_is_only_partially_orderable_on_a_non_distinct_binding_table_but_used_as_a_grouping_key_2
+    setup:
+      - |
+        CREATE ({name: 'A'}),
+               ({name: 'A'}),
+               ({name: 'B'}),
+               ({name: 'C'}),
+               ({name: 'C'})
+    query: |
+      MATCH (a)
+      WITH a.name AS name, count(*) AS cnt
+        ORDER BY a.name DESC
+        LIMIT 1
+      RETURN name, cnt
+    expect:
+      values: |
+        | name | cnt |
+        | 'C' | 2 |
+      side_effects: {}
+
+  # [23] Sort by an expression that is only partially orderable on a non-distinct binding table, but used in parts as a grouping key #1
+  - name: s23_sort_by_an_expression_that_is_only_partially_orderable_on_a_non_distinct_binding_table_but_used_in_parts_as_a_grouping_key_1
+    setup:
+      - |
+        CREATE ({name: 'A'}),
+               ({name: 'A'}),
+               ({name: 'B'}),
+               ({name: 'C'}),
+               ({name: 'C'})
+    query: |
+      MATCH (a)
+      WITH a.name AS name, count(*) AS cnt
+        ORDER BY a.name + 'C' ASC
+        LIMIT 1
+      RETURN name, cnt
+    expect:
+      values: |
+        | name | cnt |
+        | 'A' | 2 |
+      side_effects: {}
+
+  # [23] Sort by an expression that is only partially orderable on a non-distinct binding table, but used in parts as a grouping key #2
+  - name: s23_sort_by_an_expression_that_is_only_partially_orderable_on_a_non_distinct_binding_table_but_used_in_parts_as_a_grouping_key_2
+    setup:
+      - |
+        CREATE ({name: 'A'}),
+               ({name: 'A'}),
+               ({name: 'B'}),
+               ({name: 'C'}),
+               ({name: 'C'})
+    query: |
+      MATCH (a)
+      WITH a.name AS name, count(*) AS cnt
+        ORDER BY a.name + 'C' DESC
+        LIMIT 1
+      RETURN name, cnt
+    expect:
+      values: |
+        | name | cnt |
+        | 'C' | 2 |
+      side_effects: {}
+
+  # [24] Sort by an expression that is only partially orderable on a non-distinct binding table, but made distinct #1
+  - name: s24_sort_by_an_expression_that_is_only_partially_orderable_on_a_non_distinct_binding_table_but_made_distinct_1
+    setup:
+      - |
+        CREATE ({name: 'A'}),
+               ({name: 'A'}),
+               ({name: 'B'}),
+               ({name: 'C'}),
+               ({name: 'C'})
+    query: |
+      MATCH (a)
+      WITH DISTINCT a.name AS name
+        ORDER BY a.name ASC
+        LIMIT 1
+      RETURN *
+    expect:
+      values: |
+        | name |
+        | 'A' |
+      side_effects: {}
+
+  # [24] Sort by an expression that is only partially orderable on a non-distinct binding table, but made distinct #2
+  - name: s24_sort_by_an_expression_that_is_only_partially_orderable_on_a_non_distinct_binding_table_but_made_distinct_2
+    setup:
+      - |
+        CREATE ({name: 'A'}),
+               ({name: 'A'}),
+               ({name: 'B'}),
+               ({name: 'C'}),
+               ({name: 'C'})
+    query: |
+      MATCH (a)
+      WITH DISTINCT a.name AS name
+        ORDER BY a.name DESC
+        LIMIT 1
+      RETURN *
+    expect:
+      values: |
+        | name |
+        | 'C' |
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #1
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_1
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY count(1)
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #2
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_2
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY count(n)
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #3
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_3
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY count(n.num1)
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #4
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_4
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY count(1 + n.num1)
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #5
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_5
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY max(n.num2)
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #6
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_6
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY max(n.num2) ASC
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #7
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_7
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY max(n.num2) ASCENDING
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #8
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_8
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY max(n.num2) DESC
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #9
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_9
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY max(n.num2) DESCENDING
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #10
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_10
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY max(n.num2), n.name
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #11
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_11
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY max(n.num2) ASC, n.name
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #12
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_12
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY max(n.num2) ASCENDING, n.name
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #13
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_13
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY max(n.num2) DESC, n.name
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #14
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_14
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY max(n.num2) DESCENDING, n.name
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #15
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_15
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY n.name, max(n.num2)
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #16
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_16
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY n.name ASC, max(n.num2) ASC
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #17
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_17
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY n.name ASC, max(n.num2) DESC
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #18
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_18
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY n.name DESC, max(n.num2) ASC
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #19
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_19
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY n.name DESC, max(n.num2) DESC
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #20
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_20
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY n.name, max(n.num2), n.name2
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #21
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_21
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY n.name, n.name2, max(n.num2)
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #22
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_22
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY n, max(n.num2)
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #23
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_23
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY n.num1, max(n.num2)
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #24
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_24
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY n, max(n.num2), n.num1
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on sorting by an aggregation #25
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s25_fail_on_sorting_by_an_aggregation_25
+    query: |
+      MATCH (n)
+      WITH n.num1 AS foo
+        ORDER BY n, count(n.num1), max(n.num2), n.num1
+      RETURN foo AS foo
+    expect:
+      gql_status: "42"
+      side_effects: {}

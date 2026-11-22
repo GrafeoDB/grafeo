@@ -1,0 +1,212 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/return/Return4.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Return4"
+  title: "Return4 - Column renaming"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Honour the column name for RETURN items
+  - name: s1_honour_the_column_name_for_return_items
+    setup:
+      - |
+        CREATE ({name: 'Someone'})
+    query: |
+      MATCH (a)
+      WITH a.name AS a
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | 'Someone' |
+      side_effects: {}
+
+  # [2] Support column renaming
+  - name: s2_support_column_renaming
+    setup:
+      - |
+        CREATE (:Singleton)
+    query: |
+      MATCH (a)
+      RETURN a AS ColumnName
+    expect:
+      values: |
+        | ColumnName |
+        | (:Singleton) |
+      side_effects: {}
+
+  # [3] Aliasing expressions
+  - name: s3_aliasing_expressions
+    setup:
+      - |
+        CREATE ({id: 42})
+    query: |
+      MATCH (a)
+      RETURN a.id AS a, a.id
+    expect:
+      values: |
+        | a | a.id |
+        | 42 | 42 |
+      side_effects: {}
+
+  # [4] Keeping used expression 1
+  - name: s4_keeping_used_expression_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Return4: [4] Keeping used expression 1"
+      issue: "#800"
+    setup:
+      - |
+        CREATE ()
+    query: |
+      MATCH (n)
+      RETURN cOuNt( * )
+    expect:
+      values: |
+        | cOuNt( * ) |
+        | 1 |
+      side_effects: {}
+
+  # [5] Keeping used expression 2
+  - name: s5_keeping_used_expression_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Return4: [5] Keeping used expression 2"
+      issue: "fix in 0.6.5"
+    setup:
+      - |
+        CREATE ()
+    query: |
+      MATCH p = (n)-->(b)
+      RETURN nOdEs( p )
+    expect:
+      values: |
+        | nOdEs( p ) |
+      side_effects: {}
+
+  # [6] Keeping used expression 3
+  - name: s6_keeping_used_expression_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Return4: [6] Keeping used expression 3"
+      issue: "#800"
+    setup:
+      - |
+        CREATE ()
+    query: |
+      MATCH p = (n)-->(b)
+      RETURN coUnt( dIstInct p )
+    expect:
+      values: |
+        | coUnt( dIstInct p ) |
+        | 0 |
+      side_effects: {}
+
+  # [7] Keeping used expression 4
+  - name: s7_keeping_used_expression_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Return4: [7] Keeping used expression 4"
+      issue: "#800"
+    setup:
+      - |
+        CREATE ()
+    query: |
+      MATCH p = (n)-->(b)
+      RETURN aVg(    n.aGe     )
+    expect:
+      values: |
+        | aVg(    n.aGe     ) |
+        | null |
+      side_effects: {}
+
+  # [8] Support column renaming for aggregations
+  - name: s8_support_column_renaming_for_aggregations
+    setup:
+      - |
+        UNWIND range(0, 10) AS i
+        CREATE ()
+    query: |
+      MATCH ()
+      RETURN count(*) AS columnName
+    expect:
+      values: |
+        | columnName |
+        | 11 |
+      side_effects: {}
+
+  # [9] Handle subexpression in aggregation also occurring as standalone expression with nested aggregation in a literal map
+  - name: s9_handle_subexpression_in_aggregation_also_occurring_as_standalone_expression_with_nested_aggregation_in_a_literal_map
+    setup:
+      - |
+        CREATE (:A), (:B {num: 42})
+    query: |
+      MATCH (a:A), (b:B)
+      RETURN coalesce(a.num, b.num) AS foo,
+        b.num AS bar,
+        {name: count(b)} AS baz
+    expect:
+      values: |
+        | foo | bar | baz |
+        | 42 | 42 | {name: 1} |
+      side_effects: {}
+
+  # [10] Fail when returning multiple columns with same name
+  # TCK: SyntaxError at compile time: ColumnNameConflict
+  - name: s10_fail_when_returning_multiple_columns_with_same_name
+    query: |
+      RETURN 1 AS a, 2 AS a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [11] Reusing variable names in RETURN
+  - name: s11_reusing_variable_names_in_return
+    setup:
+      - |
+        CREATE (a:Person), (b:Person), (m:Message {id: 10})
+        CREATE (a)-[:LIKE {creationDate: 20160614}]->(m)-[:POSTED_BY]->(b)
+    query: |
+      MATCH (person:Person)<--(message)<-[like]-(:Person)
+      WITH like.creationDate AS likeTime, person AS person
+        ORDER BY likeTime, message.id
+      WITH head(collect({likeTime: likeTime})) AS latestLike, person AS person
+      RETURN latestLike.likeTime AS likeTime
+        ORDER BY likeTime
+    expect:
+      ordered: true
+      values: |
+        | likeTime |
+        | 20160614 |
+      side_effects: {}

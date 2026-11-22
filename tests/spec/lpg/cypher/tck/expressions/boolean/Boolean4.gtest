@@ -1,0 +1,659 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/boolean/Boolean4.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Boolean4"
+  title: "Boolean4 - NOT logical operations"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Logical negation of truth values
+  - name: s1_logical_negation_of_truth_values
+    query: |
+      RETURN NOT true AS nt, NOT false AS nf, NOT null AS nn
+    expect:
+      values: |
+        | nt | nf | nn |
+        | false | true | null |
+      side_effects: {}
+
+  # [2] Double logical negation of truth values
+  - name: s2_double_logical_negation_of_truth_values
+    query: |
+      RETURN NOT NOT true AS nnt, NOT NOT false AS nnf, NOT NOT null AS nnn
+    expect:
+      values: |
+        | nnt | nnf | nnn |
+        | true | false | null |
+      side_effects: {}
+
+  # [3] NOT and false
+  - name: s3_not_and_false
+    setup:
+      - |
+        CREATE ({name: 'a'})
+    query: |
+      MATCH (n)
+      WHERE NOT(n.name = 'apa' AND false)
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | ({name: 'a'}) |
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #1
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #1"
+      issue: "#796"
+    query: |
+      RETURN NOT 0
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #2
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #2"
+      issue: "#796"
+    query: |
+      RETURN NOT 1
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #3
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #3"
+      issue: "#796"
+    query: |
+      RETURN NOT 123
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #4
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #4"
+      issue: "#796"
+    query: |
+      RETURN NOT 123.4
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #5
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #5"
+      issue: "#796"
+    query: |
+      RETURN NOT ''
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #6
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #6"
+      issue: "#796"
+    query: |
+      RETURN NOT 'false'
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #7
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_7
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #7"
+      issue: "#796"
+    query: |
+      RETURN NOT 'true'
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #8
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_8
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #8"
+      issue: "#796"
+    query: |
+      RETURN NOT 'foo'
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #9
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_9
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #9"
+      issue: "#796"
+    query: |
+      RETURN NOT []
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #10
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_10
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #10"
+      issue: "#796"
+    query: |
+      RETURN NOT [null]
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #11
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_11
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #11"
+      issue: "#796"
+    query: |
+      RETURN NOT [true]
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #12
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_12
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #12"
+      issue: "#796"
+    query: |
+      RETURN NOT [false]
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #13
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_13
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #13"
+      issue: "#796"
+    query: |
+      RETURN NOT [true, false]
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #14
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_14
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #14"
+      issue: "#796"
+    query: |
+      RETURN NOT [false, true]
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #15
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_15
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #15"
+      issue: "#796"
+    query: |
+      RETURN NOT [0]
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #16
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_16
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #16"
+      issue: "#796"
+    query: |
+      RETURN NOT [1]
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #17
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_17
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #17"
+      issue: "#796"
+    query: |
+      RETURN NOT [1, 2, 3]
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #18
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_18
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #18"
+      issue: "#796"
+    query: |
+      RETURN NOT [0.0]
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #19
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_19
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #19"
+      issue: "#796"
+    query: |
+      RETURN NOT [1.0]
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #20
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_20
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #20"
+      issue: "#796"
+    query: |
+      RETURN NOT [1.0, 2.1]
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #21
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_21
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #21"
+      issue: "#796"
+    query: |
+      RETURN NOT ['']
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #22
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_22
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #22"
+      issue: "#796"
+    query: |
+      RETURN NOT ['', '']
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #23
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_23
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #23"
+      issue: "#796"
+    query: |
+      RETURN NOT ['true']
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #24
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_24
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #24"
+      issue: "#796"
+    query: |
+      RETURN NOT ['false']
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #25
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_25
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #25"
+      issue: "#796"
+    query: |
+      RETURN NOT ['a', 'b']
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #26
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_26
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #26"
+      issue: "#796"
+    query: |
+      RETURN NOT {}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #27
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_27
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #27"
+      issue: "#796"
+    query: |
+      RETURN NOT {``: null}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #28
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_28
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #28"
+      issue: "#796"
+    query: |
+      RETURN NOT {a: null}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #29
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_29
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #29"
+      issue: "#796"
+    query: |
+      RETURN NOT {``: true}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #30
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_30
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #30"
+      issue: "#796"
+    query: |
+      RETURN NOT {``: false}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #31
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_31
+    query: |
+      RETURN NOT {true: true}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #32
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_32
+    query: |
+      RETURN NOT {false: false}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #33
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_33
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #33"
+      issue: "#796"
+    query: |
+      RETURN NOT {bool: true}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #34
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_34
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #34"
+      issue: "#796"
+    query: |
+      RETURN NOT {bool: false}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #35
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_35
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #35"
+      issue: "#796"
+    query: |
+      RETURN NOT {``: 0}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #36
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_36
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #36"
+      issue: "#796"
+    query: |
+      RETURN NOT {``: 1}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #37
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_37
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #37"
+      issue: "#796"
+    query: |
+      RETURN NOT {a: 0}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #38
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_38
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #38"
+      issue: "#796"
+    query: |
+      RETURN NOT {a: 1}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #39
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_39
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #39"
+      issue: "#796"
+    query: |
+      RETURN NOT {a: 1, b: 2}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #40
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_40
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #40"
+      issue: "#796"
+    query: |
+      RETURN NOT {``: 0.0}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #41
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_41
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #41"
+      issue: "#796"
+    query: |
+      RETURN NOT {``: 1.0}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #42
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_42
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #42"
+      issue: "#796"
+    query: |
+      RETURN NOT {a: 0.0}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #43
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_43
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #43"
+      issue: "#796"
+    query: |
+      RETURN NOT {a: 1.0}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #44
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_44
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #44"
+      issue: "#796"
+    query: |
+      RETURN NOT {a: 1.0, b: 2.1}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #45
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_45
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #45"
+      issue: "#796"
+    query: |
+      RETURN NOT {``: ''}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #46
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_46
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #46"
+      issue: "#796"
+    query: |
+      RETURN NOT {a: ''}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #47
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_47
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #47"
+      issue: "#796"
+    query: |
+      RETURN NOT {a: 'a'}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #48
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_48
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #48"
+      issue: "#796"
+    query: |
+      RETURN NOT {a: 'a', b: 'b'}
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [4] Fail when using NOT on a non-boolean literal #49
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s4_fail_when_using_not_on_a_non_boolean_literal_49
+    xfail:
+      spec: "openCypher TCK 2024.3 Boolean4: [4] Fail when using NOT on a non-boolean literal #49"
+      issue: "#796"
+    query: |
+      RETURN NOT {a: 12, b: true}
+    expect:
+      gql_status: "42"
+      side_effects: {}

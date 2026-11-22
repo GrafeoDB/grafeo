@@ -62,6 +62,9 @@ pub enum AggregateState {
     Last(Option<Value>),
     /// Collect state.
     Collect(Vec<Value>),
+    /// Collect state that keeps a null operand as an item: the list a
+    /// pattern comprehension builds, one item per match.
+    CollectKeepingNulls(Vec<Value>),
     /// Collect distinct state (values, seen).
     CollectDistinct(Vec<Value>, HashSet<HashableValue>),
     /// Sample standard deviation state using Welford's algorithm (count, mean, M2).
@@ -234,6 +237,7 @@ impl AggregateState {
             | Self::SumFloatDistinct(..)
             | Self::AvgDistinct(..)
             | Self::Collect(..)
+            | Self::CollectKeepingNulls(..)
             | Self::CollectDistinct(..)
             | Self::PercentileDisc { .. }
             | Self::PercentileCont { .. }
@@ -256,7 +260,9 @@ impl AggregateState {
             | Self::SumIntDistinct(_, _, set)
             | Self::SumFloatDistinct(_, _, _, set)
             | Self::AvgDistinct(_, _, set) => seen(set),
-            Self::Collect(values) => values.capacity() * std::mem::size_of::<Value>(),
+            Self::Collect(values) | Self::CollectKeepingNulls(values) => {
+                values.capacity() * std::mem::size_of::<Value>()
+            }
             Self::CollectDistinct(values, set) => {
                 values.capacity() * std::mem::size_of::<Value>() + seen(set)
             }
@@ -277,6 +283,9 @@ impl AggregateState {
     /// with its parameters, and SPARQL's SUM and AVG for RDF operands.
     #[must_use]
     pub fn for_expr(expr: &AggregateExpr) -> Self {
+        if expr.keep_nulls && expr.function == AggregateFunction::Collect && !expr.distinct {
+            return AggregateState::CollectKeepingNulls(Vec::new());
+        }
         let state = Self::new(
             expr.function,
             expr.distinct,
@@ -453,6 +462,10 @@ impl AggregateState {
     /// MIN and MAX reading a local datetime against a zoned one as
     /// `temporal` reads it (the statement's `=` and `<`).
     pub fn update_under(&mut self, value: Option<Value>, temporal: TemporalComparison) {
+        if let AggregateState::CollectKeepingNulls(list) = self {
+            list.push(value.unwrap_or(Value::Null));
+            return;
+        }
         if matches!(value, Some(Value::Null)) {
             return;
         }
@@ -672,6 +685,8 @@ impl AggregateState {
                     list.push(v);
                 }
             }
+            // Pushed before the nulls are skipped (above).
+            AggregateState::CollectKeepingNulls(_) => {}
             AggregateState::CollectDistinct(list, seen) => {
                 if let Some(v) = value {
                     let hashable = HashableValue::under(&v, temporal);
@@ -977,9 +992,9 @@ impl AggregateState {
             }
             AggregateState::First(first) => first.clone().unwrap_or(Value::Null),
             AggregateState::Last(last) => last.clone().unwrap_or(Value::Null),
-            AggregateState::Collect(list) | AggregateState::CollectDistinct(list, _) => {
-                Value::List(list.clone().into())
-            }
+            AggregateState::Collect(list)
+            | AggregateState::CollectKeepingNulls(list)
+            | AggregateState::CollectDistinct(list, _) => Value::List(list.clone().into()),
             // Sample standard deviation: sqrt(M2 / (n - 1))
             AggregateState::StdDev { count, m2, .. } => {
                 if *count < 2 {
@@ -1377,8 +1392,11 @@ impl HashAggregateOperator {
                                 states[i].update_under(value, agg.temporal);
                             }
                         }
+                        // A `collect` that keeps nulls reads them too.
                         _ => {
-                            if value.is_some() && !matches!(value, Some(Value::Null)) {
+                            if agg.keep_nulls
+                                || (value.is_some() && !matches!(value, Some(Value::Null)))
+                            {
                                 states[i].update_under(value, agg.temporal);
                             }
                         }
@@ -1528,13 +1546,14 @@ pub(crate) fn update_row(
             continue;
         }
         // COUNT(*) without DISTINCT needs no value; every other aggregate
-        // skips a null or missing one.
+        // skips a null or missing one, but a `collect` that keeps nulls reads
+        // them too.
         if let (AggregateFunction::Count, false) = (agg.function, agg.distinct) {
             state.update_under(None, agg.temporal);
             continue;
         }
         let value = agg.column.and_then(&mut value_at);
-        if value.is_some() && !matches!(value, Some(Value::Null)) {
+        if agg.keep_nulls || (value.is_some() && !matches!(value, Some(Value::Null))) {
             state.update_under(value, agg.temporal);
         }
     }
@@ -2077,6 +2096,23 @@ mod tests {
         assert!((stdev - 2.0).abs() < 0.01);
     }
 
+    /// A `collect` keeps a null operand as an item only when its expression
+    /// says so (a pattern comprehension's); a plain `collect` skips it.
+    #[test]
+    fn collect_keeps_nulls_only_when_asked() {
+        let mut keeping = AggregateExpr::collect(0);
+        keeping.keep_nulls = true;
+        for (expr, expected) in [
+            (AggregateExpr::collect(0), vec![Value::Int64(1)]),
+            (keeping, vec![Value::Int64(1), Value::Null]),
+        ] {
+            let mut state = AggregateState::for_expr(&expr);
+            state.update(Some(Value::Int64(1)));
+            state.update(Some(Value::Null));
+            assert_eq!(state.finalize().unwrap(), Value::List(expected.into()));
+        }
+    }
+
     #[test]
     fn test_percentile_disc() {
         let mock = MockOperator::new(vec![create_statistical_test_chunk()]);
@@ -2266,6 +2302,7 @@ mod tests {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         };
@@ -2290,6 +2327,7 @@ mod tests {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         };
@@ -2439,6 +2477,7 @@ mod tests {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         };
@@ -2467,6 +2506,7 @@ mod tests {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         };
@@ -2499,6 +2539,7 @@ mod tests {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         };

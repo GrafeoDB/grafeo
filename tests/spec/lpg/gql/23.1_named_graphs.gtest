@@ -1,6 +1,6 @@
 # GQL Named Graphs: ISO/IEC 39075:2024 sec 23.1
 #
-# Covers: CREATE GRAPH, CREATE GRAPH IF NOT EXISTS, DROP GRAPH,
+# Covers: CREATE GRAPH, CREATE GRAPH IF NOT EXISTS, CREATE OR REPLACE GRAPH, DROP GRAPH,
 # DROP GRAPH IF EXISTS, USE GRAPH, data isolation between named graphs,
 # SESSION SET GRAPH, SESSION RESET, SHOW GRAPHS.
 
@@ -52,6 +52,56 @@ tests:
       rows:
         - [alpha]
         - [beta]
+
+  # ---------------------------------------------------------------------------
+  # CREATE OR REPLACE GRAPH (sec 12.4)
+  # ---------------------------------------------------------------------------
+
+  - name: create_or_replace_graph_creates_an_absent_graph
+    statements:
+      - "CREATE OR REPLACE GRAPH analytics"
+      - "SHOW GRAPHS"
+    expect:
+      rows:
+        - [analytics]
+
+  - name: create_or_replace_graph_replaces_with_an_empty_graph
+    statements:
+      - "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'})"
+      - "CREATE GRAPH analytics"
+      - "USE GRAPH analytics"
+      - "INSERT (:Event {type: 'click'})"
+      - "CREATE OR REPLACE GRAPH analytics"
+      - "MATCH (n) RETURN count(n) AS cnt"
+    expect:
+      rows:
+        - [0]
+
+  - name: create_or_replace_graph_as_copy_of_another
+    statements:
+      - "CREATE GRAPH source"
+      - "USE GRAPH source"
+      - "INSERT (:Event {type: 'click'})"
+      - "CREATE GRAPH analytics"
+      - "CREATE OR REPLACE GRAPH analytics AS COPY OF source"
+      - "USE GRAPH analytics"
+      - "MATCH (e:Event) RETURN e.type AS type"
+    expect:
+      rows:
+        - [click]
+
+  - name: create_or_replace_graph_copy_of_itself_fails
+    statements:
+      - "CREATE GRAPH analytics"
+      - "CREATE OR REPLACE GRAPH analytics AS COPY OF analytics"
+    expect:
+      error: copy of itself
+
+  - name: create_or_replace_graph_if_not_exists_fails
+    statements:
+      - "CREATE OR REPLACE GRAPH IF NOT EXISTS analytics"
+    expect:
+      error: IF NOT EXISTS
 
   # ---------------------------------------------------------------------------
   # DROP GRAPH

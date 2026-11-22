@@ -103,6 +103,14 @@ pub enum LogicalType {
     /// SPARQL query that produced it. Stored as an integer; meaningless
     /// outside that query.
     RdfTermId,
+
+    /// The nodes and edges a statement returns, as records (maps), where the
+    /// type inside says: `Records(Node)` holds node records, `Records(List(Node))`
+    /// lists of them, `Records(Path)` paths of records. The projection that
+    /// builds the records gives its column this type, so the nodes and edges
+    /// of a result are known by type, never by the keys of a map. Stored as
+    /// values. A result reports the type inside (see `QueryResult::cell_type`).
+    Records(Box<LogicalType>),
 }
 
 impl LogicalType {
@@ -325,6 +333,7 @@ impl fmt::Display for LogicalType {
             LogicalType::Path => write!(f, "PATH"),
             LogicalType::Vector(dim) => write!(f, "VECTOR({dim})"),
             LogicalType::RdfTermId => write!(f, "RDF TERM ID"),
+            LogicalType::Records(shape) => write!(f, "{shape}"),
         }
     }
 }

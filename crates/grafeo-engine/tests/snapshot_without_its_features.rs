@@ -200,7 +200,7 @@ fn assert_documents(db: &GrafeoDB) {
     let triple =
         |s: &str, p: &str, o: &str| [s, p, o].map(|name| format!("<http://example.org/{name}>"));
     assert_eq!(
-        stored(db.rdf_store()),
+        stored(&db.rdf_store()),
         [triple("alix", "knows", "gus")],
         "the triples of the default graph"
     );

@@ -150,4 +150,59 @@ public sealed class MemorySettingsTests
             Cleanup(path);
         }
     }
+
+    /// <summary>
+    /// The plan cache's limit (#674) reads back as <c>caches.plan_cache_limit_bytes</c>, capped at
+    /// the memory limit; zero turns the cache off.
+    /// </summary>
+    [Theory]
+    [InlineData(64 * MiB, 8 * MiB, 8 * MiB)]
+    [InlineData(32 * MiB, 1024 * MiB, 32 * MiB)]
+    [InlineData(64 * MiB, 0L, 0L)]
+    public void ThePlanCacheLimitReadsBack(long memory, long limit, long expected)
+    {
+        using var options = new GrafeoOptions();
+        options.SetMemoryLimit(memory);
+        options.SetPlanCacheLimit(limit);
+        using var db = GrafeoDB.Open(null, options);
+        var caches = (IReadOnlyDictionary<string, object?>)db.MemoryUsage()["caches"]!;
+        Assert.Equal(expected, Bytes(caches["plan_cache_limit_bytes"]));
+    }
+
+    /// <summary>A negative plan cache limit is refused.</summary>
+    [Fact]
+    public void ANegativePlanCacheLimitIsRefused()
+    {
+        using var options = new GrafeoOptions();
+        Assert.Throws<ArgumentOutOfRangeException>(() => options.SetPlanCacheLimit(-1));
+    }
+
+    /// <summary>
+    /// The change log's memory limit (#679) reads back as <c>cdc.limit_bytes</c>: a sixteenth of
+    /// the memory limit when unset, capped at the memory limit; zero fails at the open.
+    /// </summary>
+    [Theory]
+    [InlineData(64 * MiB, 512 * 1024L, 512 * 1024L)]
+    [InlineData(64 * MiB, -1L, 4 * MiB)]
+    [InlineData(32 * MiB, 1024 * MiB, 32 * MiB)]
+    public void TheCdcMemoryLimitReadsBack(long memory, long limit, long expected)
+    {
+        using var options = new GrafeoOptions();
+        options.SetMemoryLimit(memory);
+        if (limit >= 0)
+        {
+            options.SetCdcMemoryLimit(limit);
+        }
+        using var db = GrafeoDB.Open(null, options);
+        var cdc = (IReadOnlyDictionary<string, object?>)db.MemoryUsage()["cdc"]!;
+        Assert.Equal(expected, Bytes(cdc["limit_bytes"]));
+    }
+
+    [Fact]
+    public void AZeroCdcMemoryLimitFailsAtTheOpen()
+    {
+        using var options = new GrafeoOptions();
+        options.SetCdcMemoryLimit(0);
+        Assert.ThrowsAny<GrafeoException>(() => GrafeoDB.Open(null, options));
+    }
 }

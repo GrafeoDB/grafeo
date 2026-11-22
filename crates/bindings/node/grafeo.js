@@ -24,7 +24,12 @@ const { Transaction } = wrapped
 if (typeof Symbol.dispose === 'symbol' && Transaction && !(Symbol.dispose in Transaction.prototype)) {
   Object.defineProperty(Transaction.prototype, Symbol.dispose, {
     value: function dispose() {
-      if (this.isActive) this.rollback()
+      try {
+        if (this.isActive) this.rollback()
+      } catch (error) {
+        // A closed database (GRAFEO-T007) rolled the transaction back already.
+        if (error?.errorCode !== 'GRAFEO-T007') throw error
+      }
     },
     writable: true,
     configurable: true,

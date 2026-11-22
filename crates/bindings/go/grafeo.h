@@ -11,6 +11,17 @@
  * Error handling:
  *   - Functions return GrafeoStatus (0 = success).
  *   - On error, call grafeo_last_error() for a human-readable message.
+ *   - After grafeo_close, every call on the database and on the graphs,
+ *     sessions, transactions, streams and views it handed out fails with
+ *     GRAFEO-T007 (the database is closed); only grafeo_close and
+ *     grafeo_session_close (no-ops) and the frees answer.
+ *   - The calls without an error return (grafeo_set_cdc_enabled,
+ *     grafeo_is_cdc_enabled, grafeo_current_epoch, grafeo_current_schema,
+ *     grafeo_as_of_epoch, grafeo_has_property_index and the
+ *     grafeo_stream_warning_* accessors) clear the
+ *     last error when they start. On a closed database they return their
+ *     neutral value (nothing changed, false, 0, NULL) with the last error set
+ *     to GRAFEO-T007, so a non-NULL grafeo_last_error() after one means closed.
  */
 
 #ifndef GRAFEO_H
@@ -121,33 +132,68 @@ const char*     grafeo_version(void);
 /* The memory and spill settings a database opens with. Unset means the default:
    75% of the memory the process may use for the memory limit, the memory limit
    for the query memory limit, a quarter of the memory limit (at most 256 MiB)
-   for the path search budget, half the spill volume's free space for the spill
-   limit. A write past the memory limit fails with GRAFEO-S001, and so does a
-   path search over its budget.
+   for the path search budget, a quarter of the memory limit (at least 1 MiB)
+   for the snapshot retention limit, half the spill volume's free space for the
+   spill limit. A write past the memory limit fails with GRAFEO-S001, and so
+   does a path search over its budget.
      - grafeo_options_new returns an object to free with grafeo_options_free
        (NULL is ignored); it may open several databases and be freed once the
        open returns.
-     - The path search budget counts the paths a variable-length or
-       shortest-path search keeps at once, or what an RDF property path
-       search visits; the nodes an ANY SHORTEST or shortestPath search
-       visits are not counted yet.
-     - The memory and query memory limits and the path search budget must be
-       above zero (another status otherwise); a spill limit of 0 means
+     - The path search budget counts everything one path search holds at
+       once (a variable-length, shortest-path or RDF property path search):
+       the nodes it visits, its queues and the paths it keeps. The same
+       bytes count against the query memory limit and the memory limit.
+     - The snapshot retention limit is how many bytes of replaced data an
+       open transaction's snapshot may keep; past it the transaction's next
+       call fails with the retryable GRAFEO-T012 and rolls it back. Below
+       1 MiB grafeo_open_with_options fails.
+     - The history retention limit is how many bytes of replaced data the
+       history window may keep; past it the window's start moves forward.
+       No limit by default; zero fails the open. Not stored with the file.
+     - The path expansion limit is how many path expansions one statement's
+       variable-length and shortest-path searches may make together: each
+       edge they read to extend a path, and each node and edge they copy out
+       of a path into a row. 100 million by default; past it GRAFEO-Q009.
+     - The query length limit is how many bytes a statement's text may have
+       (16 MiB by default; parameter values do not count), the identifier
+       length limit how many bytes one name in it may have (16 KiB by
+       default); a statement over either fails with GRAFEO-Q002.
+     - The CDC memory limit bounds the bytes the in-memory change log holds:
+       past it the oldest commits go. A sixteenth of the memory limit by
+       default, never above it.
+     - The memory, query memory and CDC memory limits, the path search
+       budget, the path expansion limit and the query and identifier lengths
+       must be above zero (another status otherwise); a spill limit of 0 means
        nothing spills, and unlimited spill, once set, wins over a spill limit.
        An in-memory database spills nothing whatever the settings.
+     - The plan cache limit is how many bytes of plans the database keeps
+       for repeated statements; 0 keeps none. By default a sixty-fourth of
+       the memory limit, from 4 MiB to 64 MiB, and never more than the
+       memory limit.
      - grafeo_open_with_options opens in memory when path is NULL, else the
        file at path; NULL options are the defaults. */
 GrafeoOptions*  grafeo_options_new(void);
 void            grafeo_options_free(GrafeoOptions* options);
 GrafeoStatus    grafeo_options_set_memory_limit(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_query_memory_limit(GrafeoOptions* options, uint64_t bytes);
+GrafeoStatus    grafeo_options_set_cdc_memory_limit(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_path_search_budget(GrafeoOptions* options, uint64_t bytes);
+GrafeoStatus    grafeo_options_set_path_expansion_limit(GrafeoOptions* options, uint64_t expansions);
+GrafeoStatus    grafeo_options_set_max_query_length(GrafeoOptions* options, uint64_t bytes);
+GrafeoStatus    grafeo_options_set_max_identifier_length(GrafeoOptions* options, uint64_t bytes);
+GrafeoStatus    grafeo_options_set_snapshot_retention_limit(GrafeoOptions* options, uint64_t bytes);
+GrafeoStatus    grafeo_options_set_history_retention_limit(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_spill_limit(GrafeoOptions* options, uint64_t bytes);
 GrafeoStatus    grafeo_options_set_unlimited_spill(GrafeoOptions* options);
+GrafeoStatus    grafeo_options_set_plan_cache_limit(GrafeoOptions* options, uint64_t bytes);
 GrafeoDatabase* grafeo_open_with_options(const char* path, const GrafeoOptions* options);
 
 /* ---- Change Data Capture ------------------------------------------------- */
 
+/* Stores the setting with the database (an in-memory one keeps it while open). */
+GrafeoStatus grafeo_set_cdc(GrafeoDatabase* db, bool enabled);
+/* No error return: see "Error handling" above (closed: no change, false). */
+GRAFEO_DEPRECATED("changes the setting for this open only; use grafeo_set_cdc, which stores it and returns a status; removed in 0.7.0")
 void grafeo_set_cdc_enabled(GrafeoDatabase* db, bool enabled);
 bool grafeo_is_cdc_enabled(GrafeoDatabase* db);
 
@@ -199,6 +245,13 @@ uint64_t    grafeo_result_labels_added(const GrafeoResult* result);
 uint64_t    grafeo_result_labels_removed(const GrafeoResult* result);
 const char* grafeo_result_nodes_json(const GrafeoResult* result);
 const char* grafeo_result_edges_json(const GrafeoResult* result);
+/* The column names as a JSON array of strings, also for a result without rows. */
+const char* grafeo_result_columns_json(const GrafeoResult* result);
+/* The type each cell was built with, as JSON (experimental, 0.6.4+):
+ * {"columns": [T...], "runs": [{"from": row, "columns": [T...]}...]}. An
+ * object in the rows is a node or an edge exactly where its type says
+ * "node" or "edge"; see the function's documentation for T. */
+const char* grafeo_result_types_json(const GrafeoResult* result);
 /* The warnings the statement raised, ordered by code: a deprecated form it
  * wrote or ran, or a notice (experimental, 0.6.2+). The code is a GQLSTATUS of
  * class 01 (for example "01X01"), the kind "deprecation" or "notice", and the
@@ -237,7 +290,8 @@ void grafeo_stream_free(GrafeoStream* stream);
  * its translation's from the open, its run's as the rows that raise them are
  * pulled, all of them once the stream is exhausted. grafeo_stream_warning_count
  * takes them for the accessors, which read what it took; the strings are valid
- * until the next count or grafeo_stream_free. NULL past the last warning. */
+ * until the next count or grafeo_stream_free. NULL past the last warning.
+ * No error return: see "Error handling" above (closed: 0, NULL). */
 size_t      grafeo_stream_warning_count(const GrafeoStream* stream);
 const char* grafeo_stream_warning_code(const GrafeoStream* stream, size_t index);
 const char* grafeo_stream_warning_kind(const GrafeoStream* stream, size_t index);
@@ -247,6 +301,7 @@ const char* grafeo_stream_warning_message(const GrafeoStream* stream, size_t ind
 
 GrafeoStatus    grafeo_set_schema(GrafeoDatabase* db, const char* name);
 GrafeoStatus    grafeo_reset_schema(GrafeoDatabase* db);
+/* NULL when no schema is set; no error return: see "Error handling" above (closed: NULL). */
 const char*     grafeo_current_schema(const GrafeoDatabase* db);
 
 /* ---- Node CRUD ----------------------------------------------------------- */
@@ -294,6 +349,7 @@ GrafeoStatus grafeo_get_node_edges(GrafeoDatabase* db, uint64_t node_id, GrafeoD
 
 GrafeoStatus grafeo_create_property_index(GrafeoDatabase* db, const char* property);
 int32_t      grafeo_drop_property_index(GrafeoDatabase* db, const char* property);
+/* 1 if the index exists, 0 otherwise; no error return: see "Error handling" above (closed: 0). */
 int32_t      grafeo_has_property_index(GrafeoDatabase* db, const char* property);
 GrafeoStatus grafeo_find_nodes_by_property(GrafeoDatabase* db, const char* property, const char* value_json, uint64_t** out_ids, size_t* out_count);
 
@@ -385,10 +441,12 @@ GrafeoStatus  grafeo_graph_upsert_edges(GrafeoGraph* graph, const char* edge_typ
 #define GRAFEO_HISTORY_FOREVER  1
 #define GRAFEO_HISTORY_DURATION 2
 GrafeoDatabase* grafeo_open_with_history(const char* path, int32_t history_kind, uint64_t duration_ms);
+/* No error return: see "Error handling" above (closed: 0). */
 uint64_t        grafeo_current_epoch(GrafeoDatabase* db);
 GrafeoStatus    grafeo_epoch_as_of(GrafeoDatabase* db, int32_t point_kind, int64_t point_value, uint64_t* epoch_out);
 GrafeoResult*   grafeo_execute_as_of(GrafeoDatabase* db, const char* query, const char* params_json, int32_t point_kind, int64_t point_value);
 GrafeoAsOf*     grafeo_as_of(GrafeoDatabase* db, int32_t point_kind, int64_t point_value);
+/* No error return: see "Error handling" above (closed: 0). */
 uint64_t        grafeo_as_of_epoch(const GrafeoAsOf* view);
 GrafeoResult*   grafeo_as_of_execute(const GrafeoAsOf* view, const char* query, const char* params_json);
 GrafeoStatus    grafeo_as_of_get_node(const GrafeoAsOf* view, uint64_t id, GrafeoNode** out);

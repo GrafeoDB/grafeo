@@ -205,11 +205,12 @@ way. Of two open transactions that claim one pattern or key value, the one that 
 fails with the retryable `GRAFEO-T001`:
 
 - A transaction that claims second fails at once, when the holder began first or is committing.
-- A transaction that claimed first, but began after the one that claims now, fails at its next write or at its
-  commit. Its reads go on, but it can no longer commit.
+- A transaction that claimed first, but began after the one that claims now, fails at its next call, a read too,
+  and is rolled back then, so its writes no longer hold other writers off. Every call fails with the same error
+  until `ROLLBACK` or `COMMIT` ends it.
 - A commit fails when a transaction that claimed the same pattern or key value committed after this one began.
 
-So in any cycle of such claims the transaction that began first commits. A MERGE that only matches claims nothing.
+So a cycle of such claims always lets one transaction commit. A MERGE that only matches claims nothing.
 Grafeo does not retry for the application: retry the statement (auto-commit) or the whole transaction (explicit),
 and the retry matches what the other one created. A short backoff between retries saves work, but is not needed for
 progress. This holds for node, relationship and path MERGEs in GQL and Cypher, for `upsert_nodes` and
@@ -463,6 +464,36 @@ Grafeo automatically garbage collects old transaction metadata and version chain
 !!! note
     The `gc()` method is only available on the Rust `GrafeoDB` type. Python and other bindings rely on automatic GC.
 
+### The snapshot retention limit
+
+An open transaction reads the data as it was when the transaction began, so the database keeps every version that later
+commits replace or delete while the transaction can still read it. The snapshot retention limit bounds those bytes per
+snapshot. Once the commits since a transaction began replaced more than the limit of data it can still read, its
+snapshot expires: its next call fails with the retryable `GRAFEO-T012` and rolls it back, which lets that data go.
+Every call then fails with the same error until `ROLLBACK` ends the transaction (or `COMMIT`, which fails). Run the
+transaction again: it reads a new snapshot.
+
+The limit is a quarter of the memory limit by default, at least 1 MiB, and is set per open; below 1 MiB the open
+fails:
+
+| Binding | Setting |
+| --- | --- |
+| Rust | `Config::with_snapshot_retention_limit(bytes)` |
+| Python | `GrafeoDB(snapshot_retention_limit=bytes)` |
+| Node.js | `GrafeoDB.create(path, { snapshotRetentionLimit })` |
+| C | `grafeo_options_set_snapshot_retention_limit` |
+| C#, Go, Dart | `GrafeoOptions.SetSnapshotRetentionLimit`, `Options.SnapshotRetentionLimit`, `GrafeoOptions(snapshotRetentionLimit:)` |
+| WebAssembly | `new Database({ snapshotRetentionLimit })` |
+
+What does not expire:
+
+- A statement outside an explicit transaction, whose transaction ends with the statement.
+- A snapshot, a time-travel view, a stream outside a transaction, the node and edge iterators and an export. When one
+  of those holds data past the limit, the statement whose commit passed it carries a notice, `01Y02` ("drop it when
+  done"), once per epoch. A write call that returns no result reports it to `tracing` only.
+- With history kept, a transaction inside the retention window does not expire on labeled property graph data, which
+  the window keeps anyway; RDF data still counts.
+
 ## Error Codes
 
 Transaction errors use standardized `GRAFEO-TXXX` codes:
@@ -475,10 +506,11 @@ Transaction errors use standardized `GRAFEO-TXXX` codes:
 | `GRAFEO-T004` | Invalid transaction state (e.g., already committed or rolled back) | No |
 | `GRAFEO-T005` | Reserved for Serializable isolation, which is refused for now (`GRAFEO-Q004`) | Yes |
 | `GRAFEO-T006` | Deadlock detected | Yes |
-| `GRAFEO-T007` | Database closed: a write after `close()` of a persistent database | No |
-| `GRAFEO-T008` | Incomplete commit: an earlier commit did not complete, reopen the database | No |
+| `GRAFEO-T007` | Database closed: a call after `close()` | No |
+| `GRAFEO-T008` | Incomplete commit: an earlier commit or restore did not complete, reopen the database | No |
 | `GRAFEO-T009` | The commit could not be written to the write-ahead log and was rolled back | Yes |
 | `GRAFEO-T010` | Commit outcome unknown: the log could not be made durable, reopen the database before retrying | No |
 | `GRAFEO-T011` | The write-ahead log takes no more writes after an earlier failure, reopen the database | No |
+| `GRAFEO-T012` | The transaction's snapshot expired past the [snapshot retention limit](#the-snapshot-retention-limit); it was rolled back, run it again | Yes |
 
 In Rust, error codes expose an `is_retryable()` method to indicate whether the operation can be safely retried. This method is not currently exposed in the Python bindings.

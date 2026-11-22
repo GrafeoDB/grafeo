@@ -1,0 +1,281 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/match-where/MatchWhere1.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.MatchWhere1"
+  title: "MatchWhere1 - Filter single variable"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Filter node with node label predicate on multi variables with multiple bindings
+  - name: s1_filter_node_with_node_label_predicate_on_multi_variables_with_multiple_bindings
+    setup:
+      - |
+        CREATE (:A {id: 0})<-[:ADMIN]-(:B {id: 1})-[:ADMIN]->(:C {id: 2, a: 'A'})
+    query: |
+      MATCH (a)-[:ADMIN]-(b)
+      WHERE a:A
+      RETURN a.id, b.id
+    expect:
+      values: |
+        | a.id | b.id |
+        | 0 | 1 |
+      side_effects: {}
+
+  # [2] Filter node with node label predicate on multi variables without any bindings
+  - name: s2_filter_node_with_node_label_predicate_on_multi_variables_without_any_bindings
+    setup:
+      - |
+        CREATE (:A)
+    query: |
+      MATCH (a)<--()<--(b)-->()-->(c)
+      WHERE a:A
+      RETURN c
+    expect:
+      values: |
+        | c |
+      side_effects: {}
+
+  # [3] Filter node with property predicate on a single variable with multiple bindings
+  - name: s3_filter_node_with_property_predicate_on_a_single_variable_with_multiple_bindings
+    setup:
+      - |
+        CREATE (), ({name: 'Bar'}), (:Bar)
+    query: |
+      MATCH (n)
+      WHERE n.name = 'Bar'
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | ({name: 'Bar'}) |
+      side_effects: {}
+
+  # [4] Filter start node of relationship with property predicate on multi variables with multiple bindings
+  - name: s4_filter_start_node_of_relationship_with_property_predicate_on_multi_variables_with_multiple_bindings
+    setup:
+      - |
+        CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}),
+               (c), (d)
+        CREATE (a)-[:T]->(c),
+               (b)-[:T]->(d)
+    query: |
+      MATCH (n:Person)-->()
+      WHERE n.name = 'Bob'
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | (:Person {name: 'Bob'}) |
+      side_effects: {}
+
+  # [5] Filter end node of relationship with property predicate on multi variables with multiple bindings
+  - name: s5_filter_end_node_of_relationship_with_property_predicate_on_multi_variables_with_multiple_bindings
+    setup:
+      - |
+        CREATE ({name: 'Someone'})<-[:X]-()-[:X]->({name: 'Andres'})
+    query: |
+      MATCH ()-[rel:X]-(a)
+      WHERE a.name = 'Andres'
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | ({name: 'Andres'}) |
+      side_effects: {}
+
+  # [6] Filter node with a parameter in a property predicate on multi variables with one binding
+  - name: s6_filter_node_with_a_parameter_in_a_property_predicate_on_multi_variables_with_one_binding
+    setup:
+      - |
+        CREATE (:A)-[:T {name: 'bar'}]->(:B {name: 'me'})
+    params:
+      param: "me"
+    query: |
+      MATCH (a)-[r]->(b)
+      WHERE b.name = $param
+      RETURN r
+    expect:
+      values: |
+        | r |
+        | [:T {name: 'bar'}] |
+      side_effects: {}
+
+  # [7] Filter relationship with relationship type predicate on multi variables with multiple bindings
+  - name: s7_filter_relationship_with_relationship_type_predicate_on_multi_variables_with_multiple_bindings
+    setup:
+      - |
+        CREATE (a:A {name: 'A'}),
+          (b:B {name: 'B'}),
+          (c:C {name: 'C'}),
+          (a)-[:KNOWS]->(b),
+          (a)-[:HATES]->(c)
+    query: |
+      MATCH (n {name: 'A'})-[r]->(x)
+      WHERE type(r) = 'KNOWS'
+      RETURN x
+    expect:
+      values: |
+        | x |
+        | (:B {name: 'B'}) |
+      side_effects: {}
+
+  # [8] Filter relationship with property predicate on multi variables with multiple bindings
+  - name: s8_filter_relationship_with_property_predicate_on_multi_variables_with_multiple_bindings
+    setup:
+      - |
+        CREATE (:A)<-[:KNOWS {name: 'monkey'}]-()-[:KNOWS {name: 'woot'}]->(:B)
+    query: |
+      MATCH (node)-[r:KNOWS]->(a)
+      WHERE r.name = 'monkey'
+      RETURN a
+    expect:
+      values: |
+        | a |
+        | (:A) |
+      side_effects: {}
+
+  # [9] Filter relationship with a parameter in a property predicate on multi variables with one binding
+  - name: s9_filter_relationship_with_a_parameter_in_a_property_predicate_on_multi_variables_with_one_binding
+    setup:
+      - |
+        CREATE (:A)-[:T {name: 'bar'}]->(:B {name: 'me'})
+    params:
+      param: "bar"
+    query: |
+      MATCH (a)-[r]->(b)
+      WHERE r.name = $param
+      RETURN b
+    expect:
+      values: |
+        | b |
+        | (:B {name: 'me'}) |
+      side_effects: {}
+
+  # [10] Filter node with disjunctive property predicate on single variables with multiple bindings
+  - name: s10_filter_node_with_disjunctive_property_predicate_on_single_variables_with_multiple_bindings
+    setup:
+      - |
+        CREATE (a:A {p1: 12}),
+          (b:B {p2: 13}),
+          (c:C)
+    query: |
+      MATCH (n)
+      WHERE n.p1 = 12 OR n.p2 = 13
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | (:A {p1: 12}) |
+        | (:B {p2: 13}) |
+      side_effects: {}
+
+  # [11] Filter relationship with disjunctive relationship type predicate on multi variables with multiple bindings
+  - name: s11_filter_relationship_with_disjunctive_relationship_type_predicate_on_multi_variables_with_multiple_bindings
+    setup:
+      - |
+        CREATE (a {name: 'A'}),
+          (b {name: 'B'}),
+          (c {name: 'C'}),
+          (a)-[:KNOWS]->(b),
+          (a)-[:HATES]->(c),
+          (a)-[:WONDERS]->(c)
+    query: |
+      MATCH (n)-[r]->(x)
+      WHERE type(r) = 'KNOWS' OR type(r) = 'HATES'
+      RETURN r
+    expect:
+      values: |
+        | r |
+        | [:KNOWS] |
+        | [:HATES] |
+      side_effects: {}
+
+  # [12] Filter path with path length predicate on multi variables with one binding
+  - name: s12_filter_path_with_path_length_predicate_on_multi_variables_with_one_binding
+    setup:
+      - |
+        CREATE (a:A {name: 'A'})-[:KNOWS]->(b:B {name: 'B'})
+    query: |
+      MATCH p = (n)-->(x)
+      WHERE length(p) = 1
+      RETURN x
+    expect:
+      values: |
+        | x |
+        | (:B {name: 'B'}) |
+      side_effects: {}
+
+  # [13] Filter path with false path length predicate on multi variables with one binding
+  - name: s13_filter_path_with_false_path_length_predicate_on_multi_variables_with_one_binding
+    setup:
+      - |
+        CREATE (a:A {name: 'A'})-[:KNOWS]->(b:B {name: 'B'})
+    query: |
+      MATCH p = (n)-->(x)
+      WHERE length(p) = 10
+      RETURN x
+    expect:
+      values: |
+        | x |
+      side_effects: {}
+
+  # [14] Fail when filtering path with property predicate
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s14_fail_when_filtering_path_with_property_predicate
+    xfail:
+      spec: "openCypher TCK 2024.3 MatchWhere1: [14] Fail when filtering path with property predicate"
+      issue: "#795"
+    query: |
+      MATCH (n)
+      MATCH r = (n)-[*]->()
+      WHERE r.name = 'apa'
+      RETURN r
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [15] Fail on aggregation in WHERE
+  # TCK: SyntaxError at compile time: InvalidAggregation
+  - name: s15_fail_on_aggregation_in_where
+    query: |
+      MATCH (a)
+      WHERE count(a) > 10
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}

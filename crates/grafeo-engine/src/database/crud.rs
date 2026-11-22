@@ -22,7 +22,7 @@ use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::direct::{BatchEdge, DirectTarget};
 
-impl super::GrafeoDB {
+impl super::Open {
     /// The store of the current graph: the one `set_current_graph` and
     /// `set_current_schema` select, or the default graph when they select
     /// none (or one that no longer exists).
@@ -52,6 +52,280 @@ impl super::GrafeoDB {
 
     // === Node Operations ===
 
+    pub(crate) fn create_node(&self, labels: &[&str]) -> Result<NodeId> {
+        self.create_node_with_props(labels, std::iter::empty::<(PropertyKey, Value)>())
+    }
+
+    pub(crate) fn create_node_with_props(
+        &self,
+        labels: &[&str],
+        properties: impl IntoIterator<Item = (impl Into<PropertyKey>, impl Into<Value>)>,
+    ) -> Result<NodeId> {
+        self.direct(DirectTarget::Current)
+            .create_node_with_props(labels, properties)
+    }
+
+    pub(crate) fn get_node(&self, id: NodeId) -> Result<Option<Node>> {
+        let view = ReadView::committed(self.read_epoch());
+        self.read_store(DirectTarget::Current)?.node(id, view)
+    }
+
+    pub(crate) fn get_node_edges(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        edge_types: &[&str],
+    ) -> Result<Vec<(NodeId, EdgeId)>> {
+        self.direct(DirectTarget::Current)
+            .get_node_edges(node, direction, edge_types)
+    }
+
+    pub(crate) fn get_node_at_epoch(&self, id: NodeId, epoch: EpochId) -> Result<Option<Node>> {
+        let (_pin, epoch) = self.pin_epoch(epoch)?;
+        self.read_store(DirectTarget::Current)?
+            .node(id, ReadView::committed(epoch))
+    }
+
+    /// Pins a direct read at `epoch` (at the current epoch for a later one)
+    /// for as long as the pin lives, so no collect takes a version it reads.
+    /// An epoch before the history floor (see
+    /// [`history_floor`](crate::transaction::TransactionManager::history_floor)),
+    /// whose versions the database may no longer hold, is the "not retained"
+    /// error.
+    fn pin_epoch(&self, epoch: EpochId) -> Result<(crate::transaction::ReadPin, EpochId)> {
+        let epoch = epoch.min(self.read_epoch());
+        let pin = self.transaction_manager.pin_read_at(epoch)?;
+        Ok((pin, epoch))
+    }
+
+    pub(crate) fn get_edge_at_epoch(&self, id: EdgeId, epoch: EpochId) -> Result<Option<Edge>> {
+        let (_pin, epoch) = self.pin_epoch(epoch)?;
+        self.read_store(DirectTarget::Current)?
+            .edge(id, ReadView::committed(epoch))
+    }
+
+    pub(crate) fn get_node_history(
+        &self,
+        id: NodeId,
+    ) -> Result<Vec<(EpochId, Option<EpochId>, Node)>> {
+        let epoch = self.read_epoch();
+        Ok(self
+            .read_store(DirectTarget::Current)?
+            .node_history(id)?
+            .into_iter()
+            .filter_map(|version| history_at(version, epoch))
+            .collect())
+    }
+
+    pub(crate) fn get_edge_history(
+        &self,
+        id: EdgeId,
+    ) -> Result<Vec<(EpochId, Option<EpochId>, Edge)>> {
+        let epoch = self.read_epoch();
+        Ok(self
+            .read_store(DirectTarget::Current)?
+            .edge_history(id)?
+            .into_iter()
+            .filter_map(|version| history_at(version, epoch))
+            .collect())
+    }
+
+    pub(crate) fn get_node_property_at_epoch(
+        &self,
+        id: NodeId,
+        key: &str,
+        epoch: EpochId,
+    ) -> Result<Option<Value>> {
+        let (_pin, epoch) = self.pin_epoch(epoch)?;
+        Ok(self.property_history_store()?.get_node_property_at_epoch(
+            id,
+            &PropertyKey::new(key),
+            epoch,
+        ))
+    }
+
+    /// The store whose property versions the property history reads: the
+    /// current graph's row-group store. An external store keeps none the
+    /// database can read: the unsupported error.
+    fn property_history_store(&self) -> Result<Arc<RowGroupStore>> {
+        if self.root_store().is_none() {
+            return Err(grafeo_common::utils::error::Error::from(
+                grafeo_common::utils::error::QueryError::unsupported(
+                    "this store does not support property history (an external store keeps none)",
+                ),
+            ));
+        }
+        self.current_lpg_store()
+    }
+
+    pub(crate) fn get_node_property_history(
+        &self,
+        id: NodeId,
+        key: &str,
+    ) -> Result<Vec<(EpochId, Value)>> {
+        let epoch = self.read_epoch();
+        let mut history = self
+            .property_history_store()?
+            .node_property_history_for_key(id, key);
+        history.retain(|(at, _)| *at <= epoch);
+        Ok(history)
+    }
+
+    pub(crate) fn get_all_node_property_history(
+        &self,
+        id: NodeId,
+    ) -> Result<Vec<(PropertyKey, Vec<(EpochId, Value)>)>> {
+        let epoch = self.read_epoch();
+        let mut history = self.property_history_store()?.node_property_history(id);
+        for (_, versions) in &mut history {
+            versions.retain(|(at, _)| *at <= epoch);
+        }
+        history.retain(|(_, versions)| !versions.is_empty());
+        Ok(history)
+    }
+
+    #[must_use]
+    pub(crate) fn current_epoch(&self) -> EpochId {
+        self.read_epoch()
+    }
+
+    pub(crate) fn delete_node(&self, id: NodeId) -> Result<bool> {
+        self.direct(DirectTarget::Current).delete_node(id)
+    }
+
+    pub(crate) fn detach_delete_node(&self, id: NodeId) -> Result<bool> {
+        self.direct(DirectTarget::Current).detach_delete_node(id)
+    }
+
+    pub(crate) fn set_node_property(&self, id: NodeId, key: &str, value: Value) -> Result<()> {
+        self.direct(DirectTarget::Current)
+            .set_node_property(id, key, value)
+    }
+
+    pub(crate) fn add_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
+        self.direct(DirectTarget::Current).add_node_label(id, label)
+    }
+
+    pub(crate) fn remove_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
+        self.direct(DirectTarget::Current)
+            .remove_node_label(id, label)
+    }
+
+    pub(crate) fn get_node_labels(&self, id: NodeId) -> Result<Option<Vec<String>>> {
+        let view = ReadView::committed(self.read_epoch());
+        Ok(self
+            .read_store(DirectTarget::Current)?
+            .node_labels(id, view)?
+            .map(|labels| labels.iter().map(ToString::to_string).collect()))
+    }
+
+    // === Edge Operations ===
+
+    pub(crate) fn create_edge(&self, src: NodeId, dst: NodeId, edge_type: &str) -> Result<EdgeId> {
+        self.create_edge_with_props(
+            src,
+            dst,
+            edge_type,
+            std::iter::empty::<(PropertyKey, Value)>(),
+        )
+    }
+
+    pub(crate) fn create_edge_with_props(
+        &self,
+        src: NodeId,
+        dst: NodeId,
+        edge_type: &str,
+        properties: impl IntoIterator<Item = (impl Into<PropertyKey>, impl Into<Value>)>,
+    ) -> Result<EdgeId> {
+        self.direct(DirectTarget::Current)
+            .create_edge_with_props(src, dst, edge_type, properties)
+    }
+
+    pub(crate) fn get_edge(&self, id: EdgeId) -> Result<Option<Edge>> {
+        let view = ReadView::committed(self.read_epoch());
+        self.read_store(DirectTarget::Current)?.edge(id, view)
+    }
+
+    pub(crate) fn delete_edge(&self, id: EdgeId) -> Result<bool> {
+        self.direct(DirectTarget::Current).delete_edge(id)
+    }
+
+    pub(crate) fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) -> Result<()> {
+        self.direct(DirectTarget::Current)
+            .set_edge_property(id, key, value)
+    }
+
+    pub(crate) fn remove_node_property(&self, id: NodeId, key: &str) -> Result<bool> {
+        self.direct(DirectTarget::Current)
+            .remove_node_property(id, key)
+    }
+
+    pub(crate) fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<bool> {
+        self.direct(DirectTarget::Current)
+            .remove_edge_property(id, key)
+    }
+
+    pub(crate) fn batch_create_nodes(
+        &self,
+        label: &str,
+        property: &str,
+        vectors: Vec<Vec<f32>>,
+    ) -> Result<Vec<NodeId>> {
+        self.direct(DirectTarget::Current)
+            .batch_create_nodes(label, property, vectors)
+    }
+
+    pub(crate) fn batch_create_nodes_with_props(
+        &self,
+        label: &str,
+        properties_list: Vec<HashMap<PropertyKey, Value>>,
+    ) -> Result<Vec<NodeId>> {
+        self.batch_create_nodes_with_labels(&[label], properties_list)
+    }
+
+    pub(crate) fn batch_create_nodes_with_labels(
+        &self,
+        labels: &[&str],
+        properties_list: Vec<HashMap<PropertyKey, Value>>,
+    ) -> Result<Vec<NodeId>> {
+        self.direct(DirectTarget::Current)
+            .batch_create_nodes_with_labels(labels, properties_list)
+    }
+
+    pub(crate) fn batch_create_edges(&self, edges: Vec<BatchEdge>) -> Result<Vec<EdgeId>> {
+        self.direct(DirectTarget::Current).batch_create_edges(edges)
+    }
+
+    pub(crate) fn load_nodes_csv(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        spec: &crate::loader::NodeLoad,
+    ) -> Result<crate::loader::LoadReport> {
+        self.direct(DirectTarget::Current)
+            .load_nodes_csv(path.as_ref(), spec)
+    }
+
+    pub(crate) fn load_edges_csv(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        spec: &crate::loader::EdgeLoad,
+    ) -> Result<crate::loader::LoadReport> {
+        self.direct(DirectTarget::Current)
+            .load_edges_csv(path.as_ref(), spec)
+    }
+}
+
+/// A version of a history as a reader at `epoch` sees it: none when it was
+/// created later, and not yet deleted when its deletion is later.
+fn history_at<T>(
+    (created, deleted, entity): (EpochId, Option<EpochId>, T),
+    epoch: EpochId,
+) -> Option<(EpochId, Option<EpochId>, T)> {
+    (created <= epoch).then(|| (created, deleted.filter(|deleted| *deleted <= epoch), entity))
+}
+
+// The database's public methods: each reaches the open state for its call (#712).
+impl super::GrafeoDB {
     /// Creates a node with the given labels and returns its ID.
     ///
     /// Labels categorize nodes - think of them like tags. A node can have
@@ -73,7 +347,7 @@ impl super::GrafeoDB {
     /// # Ok::<(), grafeo_common::utils::error::Error>(())
     /// ```
     pub fn create_node(&self, labels: &[&str]) -> Result<NodeId> {
-        self.create_node_with_props(labels, std::iter::empty::<(PropertyKey, Value)>())
+        self.live()?.create_node(labels)
     }
 
     /// Creates a node with labels and properties and returns its ID.
@@ -87,8 +361,14 @@ impl super::GrafeoDB {
         labels: &[&str],
         properties: impl IntoIterator<Item = (impl Into<PropertyKey>, impl Into<Value>)>,
     ) -> Result<NodeId> {
-        self.direct(DirectTarget::Current)
-            .create_node_with_props(labels, properties)
+        // The caller's iterator runs before the lock: one that calls the database cannot
+        // deadlock against a close() waiting for it. A closed database pulls nothing.
+        self.refuse_if_closed()?;
+        let properties: Vec<(PropertyKey, Value)> = properties
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+        self.live()?.create_node_with_props(labels, properties)
     }
 
     /// Gets a node by ID, as of the current epoch: `None` when it does not
@@ -99,8 +379,7 @@ impl super::GrafeoDB {
     /// The error of a read the store cannot do (an external store's own):
     /// a read that fails is never an absent node.
     pub fn get_node(&self, id: NodeId) -> Result<Option<Node>> {
-        let view = ReadView::committed(self.read_epoch());
-        self.read_store(DirectTarget::Current)?.node(id, view)
+        self.live()?.get_node(id)
     }
 
     /// The edges of a node in `direction` as `(neighbor, edge)` pairs, as of
@@ -129,8 +408,7 @@ impl super::GrafeoDB {
         direction: Direction,
         edge_types: &[&str],
     ) -> Result<Vec<(NodeId, EdgeId)>> {
-        self.direct(DirectTarget::Current)
-            .get_node_edges(node, direction, edge_types)
+        self.live()?.get_node_edges(node, direction, edge_types)
     }
 
     /// Gets a node as it existed at a specific epoch.
@@ -147,21 +425,7 @@ impl super::GrafeoDB {
     /// before epoch ... is not retained", never an answer from versions
     /// garbage collection may have dropped.
     pub fn get_node_at_epoch(&self, id: NodeId, epoch: EpochId) -> Result<Option<Node>> {
-        let (_pin, epoch) = self.pin_epoch(epoch)?;
-        self.read_store(DirectTarget::Current)?
-            .node(id, ReadView::committed(epoch))
-    }
-
-    /// Pins a direct read at `epoch` (at the current epoch for a later one)
-    /// for as long as the pin lives, so no collect takes a version it reads.
-    /// An epoch before the history floor (see
-    /// [`history_floor`](crate::transaction::TransactionManager::history_floor)),
-    /// whose versions the database may no longer hold, is the "not retained"
-    /// error.
-    fn pin_epoch(&self, epoch: EpochId) -> Result<(crate::transaction::ReadPin, EpochId)> {
-        let epoch = epoch.min(self.read_epoch());
-        let pin = self.transaction_manager.pin_read_at(epoch)?;
-        Ok((pin, epoch))
+        self.live()?.get_node_at_epoch(id, epoch)
     }
 
     /// Gets an edge as it existed at a specific epoch.
@@ -173,9 +437,7 @@ impl super::GrafeoDB {
     ///
     /// As [`get_node_at_epoch`](Self::get_node_at_epoch).
     pub fn get_edge_at_epoch(&self, id: EdgeId, epoch: EpochId) -> Result<Option<Edge>> {
-        let (_pin, epoch) = self.pin_epoch(epoch)?;
-        self.read_store(DirectTarget::Current)?
-            .edge(id, ReadView::committed(epoch))
+        self.live()?.get_edge_at_epoch(id, epoch)
     }
 
     /// Returns all versions of a node with their creation/deletion epochs,
@@ -188,13 +450,7 @@ impl super::GrafeoDB {
     /// As [`get_node`](Self::get_node), and the unsupported error of an
     /// external store that keeps no history.
     pub fn get_node_history(&self, id: NodeId) -> Result<Vec<(EpochId, Option<EpochId>, Node)>> {
-        let epoch = self.read_epoch();
-        Ok(self
-            .read_store(DirectTarget::Current)?
-            .node_history(id)?
-            .into_iter()
-            .filter_map(|version| history_at(version, epoch))
-            .collect())
+        self.live()?.get_node_history(id)
     }
 
     /// Returns all versions of an edge with their creation/deletion epochs,
@@ -206,13 +462,7 @@ impl super::GrafeoDB {
     ///
     /// As [`get_node_history`](Self::get_node_history).
     pub fn get_edge_history(&self, id: EdgeId) -> Result<Vec<(EpochId, Option<EpochId>, Edge)>> {
-        let epoch = self.read_epoch();
-        Ok(self
-            .read_store(DirectTarget::Current)?
-            .edge_history(id)?
-            .into_iter()
-            .filter_map(|version| history_at(version, epoch))
-            .collect())
+        self.live()?.get_edge_history(id)
     }
 
     /// Returns a property value as it existed at a specific epoch.
@@ -231,26 +481,7 @@ impl super::GrafeoDB {
         key: &str,
         epoch: EpochId,
     ) -> Result<Option<Value>> {
-        let (_pin, epoch) = self.pin_epoch(epoch)?;
-        Ok(self.property_history_store()?.get_node_property_at_epoch(
-            id,
-            &PropertyKey::new(key),
-            epoch,
-        ))
-    }
-
-    /// The store whose property versions the property history reads: the
-    /// current graph's row-group store. An external store keeps none the
-    /// database can read: the unsupported error.
-    fn property_history_store(&self) -> Result<Arc<RowGroupStore>> {
-        if self.root_store().is_none() {
-            return Err(grafeo_common::utils::error::Error::from(
-                grafeo_common::utils::error::QueryError::unsupported(
-                    "this store does not support property history (an external store keeps none)",
-                ),
-            ));
-        }
-        self.current_lpg_store()
+        self.live()?.get_node_property_at_epoch(id, key, epoch)
     }
 
     /// Returns the version timeline for a single property of a node, up to
@@ -268,12 +499,7 @@ impl super::GrafeoDB {
         id: NodeId,
         key: &str,
     ) -> Result<Vec<(EpochId, Value)>> {
-        let epoch = self.read_epoch();
-        let mut history = self
-            .property_history_store()?
-            .node_property_history_for_key(id, key);
-        history.retain(|(at, _)| *at <= epoch);
-        Ok(history)
+        self.live()?.get_node_property_history(id, key)
     }
 
     /// Returns the version history for ALL properties of a node, up to the
@@ -290,17 +516,11 @@ impl super::GrafeoDB {
         &self,
         id: NodeId,
     ) -> Result<Vec<(PropertyKey, Vec<(EpochId, Value)>)>> {
-        let epoch = self.read_epoch();
-        let mut history = self.property_history_store()?.node_property_history(id);
-        for (_, versions) in &mut history {
-            versions.retain(|(at, _)| *at <= epoch);
-        }
-        history.retain(|(_, versions)| !versions.is_empty());
-        Ok(history)
+        self.live()?.get_all_node_property_history(id)
     }
 
     /// Returns the current epoch of the database: the last one whose commit
-    /// is complete.
+    /// is complete. After `close()` it returns epoch 0; it returns a `Result` from 0.7.0.
     ///
     /// Every committed write advances it, from a query or from the direct
     /// API, once the commit is complete. A reopen continues where the
@@ -310,7 +530,8 @@ impl super::GrafeoDB {
     /// opened.
     #[must_use]
     pub fn current_epoch(&self) -> EpochId {
-        self.read_epoch()
+        self.live_if()
+            .map_or_else(Default::default, |open| open.current_epoch())
     }
 
     /// Deletes a node and returns whether it existed.
@@ -322,7 +543,7 @@ impl super::GrafeoDB {
     ///
     /// Returns an error if the node still has edges.
     pub fn delete_node(&self, id: NodeId) -> Result<bool> {
-        self.direct(DirectTarget::Current).delete_node(id)
+        self.live()?.delete_node(id)
     }
 
     /// Deletes a node with all its edges, as `DETACH DELETE` does, and
@@ -336,7 +557,7 @@ impl super::GrafeoDB {
     /// Returns a write conflict with a transaction that writes the node or one
     /// of its edges, or creates an edge to it.
     pub fn detach_delete_node(&self, id: NodeId) -> Result<bool> {
-        self.direct(DirectTarget::Current).detach_delete_node(id)
+        self.live()?.detach_delete_node(id)
     }
 
     /// Sets a property on a node.
@@ -346,8 +567,7 @@ impl super::GrafeoDB {
     /// Returns an error if the node does not exist or the value violates a
     /// constraint of its labels (type, `NOT NULL`, `UNIQUE`, vector index size).
     pub fn set_node_property(&self, id: NodeId, key: &str, value: Value) -> Result<()> {
-        self.direct(DirectTarget::Current)
-            .set_node_property(id, key, value)
+        self.live()?.set_node_property(id, key, value)
     }
 
     /// Adds a label to an existing node.
@@ -372,7 +592,7 @@ impl super::GrafeoDB {
     /// # Ok::<(), grafeo_common::utils::error::Error>(())
     /// ```
     pub fn add_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
-        self.direct(DirectTarget::Current).add_node_label(id, label)
+        self.live()?.add_node_label(id, label)
     }
 
     /// Removes a label from a node.
@@ -397,8 +617,7 @@ impl super::GrafeoDB {
     /// # Ok::<(), grafeo_common::utils::error::Error>(())
     /// ```
     pub fn remove_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
-        self.direct(DirectTarget::Current)
-            .remove_node_label(id, label)
+        self.live()?.remove_node_label(id, label)
     }
 
     /// Gets all labels for a node.
@@ -423,14 +642,8 @@ impl super::GrafeoDB {
     ///
     /// As [`get_node`](Self::get_node).
     pub fn get_node_labels(&self, id: NodeId) -> Result<Option<Vec<String>>> {
-        let view = ReadView::committed(self.read_epoch());
-        Ok(self
-            .read_store(DirectTarget::Current)?
-            .node_labels(id, view)?
-            .map(|labels| labels.iter().map(ToString::to_string).collect()))
+        self.live()?.get_node_labels(id)
     }
-
-    // === Edge Operations ===
 
     /// Creates an edge (relationship) between two nodes.
     ///
@@ -456,12 +669,7 @@ impl super::GrafeoDB {
     /// # Ok::<(), grafeo_common::utils::error::Error>(())
     /// ```
     pub fn create_edge(&self, src: NodeId, dst: NodeId, edge_type: &str) -> Result<EdgeId> {
-        self.create_edge_with_props(
-            src,
-            dst,
-            edge_type,
-            std::iter::empty::<(PropertyKey, Value)>(),
-        )
+        self.live()?.create_edge(src, dst, edge_type)
     }
 
     /// Creates an edge with properties.
@@ -477,7 +685,13 @@ impl super::GrafeoDB {
         edge_type: &str,
         properties: impl IntoIterator<Item = (impl Into<PropertyKey>, impl Into<Value>)>,
     ) -> Result<EdgeId> {
-        self.direct(DirectTarget::Current)
+        // As `create_node_with_props`: the caller's iterator runs before the lock.
+        self.refuse_if_closed()?;
+        let properties: Vec<(PropertyKey, Value)> = properties
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+        self.live()?
             .create_edge_with_props(src, dst, edge_type, properties)
     }
 
@@ -488,8 +702,7 @@ impl super::GrafeoDB {
     ///
     /// As [`get_node`](Self::get_node).
     pub fn get_edge(&self, id: EdgeId) -> Result<Option<Edge>> {
-        let view = ReadView::committed(self.read_epoch());
-        self.read_store(DirectTarget::Current)?.edge(id, view)
+        self.live()?.get_edge(id)
     }
 
     /// Deletes an edge and returns whether it existed.
@@ -498,7 +711,7 @@ impl super::GrafeoDB {
     ///
     /// Returns an error if another transaction is writing the edge.
     pub fn delete_edge(&self, id: EdgeId) -> Result<bool> {
-        self.direct(DirectTarget::Current).delete_edge(id)
+        self.live()?.delete_edge(id)
     }
 
     /// Sets a property on an edge.
@@ -508,8 +721,7 @@ impl super::GrafeoDB {
     /// Returns an error if the edge does not exist or the value violates its
     /// type.
     pub fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) -> Result<()> {
-        self.direct(DirectTarget::Current)
-            .set_edge_property(id, key, value)
+        self.live()?.set_edge_property(id, key, value)
     }
 
     /// Removes a property from a node.
@@ -521,8 +733,7 @@ impl super::GrafeoDB {
     /// Returns an error if a constraint requires the property (`NOT NULL`,
     /// `NODE KEY`).
     pub fn remove_node_property(&self, id: NodeId, key: &str) -> Result<bool> {
-        self.direct(DirectTarget::Current)
-            .remove_node_property(id, key)
+        self.live()?.remove_node_property(id, key)
     }
 
     /// Removes a property from an edge.
@@ -533,8 +744,7 @@ impl super::GrafeoDB {
     ///
     /// Returns an error if the edge's type requires the property.
     pub fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<bool> {
-        self.direct(DirectTarget::Current)
-            .remove_edge_property(id, key)
+        self.live()?.remove_edge_property(id, key)
     }
 
     /// Creates multiple nodes in bulk, each with a single vector property.
@@ -562,8 +772,7 @@ impl super::GrafeoDB {
         property: &str,
         vectors: Vec<Vec<f32>>,
     ) -> Result<Vec<NodeId>> {
-        self.direct(DirectTarget::Current)
-            .batch_create_nodes(label, property, vectors)
+        self.live()?.batch_create_nodes(label, property, vectors)
     }
 
     /// Batch-creates nodes with full property maps.
@@ -591,7 +800,8 @@ impl super::GrafeoDB {
         label: &str,
         properties_list: Vec<HashMap<PropertyKey, Value>>,
     ) -> Result<Vec<NodeId>> {
-        self.batch_create_nodes_with_labels(&[label], properties_list)
+        self.live()?
+            .batch_create_nodes_with_props(label, properties_list)
     }
 
     /// Batch-creates nodes with full property maps, each with all of
@@ -608,7 +818,7 @@ impl super::GrafeoDB {
         labels: &[&str],
         properties_list: Vec<HashMap<PropertyKey, Value>>,
     ) -> Result<Vec<NodeId>> {
-        self.direct(DirectTarget::Current)
+        self.live()?
             .batch_create_nodes_with_labels(labels, properties_list)
     }
 
@@ -638,7 +848,7 @@ impl super::GrafeoDB {
     /// # Ok::<(), grafeo_common::utils::error::Error>(())
     /// ```
     pub fn batch_create_edges(&self, edges: Vec<BatchEdge>) -> Result<Vec<EdgeId>> {
-        self.direct(DirectTarget::Current).batch_create_edges(edges)
+        self.live()?.batch_create_edges(edges)
     }
 
     /// Loads the CSV file at `path` as nodes, as `spec` describes (see
@@ -659,8 +869,7 @@ impl super::GrafeoDB {
         path: impl AsRef<std::path::Path>,
         spec: &crate::loader::NodeLoad,
     ) -> Result<crate::loader::LoadReport> {
-        self.direct(DirectTarget::Current)
-            .load_nodes_csv(path.as_ref(), spec)
+        self.live()?.load_nodes_csv(path, spec)
     }
 
     /// Loads the CSV file at `path` as edges, as `spec` describes (see
@@ -680,16 +889,6 @@ impl super::GrafeoDB {
         path: impl AsRef<std::path::Path>,
         spec: &crate::loader::EdgeLoad,
     ) -> Result<crate::loader::LoadReport> {
-        self.direct(DirectTarget::Current)
-            .load_edges_csv(path.as_ref(), spec)
+        self.live()?.load_edges_csv(path, spec)
     }
-}
-
-/// A version of a history as a reader at `epoch` sees it: none when it was
-/// created later, and not yet deleted when its deletion is later.
-fn history_at<T>(
-    (created, deleted, entity): (EpochId, Option<EpochId>, T),
-    epoch: EpochId,
-) -> Option<(EpochId, Option<EpochId>, T)> {
-    (created <= epoch).then(|| (created, deleted.filter(|deleted| *deleted <= epoch), entity))
 }

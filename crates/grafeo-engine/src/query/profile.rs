@@ -268,6 +268,7 @@ pub fn profile_result(
     QueryResult {
         columns: vec!["profile".to_string()],
         column_types: vec![LogicalType::String],
+        type_runs: Vec::new(),
         rows: vec![vec![Value::String(output.into())]],
         execution_time_ms: Some(total_time_ms),
         rows_scanned: None,

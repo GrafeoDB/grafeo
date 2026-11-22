@@ -1,0 +1,275 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/create/Create1.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Create1"
+  title: "Create1 - Creating nodes"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Create a single node
+  - name: s1_create_a_single_node
+    query: |
+      CREATE ()
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+
+  # [2] Create two nodes
+  - name: s2_create_two_nodes
+    query: |
+      CREATE (), ()
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 2
+
+  # [3] Create a single node with a label
+  - name: s3_create_a_single_node_with_a_label
+    query: |
+      CREATE (:Label)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +labels: 1
+
+  # [4] Create two nodes with same label
+  - name: s4_create_two_nodes_with_same_label
+    query: |
+      CREATE (:Label), (:Label)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 2
+        +labels: 1
+
+  # [5] Create a single node with multiple labels
+  - name: s5_create_a_single_node_with_multiple_labels
+    query: |
+      CREATE (:A:B:C:D)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +labels: 4
+
+  # [6] Create three nodes with multiple labels
+  - name: s6_create_three_nodes_with_multiple_labels
+    query: |
+      CREATE (:B:A:D), (:B:C), (:D:E:B)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 3
+        +labels: 5
+
+  # [7] Create a single node with a property
+  - name: s7_create_a_single_node_with_a_property
+    query: |
+      CREATE ({created: true})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [8] Create a single node with a property and return it
+  - name: s8_create_a_single_node_with_a_property_and_return_it
+    query: |
+      CREATE (n {name: 'foo'})
+      RETURN n.name AS p
+    expect:
+      values: |
+        | p |
+        | 'foo' |
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [9] Create a single node with two properties
+  - name: s9_create_a_single_node_with_two_properties
+    query: |
+      CREATE (n {id: 12, name: 'foo'})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +properties: 2
+
+  # [10] Create a single node with two properties and return them
+  - name: s10_create_a_single_node_with_two_properties_and_return_them
+    query: |
+      CREATE (n {id: 12, name: 'foo'})
+      RETURN n.id AS id, n.name AS p
+    expect:
+      values: |
+        | id | p |
+        | 12 | 'foo' |
+      side_effects:
+        +nodes: 1
+        +properties: 2
+
+  # [11] Create a single node with null properties should not return those properties
+  - name: s11_create_a_single_node_with_null_properties_should_not_return_those_properties
+    query: |
+      CREATE (n {id: 12, name: null})
+      RETURN n.id AS id, n.name AS p
+    expect:
+      values: |
+        | id | p |
+        | 12 | null |
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [12] CREATE does not lose precision on large integers
+  - name: s12_create_does_not_lose_precision_on_large_integers
+    query: |
+      CREATE (p:TheLabel {id: 4611686018427387905})
+      RETURN p.id
+    expect:
+      values: |
+        | p.id |
+        | 4611686018427387905 |
+      side_effects:
+        +nodes: 1
+        +properties: 1
+        +labels: 1
+
+  # [13] Fail when creating a node that is already bound
+  # TCK: SyntaxError at compile time: VariableAlreadyBound
+  - name: s13_fail_when_creating_a_node_that_is_already_bound
+    xfail:
+      spec: "openCypher TCK 2024.3 Create1: [13] Fail when creating a node that is already bound"
+      issue: "#795"
+    query: |
+      MATCH (a)
+      CREATE (a)
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [14] Fail when creating a node with properties that is already bound
+  # TCK: SyntaxError at compile time: VariableAlreadyBound
+  - name: s14_fail_when_creating_a_node_with_properties_that_is_already_bound
+    xfail:
+      spec: "openCypher TCK 2024.3 Create1: [14] Fail when creating a node with properties that is already bound"
+      issue: "#795"
+    query: |
+      MATCH (a)
+      CREATE (a {name: 'foo'})
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [15] Fail when adding a new label predicate on a node that is already bound 1
+  # TCK: SyntaxError at compile time: VariableAlreadyBound
+  - name: s15_fail_when_adding_a_new_label_predicate_on_a_node_that_is_already_bound_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Create1: [15] Fail when adding a new label predicate on a node that is already bound 1"
+      issue: "#795"
+    query: |
+      CREATE (n:Foo)-[:T1]->(),
+             (n:Bar)-[:T2]->()
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [16] Fail when adding new label predicate on a node that is already bound 2
+  # TCK: SyntaxError at compile time: VariableAlreadyBound
+  - name: s16_fail_when_adding_new_label_predicate_on_a_node_that_is_already_bound_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Create1: [16] Fail when adding new label predicate on a node that is already bound 2"
+      issue: "#795"
+    query: |
+      CREATE ()<-[:T2]-(n:Foo),
+             (n:Bar)<-[:T1]-()
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [17] Fail when adding new label predicate on a node that is already bound 3
+  # TCK: SyntaxError at compile time: VariableAlreadyBound
+  - name: s17_fail_when_adding_new_label_predicate_on_a_node_that_is_already_bound_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Create1: [17] Fail when adding new label predicate on a node that is already bound 3"
+      issue: "#795"
+    query: |
+      CREATE (n:Foo)
+      CREATE (n:Bar)-[:OWNS]->(:Dog)
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [18] Fail when adding new label predicate on a node that is already bound 4
+  # TCK: SyntaxError at compile time: VariableAlreadyBound
+  - name: s18_fail_when_adding_new_label_predicate_on_a_node_that_is_already_bound_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Create1: [18] Fail when adding new label predicate on a node that is already bound 4"
+      issue: "#795"
+    query: |
+      CREATE (n {})
+      CREATE (n:Bar)-[:OWNS]->(:Dog)
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [19] Fail when adding new label predicate on a node that is already bound 5
+  # TCK: SyntaxError at compile time: VariableAlreadyBound
+  - name: s19_fail_when_adding_new_label_predicate_on_a_node_that_is_already_bound_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Create1: [19] Fail when adding new label predicate on a node that is already bound 5"
+      issue: "#795"
+    query: |
+      CREATE (n:Foo)
+      CREATE (n {})-[:OWNS]->(:Dog)
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [20] Fail when creating a node using undefined variable in pattern
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s20_fail_when_creating_a_node_using_undefined_variable_in_pattern
+    query: |
+      CREATE (b {name: missing})
+      RETURN b
+    expect:
+      gql_status: "42"
+      side_effects: {}

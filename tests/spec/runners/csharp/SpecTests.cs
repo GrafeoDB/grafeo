@@ -90,7 +90,16 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
         var tc = gtestFile.Tests.FirstOrDefault(t => t.Name == testName);
         Assert.NotNull(tc);
 
-        if (tc.Xfail is null)
+        // A gap of this binding (`runner_gap:`) skips the case here, as `skip:` does
+        if (tc.RunnerGap is { } gap && gap.Runners.Contains("csharp"))
+        {
+            Interlocked.Increment(ref GtestSummary.Skipped);
+            Skip.If(true, $"runner gap: {gap.Reason} ({gap.Issue})");
+            return;
+        }
+
+        // An xfail that names this runner in `passes_in` does not hold here: the case runs
+        if (tc.Xfail is null || tc.Xfail.PassesIn.Contains("csharp"))
         {
             RunCase(gtestFile, tc, variantLang, variantQuery);
             return;
@@ -172,7 +181,10 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
             if (!string.IsNullOrEmpty(effectiveDataset) && effectiveDataset != "empty")
                 LoadDataset(_db, effectiveDataset);
 
-            // Run setup queries in the file's declared language
+            // GQL statements first (the TCK's test procedures), then the setup queries in the
+            // file's declared language
+            foreach (var statement in tc.SetupGql)
+                ExecuteQuery(_db, "gql", statement);
             var setupLanguage = string.IsNullOrEmpty(meta.Language) ? "gql" : meta.Language;
             foreach (var setupQuery in tc.Setup)
                 ExecuteQuery(_db, setupLanguage, setupQuery);
@@ -192,10 +204,15 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
             var expect = tc.Expect;
             Assert.True(expect.UnknownKey is null, $"unknown expect key '{expect.UnknownKey}'");
 
+            // The graph before the statements, when their side effects are checked
+            var before = expect.SideEffects is not null ? TckValues.ObserveGraph(_db) : null;
+
             // Error tests
             if (expect.Error is not null || expect.GqlStatus is not null)
             {
                 RunErrorTest(_db, language, queries, expect.Error, expect.GqlStatus, parameters);
+                if (before is not null)
+                    TckValues.AssertSideEffects(before, TckValues.ObserveGraph(_db), expect.SideEffects!);
                 return;
             }
 
@@ -206,8 +223,18 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
             // Last query: capture result (with params if present)
             var result = ExecuteQuery(_db, language, queries[^1], parameters);
 
+            if (before is not null)
+                TckValues.AssertSideEffects(before, TckValues.ObserveGraph(_db), expect.SideEffects!);
+
             // The warnings, also when none are expected
             Assert.Equal(expect.Warnings, result.Warnings.Select(w => w.Code).ToList());
+
+            // Typed rows in the TCK's value notation
+            if (expect.Values is not null)
+            {
+                TckValues.AssertValues(_db, result, expect.Values, expect.Ordered, expect.UnorderedLists, meta.ValuesDialect == "tck");
+                return;
+            }
 
             // Column assertion
             if (expect.Columns.Count > 0)
@@ -399,6 +426,9 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
         }
         if (text is "true" or "false")
             return text == "true";
+        // A bare null is null; a quoted 'null' is the string
+        if (text == "null")
+            return null;
         return text;
     }
 
@@ -518,7 +548,8 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
             var status = (ex as GrafeoException)?.GqlStatus;
             Assert.True(status is not null,
                 $"Error '{ex.Message}' ({ex.GetType().Name}) has no GQLSTATUS");
-            Assert.True(status == expectedStatus,
+            // Two characters name a class (42), five a status (42001)
+            Assert.True(expectedStatus.Length == 2 ? status?.StartsWith(expectedStatus, StringComparison.Ordinal) == true : status == expectedStatus,
                 $"Error '{ex.Message}' has GQLSTATUS {status}, expected {expectedStatus}");
         }
     }

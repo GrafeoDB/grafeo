@@ -66,7 +66,10 @@ parameter. See [Exact and Approximate Numbers](../gql/types.md#exact-and-approxi
 ## Quantifiers
 
 ISO GQL writes the repetition after the edge: `-[:KNOWS]->{1,3}` for Cypher's `-[:KNOWS*1..3]->`, and
-`-[:KNOWS]->{1,}` for `-[:KNOWS*]->`.
+`MATCH TRAIL ... -[:KNOWS]->{1,}` for `-[:KNOWS*]->`. Cypher's variable-length relationships never repeat a
+relationship, which is GQL's `TRAIL`; and GQL refuses an unbounded quantifier without a path mode or a selector
+(`42001`), since a walk around a cycle never ends (see
+[Unbounded quantifiers](../gql/patterns.md#unbounded-quantifiers-need-a-mode-or-a-selector)).
 
 === "Cypher"
 

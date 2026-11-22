@@ -50,40 +50,8 @@ use grafeo_core::graph::apply::GraphBackend;
 
 use crate::transaction::StreamingChanges;
 
-impl super::GrafeoDB {
-    /// Bulk-imports a graph from a TSV/space-separated edge list into the LPG store.
-    ///
-    /// Each line should contain two integer IDs separated by whitespace (tab or space):
-    /// `src_id dst_id` with an optional third column for edge weight.
-    /// Lines starting with `#` or `%` are treated as comments and skipped.
-    /// Empty lines are also skipped.
-    ///
-    /// Nodes are created on-demand as new external IDs are encountered.
-    /// All nodes get the label `"_Imported"` and all edges get the given `edge_type`.
-    ///
-    /// While it changes the store, commits, new transactions and checkpoints
-    /// wait for it; the file is read before, without blocking anything, and
-    /// only once the database takes the import: a refused call opens nothing.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to the TSV file.
-    /// * `edge_type` - Edge type label for all imported edges.
-    /// * `directed` - If `true`, create one directed edge per line.
-    ///   If `false`, create edges in both directions.
-    ///
-    /// # Returns
-    ///
-    /// `(node_count, edge_count)` on success.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the file cannot be opened or contains malformed
-    /// lines; the read-only error on a read-only database, the
-    /// database-closed error after `close()` of a persistent database
-    /// (read-only or not), and the incomplete-commit error after a commit
-    /// that did not complete.
-    pub fn import_tsv(
+impl super::Open {
+    pub(crate) fn import_tsv(
         &self,
         path: impl AsRef<Path>,
         edge_type: &str,
@@ -106,22 +74,7 @@ impl super::GrafeoDB {
         self.import_edge_list(&edges, edge_type, directed)
     }
 
-    /// Bulk-imports from a string containing TSV edge list data.
-    ///
-    /// Same format as [`import_tsv`](Self::import_tsv) but reads from a string
-    /// instead of a file. Useful for tests and embedded data.
-    ///
-    /// While it changes the store, commits, new transactions and checkpoints
-    /// wait for it; the string is parsed before, without blocking anything,
-    /// and only once the database takes the import.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the data contains malformed lines; the read-only
-    /// error on a read-only database, the database-closed error after
-    /// `close()` of a persistent database (read-only or not), and the
-    /// incomplete-commit error after a commit that did not complete.
-    pub fn import_tsv_str(
+    pub(crate) fn import_tsv_str(
         &self,
         data: &str,
         edge_type: &str,
@@ -134,39 +87,11 @@ impl super::GrafeoDB {
         self.import_edge_list(&edges, edge_type, directed)
     }
 
-    /// Bulk-imports from a Matrix Market (MMIO) coordinate format file.
-    ///
-    /// Handles the standard MMIO header:
-    /// ```text
-    /// %%MatrixMarket matrix coordinate real general
-    /// % comment
-    /// rows cols nnz
-    /// row col [value]
-    /// ```
-    ///
-    /// Symmetric matrices automatically create edges in both directions.
-    ///
-    /// While it changes the store, commits, new transactions and checkpoints
-    /// wait for it; the file is read before, without blocking anything, and
-    /// only once the database takes the import: a refused call opens nothing.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to the `.mtx` file.
-    /// * `edge_type` - Edge type label for all imported edges.
-    ///
-    /// # Returns
-    ///
-    /// `(node_count, edge_count)` on success.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the file cannot be opened or has an invalid MMIO
-    /// header or data; the read-only error on a read-only database, the
-    /// database-closed error after `close()` of a persistent database
-    /// (read-only or not), and the incomplete-commit error after a commit
-    /// that did not complete.
-    pub fn import_mmio(&self, path: impl AsRef<Path>, edge_type: &str) -> Result<(usize, usize)> {
+    pub(crate) fn import_mmio(
+        &self,
+        path: impl AsRef<Path>,
+        edge_type: &str,
+    ) -> Result<(usize, usize)> {
         self.check_import_allowed()?;
         self.check_import_shape(edge_type)?;
         let path = path.as_ref();
@@ -299,34 +224,8 @@ impl super::GrafeoDB {
         Ok((rows.len(), edge_count))
     }
 
-    /// Bulk-imports a TSV edge list into the RDF store.
-    ///
-    /// Each edge `(src, dst)` becomes a triple:
-    /// `<{base_uri}{src}> <{predicate_uri}> <{base_uri}{dst}>`
-    ///
-    /// While it changes the store, commits, new transactions and checkpoints
-    /// wait for it; the file is read before, without blocking anything, and
-    /// only once the database takes the import: a refused call opens nothing.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to the TSV file.
-    /// * `predicate_uri` - Full IRI for the edge predicate (e.g., `"http://example.org/connects"`).
-    /// * `base_uri` - Base IRI prefix for node identifiers (e.g., `"http://example.org/node/"`).
-    ///
-    /// # Returns
-    ///
-    /// `(node_count, edge_count)` on success.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the file cannot be opened or contains malformed
-    /// lines; the read-only error on a read-only database, the
-    /// database-closed error after `close()` of a persistent database
-    /// (read-only or not), and the incomplete-commit error after a commit
-    /// that did not complete.
     #[cfg(feature = "triple-store")]
-    pub fn import_tsv_rdf(
+    pub(crate) fn import_tsv_rdf(
         &self,
         path: impl AsRef<Path>,
         predicate_uri: &str,
@@ -506,6 +405,143 @@ fn parse_mmio(reader: impl BufRead) -> Result<(Vec<(u64, u64)>, bool)> {
     Ok((edges, symmetric))
 }
 
+// The database's public methods: each reaches the open state for its call (#712).
+impl super::GrafeoDB {
+    /// Bulk-imports a graph from a TSV/space-separated edge list into the LPG store.
+    ///
+    /// Each line should contain two integer IDs separated by whitespace (tab or space):
+    /// `src_id dst_id` with an optional third column for edge weight.
+    /// Lines starting with `#` or `%` are treated as comments and skipped.
+    /// Empty lines are also skipped.
+    ///
+    /// Nodes are created on-demand as new external IDs are encountered.
+    /// All nodes get the label `"_Imported"` and all edges get the given `edge_type`.
+    ///
+    /// While it changes the store, commits, new transactions and checkpoints
+    /// wait for it; the file is read before, without blocking anything, and
+    /// only once the database takes the import: a refused call opens nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the TSV file.
+    /// * `edge_type` - Edge type label for all imported edges.
+    /// * `directed` - If `true`, create one directed edge per line.
+    ///   If `false`, create edges in both directions.
+    ///
+    /// # Returns
+    ///
+    /// `(node_count, edge_count)` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened or contains malformed
+    /// lines; the read-only error on a read-only database, the
+    /// database-closed error after `close()`, and the incomplete-commit error after a commit
+    /// that did not complete.
+    pub fn import_tsv(
+        &self,
+        path: impl AsRef<Path>,
+        edge_type: &str,
+        directed: bool,
+    ) -> Result<(usize, usize)> {
+        self.live()?.import_tsv(path, edge_type, directed)
+    }
+
+    /// Bulk-imports from a string containing TSV edge list data.
+    ///
+    /// Same format as [`import_tsv`](Self::import_tsv) but reads from a string
+    /// instead of a file. Useful for tests and embedded data.
+    ///
+    /// While it changes the store, commits, new transactions and checkpoints
+    /// wait for it; the string is parsed before, without blocking anything,
+    /// and only once the database takes the import.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the data contains malformed lines; the read-only
+    /// error on a read-only database, the database-closed error after
+    /// `close()`, and the
+    /// incomplete-commit error after a commit that did not complete.
+    pub fn import_tsv_str(
+        &self,
+        data: &str,
+        edge_type: &str,
+        directed: bool,
+    ) -> Result<(usize, usize)> {
+        self.live()?.import_tsv_str(data, edge_type, directed)
+    }
+
+    /// Bulk-imports from a Matrix Market (MMIO) coordinate format file.
+    ///
+    /// Handles the standard MMIO header:
+    /// ```text
+    /// %%MatrixMarket matrix coordinate real general
+    /// % comment
+    /// rows cols nnz
+    /// row col [value]
+    /// ```
+    ///
+    /// Symmetric matrices automatically create edges in both directions.
+    ///
+    /// While it changes the store, commits, new transactions and checkpoints
+    /// wait for it; the file is read before, without blocking anything, and
+    /// only once the database takes the import: a refused call opens nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the `.mtx` file.
+    /// * `edge_type` - Edge type label for all imported edges.
+    ///
+    /// # Returns
+    ///
+    /// `(node_count, edge_count)` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened or has an invalid MMIO
+    /// header or data; the read-only error on a read-only database, the
+    /// database-closed error after `close()`, and the incomplete-commit error after a commit
+    /// that did not complete.
+    pub fn import_mmio(&self, path: impl AsRef<Path>, edge_type: &str) -> Result<(usize, usize)> {
+        self.live()?.import_mmio(path, edge_type)
+    }
+
+    /// Bulk-imports a TSV edge list into the RDF store.
+    ///
+    /// Each edge `(src, dst)` becomes a triple:
+    /// `<{base_uri}{src}> <{predicate_uri}> <{base_uri}{dst}>`
+    ///
+    /// While it changes the store, commits, new transactions and checkpoints
+    /// wait for it; the file is read before, without blocking anything, and
+    /// only once the database takes the import: a refused call opens nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the TSV file.
+    /// * `predicate_uri` - Full IRI for the edge predicate (e.g., `"http://example.org/connects"`).
+    /// * `base_uri` - Base IRI prefix for node identifiers (e.g., `"http://example.org/node/"`).
+    ///
+    /// # Returns
+    ///
+    /// `(node_count, edge_count)` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened or contains malformed
+    /// lines; the read-only error on a read-only database, the
+    /// database-closed error after `close()`, and the incomplete-commit error after a commit
+    /// that did not complete.
+    #[cfg(feature = "triple-store")]
+    pub fn import_tsv_rdf(
+        &self,
+        path: impl AsRef<Path>,
+        predicate_uri: &str,
+        base_uri: &str,
+    ) -> Result<(usize, usize)> {
+        self.live()?.import_tsv_rdf(path, predicate_uri, base_uri)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::GrafeoDB;
@@ -585,7 +621,7 @@ mod tests {
         assert!(!symmetric);
         assert_eq!(edges.len(), 3);
 
-        let result = db.import_edge_list(&edges, "E", true);
+        let result = db.live().unwrap().import_edge_list(&edges, "E", true);
         assert!(result.is_ok());
         let (nodes, edge_count) = result.unwrap();
         assert_eq!(nodes, 3);
@@ -604,7 +640,11 @@ mod tests {
 
         let db = GrafeoDB::new_in_memory();
         // Symmetric = undirected = both directions
-        let (nodes, edge_count) = db.import_edge_list(&edges, "E", false).unwrap();
+        let (nodes, edge_count) = db
+            .live()
+            .unwrap()
+            .import_edge_list(&edges, "E", false)
+            .unwrap();
         assert_eq!(nodes, 3);
         assert_eq!(edge_count, 4); // 2 edges * 2 directions
     }
@@ -638,6 +678,8 @@ mod tests {
             let edges: Vec<(u64, u64)> = (0..ring).map(|n| (n, (n + 3) % ring)).collect();
             let (mut bytes, mut logged, mut rows) = (0, 0, 0_u64);
             let (nodes, edge_count) = db
+                .live()
+                .unwrap()
                 .import_edge_list_observed(&edges, "ROUTE", false, |changes| {
                     bytes = bytes.max(changes.approx_bytes());
                     rows += 1;
@@ -687,7 +729,7 @@ mod tests {
         assert_eq!(edges, 3);
 
         // Verify the adapter works on the imported RDF data
-        let adapter = RdfGraphStoreAdapter::new(&db.rdf_store);
+        let adapter = RdfGraphStoreAdapter::new(&db.live().unwrap().rdf_store);
         let view = grafeo_common::types::ReadView::latest();
         assert_eq!(adapter.node_count(view).unwrap(), 3);
         assert_eq!(adapter.edge_count(view).unwrap(), 3);

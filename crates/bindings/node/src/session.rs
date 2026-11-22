@@ -4,11 +4,10 @@
 use std::sync::Arc;
 
 use grafeo_engine::auth::{Identity, Role};
-use grafeo_engine::database::GrafeoDB;
 use napi::bindgen_prelude::*;
 use napi::{JsString, JsValue, ValueType};
 use napi_derive::napi;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 
 use crate::error::NodeGrafeoError;
 use crate::query::QueryResult;
@@ -26,7 +25,7 @@ const OPTIONS: [&str; 2] = ["readOnly", "externalAccess"];
 /// Nothing run on the session can lift a limit. `close()` it when done.
 #[napi(js_name = "Session")]
 pub struct JsSession {
-    db: Arc<RwLock<GrafeoDB>>,
+    db: crate::database::SharedDb,
     /// What the session may do: each transaction it begins gets the same.
     identity: Identity,
     /// The session's statements run here; `None` once closed. The lock is
@@ -117,7 +116,10 @@ impl JsSession {
 
     /// A session on `db` with the limits of `options` (`{ readOnly, externalAccess }`, either
     /// optional); an unknown key, or a value that is not a boolean, is an error.
-    pub(crate) fn open(db: Arc<RwLock<GrafeoDB>>, options: Option<&Object<'_>>) -> Result<Self> {
+    pub(crate) fn open(
+        db: crate::database::SharedDb,
+        options: Option<&Object<'_>>,
+    ) -> Result<Self> {
         let (mut read_only, mut external_access) = (false, true);
         if let Some(options) = options {
             let keys = options.get_property_names()?;
@@ -158,7 +160,7 @@ impl JsSession {
             Identity::anonymous()
         }
         .with_external_access(external_access);
-        let session = db.read().session_with_identity(identity.clone());
+        let session = db.read()?.session_with_identity(identity.clone());
         Ok(Self {
             db,
             identity,
@@ -238,7 +240,7 @@ impl JsSession {
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))??;
         Ok(crate::stream::JsResultStream::holding(
-            Arc::clone(&self.db),
+            self.db.share()?,
             stream,
             permit,
         ))
@@ -249,8 +251,8 @@ impl JsSession {
     #[napi(js_name = "beginTransaction")]
     pub fn begin_transaction(&self, isolation_level: Option<String>) -> Result<Transaction> {
         self.handle()?;
-        let session = self.db.read().session_with_identity(self.identity.clone());
-        Transaction::begin(Arc::clone(&self.db), session, isolation_level.as_deref())
+        let session = self.db.read()?.session_with_identity(self.identity.clone());
+        Transaction::begin(self.db.share()?, session, isolation_level.as_deref())
     }
 
     /// Close the session: statements called from now on fail; one already called finishes. The

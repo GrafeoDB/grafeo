@@ -343,17 +343,28 @@ fn any_zero_is_an_error() {
     assert!(message.contains("number of paths"), "{message}");
 }
 
-/// A search over two edge patterns would need the node between them in its
-/// partitions; it is an error until it works.
+/// A search over two edge patterns partitions the paths by their first and
+/// last node: one path per pair, whichever node is between.
 #[test]
-fn any_over_two_edge_patterns_is_an_error() {
+fn any_over_two_edge_patterns_keeps_one_path_for_each_pair() {
     let db = diamonds();
-    let message = error(
+    assert_rows(
         &db,
         "MATCH ANY (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN a.name, c.name",
+        &[
+            &["Alix", "Mia"],
+            &["Alix", "Vincent"],
+            &["Gus", "Jules"],
+            &["Gus", "Mia"],
+            &["Vincent", "Jules"],
+        ],
     );
-    assert!(message.contains("more than one edge pattern"), "{message}");
-    // A parenthesized or alternated path pattern likewise
+}
+
+/// A parenthesized or alternated path pattern is an error until it works.
+#[test]
+fn any_over_a_parenthesized_or_alternated_pattern_is_an_error() {
+    let db = diamonds();
     for query in [
         "MATCH ANY ((a:Person)-[:KNOWS]->(b)){1,2} RETURN count(*)",
         "MATCH ANY (a:Person)-[:KNOWS]->(b) | (a:Person)-[:LIKES]->(b) RETURN count(*)",

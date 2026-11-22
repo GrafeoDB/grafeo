@@ -1,0 +1,143 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/literals/Literals4.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Literals4"
+  title: "Literals4 - Octal integer"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Return a short positive octal integer
+  - name: s1_return_a_short_positive_octal_integer
+    query: |
+      RETURN 0o1 AS literal
+    expect:
+      values: |
+        | literal |
+        | 1 |
+      side_effects: {}
+
+  # [2] Return a long positive octal integer
+  - name: s2_return_a_long_positive_octal_integer
+    query: |
+      RETURN 0o2613152366 AS literal
+    expect:
+      values: |
+        | literal |
+        | 372036854 |
+      side_effects: {}
+
+  # [3] Return the largest octal integer
+  - name: s3_return_the_largest_octal_integer
+    query: |
+      RETURN 0o777777777777777777777 AS literal
+    expect:
+      values: |
+        | literal |
+        | 9223372036854775807 |
+      side_effects: {}
+
+  # [4] Return a positive octal zero
+  - name: s4_return_a_positive_octal_zero
+    query: |
+      RETURN 0o0 AS literal
+    expect:
+      values: |
+        | literal |
+        | 0 |
+      side_effects: {}
+
+  # [5] Return a negative octal zero
+  - name: s5_return_a_negative_octal_zero
+    query: |
+      RETURN -0o0 AS literal
+    expect:
+      values: |
+        | literal |
+        | 0 |
+      side_effects: {}
+
+  # [6] Return a short negative octal integer
+  - name: s6_return_a_short_negative_octal_integer
+    query: |
+      RETURN -0o1 AS literal
+    expect:
+      values: |
+        | literal |
+        | -1 |
+      side_effects: {}
+
+  # [7] Return a long negative octal integer
+  - name: s7_return_a_long_negative_octal_integer
+    query: |
+      RETURN -0o2613152366 AS literal
+    expect:
+      values: |
+        | literal |
+        | -372036854 |
+      side_effects: {}
+
+  # [8] Return the smallest octal integer
+  - name: s8_return_the_smallest_octal_integer
+    xfail:
+      spec: "openCypher TCK 2024.3 Literals4: [8] Return the smallest octal integer"
+      issue: "#800"
+    query: |
+      RETURN -0o1000000000000000000000 AS literal
+    expect:
+      values: |
+        | literal |
+        | -9223372036854775808 |
+      side_effects: {}
+
+  # [9] Fail on a too large octal integer
+  # TCK: SyntaxError at compile time: IntegerOverflow
+  - name: s9_fail_on_a_too_large_octal_integer
+    query: |
+      RETURN 0o1000000000000000000000 AS literal
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [10] Fail on a too small octal integer
+  # TCK: SyntaxError at compile time: IntegerOverflow
+  - name: s10_fail_on_a_too_small_octal_integer
+    query: |
+      RETURN -0o1000000000000000000001 AS literal
+    expect:
+      gql_status: "42"
+      side_effects: {}

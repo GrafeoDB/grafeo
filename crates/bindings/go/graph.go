@@ -21,6 +21,10 @@ type Graph struct {
 // not exist.
 func (db *Database) Graph(name string) (*Graph, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 *Graph
+		return zero0, err
+	}
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 	runtime.LockOSThread()

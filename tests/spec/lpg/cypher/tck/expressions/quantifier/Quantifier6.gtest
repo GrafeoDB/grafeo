@@ -1,0 +1,260 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/quantifier/Quantifier6.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Quantifier6"
+  title: "Quantifier6 - Single quantifier interop"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Single quantifier can nest itself and other quantifiers on nested lists #1
+  - name: s1_single_quantifier_can_nest_itself_and_other_quantifiers_on_nested_lists_1
+    query: |
+      RETURN single(x IN [['abc'], ['abc', 'def']] WHERE none(y IN x WHERE y = 'def')) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [1] Single quantifier can nest itself and other quantifiers on nested lists #2
+  - name: s1_single_quantifier_can_nest_itself_and_other_quantifiers_on_nested_lists_2
+    query: |
+      RETURN single(x IN [['abc'], ['abc', 'def']] WHERE none(y IN x WHERE y = 'ghi')) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [1] Single quantifier can nest itself and other quantifiers on nested lists #3
+  - name: s1_single_quantifier_can_nest_itself_and_other_quantifiers_on_nested_lists_3
+    query: |
+      RETURN single(x IN [['abc'], ['abc', 'def']] WHERE single(y IN x WHERE y = 'def')) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [1] Single quantifier can nest itself and other quantifiers on nested lists #4
+  - name: s1_single_quantifier_can_nest_itself_and_other_quantifiers_on_nested_lists_4
+    query: |
+      RETURN single(x IN [['abc'], ['abc', 'def']] WHERE single(y IN x WHERE y = 'abc')) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [1] Single quantifier can nest itself and other quantifiers on nested lists #5
+  - name: s1_single_quantifier_can_nest_itself_and_other_quantifiers_on_nested_lists_5
+    query: |
+      RETURN single(x IN [['abc'], ['abc', 'def']] WHERE any(y IN x WHERE y = 'def')) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [1] Single quantifier can nest itself and other quantifiers on nested lists #6
+  - name: s1_single_quantifier_can_nest_itself_and_other_quantifiers_on_nested_lists_6
+    query: |
+      RETURN single(x IN [['abc'], ['abc', 'def']] WHERE any(y IN x WHERE y = 'abc')) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [1] Single quantifier can nest itself and other quantifiers on nested lists #7
+  - name: s1_single_quantifier_can_nest_itself_and_other_quantifiers_on_nested_lists_7
+    query: |
+      RETURN single(x IN [['abc'], ['abc', 'def']] WHERE all(y IN x WHERE y = 'abc')) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [1] Single quantifier can nest itself and other quantifiers on nested lists #8
+  - name: s1_single_quantifier_can_nest_itself_and_other_quantifiers_on_nested_lists_8
+    query: |
+      RETURN single(x IN [['abc'], ['abc', 'def']] WHERE all(y IN x WHERE y = 'def')) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [2] Single quantifier can nest itself and other quantifiers on the same list #1
+  - name: s2_single_quantifier_can_nest_itself_and_other_quantifiers_on_the_same_list_1
+    query: |
+      WITH [1, 2, 3, 4, 5, 6, 7, 8, 9] AS list
+      RETURN single(x IN list WHERE none(y IN list WHERE x < y)) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [2] Single quantifier can nest itself and other quantifiers on the same list #2
+  - name: s2_single_quantifier_can_nest_itself_and_other_quantifiers_on_the_same_list_2
+    query: |
+      WITH [1, 2, 3, 4, 5, 6, 7, 8, 9] AS list
+      RETURN single(x IN list WHERE none(y IN list WHERE x % y = 0)) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [2] Single quantifier can nest itself and other quantifiers on the same list #3
+  - name: s2_single_quantifier_can_nest_itself_and_other_quantifiers_on_the_same_list_3
+    query: |
+      WITH [1, 2, 3, 4, 5, 6, 7, 8, 9] AS list
+      RETURN single(x IN list WHERE single(y IN list WHERE x + y < 5)) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [2] Single quantifier can nest itself and other quantifiers on the same list #4
+  - name: s2_single_quantifier_can_nest_itself_and_other_quantifiers_on_the_same_list_4
+    query: |
+      WITH [1, 2, 3, 4, 5, 6, 7, 8, 9] AS list
+      RETURN single(x IN list WHERE single(y IN list WHERE x % y = 1)) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [2] Single quantifier can nest itself and other quantifiers on the same list #5
+  - name: s2_single_quantifier_can_nest_itself_and_other_quantifiers_on_the_same_list_5
+    query: |
+      WITH [1, 2, 3, 4, 5, 6, 7, 8, 9] AS list
+      RETURN single(x IN list WHERE any(y IN list WHERE 2 * x + y > 25)) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [2] Single quantifier can nest itself and other quantifiers on the same list #6
+  - name: s2_single_quantifier_can_nest_itself_and_other_quantifiers_on_the_same_list_6
+    query: |
+      WITH [1, 2, 3, 4, 5, 6, 7, 8, 9] AS list
+      RETURN single(x IN list WHERE any(y IN list WHERE x < y)) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [2] Single quantifier can nest itself and other quantifiers on the same list #7
+  - name: s2_single_quantifier_can_nest_itself_and_other_quantifiers_on_the_same_list_7
+    query: |
+      WITH [1, 2, 3, 4, 5, 6, 7, 8, 9] AS list
+      RETURN single(x IN list WHERE all(y IN list WHERE x <= y)) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [2] Single quantifier can nest itself and other quantifiers on the same list #8
+  - name: s2_single_quantifier_can_nest_itself_and_other_quantifiers_on_the_same_list_8
+    query: |
+      WITH [1, 2, 3, 4, 5, 6, 7, 8, 9] AS list
+      RETURN single(x IN list WHERE all(y IN list WHERE x <= y + 1)) AS result
+    expect:
+      values: |
+        | result |
+        | false |
+      side_effects: {}
+
+  # [3] Single quantifier is equal whether the size of the list filtered with same the predicate is one #1
+  - name: s3_single_quantifier_is_equal_whether_the_size_of_the_list_filtered_with_same_the_predicate_is_one_1
+    query: |
+      RETURN single(x IN [1, 2, 3, 4, 5, 6, 7, 8, 9] WHERE x = 2) = (size([x IN [1, 2, 3, 4, 5, 6, 7, 8, 9] WHERE x = 2 | x]) = 1) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [3] Single quantifier is equal whether the size of the list filtered with same the predicate is one #2
+  - name: s3_single_quantifier_is_equal_whether_the_size_of_the_list_filtered_with_same_the_predicate_is_one_2
+    query: |
+      RETURN single(x IN [1, 2, 3, 4, 5, 6, 7, 8, 9] WHERE x % 2 = 0) = (size([x IN [1, 2, 3, 4, 5, 6, 7, 8, 9] WHERE x % 2 = 0 | x]) = 1) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [3] Single quantifier is equal whether the size of the list filtered with same the predicate is one #3
+  - name: s3_single_quantifier_is_equal_whether_the_size_of_the_list_filtered_with_same_the_predicate_is_one_3
+    query: |
+      RETURN single(x IN [1, 2, 3, 4, 5, 6, 7, 8, 9] WHERE x % 3 = 0) = (size([x IN [1, 2, 3, 4, 5, 6, 7, 8, 9] WHERE x % 3 = 0 | x]) = 1) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [3] Single quantifier is equal whether the size of the list filtered with same the predicate is one #4
+  - name: s3_single_quantifier_is_equal_whether_the_size_of_the_list_filtered_with_same_the_predicate_is_one_4
+    query: |
+      RETURN single(x IN [1, 2, 3, 4, 5, 6, 7, 8, 9] WHERE x < 7) = (size([x IN [1, 2, 3, 4, 5, 6, 7, 8, 9] WHERE x < 7 | x]) = 1) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}
+
+  # [3] Single quantifier is equal whether the size of the list filtered with same the predicate is one #5
+  - name: s3_single_quantifier_is_equal_whether_the_size_of_the_list_filtered_with_same_the_predicate_is_one_5
+    query: |
+      RETURN single(x IN [1, 2, 3, 4, 5, 6, 7, 8, 9] WHERE x >= 3) = (size([x IN [1, 2, 3, 4, 5, 6, 7, 8, 9] WHERE x >= 3 | x]) = 1) AS result
+    expect:
+      values: |
+        | result |
+        | true |
+      side_effects: {}

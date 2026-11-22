@@ -1265,19 +1265,19 @@ fn a_cycle_of_unique_keys_lets_the_oldest_commit() {
     );
 }
 
-/// Row 3: a doomed transaction's reads go on, and it fails at its commit
-/// even when it claims nothing more; a write fails at once.
+/// Row 3: a doomed transaction is rolled back at its next call, a read too,
+/// and every call fails until it ends; its commit fails as well, and ends it.
 #[test]
-fn a_doomed_transaction_reads_and_fails_at_its_next_write_and_commit() {
+fn a_doomed_transaction_fails_at_its_next_call_and_its_commit() {
     for writes in [false, true] {
         let db = GrafeoDB::new_in_memory();
         let mut sessions = open_in_order(&db, 2);
         merge_memory(&sessions[1], "ssi").unwrap();
         merge_memory(&sessions[0], "ssi").expect("the older claims the pattern and goes on");
-        let read = sessions[1]
-            .execute("MATCH (m:Memory) RETURN count(m) AS c")
-            .expect("a doomed transaction still reads");
-        assert_eq!(int(&read.rows()[0][0]), 1, "its own node");
+        assert_conflict(
+            sessions[1].execute("MATCH (m:Memory) RETURN count(m) AS c"),
+            "a doomed transaction's read",
+        );
         if writes {
             assert_conflict(
                 sessions[1].execute("MATCH (m:Memory {key: 'ssi'}) SET m.city = 'Paris'"),
@@ -1285,6 +1285,7 @@ fn a_doomed_transaction_reads_and_fails_at_its_next_write_and_commit() {
             );
         }
         assert_conflict(sessions[1].commit(), "a doomed transaction's commit");
+        assert!(!sessions[1].in_transaction(), "the commit ended it");
         sessions[0].commit().unwrap();
         assert_eq!(ssi_count(&db), 1, "writes: {writes}");
     }
@@ -1391,19 +1392,23 @@ fn a_doomed_holder_does_not_block_a_third_transaction() {
     );
 }
 
-/// Row 7: a rollback to a savepoint undoes the claims since it, but not the
-/// doom: the transaction fails at its commit all the same.
+/// Row 7: a rollback to a savepoint does not undo the doom: it fails, and
+/// the transaction is rolled back then; every call and its commit fail.
 #[test]
-fn a_rollback_to_a_savepoint_keeps_a_transaction_doomed() {
+fn a_rollback_to_a_savepoint_does_not_undo_a_doom() {
     let db = GrafeoDB::new_in_memory();
     let mut sessions = open_in_order(&db, 2);
     sessions[1].savepoint("before").unwrap();
     merge_memory(&sessions[1], "ssi").unwrap();
     merge_memory(&sessions[0], "ssi").expect("the older dooms the younger");
-    sessions[1].rollback_to_savepoint("before").unwrap();
-    sessions[1]
-        .execute("MATCH (m:Memory) RETURN count(m) AS c")
-        .expect("its reads go on");
+    assert_conflict(
+        sessions[1].rollback_to_savepoint("before"),
+        "the rollback to the savepoint",
+    );
+    assert_conflict(
+        sessions[1].execute("MATCH (m:Memory) RETURN count(m) AS c"),
+        "a read after it",
+    );
     assert_conflict(sessions[1].commit(), "the doomed transaction's commit");
     sessions[0].commit().unwrap();
     assert_eq!(ssi_count(&db), 1);
@@ -1516,7 +1521,8 @@ fn merges_that_only_match_in_opposite_orders_both_commit() {
 /// runs in two open transactions and both commit. A set that can change no
 /// property claims nothing, on a node or an edge.
 /// - `SET n += {}` and `SET n += $empty` (an empty map parameter) on a
-///   committed node, and `SET r += {}` on a committed edge.
+///   committed node, `SET n += $null` and `SET n = $null` (a null
+///   parameter), and `SET r += {}` on a committed edge.
 /// - A Cypher node MERGE without ON MATCH, and with `ON MATCH SET n += {}`.
 /// - A relationship MERGE between two bound nodes, and a path MERGE, that
 ///   match: their match branch never wrote, and must not start to.
@@ -1536,6 +1542,18 @@ fn statements_that_change_nothing_both_commit() {
             MEMORY,
             "MATCH (m:Memory {key: 'ssi'}) SET m += $empty",
             vec![("empty", empty)],
+        ),
+        (
+            "SET n += $null",
+            MEMORY,
+            "MATCH (m:Memory {key: 'ssi'}) SET m += $nothing",
+            vec![("nothing", Value::Null)],
+        ),
+        (
+            "SET n = $null",
+            MEMORY,
+            "MATCH (m:Memory {key: 'ssi'}) SET m = $nothing",
+            vec![("nothing", Value::Null)],
         ),
         (
             "SET r += {} on an edge",

@@ -2350,9 +2350,10 @@ impl RdfStore {
     }
 
     /// The IRIs of the named graphs in the newest committed state: for
-    /// applying commits, and for the serializers until they read at their
-    /// snapshot.
-    pub(crate) fn graph_names_latest(&self) -> Vec<String> {
+    /// applying commits, for the serializers until they read at their
+    /// snapshot, and for the optimizer's estimates of `GRAPH ?g`.
+    #[must_use]
+    pub fn graph_names_latest(&self) -> Vec<String> {
         self.named_graphs.read().keys().cloned().collect()
     }
 

@@ -27,7 +27,7 @@ tests:
     setup:
       - "INSERT (r:Repository)-[:`Graph:CONTAINS`]->(d:Directory)-[:`Graph:CONTAINS`]->(:File {path: 'Alix.py'}), (d)-[:CONTAINS]->(:File {path: 'Gus.py'}), (r)-[:Graph]->(:File {path: 'Berlin.py'})"
     variants:
-      gql: "MATCH (:Repository)-[:`Graph:CONTAINS`*]->(f:File) RETURN f.path"
+      gql: "MATCH TRAIL (:Repository)-[:`Graph:CONTAINS`*]->(f:File) RETURN f.path"
       cypher: "MATCH (:Repository)-[:`Graph:CONTAINS`*]->(f:File) RETURN f.path"
     expect:
       rows:
@@ -48,7 +48,7 @@ tests:
     setup:
       - "INSERT (r:Repository)-[:`Graph:CONTAINS`]->(d:Directory)-[:`Graph:CONTAINS`]->(:File {path: 'Alix.py'}), (d)-[:CONTAINS]->(:File {path: 'Gus.py'}), (r)-[:Graph]->(:File {path: 'Berlin.py'})"
     variants:
-      gql: "MATCH (:Repository)-[:Graph:CONTAINS*]->(f:File) RETURN f.path"
+      gql: "MATCH TRAIL (:Repository)-[:Graph:CONTAINS*]->(f:File) RETURN f.path"
       cypher: "MATCH (:Repository)-[:Graph:CONTAINS*]->(f:File) RETURN f.path"
     expect:
       error: "write :`Graph:CONTAINS` for the type named Graph:CONTAINS, or :Graph|CONTAINS to match either type"

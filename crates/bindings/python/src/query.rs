@@ -27,6 +27,9 @@ pub struct PyQueryResult {
     /// The nodes and edges of the rows, found when first asked for: a result
     /// read row by row never copies them out.
     entities: OnceLock<(Vec<PyNode>, Vec<PyEdge>)>,
+    /// The type each cell was built with: it says where the nodes and edges
+    /// are.
+    pub(crate) cell_types: grafeo_engine::database::CellTypes,
     current_row: usize,
     /// Query execution time in milliseconds.
     pub(crate) execution_time_ms: Option<f64>,
@@ -79,6 +82,19 @@ impl PyQueryResult {
     #[getter]
     fn columns(&self) -> Vec<String> {
         self.columns.clone()
+    }
+
+    /// The type the value in `row` and `column` was built with: `"node"`,
+    /// `"edge"` or `"path"`; `{"list": t}`, `{"tuple": [t, ...]}`,
+    /// `{"struct": {"key": t}}` or `{"map": t}` for what a list or a dict
+    /// holds; `"any"`; or the name of another type (`"int64"`). A dict is a
+    /// node or an edge exactly where its type says so: `{"_id": 1,
+    /// "_labels": []}` returned as a map is a map.
+    ///
+    /// Experimental, new in 0.6.4: it may change or be removed in any
+    /// release.
+    fn cell_type(&self, py: Python<'_>, row: usize, column: usize) -> PyResult<Py<PyAny>> {
+        cell_type_py(py, &self.cell_types, row, column)
     }
 
     /// Get number of rows.
@@ -474,6 +490,21 @@ impl PyQueryResult {
     }
 }
 
+/// The cell type in `row` and `column` of `types` as a Python value (see
+/// `QueryResult.cell_type`).
+pub(crate) fn cell_type_py(
+    py: Python<'_>,
+    types: &grafeo_engine::database::CellTypes,
+    row: usize,
+    column: usize,
+) -> PyResult<Py<PyAny>> {
+    let json = grafeo_bindings_common::entity::type_to_json(types.get(row, column));
+    Ok(py
+        .import("json")?
+        .call_method1("loads", (json.to_string(),))?
+        .unbind())
+}
+
 impl PyQueryResult {
     /// Creates a new query result (used internally).
     pub fn new(
@@ -486,6 +517,7 @@ impl PyQueryResult {
             columns,
             rows,
             entities: OnceLock::from((nodes, edges)),
+            cell_types: grafeo_engine::database::CellTypes::default(),
             current_row: 0,
             execution_time_ms: None,
             rows_scanned: None,
@@ -508,6 +540,7 @@ impl PyQueryResult {
             columns,
             rows,
             entities: OnceLock::new(),
+            cell_types: grafeo_engine::database::CellTypes::default(),
             current_row: 0,
             execution_time_ms,
             rows_scanned,
@@ -528,7 +561,7 @@ impl PyQueryResult {
                 let val = match row.get(col_idx) {
                     None => py.None(),
                     Some(Value::RdfTerm(term)) => PyValue::to_py(&term.export_value(), py)?,
-                    Some(value) => PyValue::to_py(value, py)?,
+                    Some(value) => crate::types::dataframe_value(value, py)?,
                 };
                 values.append(val)?;
             }
@@ -561,6 +594,7 @@ impl PyQueryResult {
         self.entities.get_or_init(|| {
             grafeo_bindings_common::entity::extract_and_map_rows(
                 &self.rows,
+                &self.cell_types,
                 |n| PyNode::new(n.id, n.labels, n.properties),
                 |e| PyEdge::new(e.id, e.edge_type, e.source_id, e.target_id, e.properties),
             )
@@ -573,6 +607,7 @@ impl PyQueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
             entities: OnceLock::from((Vec::new(), Vec::new())),
+            cell_types: grafeo_engine::database::CellTypes::default(),
             current_row: 0,
             execution_time_ms: None,
             rows_scanned: None,

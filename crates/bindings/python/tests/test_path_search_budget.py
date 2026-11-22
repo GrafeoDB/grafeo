@@ -72,7 +72,13 @@ def code_graph():
 
 @pytest.mark.parametrize("cypher", LANGUAGES)
 def test_an_unbounded_pattern_over_cycles_raises(code_graph, cypher):
-    query = "MATCH (repo:Repository)-[*]->(f:File) WHERE repo.repoName = 'deriva' RETURN count(f)"
+    # GQL refuses an unbounded walk (42001, since 0.6.4): a trail, Cypher's
+    # semantics, still passes the budget on this graph
+    mode = "" if cypher else "TRAIL "
+    query = (
+        f"MATCH {mode}(repo:Repository)-[*]->(f:File) "
+        "WHERE repo.repoName = 'deriva' RETURN count(f)"
+    )
     with pytest.raises(grafeo.GrafeoError) as raised:
         run(code_graph, query, cypher)
     message = str(raised.value)
@@ -103,5 +109,6 @@ def test_a_second_colon_in_an_edge_type_raises(cypher):
     with pytest.raises(grafeo.GrafeoError, match="Graph:CONTAINS") as raised:
         run(db, "MATCH (r:Repository)-[:Graph:CONTAINS*]->(f:File) RETURN count(f)", cypher)
     assert ":Graph|CONTAINS" in str(raised.value)
-    query = "MATCH (r:Repository)-[:`Graph:CONTAINS`*]->(f:File) RETURN count(f)"
+    mode = "" if cypher else "TRAIL "
+    query = f"MATCH {mode}(r:Repository)-[:`Graph:CONTAINS`*]->(f:File) RETURN count(f)"
     assert run(db, query, cypher).scalar() == 1

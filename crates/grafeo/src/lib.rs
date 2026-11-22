@@ -38,21 +38,15 @@
 //! # Ok::<(), grafeo::Error>(())
 //! ```
 //!
-//! ## Durability: the default features have no write-ahead log
+//! ## Durability
 //!
-//! [`GrafeoDB::open`] writes a database file with the default features
-//! (`embedded`), but they include no write-ahead log: a commit reaches the file
-//! only when the database checkpoints (at `close()`, when it is dropped, or at
-//! `wal_checkpoint()`). **A process that crashes loses every commit since the
-//! last checkpoint.** For commits that survive a crash, enable the `wal`
-//! feature, or the `lpg` profile, which includes it:
-//!
-//! ```toml
-//! grafeo = { version = "0.6", features = ["wal"] }
-//! ```
-//!
-//! The default profile includes the write-ahead log from 0.7.0
-//! ([#468](https://github.com/GrafeoDB/grafeo/issues/468)).
+//! The default features (`embedded`) include the `storage` group (since 0.6.4):
+//! [`GrafeoDB::open`] logs each commit beside the database file, so a commit
+//! survives a crash, and a query past `Config::with_query_memory_limit` spills to
+//! disk or fails instead of growing. A build without the `wal` feature
+//! (`default-features = false`, or the `edge` profile) reaches the file only
+//! when the database checkpoints, so a process that crashes loses every commit
+//! since.
 //!
 //! ## Stability
 //!
@@ -140,6 +134,8 @@ pub use grafeo_engine::database::QueryResult;
 pub use grafeo_engine::database::ResultKind;
 // The warnings a result carries (`QueryResult::warnings`)
 pub use grafeo_engine::database::{QueryWarning, WarningKind};
+// The type of each cell (`QueryResult::cell_types`)
+pub use grafeo_engine::database::CellTypes;
 
 // Re-export MemoryUsage, ProjectionSpec at top level for convenience
 pub use grafeo_engine::MemoryUsage;

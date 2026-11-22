@@ -149,6 +149,32 @@ every commit within that window. Retention is a setting of the database, stored 
 
 Changing the retention takes effect from then on: what was collected before stays gone.
 
+### A byte limit on the window
+
+A window of time can hold any amount of data on a write-heavy database. The history retention limit bounds it in
+bytes as well: once the commits since the window's start replaced more data than the limit, the start moves forward,
+whichever of time or bytes comes first, and a read before it is refused as one before the window. It counts the labeled
+property graph's replaced and deleted values, labels, nodes and edges (RDF keeps no history), and an open transaction
+older than the start still reads its snapshot (the [snapshot retention limit](transactions.md#the-snapshot-retention-limit)
+bounds that). There is no limit by default; zero is refused. It bounds a window the database keeps, so with history
+off it has nothing to bound.
+
+| Binding | Setting |
+| --- | --- |
+| Rust | `Config::with_history_retention_limit(bytes)` |
+| Python | `GrafeoDB(history_retention_limit=bytes)` |
+| Node.js | `GrafeoDB.create(path, { historyRetentionLimit })` |
+| C | `grafeo_options_set_history_retention_limit` |
+| C#, Go, Dart | `GrafeoOptions.SetHistoryRetentionLimit`, `Options.HistoryRetentionLimit`, `GrafeoOptions(historyRetentionLimit:)` |
+| WebAssembly | `new Database({ historyRetentionLimit })` |
+
+The retention is stored in the file; the limit is not, so pass it at every open. A reopen counts the history the file
+holds and the log replays as the commits that wrote it did, so the window starts where it would have without the reopen
+(one difference: a large value that several writes of one transaction replaced is held, and counted, once before a
+reopen and once per write after it). A lower limit at a reopen drops the oldest of it at once; a higher one brings
+nothing back. A checkpoint writes the history from the later of the two
+starts.
+
 A snapshot holds the state, not the history. A database made by `import_snapshot`, or after `restore_snapshot`, keeps
 history from that point on: a read before it, by epoch or by time, fails the same way.
 
@@ -381,5 +407,6 @@ for created, deleted, node in history:
 ### Tips
 
 - **Keep the window as short as your use case allows**: memory and file size grow with the number of versions in it.
+- **Bound it in bytes on a write-heavy database**: `with_history_retention_limit` keeps the window within a size, whatever its length in time.
 - **Epochs advance on commit**: each committed transaction or auto-commit statement is one epoch.
 - **History survives restarts**: checkpoints, crashes and reopens keep the window's versions.

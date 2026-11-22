@@ -32,6 +32,7 @@ export const EDGE_TYPES = {
   USES: { from: ['Product'], to: ['Technology'], props: [] },
   COMPETES_WITH: { from: ['Product'], to: ['Product'], props: [] },
   BUILT: { from: ['Person'], to: ['AI', 'Product'], props: [] },
+  TRAINED_ON: { from: ['AI'], to: ['AI'], props: [] },
   OWNS: { from: ['Person', 'Company'], to: ['AI', 'Place', 'Product'], props: ['from', 'to'] },
   ATTENDED: { from: ['Person', 'Company'], to: ['Event'], props: ['date', 'outcome'] },
   LOCATED_IN: { from: ['Place'], to: ['City'], props: [] },

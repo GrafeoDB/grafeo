@@ -22,6 +22,13 @@ def test_set_graph_to_a_missing_graph_raises_and_keeps_the_graph():
     assert db.current_graph() == "trips"
 
 
+def test_a_graph_may_not_have_an_empty_name():
+    db = GrafeoDB()
+    with pytest.raises(GrafeoError, match="must not be empty"):
+        db.create_graph("")
+    assert db.list_graphs() == []
+
+
 def test_set_schema_to_a_missing_schema_raises_and_keeps_the_schema():
     db = GrafeoDB()
     with pytest.raises(GrafeoError, match="Schema 'missing' does not exist"):

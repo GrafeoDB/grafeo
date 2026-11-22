@@ -22,7 +22,7 @@ fn events(
     }
     // SAFETY: Caller guarantees ptr from grafeo_open* and not yet freed.
     let db = unsafe { &*db };
-    match read(&db.inner.read()) {
+    match read(&*or_fail!(db.inner.read(), std::ptr::null_mut())) {
         Ok(events) => match grafeo_bindings_common::cdc::events_to_json(&events) {
             Ok(json) => {
                 CString::new(json.to_string()).map_or(std::ptr::null_mut(), CString::into_raw)
@@ -87,7 +87,7 @@ mod tests {
     use super::*;
     use crate::database::{
         grafeo_close, grafeo_execute, grafeo_free_database, grafeo_free_result, grafeo_free_string,
-        grafeo_open_memory, grafeo_set_cdc_enabled,
+        grafeo_open_memory, grafeo_set_cdc,
     };
 
     fn events_of(json: *mut c_char) -> Vec<serde_json::Value> {
@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn the_history_of_a_node_and_its_edges_in_the_shared_shape() {
         let db = grafeo_open_memory();
-        grafeo_set_cdc_enabled(db, true);
+        assert_eq!(grafeo_set_cdc(db, true), crate::error::GrafeoStatus::Ok);
         run(
             db,
             "INSERT (:Person {name: 'Butch'})-[:KNOWS]->(:Person {name: 'Hans'})",

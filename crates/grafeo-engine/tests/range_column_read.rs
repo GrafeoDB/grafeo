@@ -1728,8 +1728,9 @@ fn a_kept_plan_reads_the_column_again() {
     session.execute("MATCH (n:L {row: 0}) SET n.k = 8").unwrap();
     assert_eq!(count(literal, 0), 4);
     assert_eq!(count(parameter, 8), 2);
+    let stats = db.query_cache().stats();
     assert!(
-        db.query_cache().stats().optimized_hits > 0,
+        stats.optimized_hits + stats.session_hits > 0,
         "the plan was kept, so this tests a kept plan"
     );
 }

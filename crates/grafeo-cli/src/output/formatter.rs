@@ -155,7 +155,8 @@ pub fn format_memory<W: Write>(writer: &mut W, usage: &MemoryUsage) -> io::Resul
         }
     }
 
-    if !usage.cdc.is_empty() {
+    // The report always has the log's bound; a log without events has nothing to show.
+    if usage.cdc.event_count > 0 {
         writeln!(writer)?;
         writeln!(
             writer,
@@ -362,6 +363,14 @@ mod tests {
         let usage = store_of_one_kilobyte();
         let out = render(&usage);
         assert!(!out.contains("CDC:"));
+    }
+
+    #[test]
+    fn cdc_section_hidden_without_events_whatever_its_bound() {
+        let mut usage = store_of_one_kilobyte();
+        usage.cdc.limit_bytes = 1 << 20;
+        let out = render(&usage);
+        assert!(!out.contains("CDC:"), "{out}");
     }
 
     #[test]

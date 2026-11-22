@@ -89,3 +89,34 @@ fn a_zero_memory_limit_is_refused() {
     assert!(Database::create(Some(options(0.0))).is_err());
     assert!(Database::import_snapshot(&a_snapshot(), Some(options(0.0))).is_err());
 }
+
+/// The plan cache's limit (#674): `planCacheLimit` reads back as
+/// `caches.plan_cache_limit_bytes`, capped at the memory limit; 0 turns the cache off.
+#[wasm_bindgen_test]
+fn the_plan_cache_limit_reads_back() {
+    for (memory, limit, expected) in [
+        (64.0 * MIB, 8.0 * MIB, 8.0 * MIB),
+        (32.0 * MIB, 1024.0 * MIB, 32.0 * MIB),
+        (64.0 * MIB, 0.0, 0.0),
+    ] {
+        let given = options(memory);
+        js_sys::Reflect::set(&given, &"planCacheLimit".into(), &limit.into()).unwrap();
+        let db = Database::create(Some(given)).unwrap();
+        let usage = db.memory_usage().unwrap();
+        let caches = js_sys::Reflect::get(&usage, &"caches".into()).unwrap();
+        let bytes = js_sys::Reflect::get(&caches, &"plan_cache_limit_bytes".into())
+            .unwrap()
+            .as_f64();
+        assert_eq!(bytes, Some(expected), "{limit} under {memory}");
+    }
+}
+
+/// A plan cache limit that is not a whole number of bytes, 0 or more, is refused.
+#[wasm_bindgen_test]
+fn a_negative_or_fractional_plan_cache_limit_is_refused() {
+    for limit in [-1.0, 0.5] {
+        let given = options(64.0 * MIB);
+        js_sys::Reflect::set(&given, &"planCacheLimit".into(), &limit.into()).unwrap();
+        assert!(Database::create(Some(given)).is_err(), "{limit}");
+    }
+}

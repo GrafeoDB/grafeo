@@ -226,6 +226,12 @@
     "to": "2017-05"
   },
   {
+    "subject": "gavin-belson",
+    "relation": "WORKS_AT",
+    "object": "hooli",
+    "to": "2017-06"
+  },
+  {
     "subject": "hooli",
     "relation": "ATTENDED",
     "object": "hooli-con",
@@ -238,6 +244,19 @@
     "object": "hooli-con",
     "from": "2017-06",
     "to": "2017-06"
+  },
+  {
+    "subject": "jack-barker",
+    "relation": "WORKS_AT",
+    "object": "hooli",
+    "to": "2017-06"
+  },
+  {
+    "subject": "jack-barker",
+    "relation": "WORKS_AT",
+    "object": "hooli",
+    "from": "2017-06",
+    "to": "2018-04"
   },
   {
     "subject": "bream-hall",
@@ -276,5 +295,11 @@
     "relation": "WORKS_AT",
     "object": "raviga",
     "to": "2018-03"
+  },
+  {
+    "subject": "gavin-belson",
+    "relation": "WORKS_AT",
+    "object": "hooli",
+    "from": "2018-04"
   }
 ]

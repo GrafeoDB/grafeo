@@ -800,8 +800,8 @@ pub(crate) fn aggregate_column_name(aggregate: &crate::query::plan::AggregateExp
     if let Some(second) = &aggregate.expression2 {
         args.push(expression_to_string(second));
     }
-    if let Some(percentile) = aggregate.percentile {
-        args.push(literal_to_string(&Value::Float64(percentile)));
+    if let Some(percentile) = &aggregate.percentile {
+        args.push(expression_to_string(percentile));
     }
     if let Some(separator) = &aggregate.separator {
         args.push(literal_to_string(&Value::String(separator.as_str().into())));

@@ -443,6 +443,14 @@ const NOT_WRITTEN: &[(&str, &str)] = &[
         "DropCatalog/StoredConfig",
         "the stored settings go into the catalog section at a checkpoint, never into the WAL",
     ),
+    (
+        "PutCatalog/CdcConfig",
+        "the stored change data capture setting goes into the catalog section at a checkpoint,          never into the WAL",
+    ),
+    (
+        "DropCatalog/CdcConfig",
+        "the stored change data capture setting goes into the catalog section at a checkpoint,          never into the WAL",
+    ),
 ];
 
 #[test]

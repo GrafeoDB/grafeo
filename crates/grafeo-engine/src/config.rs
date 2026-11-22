@@ -401,6 +401,10 @@ impl Default for DurabilityMode {
     }
 }
 
+/// The path expansions one statement may make by default (see
+/// [`Config::with_path_expansion_limit`]).
+pub use grafeo_core::execution::operators::DEFAULT_PATH_EXPANSION_LIMIT;
+
 /// Errors from [`Config::validate()`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -409,8 +413,16 @@ pub enum ConfigError {
     ZeroMemoryLimit,
     /// [`Config::with_query_memory_limit`] must be greater than zero.
     ZeroQueryMemoryLimit,
+    /// [`Config::with_cdc_memory_limit`] must be greater than zero.
+    ZeroCdcMemoryLimit,
     /// [`Config::with_path_search_budget`] must be greater than zero.
     ZeroPathSearchBudget,
+    /// [`Config::with_path_expansion_limit`] must be greater than zero.
+    ZeroPathExpansionLimit,
+    /// [`Config::with_max_query_length`] must be greater than zero.
+    ZeroMaxQueryLength,
+    /// [`Config::with_max_identifier_length`] must be greater than zero.
+    ZeroMaxIdentifierLength,
     /// Thread count must be greater than zero.
     ZeroThreads,
     /// `DurabilityMode::Adaptive` needs an interval greater than zero.
@@ -441,6 +453,20 @@ pub enum ConfigError {
     /// [`Config::with_memory_fraction`] was given an infinite fraction, which
     /// would make the memory limit unbounded.
     MemoryFractionNotFinite,
+    /// [`Config::with_snapshot_retention_limit`] is below
+    /// [`MIN_SNAPSHOT_RETENTION_LIMIT`]; holds the bytes given.
+    SnapshotRetentionLimitTooSmall(u64),
+    /// [`Config::with_history_retention_limit`] must be greater than zero.
+    ZeroHistoryRetentionLimit,
+    /// Change data capture is stored on (or turned on) for a database
+    /// without a WAL: the setting keeps the WAL from its cursor, and nothing
+    /// would log the commits of that open. Raised by a
+    /// writable open without the WAL while the setting is stored on, and by
+    /// `GrafeoDB::set_cdc(true)` without a WAL.
+    CdcWithoutWal,
+    /// `GrafeoDB::set_cdc` on a database on a store of its own (`with_store`),
+    /// which has no file to store the setting in.
+    CdcWithoutFile,
 }
 
 /// Whether a section of `section_type` can be moved to disk: whether its
@@ -482,8 +508,18 @@ impl fmt::Display for ConfigError {
             Self::ZeroQueryMemoryLimit => {
                 write!(f, "query_memory_limit must be greater than zero")
             }
+            Self::ZeroCdcMemoryLimit => {
+                write!(f, "cdc_memory_limit must be greater than zero")
+            }
             Self::ZeroPathSearchBudget => {
                 write!(f, "path_search_budget must be greater than zero")
+            }
+            Self::ZeroPathExpansionLimit => {
+                write!(f, "path_expansion_limit must be greater than zero")
+            }
+            Self::ZeroMaxQueryLength => write!(f, "max_query_length must be greater than zero"),
+            Self::ZeroMaxIdentifierLength => {
+                write!(f, "max_identifier_length must be greater than zero")
             }
             Self::ZeroThreads => write!(f, "threads must be greater than zero"),
             Self::ZeroAdaptiveFlushInterval => write!(
@@ -532,6 +568,24 @@ impl fmt::Display for ConfigError {
                 "checkpoint_wal_size must be at least 1 MiB, and {bytes} bytes is not; turn \
                  automatic checkpoints off with Config::without_checkpoint_wal_size() instead"
             ),
+            Self::SnapshotRetentionLimitTooSmall(bytes) => write!(
+                f,
+                "snapshot_retention_limit must be at least 1 MiB, and {bytes} bytes is not"
+            ),
+            Self::ZeroHistoryRetentionLimit => {
+                write!(f, "history_retention_limit must be greater than zero")
+            }
+            Self::CdcWithoutWal => write!(
+                f,
+                "change data capture stored with a database keeps its WAL from a cursor, \
+                 and this open has no WAL: open it with the WAL, open it read-only, or \
+                 turn CDC off from an open with the WAL"
+            ),
+            Self::CdcWithoutFile => write!(
+                f,
+                "a database on a store of its own has no file to store the change data \
+                 capture setting in: turn capture on for an open with Config::with_cdc()"
+            ),
         }
     }
 }
@@ -574,6 +628,10 @@ pub const DEFAULT_WAL_SEGMENT_SIZE: u64 = 64 << 20;
 
 /// The smallest `wal_segment_size`: 1 MiB.
 pub const MIN_WAL_SEGMENT_SIZE: u64 = 1 << 20;
+
+/// The smallest snapshot retention limit, and the least the default comes to: 1 MiB (see
+/// [`Config::with_snapshot_retention_limit`]).
+pub const MIN_SNAPSHOT_RETENTION_LIMIT: u64 = 1 << 20;
 
 /// The largest `wal_segment_size`: 1 GiB.
 pub const MAX_WAL_SEGMENT_SIZE: u64 = 1 << 30;
@@ -829,8 +887,9 @@ pub struct Config {
     /// Controls how many events the CDC log retains in memory. By default,
     /// retains up to 1,000 epochs and 100,000 events.
     /// [`CdcRetentionConfig::unlimited()`](crate::cdc::CdcRetentionConfig::unlimited)
-    /// disables pruning, but beware of unbounded memory growth on
-    /// long-running instances. Set it with [`Config::with_cdc_retention()`].
+    /// lifts those two; the byte bound stays (see
+    /// [`Config::with_cdc_memory_limit`]). Set it with
+    /// [`Config::with_cdc_retention()`].
     #[cfg(feature = "cdc")]
     #[deprecated(
         since = "0.6.0",
@@ -933,6 +992,29 @@ pub struct Config {
     /// The memory one path search may hold, when set
     /// ([`with_path_search_budget`](Self::with_path_search_budget)): per open, never stored.
     path_search_budget: Option<usize>,
+
+    /// The path expansions one statement may make
+    /// ([`with_path_expansion_limit`](Self::with_path_expansion_limit)): per open, never stored.
+    path_expansion_limit: u64,
+
+    /// The most bytes a statement's text may have
+    /// ([`with_max_query_length`](Self::with_max_query_length)): per open, never stored.
+    max_query_length: usize,
+
+    /// The most bytes one name in a statement may have
+    /// ([`with_max_identifier_length`](Self::with_max_identifier_length)): per open, never
+    /// stored.
+    max_identifier_length: usize,
+
+    /// The replaced bytes an open transaction's snapshot may keep, when set
+    /// ([`with_snapshot_retention_limit`](Self::with_snapshot_retention_limit)): per open,
+    /// never stored.
+    snapshot_retention_limit: Option<u64>,
+
+    /// The bytes the history window may keep, when set
+    /// ([`with_history_retention_limit`](Self::with_history_retention_limit)): per open, never
+    /// stored.
+    history_retention_limit: Option<u64>,
 
     /// The plan cache's bound ([`with_plan_cache_limit`](Self::with_plan_cache_limit)): per
     /// open, never stored.
@@ -1080,6 +1162,11 @@ impl Default for Config {
             spill_limit: SpillLimit::Default,
             query_memory_limit: None,
             path_search_budget: None,
+            path_expansion_limit: DEFAULT_PATH_EXPANSION_LIMIT,
+            max_query_length: grafeo_adapters::query::limits::DEFAULT_MAX_QUERY_LENGTH,
+            max_identifier_length: grafeo_adapters::query::limits::DEFAULT_MAX_IDENTIFIER_LENGTH,
+            snapshot_retention_limit: None,
+            history_retention_limit: None,
             plan_cache_limit: PlanCacheLimit::Default,
             spill_path: None,
             threads: num_cpus::get(),
@@ -1168,10 +1255,11 @@ impl Config {
         self
     }
 
-    /// Sets the bytes one path search may hold: the paths a variable-length or
-    /// shortest-path search keeps at once, or what an RDF property path visits. A search that
-    /// would hold more fails with `GRAFEO-S001` naming the path search budget, and changes
-    /// nothing. Never above the memory limit when one is set. Without it, a quarter of the
+    /// Sets the bytes one path search may hold: everything a variable-length, shortest-path or
+    /// RDF property path search holds at once (the nodes it visits, its queues and the paths it
+    /// keeps). A search that would hold more fails with `GRAFEO-S001` naming the path search
+    /// budget, and changes nothing. The same bytes count against
+    /// [`with_query_memory_limit`](Self::with_query_memory_limit) and the memory limit. Never above the memory limit when one is set. Without it, a quarter of the
     /// memory limit, at most 256 MiB, or 256 MiB without a memory limit
     /// ([`path_search_budget`](Self::path_search_budget)). Per open, never stored; 0 fails
     /// [`validate`](Self::validate).
@@ -1181,9 +1269,9 @@ impl Config {
         self
     }
 
-    /// The bytes one path search of a query may hold (the paths a
-    /// variable-length or shortest-path search keeps at once, what an RDF
-    /// property path visits): the [`with_path_search_budget`](Self::with_path_search_budget)
+    /// The bytes one path search of a query may hold (everything a
+    /// variable-length, shortest-path or RDF property path search holds at
+    /// once): the [`with_path_search_budget`](Self::with_path_search_budget)
     /// setting, at most the memory limit; without it a quarter of
     /// [`memory_limit`](Self::memory_limit), at most 256 MiB, or 256 MiB
     /// without a memory limit. A search that would hold more fails with
@@ -1199,6 +1287,109 @@ impl Config {
                 (limit / 4).clamp(1, DEFAULT_PATH_SEARCH_BUDGET)
             }),
         }
+    }
+
+    /// Sets the path expansions one statement's variable-length and shortest-path searches may
+    /// make together: each edge they read to extend a path, and each node and edge they copy
+    /// out of a path into a row (a path variable, an edge list). A statement that would make
+    /// more fails with `GRAFEO-Q009` naming the path expansion limit, and changes nothing.
+    /// Reachability searches (`DISTINCT` targets) and RDF property paths are not counted.
+    /// Default 100 million ([`DEFAULT_PATH_EXPANSION_LIMIT`]). Per open, never stored; 0
+    /// fails [`validate`](Self::validate).
+    #[must_use]
+    pub fn with_path_expansion_limit(mut self, expansions: u64) -> Self {
+        self.path_expansion_limit = expansions;
+        self
+    }
+
+    /// The path expansions one statement may make
+    /// ([`with_path_expansion_limit`](Self::with_path_expansion_limit)).
+    #[must_use]
+    pub fn path_expansion_limit(&self) -> u64 {
+        self.path_expansion_limit
+    }
+
+    /// Sets the most bytes a statement's text may have: its UTF-8 bytes as given, comments
+    /// and whitespace included, the values passed as parameters not. A longer statement fails
+    /// before it is read with `GRAFEO-Q002` naming the query length limit; pass large values
+    /// as parameters instead. Default 16 MiB, the default most bytes of a property value, so
+    /// any value that can be stored fits as a literal. Per open, never stored; 0 fails
+    /// [`validate`](Self::validate).
+    #[must_use]
+    pub fn with_max_query_length(mut self, bytes: usize) -> Self {
+        self.max_query_length = bytes;
+        self
+    }
+
+    /// The most bytes a statement's text may have
+    /// ([`with_max_query_length`](Self::with_max_query_length)).
+    #[must_use]
+    pub fn max_query_length(&self) -> usize {
+        self.max_query_length
+    }
+
+    /// Sets the most bytes one name in a statement may have, as written between its
+    /// delimiters: an identifier, a delimited identifier or a parameter name, a SPARQL
+    /// variable, prefixed name or blank node label, a GraphQL name. String literals and IRIs
+    /// are not names. A statement with a longer name fails with `GRAFEO-Q002` naming the
+    /// identifier length limit and the name's place. Default 16 KiB. Per open, never stored;
+    /// 0 fails [`validate`](Self::validate).
+    #[must_use]
+    pub fn with_max_identifier_length(mut self, bytes: usize) -> Self {
+        self.max_identifier_length = bytes;
+        self
+    }
+
+    /// The most bytes one name in a statement may have
+    /// ([`with_max_identifier_length`](Self::with_max_identifier_length)).
+    #[must_use]
+    pub fn max_identifier_length(&self) -> usize {
+        self.max_identifier_length
+    }
+
+    /// The parse limits of the open: [`max_query_length`](Self::max_query_length) and
+    /// [`max_identifier_length`](Self::max_identifier_length).
+    #[cfg(query_language)]
+    pub(crate) fn parse_limits(&self) -> grafeo_adapters::query::limits::ParseLimits {
+        grafeo_adapters::query::limits::ParseLimits {
+            max_query_length: self.max_query_length,
+            max_identifier_length: self.max_identifier_length,
+        }
+    }
+
+    /// Sets how many bytes of replaced committed state an open transaction's snapshot may keep:
+    /// what the commits since it began replaced (or deleted) that it can still read. Past it the
+    /// snapshot expires, and the transaction's next call fails with the retryable
+    /// `GRAFEO-T012` and rolls it back, so the database stops keeping those bytes for it. A
+    /// statement outside an explicit transaction never expires, nor does a snapshot, view,
+    /// stream outside a transaction, iterator or export: one of those held past the limit puts
+    /// a notice (`01Y02`) on the statement whose commit passed it. Without it, a quarter of
+    /// the memory limit, or of the memory the database detected when none is set, and at
+    /// least [`MIN_SNAPSHOT_RETENTION_LIMIT`]. Per open, never stored; below
+    /// [`MIN_SNAPSHOT_RETENTION_LIMIT`] (1 MiB) fails [`validate`](Self::validate).
+    #[must_use]
+    pub fn with_snapshot_retention_limit(mut self, bytes: u64) -> Self {
+        self.snapshot_retention_limit = Some(bytes);
+        self
+    }
+
+    /// The snapshot retention limit set with
+    /// [`with_snapshot_retention_limit`](Self::with_snapshot_retention_limit), or `None` for the
+    /// default: a quarter of the open's memory budget (the memory limit, or the memory the
+    /// database detected when none is set), at least [`MIN_SNAPSHOT_RETENTION_LIMIT`].
+    #[must_use]
+    pub fn snapshot_retention_limit(&self) -> Option<u64> {
+        self.snapshot_retention_limit
+    }
+
+    /// The snapshot retention limit an open with `memory_budget` bytes of memory runs with:
+    /// the [`with_snapshot_retention_limit`](Self::with_snapshot_retention_limit) setting, or a
+    /// quarter of the budget, at least [`MIN_SNAPSHOT_RETENTION_LIMIT`].
+    #[must_use]
+    pub(crate) fn snapshot_retention_limit_for(&self, memory_budget: usize) -> u64 {
+        self.snapshot_retention_limit.unwrap_or_else(|| {
+            (u64::try_from(memory_budget).unwrap_or(u64::MAX) / 4).max(MIN_SNAPSHOT_RETENTION_LIMIT)
+        })
     }
 
     /// Sets the number of worker threads, which has no effect: nothing sizes
@@ -1342,8 +1533,9 @@ impl Config {
     /// limit, and the statement changes nothing. The memory
     /// limit binds besides it: a query limit above the memory limit is the
     /// memory limit. Per open, never stored; 0 fails
-    /// [`validate`](Self::validate). It applies in builds with spilling (the
-    /// `spill` feature); path searches keep their own budget
+    /// [`validate`](Self::validate). It applies in every build; without
+    /// spilling (the `spill` feature) nothing spills, so a sort refuses at the
+    /// cap too. Path searches count against it too, within their own budget
     /// ([`with_path_search_budget`](Self::with_path_search_budget)).
     #[must_use]
     pub fn with_query_memory_limit(mut self, bytes: usize) -> Self {
@@ -1552,7 +1744,9 @@ impl Config {
 
     /// Sets how many CDC events the change history keeps (see
     /// [`Config::cdc_retention`]); garbage collection drops the oldest
-    /// events beyond it.
+    /// events beyond it. A retention without a byte bound of its own keeps
+    /// the one [`with_cdc_memory_limit`](Self::with_cdc_memory_limit) set,
+    /// in either order.
     ///
     /// # Examples
     ///
@@ -1568,7 +1762,31 @@ impl Config {
     #[cfg(feature = "cdc")]
     #[must_use]
     pub fn with_cdc_retention(mut self, retention: crate::cdc::CdcRetentionConfig) -> Self {
+        let max_bytes = retention.max_bytes.or(self.cdc_retention.max_bytes);
         self.cdc_retention = retention;
+        self.cdc_retention.max_bytes = max_bytes;
+        self
+    }
+
+    /// Bounds the bytes the in-memory change log holds (the retention's
+    /// [`max_bytes`](crate::cdc::CdcRetentionConfig::max_bytes)).
+    /// When the log passes the bound, its oldest whole commits are dropped
+    /// until it is at or below three quarters of the bound; the newest
+    /// commit is always kept. Unset, the bound is a sixteenth of the memory limit; a bound above the memory
+    /// limit is capped at it. 0 is refused at the open with `GRAFEO-V001`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use grafeo_engine::Config;
+    ///
+    /// let config = Config::in_memory().with_cdc().with_cdc_memory_limit(4 << 20);
+    /// assert_eq!(config.cdc_memory_limit(), Some(4 << 20));
+    /// ```
+    #[cfg(feature = "cdc")]
+    #[must_use]
+    pub fn with_cdc_memory_limit(mut self, bytes: usize) -> Self {
+        self.cdc_retention.max_bytes = Some(bytes);
         self
     }
 
@@ -1705,6 +1923,10 @@ impl Config {
     /// ([`ErrorCode::BackupChainBroken`](grafeo_common::utils::error::ErrorCode::BackupChainBroken)),
     /// and a full backup starts a new chain. Raise it when more than this
     /// much is written between two incremental backups.
+    ///
+    /// The same limit holds for the WAL a change data capture cursor keeps
+    /// (see [`GrafeoDB::set_cdc`](crate::GrafeoDB::set_cdc)): past it the
+    /// oldest segments go, with a warning once.
     #[must_use]
     pub fn with_wal_retention_limit(mut self, bytes: u64) -> Self {
         self.wal_retention_limit = bytes;
@@ -1717,6 +1939,19 @@ impl Config {
     pub fn with_history_retention(mut self, retention: HistoryRetention) -> Self {
         self.history_retention = retention;
         self.set.insert(SetFields::HISTORY_RETENTION);
+        self
+    }
+
+    /// Sets how many bytes of replaced data the history window may keep: once the commits since
+    /// the window's start replaced more than this, the start moves forward, whichever of time or
+    /// bytes comes first, and a read before it is refused as one before the window. It counts
+    /// the labeled property graph's replaced and deleted data (RDF keeps no history). Without
+    /// it the window keeps what its retention says. Per open, never stored (the retention
+    /// itself is stored): pass it at every open; 0 fails [`validate`](Self::validate). It bounds
+    /// a window the database keeps: with history off it has nothing to bound.
+    #[must_use]
+    pub fn with_history_retention_limit(mut self, bytes: u64) -> Self {
+        self.history_retention_limit = Some(bytes);
         self
     }
 
@@ -1953,6 +2188,24 @@ impl Config {
         &self.cdc_retention
     }
 
+    /// The bound set with [`with_cdc_memory_limit`](Self::with_cdc_memory_limit),
+    /// `None` when the database derives it.
+    #[cfg(feature = "cdc")]
+    #[must_use]
+    pub fn cdc_memory_limit(&self) -> Option<usize> {
+        self.cdc_retention.max_bytes
+    }
+
+    /// The retention with its byte bound in force under a memory budget of
+    /// `budget` bytes: the one set, or a sixteenth of the budget, and never
+    /// above the budget.
+    #[cfg(feature = "cdc")]
+    pub(crate) fn cdc_retention_under(&self, budget: usize) -> crate::cdc::CdcRetentionConfig {
+        let mut retention = self.cdc_retention.clone();
+        retention.max_bytes = Some(retention.max_bytes.unwrap_or(budget / 16).min(budget));
+        retention
+    }
+
     /// The memory configuration of each section that has one.
     #[must_use]
     pub fn section_configs(
@@ -1999,6 +2252,14 @@ impl Config {
         self.history_retention
     }
 
+    /// The history retention limit set with
+    /// [`with_history_retention_limit`](Self::with_history_retention_limit), or `None`: no
+    /// byte limit, the window keeps what its retention says.
+    #[must_use]
+    pub fn history_retention_limit(&self) -> Option<u64> {
+        self.history_retention_limit
+    }
+
     /// The automatic checkpoint triggers this configuration sets.
     #[must_use]
     pub fn checkpoint_triggers(&self) -> crate::admin::CheckpointTriggers {
@@ -2039,8 +2300,29 @@ impl Config {
         if self.query_memory_limit == Some(0) {
             return Err(ConfigError::ZeroQueryMemoryLimit);
         }
+        #[cfg(feature = "cdc")]
+        if self.cdc_retention.max_bytes == Some(0) {
+            return Err(ConfigError::ZeroCdcMemoryLimit);
+        }
         if self.path_search_budget == Some(0) {
             return Err(ConfigError::ZeroPathSearchBudget);
+        }
+        if self.path_expansion_limit == 0 {
+            return Err(ConfigError::ZeroPathExpansionLimit);
+        }
+        if self.max_query_length == 0 {
+            return Err(ConfigError::ZeroMaxQueryLength);
+        }
+        if self.max_identifier_length == 0 {
+            return Err(ConfigError::ZeroMaxIdentifierLength);
+        }
+        if let Some(bytes) = self.snapshot_retention_limit
+            && bytes < MIN_SNAPSHOT_RETENTION_LIMIT
+        {
+            return Err(ConfigError::SnapshotRetentionLimitTooSmall(bytes));
+        }
+        if self.history_retention_limit == Some(0) {
+            return Err(ConfigError::ZeroHistoryRetentionLimit);
         }
         if let Some(fraction) = self.memory_fraction {
             if fraction.is_infinite() {
@@ -2776,12 +3058,27 @@ mod tests {
             .with_spill_limit(88 << 20)
             .with_query_memory_limit(19 << 20)
             .with_path_search_budget(3 << 20)
+            .with_path_expansion_limit(4_000)
+            .with_max_query_length(9 << 20)
+            .with_max_identifier_length(7 << 10)
+            .with_snapshot_retention_limit(5 << 20)
+            .with_history_retention_limit(6 << 20)
             .with_plan_cache_limit(8 << 20);
         #[cfg(feature = "encryption")]
         let config = config.with_encryption(EncryptionConfig::new(std::sync::Arc::new(
             grafeo_common::encryption::KeyChain::new([3; 32]),
         )));
 
+        assert_eq!(
+            config.snapshot_retention_limit(),
+            Some(5 << 20),
+            "snapshot_retention_limit() reads the setting"
+        );
+        assert_eq!(
+            config.history_retention_limit(),
+            Some(6 << 20),
+            "history_retention_limit() reads the setting"
+        );
         #[expect(
             deprecated,
             reason = "the pattern names every field, the deprecated adaptive one too, until 0.7.0 removes it"
@@ -2825,6 +3122,11 @@ mod tests {
             spill_limit,
             query_memory_limit,
             path_search_budget,
+            path_expansion_limit,
+            max_query_length,
+            max_identifier_length,
+            snapshot_retention_limit,
+            history_retention_limit,
             plan_cache_limit,
         } = config;
 
@@ -2842,6 +3144,30 @@ mod tests {
             path_search_budget,
             Some(3 << 20),
             "with_path_search_budget sets the budget"
+        );
+        assert_eq!(
+            path_expansion_limit, 4_000,
+            "with_path_expansion_limit sets the limit"
+        );
+        assert_eq!(
+            max_query_length,
+            9 << 20,
+            "with_max_query_length sets the limit"
+        );
+        assert_eq!(
+            max_identifier_length,
+            7 << 10,
+            "with_max_identifier_length sets the limit"
+        );
+        assert_eq!(
+            snapshot_retention_limit,
+            Some(5 << 20),
+            "with_snapshot_retention_limit sets the limit"
+        );
+        assert_eq!(
+            history_retention_limit,
+            Some(6 << 20),
+            "with_history_retention_limit sets the limit"
         );
         assert_eq!(
             plan_cache_limit,
@@ -3049,5 +3375,27 @@ mod tests {
         // Other defaults should still apply
         assert!(config.backward_edges());
         assert_eq!(config.graph_model(), GraphModel::Lpg);
+    }
+
+    /// The snapshot retention limit an open runs with: the setting, or a quarter of the open's
+    /// memory budget, at least 1 MiB.
+    #[test]
+    fn the_snapshot_retention_limit_is_a_quarter_of_the_budget_or_the_setting() {
+        let default = Config::in_memory();
+        assert_eq!(
+            default.snapshot_retention_limit(),
+            None,
+            "the default applies"
+        );
+        assert_eq!(default.snapshot_retention_limit_for(16 << 20), 4 << 20);
+        assert_eq!(
+            default.snapshot_retention_limit_for(1 << 20),
+            MIN_SNAPSHOT_RETENTION_LIMIT,
+            "at least 1 MiB"
+        );
+        let set = Config::in_memory().with_snapshot_retention_limit(5 << 20);
+        assert_eq!(set.snapshot_retention_limit(), Some(5 << 20));
+        assert_eq!(set.snapshot_retention_limit_for(16 << 20), 5 << 20);
+        assert_eq!(set.snapshot_retention_limit_for(1 << 40), 5 << 20);
     }
 }

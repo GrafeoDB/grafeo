@@ -5,9 +5,7 @@
 //! spanning trees, and network flow.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
 
-use parking_lot::RwLock;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -186,7 +184,7 @@ fn node_list(
 /// treats as the same key (`True` and `1`).
 #[pyclass(name = "Algorithms")]
 pub struct PyAlgorithms {
-    db: Arc<RwLock<GrafeoDB>>,
+    db: crate::database::SharedDb,
     /// The named graph (schema, name) of a `GraphHandle`; `None` reads the
     /// graph `set_graph()` selects.
     graph: Option<(Option<String>, String)>,
@@ -195,12 +193,16 @@ pub struct PyAlgorithms {
 impl PyAlgorithms {
     /// The algorithms of the database: they read the graph `set_graph()`
     /// selects, or the default graph when none is selected.
-    pub fn new(db: Arc<RwLock<GrafeoDB>>) -> Self {
+    pub(crate) fn new(db: crate::database::SharedDb) -> Self {
         Self { db, graph: None }
     }
 
     /// The algorithms of one named graph (`db.graph(name).algorithms`).
-    pub fn for_graph(db: Arc<RwLock<GrafeoDB>>, schema: Option<String>, name: String) -> Self {
+    pub(crate) fn for_graph(
+        db: crate::database::SharedDb,
+        schema: Option<String>,
+        name: String,
+    ) -> Self {
         Self {
             db,
             graph: Some((schema, name)),
@@ -246,7 +248,7 @@ impl PyAlgorithms {
         compute: impl FnOnce(&dyn GraphStore, ReadView) -> Result<T, E> + Send,
     ) -> PyResult<T> {
         without_gil(py, || {
-            let db = self.db.read();
+            let db = self.db.read()?;
             let _deadline = grafeo_core::execution::deadline::enter(db.query_deadline());
             let snapshot = self.snapshot_for(&db, projection)?;
             compute(snapshot.store(), snapshot.view()).map_err(Into::into)
@@ -265,7 +267,7 @@ impl PyAlgorithms {
         compute: impl FnOnce(&dyn GraphStore, ReadView, Option<&[NodeId]>) -> Result<T, E> + Send,
     ) -> PyResult<(T, Option<KeyOrder>)> {
         let (result, ordered) = without_gil(py, || {
-            let db = self.db.read();
+            let db = self.db.read()?;
             let _deadline = grafeo_core::execution::deadline::enter(db.query_deadline());
             let snapshot = self.snapshot_for(&db, projection)?;
             let (store, view) = (snapshot.store(), snapshot.view());

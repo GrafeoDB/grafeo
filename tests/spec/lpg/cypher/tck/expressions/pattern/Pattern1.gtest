@@ -1,0 +1,563 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/pattern/Pattern1.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Pattern1"
+  title: "Pattern1 - Pattern predicate"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Matching on any single outgoing directed connection
+  - name: s1_matching_on_any_single_outgoing_directed_connection
+    setup:
+      - |
+        CREATE (a:A)-[:REL1]->(b:B), (b)-[:REL2]->(a), (a)-[:REL3]->(:C), (a)-[:REL1]->(:D)
+    query: |
+      MATCH (n) WHERE (n)-[]->() RETURN n
+    expect:
+      values: |
+        | n |
+        | (:A) |
+        | (:B) |
+      side_effects: {}
+
+  # [2] Matching on a single undirected connection
+  - name: s2_matching_on_a_single_undirected_connection
+    setup:
+      - |
+        CREATE (a:A)-[:REL1]->(b:B), (b)-[:REL2]->(a), (a)-[:REL3]->(:C), (a)-[:REL1]->(:D)
+    query: |
+      MATCH (n) WHERE (n)-[]-() RETURN n
+    expect:
+      values: |
+        | n |
+        | (:A) |
+        | (:B) |
+        | (:C) |
+        | (:D) |
+      side_effects: {}
+
+  # [3] Matching on any single incoming directed connection
+  - name: s3_matching_on_any_single_incoming_directed_connection
+    setup:
+      - |
+        CREATE (a:A)-[:REL1]->(b:B), (b)-[:REL2]->(a), (a)-[:REL3]->(:C), (a)-[:REL1]->(:D)
+    query: |
+      MATCH (n) WHERE (n)<-[]-() RETURN n
+    expect:
+      values: |
+        | n |
+        | (:A) |
+        | (:B) |
+        | (:C) |
+        | (:D) |
+      side_effects: {}
+
+  # [4] Matching on a specific type of single outgoing directed connection
+  - name: s4_matching_on_a_specific_type_of_single_outgoing_directed_connection
+    setup:
+      - |
+        CREATE (a:A)-[:REL1]->(b:B), (b)-[:REL2]->(a), (a)-[:REL3]->(:C), (a)-[:REL1]->(:D)
+    query: |
+      MATCH (n) WHERE (n)-[:REL1]->() RETURN n
+    expect:
+      values: |
+        | n |
+        | (:A) |
+      side_effects: {}
+
+  # [5] Matching on a specific type of single undirected connection
+  - name: s5_matching_on_a_specific_type_of_single_undirected_connection
+    setup:
+      - |
+        CREATE (a:A)-[:REL1]->(b:B), (b)-[:REL2]->(a), (a)-[:REL3]->(:C), (a)-[:REL1]->(:D)
+    query: |
+      MATCH (n) WHERE (n)-[:REL1]-() RETURN n
+    expect:
+      values: |
+        | n |
+        | (:A) |
+        | (:B) |
+        | (:D) |
+      side_effects: {}
+
+  # [6] Matching on a specific type of single incoming directed connection
+  - name: s6_matching_on_a_specific_type_of_single_incoming_directed_connection
+    setup:
+      - |
+        CREATE (a:A)-[:REL1]->(b:B), (b)-[:REL2]->(a), (a)-[:REL3]->(:C), (a)-[:REL1]->(:D)
+    query: |
+      MATCH (n) WHERE (n)<-[:REL1]-() RETURN n
+    expect:
+      values: |
+        | n |
+        | (:B) |
+        | (:D) |
+      side_effects: {}
+
+  # [7] Matching on a specific type of a variable length outgoing directed connection
+  - name: s7_matching_on_a_specific_type_of_a_variable_length_outgoing_directed_connection
+    setup:
+      - |
+        CREATE (a:A)-[:REL1]->(b:B), (b)-[:REL2]->(a), (a)-[:REL3]->(:C), (a)-[:REL1]->(:D)
+    query: |
+      MATCH (n) WHERE (n)-[:REL1*]->() RETURN n
+    expect:
+      values: |
+        | n |
+        | (:A) |
+      side_effects: {}
+
+  # [8] Matching on a specific type of variable length undirected connection
+  - name: s8_matching_on_a_specific_type_of_variable_length_undirected_connection
+    setup:
+      - |
+        CREATE (a:A)-[:REL1]->(b:B), (b)-[:REL2]->(a), (a)-[:REL3]->(:C), (a)-[:REL1]->(:D)
+    query: |
+      MATCH (n) WHERE (n)-[:REL1*]-() RETURN n
+    expect:
+      values: |
+        | n |
+        | (:A) |
+        | (:B) |
+        | (:D) |
+      side_effects: {}
+
+  # [9] Matching on a specific type of variable length incoming directed connection
+  - name: s9_matching_on_a_specific_type_of_variable_length_incoming_directed_connection
+    setup:
+      - |
+        CREATE (a:A)-[:REL1]->(b:B), (b)-[:REL2]->(a), (a)-[:REL3]->(:C), (a)-[:REL1]->(:D)
+    query: |
+      MATCH (n) WHERE (n)<-[:REL1*]-() RETURN n
+    expect:
+      values: |
+        | n |
+        | (:B) |
+        | (:D) |
+      side_effects: {}
+
+  # [10] Matching on a specific type of undirected connection with length 2
+  - name: s10_matching_on_a_specific_type_of_undirected_connection_with_length_2
+    setup:
+      - |
+        CREATE (a:A)-[:REL1]->(b:B), (b)-[:REL2]->(a), (a)-[:REL3]->(:C), (a)-[:REL1]->(:D)
+    query: |
+      MATCH (n) WHERE (n)-[:REL1*2]-() RETURN n
+    expect:
+      values: |
+        | n |
+        | (:B) |
+        | (:D) |
+      side_effects: {}
+
+  # [10] Fail on introducing unbounded variables in pattern #1
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s10_fail_on_introducing_unbounded_variables_in_pattern_1
+    query: |
+      MATCH (n) WHERE (a) RETURN n
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [10] Fail on introducing unbounded variables in pattern #2
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s10_fail_on_introducing_unbounded_variables_in_pattern_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Pattern1: [10] Fail on introducing unbounded variables in pattern #2"
+      issue: "#795"
+    query: |
+      MATCH (n) WHERE (n)-[r]->(a) RETURN n
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [10] Fail on introducing unbounded variables in pattern #3
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s10_fail_on_introducing_unbounded_variables_in_pattern_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Pattern1: [10] Fail on introducing unbounded variables in pattern #3"
+      issue: "#795"
+    query: |
+      MATCH (n) WHERE (a)-[r]->(n) RETURN n
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [10] Fail on introducing unbounded variables in pattern #4
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s10_fail_on_introducing_unbounded_variables_in_pattern_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Pattern1: [10] Fail on introducing unbounded variables in pattern #4"
+      issue: "#795"
+    query: |
+      MATCH (n) WHERE (n)<-[r {}]-(a) RETURN n
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [10] Fail on introducing unbounded variables in pattern #5
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s10_fail_on_introducing_unbounded_variables_in_pattern_5
+    xfail:
+      spec: "openCypher TCK 2024.3 Pattern1: [10] Fail on introducing unbounded variables in pattern #5"
+      issue: "#795"
+    query: |
+      MATCH (n) WHERE (n)-[r {}]-(a) RETURN n
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [10] Fail on introducing unbounded variables in pattern #6
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s10_fail_on_introducing_unbounded_variables_in_pattern_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Pattern1: [10] Fail on introducing unbounded variables in pattern #6"
+      issue: "#795"
+    query: |
+      MATCH (n) WHERE (n)-[r]->() RETURN n
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [10] Fail on introducing unbounded variables in pattern #7
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s10_fail_on_introducing_unbounded_variables_in_pattern_7
+    xfail:
+      spec: "openCypher TCK 2024.3 Pattern1: [10] Fail on introducing unbounded variables in pattern #7"
+      issue: "#795"
+    query: |
+      MATCH (n) WHERE ()-[r]->(n) RETURN n
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [10] Fail on introducing unbounded variables in pattern #8
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s10_fail_on_introducing_unbounded_variables_in_pattern_8
+    xfail:
+      spec: "openCypher TCK 2024.3 Pattern1: [10] Fail on introducing unbounded variables in pattern #8"
+      issue: "#795"
+    query: |
+      MATCH (n) WHERE (n)<-[r]-() RETURN n
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [10] Fail on introducing unbounded variables in pattern #9
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s10_fail_on_introducing_unbounded_variables_in_pattern_9
+    xfail:
+      spec: "openCypher TCK 2024.3 Pattern1: [10] Fail on introducing unbounded variables in pattern #9"
+      issue: "#795"
+    query: |
+      MATCH (n) WHERE (n)-[r]-() RETURN n
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [10] Fail on introducing unbounded variables in pattern #10
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s10_fail_on_introducing_unbounded_variables_in_pattern_10
+    xfail:
+      spec: "openCypher TCK 2024.3 Pattern1: [10] Fail on introducing unbounded variables in pattern #10"
+      issue: "#795"
+    query: |
+      MATCH (n) WHERE ()-[r]->() RETURN n
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [10] Fail on introducing unbounded variables in pattern #11
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s10_fail_on_introducing_unbounded_variables_in_pattern_11
+    xfail:
+      spec: "openCypher TCK 2024.3 Pattern1: [10] Fail on introducing unbounded variables in pattern #11"
+      issue: "#795"
+    query: |
+      MATCH (n) WHERE ()<-[r]-() RETURN n
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [10] Fail on introducing unbounded variables in pattern #12
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s10_fail_on_introducing_unbounded_variables_in_pattern_12
+    xfail:
+      spec: "openCypher TCK 2024.3 Pattern1: [10] Fail on introducing unbounded variables in pattern #12"
+      issue: "#795"
+    query: |
+      MATCH (n) WHERE ()-[r]-() RETURN n
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [10] Fail on introducing unbounded variables in pattern #13
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s10_fail_on_introducing_unbounded_variables_in_pattern_13
+    xfail:
+      spec: "openCypher TCK 2024.3 Pattern1: [10] Fail on introducing unbounded variables in pattern #13"
+      issue: "#795"
+    query: |
+      MATCH (n) WHERE (n)-[r:REL]->(a {num: 5}) RETURN n
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [10] Fail on introducing unbounded variables in pattern #14
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s10_fail_on_introducing_unbounded_variables_in_pattern_14
+    xfail:
+      spec: "openCypher TCK 2024.3 Pattern1: [10] Fail on introducing unbounded variables in pattern #14"
+      issue: "#795"
+    query: |
+      MATCH (n) WHERE (n)-[r:REL*0..2]->(a {num: 5}) RETURN n
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [10] Fail on introducing unbounded variables in pattern #15
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s10_fail_on_introducing_unbounded_variables_in_pattern_15
+    xfail:
+      spec: "openCypher TCK 2024.3 Pattern1: [10] Fail on introducing unbounded variables in pattern #15"
+      issue: "#795"
+    query: |
+      MATCH (n) WHERE (n)-[r:REL]->(:C)<-[s:REL]-(a {num: 5}) RETURN n
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [11] Fail on checking self pattern
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s11_fail_on_checking_self_pattern
+    xfail:
+      spec: "openCypher TCK 2024.3 Pattern1: [11] Fail on checking self pattern"
+      issue: "#795"
+    query: |
+      MATCH (n) WHERE (n) RETURN n
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [12] Matching two nodes on a single directed connection between them
+  - name: s12_matching_two_nodes_on_a_single_directed_connection_between_them
+    setup:
+      - |
+        CREATE (a:A)-[:REL1]->(b:B), (b)-[:REL2]->(a), (a)-[:REL3]->(:C), (a)-[:REL1]->(:D)
+    query: |
+      MATCH (n), (m) WHERE (n)-[]->(m) RETURN n, m
+    expect:
+      values: |
+        | n | m |
+        | (:A) | (:B) |
+        | (:B) | (:A) |
+        | (:A) | (:C) |
+        | (:A) | (:D) |
+      side_effects: {}
+
+  # [13] Fail on matching two nodes on a single undirected connection between them
+  - name: s13_fail_on_matching_two_nodes_on_a_single_undirected_connection_between_them
+    setup:
+      - |
+        CREATE (a:A)-[:REL1]->(b:B), (b)-[:REL2]->(a), (a)-[:REL3]->(:C), (a)-[:REL1]->(:D)
+    query: |
+      MATCH (n), (m) WHERE (n)-[:REL1|REL2|REL3|REL4]-(m) RETURN n, m
+    expect:
+      values: |
+        | n | m |
+        | (:A) | (:B) |
+        | (:B) | (:A) |
+        | (:A) | (:C) |
+        | (:A) | (:D) |
+        | (:C) | (:A) |
+        | (:D) | (:A) |
+      side_effects: {}
+
+  # [14] Matching two nodes on a specific type of single outgoing directed connection
+  - name: s14_matching_two_nodes_on_a_specific_type_of_single_outgoing_directed_connection
+    setup:
+      - |
+        CREATE (a:A)-[:REL1]->(b:B), (b)-[:REL2]->(a), (a)-[:REL3]->(:C), (a)-[:REL1]->(:D)
+    query: |
+      MATCH (n), (m) WHERE (n)-[:REL1]->(m) RETURN n, m
+    expect:
+      values: |
+        | n | m |
+        | (:A) | (:B) |
+        | (:A) | (:D) |
+      side_effects: {}
+
+  # [15] Matching two nodes on a specific type of single undirected connection
+  - name: s15_matching_two_nodes_on_a_specific_type_of_single_undirected_connection
+    setup:
+      - |
+        CREATE (a:A)-[:REL1]->(b:B), (b)-[:REL2]->(a), (a)-[:REL3]->(:C), (a)-[:REL1]->(:D)
+    query: |
+      MATCH (n), (m) WHERE (n)-[:REL1]-(m) RETURN n, m
+    expect:
+      values: |
+        | n | m |
+        | (:A) | (:B) |
+        | (:B) | (:A) |
+        | (:A) | (:D) |
+        | (:D) | (:A) |
+      side_effects: {}
+
+  # [16] Matching two nodes on a specific type of a variable length outgoing directed connection
+  - name: s16_matching_two_nodes_on_a_specific_type_of_a_variable_length_outgoing_directed_connection
+    setup:
+      - |
+        CREATE (a:A)-[:REL1]->(b:B), (b)-[:REL2]->(a), (a)-[:REL3]->(:C), (a)-[:REL1]->(:D)
+    query: |
+      MATCH (n), (m) WHERE (n)-[:REL1*]->(m) RETURN n, m
+    expect:
+      values: |
+        | n | m |
+        | (:A) | (:B) |
+        | (:A) | (:D) |
+      side_effects: {}
+
+  # [17] Matching two nodes on a specific type of variable length undirected connection
+  - name: s17_matching_two_nodes_on_a_specific_type_of_variable_length_undirected_connection
+    setup:
+      - |
+        CREATE (a:A)-[:REL1]->(b:B), (b)-[:REL2]->(a), (a)-[:REL3]->(:C), (a)-[:REL1]->(:D)
+    query: |
+      MATCH (n), (m) WHERE (n)-[:REL1*]-(m) RETURN n, m
+    expect:
+      values: |
+        | n | m |
+        | (:A) | (:B) |
+        | (:A) | (:D) |
+        | (:B) | (:A) |
+        | (:B) | (:D) |
+        | (:D) | (:A) |
+        | (:D) | (:B) |
+      side_effects: {}
+
+  # [18] Matching two nodes on a specific type of undirected connection with length 2
+  - name: s18_matching_two_nodes_on_a_specific_type_of_undirected_connection_with_length_2
+    setup:
+      - |
+        CREATE (a:A)-[:REL1]->(b:B), (b)-[:REL2]->(a), (a)-[:REL3]->(:C), (a)-[:REL1]->(:D)
+    query: |
+      MATCH (n), (m) WHERE (n)-[:REL1*2]-(m) RETURN n, m
+    expect:
+      values: |
+        | n | m |
+        | (:D) | (:B) |
+        | (:B) | (:D) |
+      side_effects: {}
+
+  # [19] Using a negated existential pattern predicate
+  - name: s19_using_a_negated_existential_pattern_predicate
+    setup:
+      - |
+        CREATE (a:A)-[:REL1]->(b:B), (b)-[:REL2]->(a), (a)-[:REL3]->(:C), (a)-[:REL1]->(:D)
+    query: |
+      MATCH (n) WHERE NOT (n)-[:REL2]-() RETURN n
+    expect:
+      values: |
+        | n |
+        | (:C) |
+        | (:D) |
+      side_effects: {}
+
+  # [20] Using two existential pattern predicates in a conjunction
+  - name: s20_using_two_existential_pattern_predicates_in_a_conjunction
+    setup:
+      - |
+        CREATE (a:A)-[:REL1]->(b:B), (b)-[:REL2]->(a), (a)-[:REL3]->(:C), (a)-[:REL1]->(:D)
+    query: |
+      MATCH (n) WHERE (n)-[:REL1]-() AND (n)-[:REL3]-() RETURN n
+    expect:
+      values: |
+        | n |
+        | (:A) |
+      side_effects: {}
+
+  # [21] Using two existential pattern predicates in a disjunction
+  - name: s21_using_two_existential_pattern_predicates_in_a_disjunction
+    setup:
+      - |
+        CREATE (a:A)-[:REL1]->(b:B), (b)-[:REL2]->(a), (a)-[:REL3]->(:C), (a)-[:REL1]->(:D)
+    query: |
+      MATCH (n) WHERE (n)-[:REL1]-() OR (n)-[:REL2]-() RETURN n
+    expect:
+      values: |
+        | n |
+        | (:A) |
+        | (:B) |
+        | (:D) |
+      side_effects: {}
+
+  # [22] Fail on using pattern in RETURN projection
+  # TCK: SyntaxError at compile time: UnexpectedSyntax
+  - name: s22_fail_on_using_pattern_in_return_projection
+    xfail:
+      spec: "openCypher TCK 2024.3 Pattern1: [22] Fail on using pattern in RETURN projection"
+      issue: "#795"
+    query: |
+      MATCH (n) RETURN (n)-[]->()
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [23] Fail on using pattern in WITH projection
+  # TCK: SyntaxError at compile time: UnexpectedSyntax
+  - name: s23_fail_on_using_pattern_in_with_projection
+    xfail:
+      spec: "openCypher TCK 2024.3 Pattern1: [23] Fail on using pattern in WITH projection"
+      issue: "#795"
+    query: |
+      MATCH (n) WITH (n)-[]->() AS x RETURN x
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [24] Fail on using pattern in right-hand side of SET
+  # TCK: SyntaxError at compile time: UnexpectedSyntax
+  - name: s24_fail_on_using_pattern_in_right_hand_side_of_set
+    xfail:
+      spec: "openCypher TCK 2024.3 Pattern1: [24] Fail on using pattern in right-hand side of SET"
+      issue: "#795"
+    query: |
+      MATCH (n) SET n.prop = head(nodes(head((n)-[:REL]->()))).foo
+    expect:
+      gql_status: "42"
+      side_effects: {}

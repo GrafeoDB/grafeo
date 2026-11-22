@@ -64,7 +64,7 @@ edge = ["gql", "regex-lite"]  # Frontend/Edge: minimal WASM-friendly
 enterprise = ["metrics", "tracing", "async-storage"]  # Platform Operator: observability + async I/O
 
 # Deployment-based profiles (deprecated, use persona profiles instead)
-embedded = ["gql", "ai", "algos", "parallel", "regex", "grafeo-file", "arrow-export"]  # Deprecated: use lpg + ai + algos
+embedded = ["gql", "ai", "algos", "parallel", "regex", "storage", "arrow-export"]  # Deprecated: use lpg + ai + algos
 browser = ["edge"]  # Deprecated: use edge
 server = ["embedded", "languages", "storage", "triple-store", "cdc", "async-storage", "tracing", "shacl"]  # Deprecated: use lpg + rdf + ai + enterprise
 full = ["server"]  # Deprecated: use lpg + rdf + analytics + ai

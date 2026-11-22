@@ -84,10 +84,10 @@ pub fn evaluate_constraint(
         Constraint::LessThanOrEquals(path_iri) => eval_less_than(path_iri, value_nodes, ctx, true),
 
         // -- Logical --
-        Constraint::Not(shape) => eval_not(shape, ctx),
-        Constraint::And(shapes) => eval_and(shapes, ctx),
-        Constraint::Or(shapes) => eval_or(shapes, ctx),
-        Constraint::Xone(shapes) => eval_xone(shapes, ctx),
+        Constraint::Not(shape) => eval_not(shape, value_nodes, ctx),
+        Constraint::And(shapes) => eval_and(shapes, value_nodes, ctx),
+        Constraint::Or(shapes) => eval_or(shapes, value_nodes, ctx),
+        Constraint::Xone(shapes) => eval_xone(shapes, value_nodes, ctx),
 
         // -- Shape-based --
         Constraint::ShapeNode(shape) => eval_shape_node(shape, value_nodes, ctx),
@@ -553,77 +553,95 @@ fn eval_less_than(
 // Logical constraints
 // =========================================================================
 
-fn eval_not(inner_shape: &Shape, ctx: &mut EvalContext<'_>) -> Vec<ValidationResult> {
-    let inner_results = evaluate_shape_for_node(inner_shape, ctx.focus_node, ctx);
-    // If the inner shape conforms (no violations), that's a violation of sh:not
-    let inner_conforms = inner_results
+/// Whether `node` conforms to `shape`: validating it reports no violation.
+fn conforms(shape: &Shape, node: &Term, ctx: &mut EvalContext<'_>) -> bool {
+    evaluate_shape_for_node(shape, node, ctx)
         .iter()
-        .all(|r| r.severity != Severity::Violation);
-    if inner_conforms {
-        vec![result(
-            ctx,
-            "Not",
-            None,
-            "Focus node conforms to shape that should not match".to_string(),
-        )]
-    } else {
-        Vec::new()
-    }
+        .all(|r| r.severity != Severity::Violation)
 }
 
-fn eval_and(shapes: &[Shape], ctx: &mut EvalContext<'_>) -> Vec<ValidationResult> {
+// Each logical constraint tests every value node: in a node shape the focus node, in a property
+// shape each value its path reaches (SHACL 1.0 sections 4.6.1 to 4.6.4). A result names the
+// value node that fails.
+
+fn eval_not(
+    inner_shape: &Shape,
+    value_nodes: &[Term],
+    ctx: &mut EvalContext<'_>,
+) -> Vec<ValidationResult> {
     let mut results = Vec::new();
-    for shape in shapes {
-        let inner = evaluate_shape_for_node(shape, ctx.focus_node, ctx);
-        let conforms = inner.iter().all(|r| r.severity != Severity::Violation);
-        if !conforms {
+    for vn in value_nodes {
+        if conforms(inner_shape, vn, ctx) {
             results.push(result(
                 ctx,
-                "And",
-                None,
-                "Focus node does not conform to all shapes in sh:and".to_string(),
+                "Not",
+                Some(vn.clone()),
+                format!("Value {vn} conforms to a shape it should not"),
             ));
-            break;
         }
     }
     results
 }
 
-fn eval_or(shapes: &[Shape], ctx: &mut EvalContext<'_>) -> Vec<ValidationResult> {
-    for shape in shapes {
-        let inner = evaluate_shape_for_node(shape, ctx.focus_node, ctx);
-        let conforms = inner.iter().all(|r| r.severity != Severity::Violation);
-        if conforms {
-            return Vec::new();
+fn eval_and(
+    shapes: &[Shape],
+    value_nodes: &[Term],
+    ctx: &mut EvalContext<'_>,
+) -> Vec<ValidationResult> {
+    let mut results = Vec::new();
+    for vn in value_nodes {
+        if !shapes.iter().all(|shape| conforms(shape, vn, ctx)) {
+            results.push(result(
+                ctx,
+                "And",
+                Some(vn.clone()),
+                format!("Value {vn} does not conform to all shapes in sh:and"),
+            ));
         }
     }
-    vec![result(
-        ctx,
-        "Or",
-        None,
-        "Focus node does not conform to any shape in sh:or".to_string(),
-    )]
+    results
 }
 
-fn eval_xone(shapes: &[Shape], ctx: &mut EvalContext<'_>) -> Vec<ValidationResult> {
-    let conforming_count = shapes
-        .iter()
-        .filter(|shape| {
-            let inner = evaluate_shape_for_node(shape, ctx.focus_node, ctx);
-            inner.iter().all(|r| r.severity != Severity::Violation)
-        })
-        .count();
-
-    if conforming_count == 1 {
-        Vec::new()
-    } else {
-        vec![result(
-            ctx,
-            "Xone",
-            None,
-            format!("Focus node conforms to {conforming_count} shapes (expected exactly 1)"),
-        )]
+fn eval_or(
+    shapes: &[Shape],
+    value_nodes: &[Term],
+    ctx: &mut EvalContext<'_>,
+) -> Vec<ValidationResult> {
+    let mut results = Vec::new();
+    for vn in value_nodes {
+        if !shapes.iter().any(|shape| conforms(shape, vn, ctx)) {
+            results.push(result(
+                ctx,
+                "Or",
+                Some(vn.clone()),
+                format!("Value {vn} does not conform to any shape in sh:or"),
+            ));
+        }
     }
+    results
+}
+
+fn eval_xone(
+    shapes: &[Shape],
+    value_nodes: &[Term],
+    ctx: &mut EvalContext<'_>,
+) -> Vec<ValidationResult> {
+    let mut results = Vec::new();
+    for vn in value_nodes {
+        let conforming = shapes
+            .iter()
+            .filter(|shape| conforms(shape, vn, ctx))
+            .count();
+        if conforming != 1 {
+            results.push(result(
+                ctx,
+                "Xone",
+                Some(vn.clone()),
+                format!("Value {vn} conforms to {conforming} shapes (expected exactly 1)"),
+            ));
+        }
+    }
+    results
 }
 
 // =========================================================================
@@ -637,9 +655,7 @@ fn eval_shape_node(
 ) -> Vec<ValidationResult> {
     let mut results = Vec::new();
     for vn in value_nodes {
-        let inner = evaluate_shape_for_node(inner_shape, vn, ctx);
-        let conforms = inner.iter().all(|r| r.severity != Severity::Violation);
-        if !conforms {
+        if !conforms(inner_shape, vn, ctx) {
             results.push(result(
                 ctx,
                 "Node",
@@ -681,24 +697,12 @@ fn eval_qualified(
     let conforming = value_nodes
         .iter()
         .filter(|vn| {
-            let inner = evaluate_shape_for_node(inner_shape, vn, ctx);
-            let conforms = inner.iter().all(|r| r.severity != Severity::Violation);
-            if !conforms {
-                return false;
-            }
             // When disjoint, exclude values that also conform to a sibling shape
-            if disjoint {
-                for sibling in &sibling_shapes {
-                    let sibling_results = evaluate_shape_for_node(sibling, vn, ctx);
-                    if sibling_results
+            conforms(inner_shape, vn, ctx)
+                && !(disjoint
+                    && sibling_shapes
                         .iter()
-                        .all(|r| r.severity != Severity::Violation)
-                    {
-                        return false;
-                    }
-                }
-            }
-            true
+                        .any(|sibling| conforms(sibling, vn, ctx)))
         })
         .count();
 
@@ -1757,7 +1761,7 @@ mod tests {
         let mut ctx = make_ctx(&alix, &shape, &store, &mut visited);
         // alix is an IRI, not a literal; inner shape requires Literal nodeKind
         let inner = string_node_kind_shape();
-        let results = eval_not(&inner, &mut ctx);
+        let results = eval_not(&inner, std::slice::from_ref(&alix), &mut ctx);
         assert!(
             results.is_empty(),
             "sh:not should pass when inner shape fails (alix is IRI, not Literal)"
@@ -1784,7 +1788,7 @@ mod tests {
                 messages: Vec::new(),
             })
         };
-        let results = eval_not(&inner, &mut ctx);
+        let results = eval_not(&inner, std::slice::from_ref(&alix), &mut ctx);
         assert_eq!(
             results.len(),
             1,
@@ -1827,7 +1831,7 @@ mod tests {
                 })
             },
         ];
-        let results = eval_and(&shapes, &mut ctx);
+        let results = eval_and(&shapes, std::slice::from_ref(&alix), &mut ctx);
         assert!(
             results.is_empty(),
             "sh:and should pass when all shapes conform"
@@ -1857,7 +1861,7 @@ mod tests {
             },
             string_node_kind_shape(),
         ];
-        let results = eval_and(&shapes, &mut ctx);
+        let results = eval_and(&shapes, std::slice::from_ref(&alix), &mut ctx);
         assert_eq!(results.len(), 1);
         assert!(results[0].source_constraint_component.contains("And"));
     }
@@ -1882,7 +1886,7 @@ mod tests {
                 messages: Vec::new(),
             })
         }];
-        let results = eval_or(&shapes, &mut ctx);
+        let results = eval_or(&shapes, std::slice::from_ref(&alix), &mut ctx);
         assert!(
             results.is_empty(),
             "sh:or should pass when at least one shape conforms"
@@ -1909,7 +1913,7 @@ mod tests {
                 messages: Vec::new(),
             })
         }];
-        let results = eval_or(&shapes, &mut ctx);
+        let results = eval_or(&shapes, std::slice::from_ref(&alix), &mut ctx);
         assert_eq!(results.len(), 1);
         assert!(results[0].source_constraint_component.contains("Or"));
     }
@@ -1937,7 +1941,7 @@ mod tests {
             },
             string_node_kind_shape(),
         ];
-        let results = eval_xone(&shapes, &mut ctx);
+        let results = eval_xone(&shapes, std::slice::from_ref(&alix), &mut ctx);
         assert!(
             results.is_empty(),
             "sh:xone should pass with exactly 1 conforming"
@@ -1978,7 +1982,7 @@ mod tests {
                 })
             },
         ];
-        let results = eval_xone(&shapes, &mut ctx);
+        let results = eval_xone(&shapes, std::slice::from_ref(&alix), &mut ctx);
         assert_eq!(results.len(), 1);
         assert!(results[0].message.as_ref().unwrap().contains('2'));
     }

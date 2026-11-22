@@ -417,13 +417,16 @@ fn main() {
         unsafe { std::env::remove_var("NO_COLOR") };
     }
 
-    // Set up logging based on verbosity
+    // Set up logging based on verbosity, on standard error: standard output holds the rows, in
+    // the format asked for.
     if cli.verbose {
         tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
             .with_max_level(tracing::Level::DEBUG)
             .init();
     } else if !cli.quiet {
         tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
             .with_max_level(tracing::Level::WARN)
             .init();
     }

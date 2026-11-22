@@ -164,7 +164,7 @@ Grafeo uses **persona-based feature profiles** that describe use cases rather th
 ```toml
 [dependencies]
 # Default: the deprecated `embedded` profile (GQL, search, algorithms, parallel
-# execution, the database file and Arrow export), without a write-ahead log
+# execution, storage with the write-ahead log, and Arrow export)
 grafeo = "0.6"
 
 # LPG application with search
@@ -186,14 +186,8 @@ grafeo = { version = "0.6", default-features = false, features = ["gql"] }
 grafeo = { version = "0.6", features = ["embed"] }
 ```
 
-!!! warning "The default features have no write-ahead log"
-    `GrafeoDB::open(path)` works with the default features, but they have no write-ahead log: commits reach the file only when the database checkpoints (`close()`, dropping it, or `wal_checkpoint()`). **A process that crashes loses every commit since the last checkpoint.** For commits that survive a crash, add the `wal` feature (also in the `storage` group and the `lpg` and `rdf` profiles):
-
-    ```toml
-    grafeo = { version = "0.6", features = ["wal"] }
-    ```
-
-    This is the Rust crate only: the Python, Node.js, C, C#, Dart and Go packages include the write-ahead log. The Rust default includes it from 0.7.0 ([#468](https://github.com/GrafeoDB/grafeo/issues/468)).
+!!! note "The default features include the write-ahead log"
+    Since 0.6.4, `GrafeoDB::open(path)` with the default features logs each commit beside the database file, so a commit survives a crash, as in the Python, Node.js, C, C#, Dart and Go packages. In 0.6.0 to 0.6.3 the Rust default had no write-ahead log and needed `features = ["wal"]` for that. A build with `default-features = false` and without `wal` reaches the file only at a checkpoint (`close()`, dropping the database, or `wal_checkpoint()`).
 
 #### Persona Profiles
 

@@ -155,12 +155,12 @@ Per the standard, minimum conformance requires:
 | Feature | Status | Notes |
 |---------|--------|-------|
 | ALL | Supported | |
-| ANY | Partial | One path per pair of endpoints; over one edge pattern between two node patterns |
-| ANY k | Partial | k paths per pair of endpoints (the k shortest); over one edge pattern |
-| ALL SHORTEST | Partial | Over one edge pattern |
-| ANY SHORTEST | Partial | Over one edge pattern |
-| SHORTEST k | Partial | Over one edge pattern |
-| SHORTEST k GROUPS | Partial | Over one edge pattern |
+| ANY | Partial | One path per pair of endpoints; over a chain of edge patterns, not a parenthesized or alternated pattern, nor one with a questioned edge pattern (`->?`) |
+| ANY k | Partial | k paths per pair of endpoints (the k shortest); over a chain of edge patterns, not with `->?` |
+| ALL SHORTEST | Partial | Over a chain of edge patterns, not with `->?` |
+| ANY SHORTEST | Partial | Over a chain of edge patterns, not with `->?` |
+| SHORTEST k | Partial | Over a chain of edge patterns, not with `->?` |
+| SHORTEST k GROUPS | Partial | Over a chain of edge patterns, not with `->?` |
 | Path mode of a search prefix `ANY SHORTEST TRAIL` | Supported | |
 | Search prefix of one path pattern `p = ANY SHORTEST (...)` | Supported | |
 
@@ -183,6 +183,7 @@ Per the standard, minimum conformance requires:
 | `+` (1 or more) | Supported | Normalized to `{1,}` |
 | `?` questioned | Supported | 0 or 1 hop |
 | Parenthesized quantified `((a)-[e]->(b)){2,5}` | Supported | A pattern of more than one edge needs an upper bound of at most 16 repetitions |
+| An unbounded quantifier without a mode or selector | Refused (`42001`), as section 16.4, syntax rule 14 requires | Needs `TRAIL`, `ACYCLIC`, `SIMPLE`, a selector or `DIFFERENT EDGES` (see [patterns](patterns.md#unbounded-quantifiers-need-a-mode-or-a-selector)) |
 
 ### Pattern Composition
 
@@ -190,7 +191,7 @@ Per the standard, minimum conformance requires:
 |---------|--------|-------|
 | Multiple comma-separated patterns | Supported | Implicit join on shared variables |
 | Pattern union `\|` | Supported | |
-| Path aliases `p = (a)-[*]-(b)` | Supported | |
+| Path aliases `p = TRAIL (a)-[*]-(b)` | Supported | |
 | shortestPath / allShortestPaths | Supported | Cypher-style functions |
 
 ## Expressions and Predicates
@@ -207,6 +208,7 @@ Per the standard, minimum conformance requires:
 | IN list membership | Supported | |
 | STARTS WITH / ENDS WITH / CONTAINS | Supported | |
 | Regular expression match `=~` | Supported | Extension, as in Cypher (see below) |
+| Power `^` | Supported | Extension; `POWER(b, x)` is the conformant form, and a chain such as `2 ^ 3 ^ 2` needs parentheses (see [Numeric functions](functions-numeric.md#power)) |
 
 `s =~ pattern` is a Grafeo extension: ISO GQL has no regular expressions. It has the
 meaning and the precedence of Cypher's `=~`: true when the pattern matches the whole
@@ -288,11 +290,11 @@ refuses `=~` and LIKE with an error that says so.
 | G013 | Advanced path modes: ACYCLIC | Supported |
 | G014 | Explicit PATH/PATHS keywords | Supported |
 | G015 | All path search: explicit ALL keyword | Supported |
-| G016 | Any path search | Partial (over one edge pattern) |
-| G017 | All shortest path search | Partial (over one edge pattern) |
-| G018 | Any shortest path search | Partial (over one edge pattern) |
-| G019 | Counted shortest path search | Partial (over one edge pattern) |
-| G020 | Counted shortest group search | Partial (over one edge pattern) |
+| G016 | Any path search | Partial (over a chain of edge patterns, not with `->?`) |
+| G017 | All shortest path search | Partial (over a chain of edge patterns, not with `->?`) |
+| G018 | Any shortest path search | Partial (over a chain of edge patterns, not with `->?`) |
+| G019 | Counted shortest path search | Partial (over a chain of edge patterns, not with `->?`) |
+| G020 | Counted shortest group search | Partial (over a chain of edge patterns, not with `->?`) |
 | G030 | Path multiset alternation | **Supported** |
 | G031 | Path multiset alternation: var-length operands | **Supported** |
 | G032 | Path pattern union | Supported |
@@ -527,7 +529,7 @@ refuses `=~` and LIKE with an error that says so.
 
 | ID | Feature | Status |
 |----|---------|--------|
-| GB01 | Long identifiers | Supported |
+| GB01 | Long identifiers | Supported (up to 16 KiB by default, `Config::with_max_identifier_length`) |
 | GB02 | Double minus sign comments | Supported |
 | GB03 | Double solidus comments | Supported |
 | GL01 | Hexadecimal literals | **Supported** |

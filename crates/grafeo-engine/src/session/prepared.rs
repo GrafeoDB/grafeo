@@ -3,14 +3,61 @@
 //! (DuckDB's prepared statements). See [`Session::plan_with_values`].
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::Result;
 use grafeo_core::graph::GraphStore;
 
-use super::Session;
-use crate::query::cache::{CacheKey, CachedPlan, Stage};
+use super::SessionInner;
+use crate::query::cache::{CacheKey, CachedPlan, QueryCache, SessionPlans, Stage};
 use crate::query::plan::LogicalPlan;
+
+/// Where a session's statements find and store their plans
+/// (`SessionInner::plan_cache`).
+pub(super) enum PlanCache<'a> {
+    /// The open transaction's private cache: it changed the catalog it plans with.
+    Private(Arc<QueryCache>),
+    /// The session's own cache, in front of the shared one.
+    Session(&'a SessionPlans),
+}
+
+impl PlanCache<'_> {
+    fn cache(&self) -> &QueryCache {
+        match self {
+            Self::Private(private) => private,
+            Self::Session(session) => session.shared(),
+        }
+    }
+
+    /// The planning generation now: a statement reads it before it plans.
+    pub(super) fn generation(&self) -> u64 {
+        self.cache().generation()
+    }
+
+    /// The plan cached for `key` at `stage`.
+    pub(super) fn get(&self, key: &CacheKey, stage: Stage) -> Option<Arc<CachedPlan>> {
+        match self {
+            Self::Private(private) => private.get(key, stage),
+            Self::Session(session) => session.get(key, stage),
+        }
+    }
+
+    /// Stores `plan`, planned under `generation`, and returns it shared (see
+    /// [`QueryCache::put`]).
+    pub(super) fn put(
+        &self,
+        key: CacheKey,
+        stage: Stage,
+        plan: LogicalPlan,
+        generation: u64,
+    ) -> Arc<CachedPlan> {
+        match self {
+            Self::Private(private) => private.put(key, stage, plan, generation),
+            Self::Session(session) => session.put(key, stage, plan, generation),
+        }
+    }
+}
 
 /// The plan a statement runs: a cached plan, shared, or one made for this
 /// run (filled with its values). Either reads as a [`LogicalPlan`].
@@ -20,7 +67,7 @@ pub(crate) enum RunPlan {
     /// A plan of this run alone.
     Owned(LogicalPlan),
     /// A prepared plan whose recipe this call opens with its values, defaults included
-    /// (see [`Session::physical_plan`]); it reads as the plan with its parameters.
+    /// (see [`SessionInner::physical_plan`]); it reads as the plan with its parameters.
     Prepared(std::sync::Arc<CachedPlan>, HashMap<String, Value>),
 }
 
@@ -36,17 +83,37 @@ impl std::ops::Deref for RunPlan {
     }
 }
 
-impl Session {
+impl SessionInner {
+    /// The cache of this session's plans: its own cache in front of the shared one, or,
+    /// while the open transaction has its own view, the transaction's private cache, whose
+    /// plans no other session may run, nor it theirs.
+    pub(super) fn plan_cache(&self) -> PlanCache<'_> {
+        match &*self.pending_schema.lock() {
+            Some(pending) => PlanCache::Private(Arc::clone(&pending.plans)),
+            None => PlanCache::Session(&self.session_plans),
+        }
+    }
+
     /// The plan cache's key for `query` in `language` in this session: its
     /// current schema and graph and its planner rules, which the plan is made
     /// for.
+    ///
+    /// # Errors
+    ///
+    /// A statement longer than the session's query length limit has no key:
+    /// it fails here, before the cache is read, as its parse would (the key
+    /// leaves out the whitespace around the text, so a longer text can share
+    /// the key of a shorter one).
     pub(super) fn plan_cache_key(
         &self,
         query: &str,
         language: crate::query::processor::QueryLanguage,
-    ) -> CacheKey {
-        CacheKey::in_scope(query, language, self.current_schema(), self.current_graph())
-            .with_rules(self.plan_options.rules)
+    ) -> Result<CacheKey> {
+        self.plan_options.parse_limits.check_query(query)?;
+        Ok(
+            CacheKey::in_scope(query, language, self.current_schema(), self.current_graph())
+                .with_rules(self.plan_options.rules),
+        )
     }
 
     /// The cached plan of a statement in this session (`key`), with the values
@@ -167,7 +234,7 @@ impl Session {
     }
 }
 
-impl Session {
+impl SessionInner {
     /// What the route of an aggregate in a statement with cache key `key` reads besides the
     /// plan, as this session's planner reads it: the key's language and rules, factorized
     /// execution, and the backward adjacency of the store the statement reads.
@@ -248,9 +315,15 @@ mod tests {
 
         plain.execute(query).unwrap();
 
-        let cached = |session: &super::Session| {
-            let key = session.plan_cache_key(query, QueryLanguage::Gql);
+        let cached = |session: &crate::session::Session| {
+            let key = session
+                .inner()
+                .unwrap()
+                .plan_cache_key(query, QueryLanguage::Gql)
+                .unwrap();
             session
+                .inner()
+                .unwrap()
                 .plan_cache()
                 .get(&key, crate::query::cache::Stage::Optimized)
                 .is_some()
@@ -263,7 +336,8 @@ mod tests {
     fn inputs() -> crate::query::planner::lpg::aggregate::RouteInputs {
         let db = crate::GrafeoDB::new_in_memory();
         let session = db.session();
-        session.route_inputs(&session.plan_cache_key("", QueryLanguage::Gql))
+        let inner = session.inner().unwrap();
+        inner.route_inputs(&inner.plan_cache_key("", QueryLanguage::Gql).unwrap())
     }
 
     /// The prepared plan the first call of `query` with `params` caches, with its
@@ -277,8 +351,14 @@ mod tests {
             .unwrap();
         let session = db.session();
         session.execute_with_params(query, params.clone()).unwrap();
-        let key = session.plan_cache_key(query, QueryLanguage::Gql);
+        let key = session
+            .inner()
+            .unwrap()
+            .plan_cache_key(query, QueryLanguage::Gql)
+            .unwrap();
         session
+            .inner()
+            .unwrap()
             .plan_cache()
             .get(&key.prepared(), crate::query::cache::Stage::Optimized)
             .expect("the first call caches its prepared plan")
@@ -469,12 +549,18 @@ mod tests {
         db.create_property_index("id").unwrap();
         let session = db.session();
         session.execute_language(query, name, Some(params)).unwrap();
-        let key = session.plan_cache_key(query, language);
+        let key = session
+            .inner()
+            .unwrap()
+            .plan_cache_key(query, language)
+            .unwrap();
         let cached = session
+            .inner()
+            .unwrap()
             .plan_cache()
             .get(&key.prepared(), crate::query::cache::Stage::Optimized)
             .expect("the first call caches its prepared plan");
-        let recipe = recipe_of(cached.plan(), session.route_inputs(&key));
+        let recipe = recipe_of(cached.plan(), session.inner().unwrap().route_inputs(&key));
         assert!(recipe.is_ok(), "{query}: {recipe:?}");
     }
 
@@ -495,12 +581,18 @@ mod tests {
         let query = "MATCH (n:Person {id: $personId})-[:LIVES_IN]->(c:City) RETURN n.firstName AS firstName, c.id AS cityId";
         let values = |id: i64| HashMap::from([("personId".to_string(), Value::Int64(id))]);
         session.execute_with_params(query, values(1)).unwrap();
-        let key = session.plan_cache_key(query, QueryLanguage::Gql);
+        let key = session
+            .inner()
+            .unwrap()
+            .plan_cache_key(query, QueryLanguage::Gql)
+            .unwrap();
         let cached = session
+            .inner()
+            .unwrap()
             .plan_cache()
             .get(&key.prepared(), crate::query::cache::Stage::Optimized)
             .unwrap();
-        let recipe = recipe_of(cached.plan(), session.route_inputs(&key)).unwrap();
+        let recipe = recipe_of(cached.plan(), session.inner().unwrap().route_inputs(&key)).unwrap();
         let rows = |mut plan: crate::query::planner::PhysicalPlan| {
             let result = crate::query::executor::Executor::with_columns(plan.columns.clone())
                 .execute(plan.operator.as_mut())
@@ -512,12 +604,15 @@ mod tests {
         };
         for id in [1, 2, 3, 4] {
             // A statement's operators are built inside its memory, as the session builds them.
-            let _memory = session.enter_statement_memory();
+            let _memory = session.inner().unwrap().enter_statement_memory();
             let planner = || {
-                let (epoch, transaction, _pin) = session.get_transaction_context().unwrap();
+                let (epoch, transaction, _pin) =
+                    session.inner().unwrap().get_transaction_context().unwrap();
                 session
+                    .inner()
+                    .unwrap()
                     .create_planner_for_store_with_read_only(
-                        session.active_store(),
+                        session.inner().unwrap().active_store(),
                         epoch,
                         transaction,
                         true,
@@ -566,19 +661,28 @@ mod tests {
             ])
         };
         session.execute_with_params(query, values(1)).unwrap();
-        let key = session.plan_cache_key(query, QueryLanguage::Gql);
+        let key = session
+            .inner()
+            .unwrap()
+            .plan_cache_key(query, QueryLanguage::Gql)
+            .unwrap();
         let cached = session
+            .inner()
+            .unwrap()
             .plan_cache()
             .get(&key.prepared(), crate::query::cache::Stage::Optimized)
             .unwrap();
-        let recipe = recipe_of(cached.plan(), session.route_inputs(&key)).unwrap();
+        let recipe = recipe_of(cached.plan(), session.inner().unwrap().route_inputs(&key)).unwrap();
         for count in [0, 1, 3] {
-            let _memory = session.enter_statement_memory();
+            let _memory = session.inner().unwrap().enter_statement_memory();
             let planner = || {
-                let (epoch, transaction, _pin) = session.get_transaction_context().unwrap();
+                let (epoch, transaction, _pin) =
+                    session.inner().unwrap().get_transaction_context().unwrap();
                 session
+                    .inner()
+                    .unwrap()
                     .create_planner_for_store_with_read_only(
-                        session.active_store(),
+                        session.inner().unwrap().active_store(),
                         epoch,
                         transaction,
                         true,
@@ -642,12 +746,18 @@ mod tests {
             "MATCH (n:Person) WHERE n.id > TIME('10:00:00') RETURN count(*) AS later",
         ] {
             session.execute_with_params(query, params.clone()).unwrap();
-            let key = session.plan_cache_key(query, QueryLanguage::Gql);
+            let key = session
+                .inner()
+                .unwrap()
+                .plan_cache_key(query, QueryLanguage::Gql)
+                .unwrap();
             let cached = session
+                .inner()
+                .unwrap()
                 .plan_cache()
                 .get(&key.prepared(), crate::query::cache::Stage::Optimized)
                 .unwrap();
-            let inputs = session.route_inputs(&key);
+            let inputs = session.inner().unwrap().route_inputs(&key);
             let mut filled = cached.plan().clone();
             crate::query::processor::substitute_params(&mut filled, &params).unwrap();
             for factorized in [true, false] {
@@ -655,10 +765,13 @@ mod tests {
                     factorized_execution: factorized,
                     ..inputs
                 };
-                let (epoch, transaction, _pin) = session.get_transaction_context().unwrap();
+                let (epoch, transaction, _pin) =
+                    session.inner().unwrap().get_transaction_context().unwrap();
                 let planner = session
+                    .inner()
+                    .unwrap()
                     .create_planner_for_store_with_read_only(
-                        session.active_store(),
+                        session.inner().unwrap().active_store(),
                         epoch,
                         transaction,
                         true,
@@ -675,13 +788,22 @@ mod tests {
         }
         let query = "MATCH (n:Person) WHERE n.id > $personId RETURN count(*) AS later";
         session.execute_with_params(query, params.clone()).unwrap();
-        let key = session.plan_cache_key(query, QueryLanguage::Gql);
+        let key = session
+            .inner()
+            .unwrap()
+            .plan_cache_key(query, QueryLanguage::Gql)
+            .unwrap();
         let cached = session
+            .inner()
+            .unwrap()
             .plan_cache()
             .get(&key.prepared(), crate::query::cache::Stage::Optimized)
             .unwrap();
         assert_eq!(
-            recipe_route(session.route_inputs(&key), aggregate_of(cached.plan())),
+            recipe_route(
+                session.inner().unwrap().route_inputs(&key),
+                aggregate_of(cached.plan())
+            ),
             None
         );
     }
@@ -718,12 +840,18 @@ mod tests {
                 session
                     .execute_sql_with_params(query, params.clone())
                     .unwrap();
-                let key = session.plan_cache_key(query, QueryLanguage::SqlPgq);
+                let key = session
+                    .inner()
+                    .unwrap()
+                    .plan_cache_key(query, QueryLanguage::SqlPgq)
+                    .unwrap();
                 let cached = session
+                    .inner()
+                    .unwrap()
                     .plan_cache()
                     .get(&key.prepared(), crate::query::cache::Stage::Optimized)
                     .expect("the call caches its prepared plan");
-                match recipe_of(cached.plan(), session.route_inputs(&key)) {
+                match recipe_of(cached.plan(), session.inner().unwrap().route_inputs(&key)) {
                     Err(uncovered) => assert_eq!(uncovered.kind, kind, "{query}"),
                     Ok(recipe) => panic!("{query} made a recipe: {:?}", recipe.kinds()),
                 }
@@ -751,12 +879,18 @@ mod tests {
                 std::collections::HashMap::from([("unused".to_string(), Value::Int64(1))]),
             )
             .unwrap();
-        let key = session.plan_cache_key(query, QueryLanguage::Gql);
+        let key = session
+            .inner()
+            .unwrap()
+            .plan_cache_key(query, QueryLanguage::Gql)
+            .unwrap();
         let cached = session
+            .inner()
+            .unwrap()
             .plan_cache()
             .get(&key.prepared(), crate::query::cache::Stage::Optimized)
             .unwrap();
-        match recipe_of(cached.plan(), session.route_inputs(&key)) {
+        match recipe_of(cached.plan(), session.inner().unwrap().route_inputs(&key)) {
             Err(uncovered) => assert_eq!(uncovered.kind, "Factorized"),
             Ok(recipe) => panic!("a recipe: {:?}", recipe.kinds()),
         }
@@ -840,16 +974,35 @@ mod filter_route_tests {
         use crate::query::translators::{cypher, gql, sql_pgq};
 
         let (plan, language) = match language {
-            "gql" => match gql::translate_full(query).unwrap() {
+            "gql" => match gql::translate_full(
+                query,
+                &grafeo_adapters::query::limits::ParseLimits::default(),
+            )
+            .unwrap()
+            {
                 gql::GqlTranslationResult::Plan(plan) => (plan, QueryLanguage::Gql),
                 _ => panic!("{query} is no query"),
             },
-            "cypher" => match cypher::translate_full(query).unwrap() {
+            "cypher" => match cypher::translate_full(
+                query,
+                &grafeo_adapters::query::limits::ParseLimits::default(),
+            )
+            .unwrap()
+            {
                 cypher::CypherTranslationResult::Plan(plan) => (plan, QueryLanguage::Cypher),
                 _ => panic!("{query} is no query"),
             },
-            _ => (sql_pgq::translate(query).unwrap(), QueryLanguage::SqlPgq),
+            _ => (
+                sql_pgq::translate(
+                    query,
+                    &grafeo_adapters::query::limits::ParseLimits::default(),
+                )
+                .unwrap(),
+                QueryLanguage::SqlPgq,
+            ),
         };
+        let mut inner = session.inner_mut().unwrap();
+        let session = &mut *inner;
         let plan = session.translated(plan).unwrap();
         crate::query::binder::Binder::new().bind(&plan).unwrap();
         let active = session.active_store();

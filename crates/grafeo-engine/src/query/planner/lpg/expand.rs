@@ -274,7 +274,8 @@ impl super::Planner {
             )
             .with_path_mode(exec_path_mode)
             .with_read_counter(self.read_counter())
-            .with_memory_budget(self.path_search_budget);
+            .with_memory_budget(self.path_search_budget)
+            .with_path_expansions(self.path_expansions());
 
             // If a path alias is set, enable path length and detail output
             if needs_path_details {

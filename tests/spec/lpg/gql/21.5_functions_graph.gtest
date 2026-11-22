@@ -202,7 +202,7 @@ tests:
       - "INSERT (:Person {name: 'Vincent'})"
       - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) INSERT (a)-[:KNOWS]->(b)"
       - "MATCH (b:Person {name: 'Gus'}), (c:Person {name: 'Vincent'}) INSERT (b)-[:KNOWS]->(c)"
-    query: "MATCH p = (:Person {name: 'Alix'})-[:KNOWS*]->(:Person {name: 'Vincent'}) RETURN length(p) AS len"
+    query: "MATCH p = TRAIL (:Person {name: 'Alix'})-[:KNOWS*]->(:Person {name: 'Vincent'}) RETURN length(p) AS len"
     expect:
       rows:
         - [2]

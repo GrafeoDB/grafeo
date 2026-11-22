@@ -4,9 +4,77 @@ use std::sync::Arc;
 
 use grafeo_common::utils::error::Result;
 
-impl super::GrafeoDB {
+impl super::Open {
     // ── Embedding ────────────────────────────────────────────────────────
 
+    #[cfg(feature = "embed")]
+    pub(crate) fn load_embedding_model(
+        &self,
+        config: crate::embedding::EmbeddingModelConfig,
+    ) -> Result<()> {
+        self.load_embedding_model_with_options(
+            config,
+            crate::embedding::EmbeddingOptions::default(),
+        )
+    }
+
+    #[cfg(feature = "embed")]
+    pub(crate) fn load_embedding_model_with_options(
+        &self,
+        config: crate::embedding::EmbeddingModelConfig,
+        options: crate::embedding::EmbeddingOptions,
+    ) -> Result<()> {
+        let name = config.display_name();
+        let model =
+            crate::embedding::OnnxEmbeddingModel::from_config_with_options(config, options)?;
+        self.register_embedding_model(&name, Arc::new(model));
+        Ok(())
+    }
+
+    #[cfg(feature = "embed")]
+    pub(crate) fn register_embedding_model(
+        &self,
+        name: &str,
+        model: Arc<dyn crate::embedding::EmbeddingModel>,
+    ) {
+        self.embedding_models
+            .write()
+            .insert(name.to_string(), model);
+    }
+
+    #[cfg(feature = "embed")]
+    pub(crate) fn embed_text(&self, model_name: &str, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        let models = self.embedding_models.read();
+        let model = models.get(model_name).ok_or_else(|| {
+            grafeo_common::utils::error::Error::InvalidValue(format!(
+                "no embedding model is registered as '{model_name}'"
+            ))
+        })?;
+        model.embed(texts)
+    }
+
+    #[cfg(all(feature = "embed", feature = "vector-index"))]
+    pub(crate) fn vector_search_text(
+        &self,
+        label: &str,
+        property: &str,
+        model_name: &str,
+        query_text: &str,
+        k: usize,
+        ef: Option<usize>,
+    ) -> Result<Vec<(grafeo_common::types::NodeId, f32)>> {
+        let vectors = self.embed_text(model_name, &[query_text])?;
+        let query_vec = vectors.into_iter().next().ok_or_else(|| {
+            grafeo_common::utils::error::Error::Internal(
+                "Embedding model returned no vectors".to_string(),
+            )
+        })?;
+        self.vector_search(label, property, &query_vec, k, ef, None)
+    }
+}
+
+// The database's public methods: each reaches the open state for its call (#712).
+impl super::GrafeoDB {
     /// Loads a pre-configured embedding model, downloading from HuggingFace Hub if needed.
     ///
     /// For preset models, the ONNX model and tokenizer are automatically
@@ -34,10 +102,7 @@ impl super::GrafeoDB {
         &self,
         config: crate::embedding::EmbeddingModelConfig,
     ) -> Result<()> {
-        self.load_embedding_model_with_options(
-            config,
-            crate::embedding::EmbeddingOptions::default(),
-        )
+        self.live()?.load_embedding_model(config)
     }
 
     /// Loads a pre-configured embedding model with custom options.
@@ -54,14 +119,12 @@ impl super::GrafeoDB {
         config: crate::embedding::EmbeddingModelConfig,
         options: crate::embedding::EmbeddingOptions,
     ) -> Result<()> {
-        let name = config.display_name();
-        let model =
-            crate::embedding::OnnxEmbeddingModel::from_config_with_options(config, options)?;
-        self.register_embedding_model(&name, Arc::new(model));
-        Ok(())
+        self.live()?
+            .load_embedding_model_with_options(config, options)
     }
 
-    /// Registers an embedding model for text-to-vector conversion.
+    /// Registers an embedding model for text-to-vector conversion. After `close()` it does nothing;
+    /// it returns a `Result` from 0.7.0.
     ///
     /// Once registered, you can use [`embed_text()`](Self::embed_text) and
     /// [`vector_search_text()`](Self::vector_search_text) with the model name.
@@ -71,9 +134,9 @@ impl super::GrafeoDB {
         name: &str,
         model: Arc<dyn crate::embedding::EmbeddingModel>,
     ) {
-        self.embedding_models
-            .write()
-            .insert(name.to_string(), model);
+        if let Some(open) = self.live_if() {
+            open.register_embedding_model(name, model);
+        }
     }
 
     /// Generates embeddings for a batch of texts using a registered model.
@@ -83,13 +146,7 @@ impl super::GrafeoDB {
     /// Returns an error if the model is not registered or embedding fails.
     #[cfg(feature = "embed")]
     pub fn embed_text(&self, model_name: &str, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        let models = self.embedding_models.read();
-        let model = models.get(model_name).ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(format!(
-                "no embedding model is registered as '{model_name}'"
-            ))
-        })?;
-        model.embed(texts)
+        self.live()?.embed_text(model_name, texts)
     }
 
     /// Searches a vector index using a text query, generating the embedding on-the-fly.
@@ -111,12 +168,7 @@ impl super::GrafeoDB {
         k: usize,
         ef: Option<usize>,
     ) -> Result<Vec<(grafeo_common::types::NodeId, f32)>> {
-        let vectors = self.embed_text(model_name, &[query_text])?;
-        let query_vec = vectors.into_iter().next().ok_or_else(|| {
-            grafeo_common::utils::error::Error::Internal(
-                "Embedding model returned no vectors".to_string(),
-            )
-        })?;
-        self.vector_search(label, property, &query_vec, k, ef, None)
+        self.live()?
+            .vector_search_text(label, property, model_name, query_text, k, ef)
     }
 }

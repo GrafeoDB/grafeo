@@ -11,10 +11,12 @@ import (
 	"unsafe"
 )
 
-// Options are the memory and spill settings a database opens with (see OpenWithOptions). A nil
-// field is the default: 75% of the memory the process may use for MemoryLimit, MemoryLimit for
-// QueryMemoryLimit, a quarter of MemoryLimit (at most 256 MiB) for PathSearchBudget, half the
-// spill volume's free space for SpillLimit. A write past the memory limit fails with
+// Options are the memory, spill and query limit settings a database opens with (see
+// OpenWithOptions). A nil field is the default: 75% of the memory the process may use for
+// MemoryLimit, MemoryLimit for QueryMemoryLimit, a quarter of MemoryLimit (at most 256 MiB) for
+// PathSearchBudget, 100 million for PathExpansionLimit, 16 MiB for MaxQueryLength, 16 KiB for
+// MaxIdentifierLength, a quarter of MemoryLimit (at least 1 MiB) for SnapshotRetentionLimit,
+// half the spill volume's free space for SpillLimit. A write past the memory limit fails with
 // GRAFEO-S001, and so does a path search over its budget. One Options value may open several
 // databases.
 type Options struct {
@@ -23,16 +25,48 @@ type Options struct {
 	// QueryMemoryLimit is how many bytes one statement's sorts, joins and aggregates may hold,
 	// never more than MemoryLimit; zero fails at the open.
 	QueryMemoryLimit *uint64
-	// PathSearchBudget is how many bytes one path search may hold: the paths a variable-length or
-	// shortest-path search keeps at once, or what an RDF property path search visits (the nodes an
-	// ANY SHORTEST or shortestPath search visits are not counted yet). Never more than
+	// CdcMemoryLimit is how many bytes the in-memory change log may hold: past it the oldest
+	// commits go. A sixteenth of MemoryLimit by default, never more than it; zero fails at the
+	// open.
+	CdcMemoryLimit *uint64
+	// PathSearchBudget is how many bytes one path search may hold: everything a variable-length,
+	// shortest-path or RDF property path search holds at once (the nodes it visits, its queues and
+	// the paths it keeps), which counts against QueryMemoryLimit too. Never more than
 	// MemoryLimit; zero fails at the open.
 	PathSearchBudget *uint64
+	// PathExpansionLimit is how many path expansions one statement's variable-length and
+	// shortest-path searches may make together: each edge they read to extend a path, and each
+	// node and edge they copy out of a path into a row. 100 million by default; a statement over
+	// it fails with GRAFEO-Q009. Zero fails at the open.
+	PathExpansionLimit *uint64
+	// MaxQueryLength is how many bytes a statement's text may have; the values passed as
+	// parameters do not count. 16 MiB by default; a longer statement fails with GRAFEO-Q002.
+	// Zero fails at the open.
+	MaxQueryLength *uint64
+	// MaxIdentifierLength is how many bytes one name in a statement may have, as written between
+	// its delimiters (string literals and IRIs are not names). 16 KiB by default; a statement
+	// with a longer name fails with GRAFEO-Q002. Zero fails at the open.
+	MaxIdentifierLength *uint64
+	// SnapshotRetentionLimit is how many bytes of replaced data an open transaction's snapshot may
+	// keep: what the commits since it began replaced that it can still read. Past it the
+	// transaction's next call fails with the retryable GRAFEO-T012 and rolls it back. Below 1 MiB
+	// fails at the open.
+	SnapshotRetentionLimit *uint64
+	// HistoryRetentionLimit is how many bytes of replaced data the history window may keep: once the
+	// commits since its start replaced more, the start moves forward, whichever of time or bytes
+	// comes first, and a read before it is refused. No limit by default; zero fails at the open. Not
+	// stored with the database: pass it at every open.
+	HistoryRetentionLimit *uint64
 	// SpillLimit is how many bytes may spill to disk; zero means nothing spills.
 	SpillLimit *uint64
 	// UnlimitedSpill lifts the spill limit; it wins over SpillLimit. An in-memory database
 	// spills nothing whatever the settings.
 	UnlimitedSpill bool
+	// PlanCacheLimit is how many bytes of plans the database keeps for repeated statements, by a
+	// deep estimate of what each plan holds; zero keeps none, so every statement plans. By default
+	// a sixty-fourth of MemoryLimit, from 4 MiB to 64 MiB; never more than MemoryLimit. The
+	// report's caches.plan_cache_limit_bytes reads it back.
+	PlanCacheLimit *uint64
 }
 
 // apply sets the options on the native options object. Must be called on the OS thread that
@@ -48,8 +82,43 @@ func (o *Options) apply(native *C.GrafeoOptions) error {
 			return err
 		}
 	}
+	if o.CdcMemoryLimit != nil {
+		if err := statusToError(C.grafeo_options_set_cdc_memory_limit(native, C.uint64_t(*o.CdcMemoryLimit))); err != nil {
+			return err
+		}
+	}
 	if o.PathSearchBudget != nil {
 		if err := statusToError(C.grafeo_options_set_path_search_budget(native, C.uint64_t(*o.PathSearchBudget))); err != nil {
+			return err
+		}
+	}
+	if o.PathExpansionLimit != nil {
+		if err := statusToError(C.grafeo_options_set_path_expansion_limit(native, C.uint64_t(*o.PathExpansionLimit))); err != nil {
+			return err
+		}
+	}
+	if o.MaxQueryLength != nil {
+		if err := statusToError(C.grafeo_options_set_max_query_length(native, C.uint64_t(*o.MaxQueryLength))); err != nil {
+			return err
+		}
+	}
+	if o.MaxIdentifierLength != nil {
+		if err := statusToError(C.grafeo_options_set_max_identifier_length(native, C.uint64_t(*o.MaxIdentifierLength))); err != nil {
+			return err
+		}
+	}
+	if o.SnapshotRetentionLimit != nil {
+		if err := statusToError(C.grafeo_options_set_snapshot_retention_limit(native, C.uint64_t(*o.SnapshotRetentionLimit))); err != nil {
+			return err
+		}
+	}
+	if o.HistoryRetentionLimit != nil {
+		if err := statusToError(C.grafeo_options_set_history_retention_limit(native, C.uint64_t(*o.HistoryRetentionLimit))); err != nil {
+			return err
+		}
+	}
+	if o.PlanCacheLimit != nil {
+		if err := statusToError(C.grafeo_options_set_plan_cache_limit(native, C.uint64_t(*o.PlanCacheLimit))); err != nil {
 			return err
 		}
 	}
@@ -124,6 +193,10 @@ type MemoryUsage struct {
 // MemoryUsage returns the database's memory report.
 func (db *Database) MemoryUsage() (*MemoryUsage, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 *MemoryUsage
+		return zero0, err
+	}
 	runtime.LockOSThread()
 	cJSON := C.grafeo_memory_usage_json(db.handle)
 	if cJSON == nil {
@@ -153,6 +226,10 @@ type OpenWarning struct {
 // OpenWarnings returns what the open had to say; empty for a clean open.
 func (db *Database) OpenWarnings() ([]OpenWarning, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 []OpenWarning
+		return zero0, err
+	}
 	runtime.LockOSThread()
 	cJSON := C.grafeo_open_warnings(db.handle)
 	if cJSON == nil {

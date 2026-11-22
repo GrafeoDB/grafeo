@@ -28,6 +28,8 @@ grafeo-common = { workspace = true }
 md5 = { workspace = true }
 
 [dev-dependencies]
+# Reads tests/spec/runners/values_cases.json, the cases every runner's `values:` agrees on
+serde_json = "1"
 tempfile = { workspace = true }
 
 [build-dependencies]

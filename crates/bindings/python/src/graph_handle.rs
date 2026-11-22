@@ -1,9 +1,6 @@
 //! `db.graph(name)`: work in one named graph without switching the database's
 //! current graph.
 
-use std::sync::Arc;
-
-use parking_lot::RwLock;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
@@ -34,16 +31,16 @@ use crate::types::PyValue;
 ///     model.execute("MATCH (n:Component) RETURN n.name")
 #[pyclass(name = "GraphHandle", frozen)]
 pub struct PyGraphHandle {
-    db: Arc<RwLock<GrafeoDB>>,
+    db: crate::database::SharedDb,
     schema: Option<String>,
     name: String,
 }
 
 impl PyGraphHandle {
     /// A handle on the named graph of the database's current schema.
-    pub(crate) fn open(db: Arc<RwLock<GrafeoDB>>, name: &str) -> PyResult<Self> {
+    pub(crate) fn open(db: crate::database::SharedDb, name: &str) -> PyResult<Self> {
         let schema = {
-            let guard = db.read();
+            let guard = db.read()?;
             let handle = guard.graph(name).map_err(PyGrafeoError::from)?;
             handle.schema().map(ToString::to_string)
         };
@@ -71,7 +68,7 @@ impl PyGraphHandle {
     ) -> PyResult<PyQueryResult> {
         let params = direct::params(params)?;
         let result = without_gil(py, || {
-            let db = self.db.read();
+            let db = self.db.read()?;
             direct::run(&self.session(&db)?, language, query, params)
         });
         direct::surfaced(py, result)
@@ -79,7 +76,7 @@ impl PyGraphHandle {
 
     /// Runs `call` with a session working in this graph.
     fn with_session<T>(&self, call: impl FnOnce(&Session) -> PyResult<T>) -> PyResult<T> {
-        let db = self.db.read();
+        let db = self.db.read()?;
         call(&self.session(&db)?)
     }
 
@@ -91,7 +88,7 @@ impl PyGraphHandle {
         work: impl FnOnce(&Session) -> Result<T, PyGrafeoError> + Send,
     ) -> PyResult<T> {
         without_gil(py, || {
-            let db = self.db.read();
+            let db = self.db.read()?;
             work(&self.session(&db)?)
         })
     }
@@ -104,7 +101,7 @@ impl PyGraphHandle {
         work: impl FnOnce(&GraphHandle<'_>) -> Result<T, PyGrafeoError> + Send,
     ) -> PyResult<T> {
         without_gil(py, || {
-            let db = self.db.read();
+            let db = self.db.read()?;
             work(&db.graph_in(self.schema.as_deref(), &self.name)?)
         })
     }
@@ -112,7 +109,7 @@ impl PyGraphHandle {
     /// Runs `call` with the engine's handle on this graph, whose direct calls
     /// commit on their own without a session.
     fn with_graph<T>(&self, call: impl FnOnce(&GraphHandle<'_>) -> PyResult<T>) -> PyResult<T> {
-        let db = self.db.read();
+        let db = self.db.read()?;
         let graph = db
             .graph_in(self.schema.as_deref(), &self.name)
             .map_err(PyGrafeoError::from)?;
@@ -128,18 +125,19 @@ impl PyGraphHandle {
     ///     db.graph("model").algorithms.pagerank()
     #[cfg(feature = "algos")]
     #[getter]
-    fn algorithms(&self) -> crate::bridges::PyAlgorithms {
-        crate::bridges::PyAlgorithms::for_graph(
-            Arc::clone(&self.db),
+    fn algorithms(&self) -> PyResult<crate::bridges::PyAlgorithms> {
+        Ok(crate::bridges::PyAlgorithms::for_graph(
+            self.db.share()?,
             self.schema.clone(),
             self.name.clone(),
-        )
+        ))
     }
 
     /// The graph's name.
     #[getter]
-    fn name(&self) -> &str {
-        &self.name
+    fn name(&self) -> PyResult<&str> {
+        self.db.check()?;
+        Ok(&self.name)
     }
 
     fn __repr__(&self) -> String {
@@ -184,8 +182,8 @@ impl PyGraphHandle {
     /// Begins a transaction in this graph.
     #[pyo3(signature = (isolation_level=None))]
     fn begin_transaction(&self, isolation_level: Option<&str>) -> PyResult<PyTransaction> {
-        let session = self.session(&self.db.read())?;
-        PyTransaction::begin(Arc::clone(&self.db), session, isolation_level)
+        let session = self.session(&*self.db.read()?)?;
+        PyTransaction::begin(self.db.share()?, session, isolation_level)
     }
 
     /// Creates a node; raises if it breaks a constraint or node type.

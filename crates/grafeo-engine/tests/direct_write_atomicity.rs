@@ -358,7 +358,7 @@ fn a_failed_label_change_that_converts_values_restores_the_node() {
                         .unwrap();
                 db.execute(TYPED).unwrap();
                 #[cfg(feature = "cdc")]
-                db.set_cdc_enabled(true);
+                db.set_cdc(true).unwrap();
                 let node = typed_label_node(&db, "Alix");
                 let before = db.current_epoch();
                 #[cfg(feature = "cdc")]
@@ -413,7 +413,7 @@ fn failed_direct_detach_reopens_without_an_intervening_write() {
                 )
                 .unwrap();
                 #[cfg(feature = "cdc")]
-                db.set_cdc_enabled(true);
+                db.set_cdc(true).unwrap();
                 let graph = graph(&db);
                 let before = db.current_epoch();
                 #[cfg(feature = "cdc")]

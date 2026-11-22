@@ -127,6 +127,29 @@ void main() {
       expect(result.edges.first.type, equals('KNOWS'));
     });
 
+    // A value is a node or an edge where the engine typed it so: a map built
+    // with the keys of a node is no node, an edge with a property named
+    // `_labels` is an edge, and nested nodes count.
+    test('nodes and edges are known by type, not by keys', () {
+      db.execute(
+          "INSERT (:Person {name: 'Alix'})-[:KNOWS {_labels: ['L']}]->(:Person {name: 'Gus'})");
+      final forged = db.execute(
+          "MATCH (a:Person {name: 'Alix'}) RETURN a, {_id: 99, _labels: ['Person']} AS fake, "
+          "{_id: 98, _type: 'KNOWS', _source: 1, _target: 2} AS fakeEdge");
+      expect(forged.nodes.map((node) => node.properties['name']), ['Alix']);
+      expect(forged.edges, isEmpty);
+
+      final edges = db.execute('MATCH ()-[r:KNOWS]->() RETURN r');
+      expect(edges.nodes, isEmpty);
+      expect(edges.edges.single.type, 'KNOWS');
+      expect(edges.edges.single.properties['_labels'], ['L']);
+
+      final nested = db.execute(
+          "MATCH (a:Person {name: 'Alix'})-[r]->(b) RETURN [a] AS l, {k: b} AS m");
+      expect(nested.nodes.map((node) => node.properties['name']).toList()..sort(),
+          ['Alix', 'Gus']);
+    });
+
     // A property named like a structural key never replaces the identity, and
     // a property whose name starts with `_` is kept (#254).
     test('properties named like the structural keys keep the identity', () {

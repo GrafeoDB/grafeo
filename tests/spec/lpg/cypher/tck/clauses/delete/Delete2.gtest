@@ -1,0 +1,110 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/delete/Delete2.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Delete2"
+  title: "Delete2 - Deleting relationships"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Delete relationships
+  - name: s1_delete_relationships
+    setup:
+      - |
+        UNWIND range(0, 2) AS i
+        CREATE ()-[:R]->()
+    query: |
+      MATCH ()-[r]-()
+      DELETE r
+    expect:
+      empty: true
+      side_effects:
+        -relationships: 3
+
+  # [2] Delete optionally matched relationship
+  - name: s2_delete_optionally_matched_relationship
+    setup:
+      - |
+        CREATE ()
+    query: |
+      MATCH (n)
+      OPTIONAL MATCH (n)-[r]-()
+      DELETE n, r
+    expect:
+      empty: true
+      side_effects:
+        -nodes: 1
+
+  # [3] Delete relationship with bidirectional matching
+  - name: s3_delete_relationship_with_bidirectional_matching
+    setup:
+      - |
+        CREATE ()-[:T {id: 42}]->()
+    query: |
+      MATCH p = ()-[r:T]-()
+      WHERE r.id = 42
+      DELETE r
+    expect:
+      empty: true
+      side_effects:
+        -relationships: 1
+        -properties: 1
+
+  # [4] Ignore null when deleting relationship
+  - name: s4_ignore_null_when_deleting_relationship
+    query: |
+      OPTIONAL MATCH ()-[r:DoesNotExist]-()
+      DELETE r
+      RETURN r
+    expect:
+      values: |
+        | r |
+        | null |
+      side_effects: {}
+
+  # [5] Failing when deleting a relationship type
+  # TCK: SyntaxError at compile time: InvalidDelete
+  - name: s5_failing_when_deleting_a_relationship_type
+    setup:
+      - |
+        CREATE ()-[:T {id: 42}]->()
+    query: |
+      MATCH ()-[r:T]-()
+      DELETE r:T
+    expect:
+      gql_status: "42"
+      side_effects: {}

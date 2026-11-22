@@ -48,6 +48,7 @@ pub mod merge_claim;
 mod mutation;
 mod node_seek;
 mod parameter_scan;
+mod path_expansions;
 mod project;
 pub mod push;
 mod range_fold;
@@ -93,7 +94,7 @@ pub use factorized_filter::{
     FactorizedPredicate, OrPredicate, PropertyPredicate,
 };
 pub use filter::{
-    BinaryFilterOp, ExpressionPredicate, FilterExpression, FilterOperator, LazyValue,
+    BinaryFilterOp, ChosenPart, ExpressionPredicate, FilterExpression, FilterOperator, LazyValue,
     ListPredicateKind, PatternCache, Predicate, SessionContext, StatementClock, UnaryFilterOp,
 };
 pub use functions::{
@@ -123,6 +124,7 @@ pub use node_seek::{
     NodeSeekOperator, SeekKey, find_indexed_as_compared, find_through_label_indexes,
 };
 pub use parameter_scan::{ParameterScanOperator, ParameterState};
+pub use path_expansions::{DEFAULT_PATH_EXPANSION_LIMIT, PathExpansions};
 pub use project::{EntityValue, ProjectExpr, ProjectOperator};
 pub use push::{
     AggregatePushOperator, DistinctMaterializingOperator, DistinctPushOperator, FilterPushOperator,
@@ -145,7 +147,10 @@ pub use scan_text::TextScanOperator;
 #[cfg(feature = "vector-index")]
 pub use scan_vector::VectorScanOperator;
 pub use set_ops::{ExceptOperator, IntersectOperator, OtherwiseOperator};
-pub use shortest_path::{PathSelection as ExecutionPathSelection, ShortestPathOperator};
+pub use shortest_path::{
+    PATH_RESTRICTIVE_QUEUE_ENTRY_BYTES, PathSelection as ExecutionPathSelection,
+    PathStep as ExecutionPathStep, ShortestPathOperator,
+};
 pub use shuffle::ShuffleOperator;
 pub use single_row::{EmptyOperator, NodeListOperator, SingleRowOperator};
 pub use sort::{NullOrder, SortDirection, SortKey, SortOperator};
@@ -153,12 +158,12 @@ pub use top_k::TopKOperator;
 pub use union::UnionOperator;
 pub use unwind::UnwindOperator;
 pub use variable_length_expand::{
-    DEFAULT_PATH_SEARCH_BUDGET, PathMode as ExecutionPathMode, VariableLengthExpandOperator,
+    DEFAULT_PATH_SEARCH_BUDGET, PATH_QUEUE_ENTRY_BYTES, PathMode as ExecutionPathMode,
+    SEGMENT_BYTES as PATH_SEGMENT_BYTES, VariableLengthExpandOperator,
 };
-// The RDF path budget refuses as the LPG path searches do.
-#[cfg(all(test, feature = "triple-store"))]
+// Every path search's budget refuses as the LPG path searches do.
+#[cfg(test)]
 pub(crate) use variable_length_expand::path_budget_message;
-#[cfg(feature = "triple-store")]
 pub(crate) use variable_length_expand::{budget_text, path_search_refused};
 pub use vector_join::VectorJoinOperator;
 pub use writer::{GraphWriter, MAP_ASSIGNMENT, NewEdge, Recording, WriteCounter, WriteCounters};

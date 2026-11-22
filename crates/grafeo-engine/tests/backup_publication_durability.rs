@@ -102,6 +102,20 @@ mod durable_publication {
                 Backup::Full => db.backup_full(&backups),
                 Backup::Incremental => db.backup_incremental(&backups),
             });
+            // A failed cut of the copy's file after its header's sync fails
+            // no backup: it is not the barrier asked for.
+            if let Ok(segment) = &result
+                && grafeo_common::testing::crash::fired_failure()
+                    .is_some_and(|point| point.ends_with("trim"))
+            {
+                assert_eq!(
+                    restored_people(&backups, segment.end_epoch),
+                    names(&["Base", "Committed"]),
+                    "a backup past a failed cut is whole"
+                );
+                let _ = db.close();
+                continue;
+            }
             let Err(error) = result else {
                 panic!(
                     "{backup:?} backup completed at failure count {count} without reaching \

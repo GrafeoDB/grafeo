@@ -65,10 +65,17 @@ void main() {
       expect(result.rows.first['c.name'], equals('Amsterdam'));
     });
 
+    test('an empty result names its columns', () {
+      final result =
+          db.execute('MATCH (n:Nobody) RETURN n.name AS name, 1 AS one');
+      expect(result.rows, isEmpty);
+      expect(result.columns, ['name', 'one']);
+    });
+
     test('empty result has zero rows', () {
       final result = db.execute('MATCH (n:Nothing) RETURN n');
       expect(result.rows, isEmpty);
-      expect(result.columns, isEmpty);
+      expect(result.columns, ['n']);
     });
 
     test('invalid query throws QueryException', () {

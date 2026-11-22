@@ -12,6 +12,9 @@ use std::sync::Arc;
 use grafeo_common::grafeo_debug_span;
 use grafeo_common::types::{EpochId, TransactionId, Value};
 use grafeo_common::utils::error::{Error, Result};
+// A processor has no configuration of its own: it parses under the default limits.
+#[cfg(query_language)]
+use grafeo_adapters::query::limits::ParseLimits;
 use grafeo_core::execution::operators::Recording;
 use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::apply::GraphBackend;
@@ -436,7 +439,7 @@ impl QueryProcessor {
             && optimized_plan.root.has_mutations()
             && self.write_store.is_some()
         {
-            let transaction = self.transaction_manager.begin();
+            let transaction = self.transaction_manager.begin_statement();
             let epoch = self
                 .transaction_manager
                 .start_epoch(transaction)
@@ -486,6 +489,11 @@ impl QueryProcessor {
         let _pin = context
             .is_none()
             .then(|| self.transaction_manager.pin_read());
+        // In a caller's transaction the statement reads at its snapshot, held for its run:
+        // `GRAFEO-T012` once the snapshot expired.
+        let _read = context
+            .map(|(_, transaction_id)| self.transaction_manager.read_in(transaction_id))
+            .transpose()?;
         let planner = if let Some((epoch, transaction_id)) = context {
             Planner::with_context(
                 Arc::clone(&self.graph_store),
@@ -554,27 +562,27 @@ impl QueryProcessor {
             #[cfg(feature = "gql")]
             QueryLanguage::Gql => {
                 use crate::query::translators::gql;
-                gql::translate(query)
+                gql::translate(query, &ParseLimits::default())
             }
             #[cfg(feature = "cypher")]
             QueryLanguage::Cypher => {
                 use crate::query::translators::cypher;
-                cypher::translate(query)
+                cypher::translate(query, &ParseLimits::default())
             }
             #[cfg(feature = "gremlin")]
             QueryLanguage::Gremlin => {
                 use crate::query::translators::gremlin;
-                gremlin::translate(query)
+                gremlin::translate(query, &ParseLimits::default())
             }
             #[cfg(feature = "graphql")]
             QueryLanguage::GraphQL => {
                 use crate::query::translators::graphql;
-                graphql::translate(query)
+                graphql::translate(query, &ParseLimits::default())
             }
             #[cfg(feature = "sql-pgq")]
             QueryLanguage::SqlPgq => {
                 use crate::query::translators::sql_pgq;
-                sql_pgq::translate(query)
+                sql_pgq::translate(query, &ParseLimits::default())
             }
             #[allow(unreachable_patterns)]
             _ => Err(Error::Internal(format!(
@@ -757,13 +765,17 @@ impl QueryProcessor {
             #[cfg(feature = "sparql")]
             QueryLanguage::Sparql => {
                 use crate::query::translators::sparql;
-                sparql::translate_with_bindings(query, &params.cloned().unwrap_or_default())
+                sparql::translate_with_bindings(
+                    query,
+                    &params.cloned().unwrap_or_default(),
+                    &ParseLimits::default(),
+                )
             }
             #[cfg(all(feature = "graphql", feature = "triple-store"))]
             QueryLanguage::GraphQLRdf => {
                 use crate::query::translators::graphql_rdf;
                 // Default namespace for GraphQL-RDF queries
-                graphql_rdf::translate(query, "http://example.org/")
+                graphql_rdf::translate(query, "http://example.org/", &ParseLimits::default())
             }
             // Only a build with a property graph language has other ones.
             #[cfg(lpg_language)]
@@ -1094,6 +1106,7 @@ pub(crate) fn explain_result(
     QueryResult {
         columns: vec!["plan".to_string()],
         column_types: vec![grafeo_common::types::LogicalType::String],
+        type_runs: Vec::new(),
         rows: vec![vec![Value::String(tree_text.into())]],
         execution_time_ms: None,
         rows_scanned: None,
@@ -1122,6 +1135,7 @@ pub(crate) fn physical_explain_result(
     Ok(QueryResult {
         columns: vec!["plan".to_string()],
         column_types: vec![grafeo_common::types::LogicalType::String],
+        type_runs: Vec::new(),
         rows: vec![vec![Value::String(output.into())]],
         execution_time_ms: None,
         rows_scanned: None,
@@ -1380,9 +1394,13 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &Substitution<'_>) -
                 }
             }
             for agg_expr in &mut agg.aggregates {
-                for expr in [&mut agg_expr.expression, &mut agg_expr.expression2]
-                    .into_iter()
-                    .flatten()
+                for expr in [
+                    &mut agg_expr.expression,
+                    &mut agg_expr.expression2,
+                    &mut agg_expr.percentile,
+                ]
+                .into_iter()
+                .flatten()
                 {
                     substitute_in_expression(expr, params)?;
                 }
@@ -1507,7 +1525,7 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &Substitution<'_>) -
             substitute_in_operator(&mut remove_label.input, params)?;
         }
         LogicalOperator::ShortestPath(sp) => {
-            if let Some(condition) = &mut sp.edge_condition {
+            for condition in sp.conditions_mut() {
                 substitute_in_expression(&mut condition.predicate, params)?;
             }
             substitute_in_operator(&mut sp.input, params)?;
@@ -1534,6 +1552,9 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &Substitution<'_>) -
         | LogicalOperator::MoveGraph(_)
         | LogicalOperator::AddGraph(_) => {}
         LogicalOperator::HorizontalAggregate(op) => {
+            if let Some(percentile) = &mut op.percentile {
+                substitute_in_expression(percentile, params)?;
+            }
             substitute_in_operator(&mut op.input, params)?;
         }
         LogicalOperator::Empty => {}

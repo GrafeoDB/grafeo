@@ -173,10 +173,32 @@ tests:
       rows:
         - [3.0]
 
-  # `^` binds tighter than `*` and is right associative: (2 ^ (3 ^ 2)) * 2.
-  - name: power_precedence_and_associativity
-    query: RETURN 2.0 ^ 3.0 ^ 2.0 * 2.0 AS r
+  # `^` (a Grafeo extension) binds tighter than `*`: (2 ^ 3) * 2.
+  - name: power_precedence
+    query: RETURN 2.0 ^ 3.0 * 2.0 AS r
     expect:
       precision: 6
       rows:
-        - [1024.0]
+        - [16.0]
+
+  # ISO GQL has no `^`, so a chain has no grouping: it is a syntax error that
+  # names POWER, the standard's form.
+  - name: power_chain_needs_parentheses
+    query: RETURN 2.0 ^ 3.0 ^ 2.0 AS r
+    expect:
+      error: "POWER"
+      gql_status: "42001"
+
+  - name: power_parenthesized_chain
+    query: RETURN (2.0 ^ 3.0) ^ 2.0 AS r
+    expect:
+      precision: 6
+      rows:
+        - [64.0]
+
+  - name: power_function_nests
+    query: RETURN POWER(2.0, POWER(3.0, 2.0)) AS r
+    expect:
+      precision: 6
+      rows:
+        - [512.0]

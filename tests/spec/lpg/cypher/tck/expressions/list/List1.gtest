@@ -1,0 +1,334 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/list/List1.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.List1"
+  title: "List1 - Dynamic Element Access"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Indexing into literal list
+  - name: s1_indexing_into_literal_list
+    query: |
+      RETURN [1, 2, 3][0] AS value
+    expect:
+      values: |
+        | value |
+        | 1 |
+      side_effects: {}
+
+  # [2] Indexing into nested literal lists
+  - name: s2_indexing_into_nested_literal_lists
+    query: |
+      RETURN [[1]][0][0]
+    expect:
+      values: |
+        | [[1]][0][0] |
+        | 1 |
+      side_effects: {}
+
+  # [3] Use list lookup based on parameters when there is no type information
+  - name: s3_use_list_lookup_based_on_parameters_when_there_is_no_type_information
+    params:
+      expr: ["Apa"]
+      idx: 0
+    query: |
+      WITH $expr AS expr, $idx AS idx
+      RETURN expr[idx] AS value
+    expect:
+      values: |
+        | value |
+        | 'Apa' |
+      side_effects: {}
+
+  # [4] Use list lookup based on parameters when there is lhs type information
+  - name: s4_use_list_lookup_based_on_parameters_when_there_is_lhs_type_information
+    params:
+      idx: 0
+    query: |
+      WITH ['Apa'] AS expr
+      RETURN expr[$idx] AS value
+    expect:
+      values: |
+        | value |
+        | 'Apa' |
+      side_effects: {}
+
+  # [5] Use list lookup based on parameters when there is rhs type information
+  - name: s5_use_list_lookup_based_on_parameters_when_there_is_rhs_type_information
+    params:
+      expr: ["Apa"]
+      idx: 0
+    query: |
+      WITH $expr AS expr, $idx AS idx
+      RETURN expr[toInteger(idx)] AS value
+    expect:
+      values: |
+        | value |
+        | 'Apa' |
+      side_effects: {}
+
+  # [6] Fail when indexing a non-list #Example: boolean #1
+  # TCK: TypeError at any time: InvalidArgumentType
+  - name: s6_fail_when_indexing_a_non_list_example_boolean_1
+    xfail:
+      spec: "openCypher TCK 2024.3 List1: [6] Fail when indexing a non-list #Example: boolean #1"
+      issue: "#796"
+    query: |
+      WITH true AS list, 0 AS idx
+      RETURN list[idx]
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [6] Fail when indexing a non-list #Example: integer #2
+  # TCK: TypeError at any time: InvalidArgumentType
+  - name: s6_fail_when_indexing_a_non_list_example_integer_2
+    xfail:
+      spec: "openCypher TCK 2024.3 List1: [6] Fail when indexing a non-list #Example: integer #2"
+      issue: "#796"
+    query: |
+      WITH 123 AS list, 0 AS idx
+      RETURN list[idx]
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [6] Fail when indexing a non-list #Example: float #3
+  # TCK: TypeError at any time: InvalidArgumentType
+  - name: s6_fail_when_indexing_a_non_list_example_float_3
+    xfail:
+      spec: "openCypher TCK 2024.3 List1: [6] Fail when indexing a non-list #Example: float #3"
+      issue: "#796"
+    query: |
+      WITH 4.7 AS list, 0 AS idx
+      RETURN list[idx]
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [6] Fail when indexing a non-list #Example: string #4
+  # TCK: TypeError at any time: InvalidArgumentType
+  - name: s6_fail_when_indexing_a_non_list_example_string_4
+    xfail:
+      spec: "openCypher TCK 2024.3 List1: [6] Fail when indexing a non-list #Example: string #4"
+      issue: "#796"
+    query: |
+      WITH '1' AS list, 0 AS idx
+      RETURN list[idx]
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [7] Fail when indexing a non-list given by a parameter #Example: boolean #1
+  # TCK: TypeError at any time: *
+  - name: s7_fail_when_indexing_a_non_list_given_by_a_parameter_example_boolean_1
+    xfail:
+      spec: "openCypher TCK 2024.3 List1: [7] Fail when indexing a non-list given by a parameter #Example: boolean #1"
+      issue: "#796"
+    params:
+      expr: true
+      idx: 0
+    query: |
+      WITH $expr AS list, $idx AS idx
+      RETURN list[idx]
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [7] Fail when indexing a non-list given by a parameter #Example: integer #2
+  # TCK: TypeError at any time: *
+  - name: s7_fail_when_indexing_a_non_list_given_by_a_parameter_example_integer_2
+    xfail:
+      spec: "openCypher TCK 2024.3 List1: [7] Fail when indexing a non-list given by a parameter #Example: integer #2"
+      issue: "#796"
+    params:
+      expr: 123
+      idx: 0
+    query: |
+      WITH $expr AS list, $idx AS idx
+      RETURN list[idx]
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [7] Fail when indexing a non-list given by a parameter #Example: float #3
+  # TCK: TypeError at any time: *
+  - name: s7_fail_when_indexing_a_non_list_given_by_a_parameter_example_float_3
+    xfail:
+      spec: "openCypher TCK 2024.3 List1: [7] Fail when indexing a non-list given by a parameter #Example: float #3"
+      issue: "#796"
+    params:
+      expr: 4.7
+      idx: 0
+    query: |
+      WITH $expr AS list, $idx AS idx
+      RETURN list[idx]
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [7] Fail when indexing a non-list given by a parameter #Example: string #4
+  # TCK: TypeError at any time: *
+  - name: s7_fail_when_indexing_a_non_list_given_by_a_parameter_example_string_4
+    xfail:
+      spec: "openCypher TCK 2024.3 List1: [7] Fail when indexing a non-list given by a parameter #Example: string #4"
+      issue: "#796"
+    params:
+      expr: "1"
+      idx: 0
+    query: |
+      WITH $expr AS list, $idx AS idx
+      RETURN list[idx]
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [8] Fail when indexing with a non-integer #Example: boolean #1
+  # TCK: TypeError at any time: *
+  - name: s8_fail_when_indexing_with_a_non_integer_example_boolean_1
+    query: |
+      WITH [1, 2, 3, 4, 5] AS list, true AS idx
+      RETURN list[idx]
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [8] Fail when indexing with a non-integer #Example: float #2
+  # TCK: TypeError at any time: *
+  - name: s8_fail_when_indexing_with_a_non_integer_example_float_2
+    query: |
+      WITH [1, 2, 3, 4, 5] AS list, 4.7 AS idx
+      RETURN list[idx]
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [8] Fail when indexing with a non-integer #Example: string #3
+  # TCK: TypeError at any time: *
+  - name: s8_fail_when_indexing_with_a_non_integer_example_string_3
+    query: |
+      WITH [1, 2, 3, 4, 5] AS list, '1' AS idx
+      RETURN list[idx]
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [8] Fail when indexing with a non-integer #Example: list #4
+  # TCK: TypeError at any time: *
+  - name: s8_fail_when_indexing_with_a_non_integer_example_list_4
+    query: |
+      WITH [1, 2, 3, 4, 5] AS list, [1] AS idx
+      RETURN list[idx]
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [8] Fail when indexing with a non-integer #Example: map #5
+  # TCK: TypeError at any time: *
+  - name: s8_fail_when_indexing_with_a_non_integer_example_map_5
+    query: |
+      WITH [1, 2, 3, 4, 5] AS list, {x: 3} AS idx
+      RETURN list[idx]
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [9] Fail when indexing with a non-integer given by a parameter #Example: boolean #1
+  # TCK: TypeError at any time: *
+  - name: s9_fail_when_indexing_with_a_non_integer_given_by_a_parameter_example_boolean_1
+    params:
+      expr: ["Apa"]
+      idx: true
+    query: |
+      WITH $expr AS list, $idx AS idx
+      RETURN list[idx]
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [9] Fail when indexing with a non-integer given by a parameter #Example: float #2
+  # TCK: TypeError at any time: *
+  - name: s9_fail_when_indexing_with_a_non_integer_given_by_a_parameter_example_float_2
+    params:
+      expr: ["Apa"]
+      idx: 4.7
+    query: |
+      WITH $expr AS list, $idx AS idx
+      RETURN list[idx]
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [9] Fail when indexing with a non-integer given by a parameter #Example: string #3
+  # TCK: TypeError at any time: *
+  - name: s9_fail_when_indexing_with_a_non_integer_given_by_a_parameter_example_string_3
+    params:
+      expr: ["Apa"]
+      idx: "1"
+    query: |
+      WITH $expr AS list, $idx AS idx
+      RETURN list[idx]
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [9] Fail when indexing with a non-integer given by a parameter #Example: list #4
+  # TCK: TypeError at any time: *
+  - name: s9_fail_when_indexing_with_a_non_integer_given_by_a_parameter_example_list_4
+    params:
+      expr: ["Apa"]
+      idx: [1]
+    query: |
+      WITH $expr AS list, $idx AS idx
+      RETURN list[idx]
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [9] Fail when indexing with a non-integer given by a parameter #Example: map #5
+  # TCK: TypeError at any time: *
+  - name: s9_fail_when_indexing_with_a_non_integer_given_by_a_parameter_example_map_5
+    params:
+      expr: ["Apa"]
+      idx: {"x": 3}
+    query: |
+      WITH $expr AS list, $idx AS idx
+      RETURN list[idx]
+    expect:
+      gql_status: "22"
+      side_effects: {}

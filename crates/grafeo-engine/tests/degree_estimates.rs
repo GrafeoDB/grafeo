@@ -24,6 +24,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use grafeo_adapters::query::limits::ParseLimits;
 use grafeo_common::types::{NodeId, Value};
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::traits::GraphStore;
@@ -316,7 +317,11 @@ fn an_id_range_is_estimated_from_the_id_range() {
     let estimate = |condition: &str| {
         let store = db.store().unwrap();
         let optimizer = Optimizer::from_graph_store(&*store);
-        let plan = translate_gql(&format!("MATCH (a:V) WHERE {condition} RETURN a")).unwrap();
+        let plan = translate_gql(
+            &format!("MATCH (a:V) WHERE {condition} RETURN a"),
+            &ParseLimits::default(),
+        )
+        .unwrap();
         let plan = optimizer.optimize(plan).unwrap();
         optimizer.estimate_cardinality(&plan)
     };
@@ -354,7 +359,11 @@ fn an_id_range_on_something_else_plans_without_an_estimate() {
         "id(a) < 1.5",
         "id(a) < a.k",
     ] {
-        let plan = translate_gql(&format!("MATCH (a:V) WHERE {condition} RETURN a")).unwrap();
+        let plan = translate_gql(
+            &format!("MATCH (a:V) WHERE {condition} RETURN a"),
+            &ParseLimits::default(),
+        )
+        .unwrap();
         let plan = optimizer.optimize(plan).unwrap();
         let rows = optimizer.estimate_cardinality(&plan);
         assert!((0.0..=100.0).contains(&rows), "{condition}: {rows}");

@@ -14,13 +14,12 @@
 //! - once the database is dropped, Grafeo holds no value of it in memory, and a reopen of the
 //!   compacted file loads none;
 //! - after the delete and `compact()`, Grafeo holds no deleted value in memory, except in the
-//!   structures that keep values by design: the RDF term dictionary until a checkpoint and a
-//!   reopen, the change feed while CDC is on, and history while history retention keeps it;
+//!   structures that keep values by design: the RDF term dictionary until `close()`, the
+//!   change feed while CDC is on, and history while history retention keeps it;
 //! - after `close()`, before the drop, Grafeo holds no value of the database in memory.
 //!
-//! The rows that do not hold yet are strict expected failures naming #712. Only Grafeo's own
-//! memory is scanned: the host language's copies (a binding's strings, its allocator's free
-//! lists) are outside it.
+//! Only Grafeo's own memory is scanned: the host language's copies (a binding's strings, its
+//! allocator's free lists) are outside it.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test deleted_values_leave_memory
@@ -241,6 +240,13 @@ static SERIAL: Mutex<()> = Mutex::new(());
 static NEXT_MARKER: AtomicUsize = AtomicUsize::new(0);
 
 /// A word no other value holds, on the stack: lowercase, so a text index's terms hold it too.
+///
+/// Written in place (`let mut marker = Marker::BLANK; marker.fill();`), never returned by
+/// value: a marker moved out of a constructor leaves a dead copy of its bytes in the caller's
+/// stack frame, and a value later built in that slot (an enum's unused bytes, a struct's
+/// padding) carries them into the heap when it moves there, where the scan counts a copy that
+/// no database made. Under a fixed hash seed (`--cfg grafeo_codspeed`) that copy landed in a
+/// block the setup's statements allocated, before the marker was written (#712).
 struct Marker {
     bytes: [u8; 48],
     len: usize,
@@ -250,14 +256,22 @@ struct Marker {
 }
 
 impl Marker {
-    fn new() -> Self {
+    /// A marker without its bytes yet: [`fill`](Self::fill) writes them.
+    const BLANK: Self = Self {
+        bytes: [0; 48],
+        len: 0,
+        #[cfg(feature = "vector-index")]
+        vector: [0.0; 8],
+    };
+
+    /// Writes a new marker into `self`.
+    fn fill(&mut self) {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("the clock is past 1970")
             .subsec_nanos();
         let count = NEXT_MARKER.fetch_add(1, Ordering::Relaxed);
-        let mut bytes = [0u8; 48];
-        let mut len = 0;
+        self.len = 0;
         for byte in b"zq"
             .iter()
             .chain(nanos.to_string().as_bytes())
@@ -265,25 +279,17 @@ impl Marker {
             .chain(count.to_string().as_bytes())
             .chain(b"vexmarrow")
         {
-            bytes[len] = *byte;
-            len += 1;
+            self.bytes[self.len] = *byte;
+            self.len += 1;
         }
         #[cfg(feature = "vector-index")]
-        let vector = {
+        {
             let base = 1000.0
                 + f32::from(u16::try_from(nanos % 60_000).expect("below 60000")) / 7.0
                 + f32::from(u16::try_from(count % 1000).expect("below 1000")) * 101.0;
-            let mut vector = [0f32; 8];
-            for (step, value) in (0u16..).zip(vector.iter_mut()) {
+            for (step, value) in (0u16..).zip(self.vector.iter_mut()) {
                 *value = base + 0.125 * f32::from(step);
             }
-            vector
-        };
-        Self {
-            bytes,
-            len,
-            #[cfg(feature = "vector-index")]
-            vector,
         }
     }
 
@@ -291,14 +297,13 @@ impl Marker {
         std::str::from_utf8(&self.bytes[..self.len]).expect("the marker is ASCII")
     }
 
-    /// The bytes of the marker vector as a vector column and an index hold them.
+    /// Writes the bytes of the marker vector, as a vector column and an index hold them, into
+    /// `out` (in place, as the marker itself).
     #[cfg(feature = "vector-index")]
-    fn vector_bytes(&self) -> [u8; 32] {
-        let mut bytes = [0u8; 32];
+    fn write_vector_bytes(&self, out: &mut [u8; 32]) {
         for (at, value) in self.vector.iter().enumerate() {
-            bytes[at * 4..at * 4 + 4].copy_from_slice(&value.to_le_bytes());
+            out[at * 4..at * 4 + 4].copy_from_slice(&value.to_le_bytes());
         }
-        bytes
     }
 }
 
@@ -330,6 +335,9 @@ struct Case {
     setup: fn(&GrafeoDB),
     write: fn(&GrafeoDB, &Marker),
     delete: fn(&GrafeoDB, &Marker),
+    /// The write rolls its values back: it takes the positive control itself, before the
+    /// rollback, and nothing holds the values after it.
+    rolls_back: bool,
 }
 
 impl Case {
@@ -342,6 +350,7 @@ impl Case {
             setup: |_| {},
             write: write_texts,
             delete: delete_items,
+            rolls_back: false,
         }
     }
 }
@@ -450,9 +459,12 @@ fn config(open: Open, path: &Path) -> Config {
 /// Runs `case` and counts its marker after each step.
 fn counts(case: &Case) -> Counts {
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-    let marker = Marker::new();
+    let mut marker = Marker::BLANK;
+    marker.fill();
     #[cfg(feature = "vector-index")]
-    let vector_bytes = marker.vector_bytes();
+    let mut vector_bytes = [0u8; 32];
+    #[cfg(feature = "vector-index")]
+    marker.write_vector_bytes(&mut vector_bytes);
     let needle: &[u8] = match case.needle {
         Needle::Word => &marker.bytes[..marker.len],
         #[cfg(feature = "vector-index")]
@@ -485,7 +497,7 @@ fn counts(case: &Case) -> Counts {
     (case.write)(&db, &marker);
     counts.written = heap::copies(needle);
     assert!(
-        counts.written > 0,
+        counts.written > 0 || case.rolls_back,
         "the positive control: the scan finds the written values"
     );
     (case.delete)(&db, &marker);
@@ -504,16 +516,6 @@ fn counts(case: &Case) -> Counts {
         drop(db);
     }
     counts
-}
-
-/// A strict expected failure: `body` must panic (the behavior `spec` names is not there yet,
-/// `issue` tracks it); if it passes, the test fails so the mark is removed.
-fn xfail(spec: &str, issue: &str, body: impl FnOnce()) {
-    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).is_err();
-    assert!(
-        failed,
-        "XPASS: {spec} ({issue}) holds now; remove the xfail"
-    );
 }
 
 /// The values this case deleted are gone from memory after `compact()`.
@@ -781,113 +783,79 @@ fn a_binary_quantized_vector_index_frees_deleted_vectors() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// In memory after compact(): the shapes that keep a deleted value (expected failures).
+// In memory after compact(): the reporter's scenario and its shapes, then the ones that still
+// keep a deleted value (expected failures).
 // ---------------------------------------------------------------------------------------------
 
-/// The reporter's scenario: the deleted texts are the column's largest, and the column's bound
-/// keeps the largest after `compact()`.
+/// The reporter's scenario: the deleted texts are the column's largest, which the column's bound
+/// kept until it named rows instead of holding values.
 #[test]
 fn deleted_texts_are_freed_by_compact() {
-    xfail(
-        "#712: after the delete and compact(), Grafeo holds no deleted value in memory",
-        "#712",
-        || {
-            compact_frees(&Case::text(Open::File, 1000));
-        },
-    );
+    compact_frees(&Case::text(Open::File, 1000));
 }
 
 /// The same in a database without a file.
 #[test]
 fn deleted_texts_are_freed_by_compact_in_memory() {
-    xfail(
-        "#712: after the delete and compact(), Grafeo holds no deleted value in memory",
-        "#712",
-        || {
-            compact_frees(&Case::text(Open::InMemory, 100));
-        },
-    );
+    compact_frees(&Case::text(Open::InMemory, 100));
 }
 
 /// The same in an encrypted database: what it holds in memory is not encrypted.
 #[cfg(feature = "encryption")]
 #[test]
 fn deleted_texts_are_freed_by_compact_when_encrypted() {
-    xfail(
-        "#712: after the delete and compact(), Grafeo holds no deleted value in memory",
-        "#712",
-        || {
-            compact_frees(&Case::text(Open::Encrypted, 100));
-        },
-    );
+    compact_frees(&Case::text(Open::Encrypted, 100));
 }
 
 /// A text inside a list.
 #[test]
 fn a_deleted_list_is_freed_by_compact() {
-    xfail(
-        "#712: after the delete and compact(), Grafeo holds no deleted value in memory",
-        "#712",
-        || compact_frees(&list()),
-    );
+    compact_frees(&list());
 }
 
 /// A text inside a map.
 #[test]
 fn a_deleted_map_is_freed_by_compact() {
-    xfail(
-        "#712: after the delete and compact(), Grafeo holds no deleted value in memory",
-        "#712",
-        || compact_frees(&map()),
-    );
+    compact_frees(&map());
 }
 
-/// An insert rolled back: never committed, yet the column's bound took it in.
+/// An insert rolled back: never committed, so nothing holds its values once the rollback
+/// returns, the column's bound included (it names rows and owns no value).
 #[test]
 fn a_rolled_back_text_is_freed() {
-    xfail(
-        "#712: after the delete and compact(), Grafeo holds no deleted value in memory",
-        "#712",
-        || compact_frees(&rolled_back()),
-    );
+    let counts = counts(&rolled_back());
+    assert_eq!(counts.written, 0, "after the rollback: {counts:?}");
+    assert_eq!(counts.compacted, 0, "after compact(): {counts:?}");
 }
 
-/// Texts written as literals: the plan cache keeps each statement's text and literals.
+/// Texts written as literals: the plan cache keeps each statement's text and literals, and
+/// `compact()` empties it.
 #[test]
 fn texts_written_as_literals_are_freed_by_compact() {
-    xfail(
-        "#712: after the delete and compact(), Grafeo holds no deleted value in memory",
-        "#712",
-        || compact_frees(&literal_insert()),
-    );
+    compact_frees(&literal_insert());
 }
 
-/// A scalar-quantized index below its training threshold keeps every vector as a training
-/// sample, and a delete does not take it out.
+/// A scalar-quantized index below its training threshold keeps its training samples as ids,
+/// so a deleted vector is freed with its entry and never trains the quantizer.
 #[cfg(feature = "vector-index")]
 #[test]
 fn a_scalar_quantized_vector_index_frees_deleted_vectors() {
-    xfail(
-        "#712: after the delete and compact(), Grafeo holds no deleted value in memory",
-        "#712",
-        || {
-            compact_frees(&vector_index(Some("scalar")));
-        },
-    );
+    compact_frees(&vector_index(Some("scalar")));
 }
 
 // ---------------------------------------------------------------------------------------------
 // The structures that keep deleted values by design.
 // ---------------------------------------------------------------------------------------------
 
-/// The RDF term dictionary keeps a deleted literal until a checkpoint and a reopen: present
-/// after `compact()` and `close()`, gone after the reopen (the file holds none).
+/// The RDF term dictionary keeps a deleted literal while the database is open: present after
+/// `compact()`, gone once `close()` releases the store, and not loaded by the reopen (the file
+/// holds none).
 #[cfg(all(feature = "triple-store", feature = "sparql"))]
 #[test]
-fn the_rdf_term_dictionary_keeps_a_deleted_literal_until_reopen() {
+fn the_rdf_term_dictionary_keeps_a_deleted_literal_while_open() {
     let counts = counts(&rdf_literal());
     assert!(counts.compacted > 0, "kept after compact(): {counts:?}");
-    assert!(counts.closed > 0, "kept after close(): {counts:?}");
+    assert_eq!(counts.closed, 0, "released by close(): {counts:?}");
     assert_eq!(
         (counts.files_compacted, counts.reopened),
         (0, 0),
@@ -920,6 +888,96 @@ fn history_kept_forever_keeps_deleted_values() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The plan caches of open sessions (#674): a session's cache holds weak references, so it keeps
+// no plan alive, and `compact()` and `close()` clear the shared cache at once.
+// ---------------------------------------------------------------------------------------------
+
+/// Runs a read whose text holds the marker as a literal twice in one session (the second run is
+/// a session hit), with no item holding the marker, so only the plan caches keep it. Then runs
+/// `step` while that session stays open and idle, and returns the marker's count before and
+/// after the step.
+fn a_sessions_plan_after(config: Config, step: impl FnOnce(&mut GrafeoDB)) -> (usize, usize) {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut marker = Marker::BLANK;
+    marker.fill();
+    let needle = &marker.bytes[..marker.len];
+    let mut db = GrafeoDB::with_config(config).expect("the database opens");
+    for item in 0..10 {
+        run(
+            &db,
+            "INSERT (:Item {id: $id, text: $text})",
+            vec![
+                ("id", Value::from(format!("I{item}"))),
+                ("text", Value::from(format!("Item {item}: Mia asked."))),
+            ],
+        );
+    }
+    assert_eq!(heap::copies(needle), 0, "the negative control: no copy yet");
+    let session = db.session();
+    for _ in 0..2 {
+        run_literal(
+            |text| {
+                session.execute(text).expect("the read");
+            },
+            format!(
+                "MATCH (n:Item) WHERE n.text = 'Mia asked about {}' RETURN n.id AS id",
+                marker.word()
+            ),
+        );
+    }
+    let cached = heap::copies(needle);
+    assert!(
+        cached > 0,
+        "the positive control: the plan caches hold the literal"
+    );
+    step(&mut db);
+    let after = heap::copies(needle);
+    drop(session);
+    drop(db);
+    (cached, after)
+}
+
+/// `compact()` frees a plan an open session cached, before that session runs anything.
+#[test]
+fn a_plan_an_open_session_cached_is_freed_by_compact() {
+    let dir = tempfile::tempdir().expect("a temporary folder");
+    let (cached, after) =
+        a_sessions_plan_after(config(Open::File, &dir.path().join("plans.grafeo")), |db| {
+            db.compact().expect("compact()");
+        });
+    assert_eq!(after, 0, "after compact(), {cached} copies before it");
+}
+
+/// `close()` frees a plan an open session cached, before the drop.
+#[test]
+fn a_plan_an_open_session_cached_is_freed_by_close() {
+    let dir = tempfile::tempdir().expect("a temporary folder");
+    let (cached, after) =
+        a_sessions_plan_after(config(Open::File, &dir.path().join("plans.grafeo")), |db| {
+            db.close().expect("close()");
+        });
+    assert_eq!(after, 0, "after close(), {cached} copies before it");
+}
+
+/// A session's cache keeps no plan alive: once the shared cache evicts the plan (the statements
+/// after it fill a 64 KiB limit many times over), its memory is freed though the session that
+/// cached it is still open.
+#[test]
+fn a_plan_the_shared_cache_evicts_is_freed_though_a_session_cached_it() {
+    let (cached, after) =
+        a_sessions_plan_after(Config::in_memory().with_plan_cache_limit(64 * 1024), |db| {
+            for i in 0..400 {
+                run(
+                    db,
+                    &format!("RETURN {i} AS i, '{}' AS s", "y".repeat(1000)),
+                    vec![],
+                );
+            }
+        });
+    assert_eq!(after, 0, "after the eviction, {cached} copies before it");
+}
+
+// ---------------------------------------------------------------------------------------------
 // close().
 // ---------------------------------------------------------------------------------------------
 
@@ -927,16 +985,132 @@ fn history_kept_forever_keeps_deleted_values() {
 /// released, not only persisted. Live values (none deleted) are the oracle.
 #[test]
 fn close_releases_the_values_before_the_drop() {
-    xfail(
-        "#712: close() releases the in-memory store, not only the drop",
-        "#712",
-        || {
-            let counts = counts(&Case {
-                delete: |_, _| {},
-                ..Case::text(Open::File, 100)
-            });
-            assert_eq!(counts.closed, 0, "after close(): {counts:?}");
-        },
+    let counts = counts(&Case {
+        delete: |_, _| {},
+        ..Case::text(Open::File, 100)
+    });
+    assert_eq!(counts.closed, 0, "after close(): {counts:?}");
+}
+
+/// Writes the reporter's texts, keeps what `hold` returns alive across `close()`, and counts
+/// the marker after the close, before the holder and the database drop: what a session, a
+/// stream or a view handed out before the close holds of the database once it is closed.
+fn closed_while_held(hold: fn(&GrafeoDB) -> Box<dyn std::any::Any>) -> usize {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut marker = Marker::BLANK;
+    marker.fill();
+    let needle = &marker.bytes[..marker.len];
+    let dir = tempfile::tempdir().expect("a temporary folder");
+    let path = dir.path().join("held.grafeo");
+    let db = GrafeoDB::with_config(
+        config(Open::File, &path)
+            .with_history_retention(grafeo_engine::config::HistoryRetention::Forever),
+    )
+    .expect("the database opens");
+    write_texts(&db, &marker);
+    assert!(
+        heap::copies(needle) > 0,
+        "the positive control: the scan finds the written values"
+    );
+    let held = hold(&db);
+    db.close().expect("close()");
+    let closed = heap::copies(needle);
+    drop(held);
+    drop(db);
+    closed
+}
+
+/// A session and the stream it lends (`Session::execute_streaming`, which borrows the session,
+/// so it cannot be one of the boxed holders above) held across `close()`: neither keeps a value.
+#[test]
+fn close_releases_the_values_a_borrowed_stream_held() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut marker = Marker::BLANK;
+    marker.fill();
+    let needle = &marker.bytes[..marker.len];
+    let dir = tempfile::tempdir().expect("a temporary folder");
+    let path = dir.path().join("borrowed.grafeo");
+    let db = GrafeoDB::with_config(
+        config(Open::File, &path)
+            .with_history_retention(grafeo_engine::config::HistoryRetention::Forever),
+    )
+    .expect("the database opens");
+    write_texts(&db, &marker);
+    assert!(
+        heap::copies(needle) > 0,
+        "the positive control: the scan finds the written values"
+    );
+    let session = db.session();
+    let stream = session
+        .execute_streaming("MATCH (i:Item) RETURN i.text")
+        .expect("the stream");
+    db.close().expect("close()");
+    let closed = heap::copies(needle);
+    drop(stream);
+    drop(session);
+    drop(db);
+    assert_eq!(
+        closed, 0,
+        "the session and its stream held {closed} copies after close()"
+    );
+}
+
+/// Dropping the database without `close()`, then the session it handed out last: once the
+/// session goes, nothing of the database is left (#712).
+#[test]
+fn dropping_the_database_then_the_session_last_leaves_nothing() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut marker = Marker::BLANK;
+    marker.fill();
+    let needle = &marker.bytes[..marker.len];
+    let dir = tempfile::tempdir().expect("a temporary folder");
+    let db = GrafeoDB::with_config(config(Open::File, &dir.path().join("dropped.grafeo")))
+        .expect("the database opens");
+    write_texts(&db, &marker);
+    assert!(heap::copies(needle) > 0, "the positive control");
+    let session = db.session();
+    drop(db);
+    drop(session);
+    assert_eq!(
+        heap::copies(needle),
+        0,
+        "after the session, the last holder, went"
+    );
+}
+
+/// A session made before `close()` holds nothing of the database after it.
+#[test]
+fn close_releases_the_values_a_session_could_reach() {
+    assert_eq!(closed_while_held(|db| Box::new(db.session())), 0);
+}
+
+/// A stream opened before `close()` and never read holds nothing of the database after it.
+#[test]
+fn close_releases_the_values_an_unread_stream_could_reach() {
+    assert_eq!(
+        closed_while_held(|db| {
+            let session = db.session();
+            let stream = session
+                .execute_streaming_owned("MATCH (i:Item) RETURN i.text")
+                .expect("the stream opens");
+            Box::new((stream, session))
+        }),
+        0
+    );
+}
+
+/// A view of an earlier epoch made before `close()`, which sees the texts as they were before
+/// they were overwritten (history kept), holds nothing of the database after it.
+#[test]
+fn close_releases_the_values_a_view_could_reach() {
+    assert_eq!(
+        closed_while_held(|db| {
+            let earlier = db.current_epoch();
+            db.execute("MATCH (i:Item) SET i.text = 'overwritten'")
+                .expect("the overwrite");
+            Box::new(db.as_of(earlier).expect("the view opens"))
+        }),
+        0
     );
 }
 
@@ -1041,15 +1215,23 @@ fn rolled_back() -> Case {
                     )
                     .expect("the insert");
             }
+            assert!(
+                heap::copies(&marker.bytes[..marker.len]) > 0,
+                "the positive control: the scan finds the values before the rollback"
+            );
             session.rollback().expect("ROLLBACK");
         },
         delete: |_, _| {},
+        rolls_back: true,
         ..Case::text(Open::File, 100)
     }
 }
 
+/// The texts below the larger seed's, so the column's bound keeps none of them and only the
+/// plan cache holds the literals.
 fn literal_insert() -> Case {
     Case {
+        setup: larger_seed,
         write: |db, marker| {
             for item in 0..3 {
                 run_literal(
@@ -1202,4 +1384,146 @@ fn rdf_literal() -> Case {
         },
         ..Case::text(Open::File, 0)
     }
+}
+
+/// Every public way to get a session, a view or a stream of a database, each held across
+/// `close()`: none holds anything of the database after it (#712). A new way to get one is a
+/// new row here.
+#[test]
+#[expect(
+    deprecated,
+    reason = "session_read_only() is one of the ways a session is handed out until 0.7.0 removes it"
+)]
+fn close_releases_the_values_whatever_was_handed_out() {
+    let holders: Vec<(&str, fn(&GrafeoDB) -> Box<dyn std::any::Any>)> = vec![
+        ("session()", |db| Box::new(db.session())),
+        ("session_read_only()", |db| Box::new(db.session_read_only())),
+        ("session_with_role()", |db| {
+            Box::new(db.session_with_role(grafeo_engine::auth::Role::ReadWrite))
+        }),
+        ("session_with_identity()", |db| {
+            Box::new(db.session_with_identity(grafeo_engine::auth::Identity::anonymous()))
+        }),
+        #[cfg(feature = "cdc")]
+        ("session_with_cdc()", |db| {
+            Box::new(db.session_with_cdc(true))
+        }),
+        ("graph(...).session()", |db| {
+            db.create_graph("trips").expect("the graph");
+            Box::new(
+                db.graph("trips")
+                    .expect("the handle")
+                    .session()
+                    .expect("the session"),
+            )
+        }),
+        ("as_of()", |db| {
+            Box::new(db.as_of(db.current_epoch()).expect("the view"))
+        }),
+        ("execute_streaming()", |db| {
+            Box::new(
+                db.execute_streaming("MATCH (i:Item) RETURN i.text")
+                    .expect("the stream"),
+            )
+        }),
+        ("session().execute_streaming_owned()", |db| {
+            let session = db.session();
+            let stream = session
+                .execute_streaming_owned("MATCH (i:Item) RETURN i.text")
+                .expect("the stream");
+            Box::new((stream, session))
+        }),
+    ];
+    let mut kept = Vec::new();
+    for (way, hold) in holders {
+        let copies = closed_while_held(hold);
+        if copies > 0 {
+            kept.push(format!("{way}: {copies} copies"));
+        }
+    }
+    assert!(kept.is_empty(), "held after close(): {}", kept.join(", "));
+}
+
+/// What a reader holds; dropped after the count, before the database.
+trait Held {}
+impl<T> Held for T {}
+
+/// The documented exception to "`close()` releases everything" until 0.7.0 (#712): a snapshot,
+/// the store a snapshot shares, and the node and edge iterators, each held across `close()`,
+/// keep the graph's values while they live, and nothing is left once they drop. The 0.7.0 fix,
+/// which makes them fail with `T007`, turns the first count of each row to zero.
+#[test]
+fn a_snapshot_or_iterator_held_across_close_keeps_the_values_until_it_drops() {
+    type Hold = for<'a> fn(&'a GrafeoDB) -> Box<dyn Held + 'a>;
+    let holders: Vec<(&str, Hold)> = vec![
+        ("snapshot()", |db| {
+            Box::new(db.snapshot().expect("the snapshot"))
+        }),
+        ("snapshot().shared()", |db| {
+            Box::new(db.snapshot().expect("the snapshot").shared())
+        }),
+        ("projection()", |db| {
+            db.create_projection(
+                "items",
+                grafeo_core::graph::ProjectionSpec::new().with_node_labels(["Item"]),
+            )
+            .expect("the projection");
+            Box::new(db.projection("items").expect("the projection"))
+        }),
+        ("graph(...).snapshot()", |db| {
+            db.create_graph("trips").expect("the graph");
+            // The named graph gets a copy of a text: the default graph's go at `close()`.
+            let text = db
+                .execute("MATCH (i:Item) RETURN i.text LIMIT 1")
+                .expect("a text")
+                .rows()[0][0]
+                .clone();
+            db.graph("trips")
+                .expect("the handle")
+                .session()
+                .expect("the session")
+                .execute_with_params("INSERT (:Item {text: $text})", params(vec![("text", text)]))
+                .expect("the copy");
+            Box::new(
+                db.graph("trips")
+                    .expect("the handle")
+                    .snapshot()
+                    .expect("the snapshot"),
+            )
+        }),
+        ("as_of().snapshot()", |db| {
+            Box::new(db.as_of(db.current_epoch()).expect("the view").snapshot())
+        }),
+        ("iter_nodes()", |db| {
+            Box::new(db.iter_nodes().expect("the iterator"))
+        }),
+        ("iter_edges()", |db| {
+            db.execute("MATCH (i:Item) WITH i LIMIT 1 INSERT (i)-[:NEXT]->(:Item)")
+                .expect("an edge");
+            Box::new(db.iter_edges().expect("the iterator"))
+        }),
+    ];
+    let mut wrong = Vec::new();
+    for (way, hold) in holders {
+        let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut marker = Marker::BLANK;
+        marker.fill();
+        let needle = &marker.bytes[..marker.len];
+        let dir = tempfile::tempdir().expect("a temporary folder");
+        let db = GrafeoDB::with_config(config(Open::File, &dir.path().join("held.grafeo")))
+            .expect("the database opens");
+        write_texts(&db, &marker);
+        let held = hold(&db);
+        db.close().expect("close()");
+        let while_held = heap::copies(needle);
+        drop(held);
+        let after = heap::copies(needle);
+        drop(db);
+        if while_held == 0 || after > 0 {
+            wrong.push(format!(
+                "{way}: {while_held} copies while held, {after} after"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join(", "));
 }

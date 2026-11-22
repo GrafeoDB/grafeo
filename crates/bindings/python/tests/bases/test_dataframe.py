@@ -1,6 +1,7 @@
 """Tests for DataFrame bridge: to_pandas(), to_polars(), nodes_df(), edges_df()."""
 
 import sys
+from datetime import timedelta
 
 import pytest
 
@@ -335,8 +336,11 @@ class TestTypedArrowExport:
             "p.contact AS contact ORDER BY name"
         )
         rows = [dict(row) for row in result]
-        assert rows[0]["wait"] == WAIT
-        assert result.to_arrow().to_pylist() == rows
+        assert rows[0]["wait"] == timedelta(days=3)
+        # The Arrow export keeps a duration as its parts, a row as a timedelta.
+        arrow_rows = result.to_arrow().to_pylist()
+        assert [row.pop("wait") for row in arrow_rows] == [WAIT, None]
+        assert arrow_rows == [{k: v for k, v in row.items() if k != "wait"} for row in rows]
 
     def test_polars_reads_the_nested_properties(self, typed_db):
         pytest.importorskip("polars")

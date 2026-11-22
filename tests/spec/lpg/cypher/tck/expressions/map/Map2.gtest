@@ -1,0 +1,223 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/map/Map2.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Map2"
+  title: "Map2 - Dynamic Value Access"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Dynamically access a field based on parameters when there is no type information
+  - name: s1_dynamically_access_a_field_based_on_parameters_when_there_is_no_type_information
+    params:
+      expr: {"name": "Apa"}
+      idx: "name"
+    query: |
+      WITH $expr AS expr, $idx AS idx
+      RETURN expr[idx] AS value
+    expect:
+      values: |
+        | value |
+        | 'Apa' |
+      side_effects: {}
+
+  # [2] Dynamically access a field based on parameters when there is rhs type information
+  - name: s2_dynamically_access_a_field_based_on_parameters_when_there_is_rhs_type_information
+    params:
+      expr: {"name": "Apa"}
+      idx: "name"
+    query: |
+      WITH $expr AS expr, $idx AS idx
+      RETURN expr[toString(idx)] AS value
+    expect:
+      values: |
+        | value |
+        | 'Apa' |
+      side_effects: {}
+
+  # [3] Dynamically access a field on null results in null
+  - name: s3_dynamically_access_a_field_on_null_results_in_null
+    query: |
+      WITH null AS expr, 'x' AS idx
+      RETURN expr[idx] AS value
+    expect:
+      values: |
+        | value |
+        | null |
+      side_effects: {}
+
+  # [4] Dynamically access a field with null results in null
+  - name: s4_dynamically_access_a_field_with_null_results_in_null
+    query: |
+      WITH {name: 'Mats'} AS expr, null AS idx
+      RETURN expr[idx] AS value
+    expect:
+      values: |
+        | value |
+        | null |
+      side_effects: {}
+
+  # [5] Dynamically access a field is case-sensitive #1
+  - name: s5_dynamically_access_a_field_is_case_sensitive_1
+    query: |
+      WITH {name: 'Mats', nome: 'Pontus'} AS map
+      RETURN map['name'] AS result
+    expect:
+      values: |
+        | result |
+        | 'Mats' |
+      side_effects: {}
+
+  # [5] Dynamically access a field is case-sensitive #2
+  - name: s5_dynamically_access_a_field_is_case_sensitive_2
+    query: |
+      WITH {name: 'Mats', Name: 'Pontus'} AS map
+      RETURN map['name'] AS result
+    expect:
+      values: |
+        | result |
+        | 'Mats' |
+      side_effects: {}
+
+  # [5] Dynamically access a field is case-sensitive #3
+  - name: s5_dynamically_access_a_field_is_case_sensitive_3
+    query: |
+      WITH {name: 'Mats', Name: 'Pontus'} AS map
+      RETURN map['Name'] AS result
+    expect:
+      values: |
+        | result |
+        | 'Pontus' |
+      side_effects: {}
+
+  # [5] Dynamically access a field is case-sensitive #4
+  - name: s5_dynamically_access_a_field_is_case_sensitive_4
+    query: |
+      WITH {name: 'Mats', Name: 'Pontus'} AS map
+      RETURN map['nAMe'] AS result
+    expect:
+      values: |
+        | result |
+        | null |
+      side_effects: {}
+
+  # [5] Dynamically access a field is case-sensitive #5
+  - name: s5_dynamically_access_a_field_is_case_sensitive_5
+    query: |
+      WITH {name: 'Mats', nome: 'Pontus'} AS map
+      RETURN map['null'] AS result
+    expect:
+      values: |
+        | result |
+        | null |
+      side_effects: {}
+
+  # [5] Dynamically access a field is case-sensitive #6
+  - name: s5_dynamically_access_a_field_is_case_sensitive_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Map2: [5] Dynamically access a field is case-sensitive #6"
+      issue: "#800"
+    query: |
+      WITH {null: 'Mats', NULL: 'Pontus'} AS map
+      RETURN map['null'] AS result
+    expect:
+      values: |
+        | result |
+        | 'Mats' |
+      side_effects: {}
+
+  # [5] Dynamically access a field is case-sensitive #7
+  - name: s5_dynamically_access_a_field_is_case_sensitive_7
+    xfail:
+      spec: "openCypher TCK 2024.3 Map2: [5] Dynamically access a field is case-sensitive #7"
+      issue: "#800"
+    query: |
+      WITH {null: 'Mats', NULL: 'Pontus'} AS map
+      RETURN map['NULL'] AS result
+    expect:
+      values: |
+        | result |
+        | 'Pontus' |
+      side_effects: {}
+
+  # [6] Fail at runtime when attempting to index with an Int into a Map
+  # TCK: TypeError at runtime: MapElementAccessByNonString
+  - name: s6_fail_at_runtime_when_attempting_to_index_with_an_int_into_a_map
+    xfail:
+      spec: "openCypher TCK 2024.3 Map2: [6] Fail at runtime when attempting to index with an Int into a Map"
+      issue: "#796"
+    params:
+      expr: {"name": "Apa"}
+      idx: 0
+    query: |
+      WITH $expr AS expr, $idx AS idx
+      RETURN expr[idx]
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [7] Fail at runtime when trying to index into a map with a non-string
+  # TCK: TypeError at runtime: MapElementAccessByNonString
+  - name: s7_fail_at_runtime_when_trying_to_index_into_a_map_with_a_non_string
+    xfail:
+      spec: "openCypher TCK 2024.3 Map2: [7] Fail at runtime when trying to index into a map with a non-string"
+      issue: "#796"
+    params:
+      expr: {"name": "Apa"}
+      idx: 12.3
+    query: |
+      WITH $expr AS expr, $idx AS idx
+      RETURN expr[idx]
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [8] Fail at runtime when trying to index something which is not a map
+  # TCK: TypeError at runtime: InvalidArgumentType
+  - name: s8_fail_at_runtime_when_trying_to_index_something_which_is_not_a_map
+    xfail:
+      spec: "openCypher TCK 2024.3 Map2: [8] Fail at runtime when trying to index something which is not a map"
+      issue: "#796"
+    params:
+      expr: 100
+      idx: 0
+    query: |
+      WITH $expr AS expr, $idx AS idx
+      RETURN expr[idx]
+    expect:
+      gql_status: "22"
+      side_effects: {}

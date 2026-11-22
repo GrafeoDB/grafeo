@@ -238,90 +238,101 @@ impl Pipeline {
 
     /// Push a chunk through the operator chain.
     fn push_through(&mut self, chunk: DataChunk) -> Result<bool, OperatorError> {
-        if self.operators.is_empty() {
-            // No operators, push directly to sink
-            return self.sink.consume(chunk);
-        }
-
-        // Build a chain: operators push to each other, final one pushes to sink
-        let mut current_chunk = chunk;
-        let num_operators = self.operators.len();
-
-        for i in 0..num_operators {
-            let is_last = i == num_operators - 1;
-
-            if is_last {
-                // Last operator pushes to the real sink
-                return self.operators[i].push(current_chunk, &mut *self.sink);
-            }
-
-            // Intermediate operators collect output
-            let mut collector = ChunkCollector::new();
-            let continue_processing = self.operators[i].push(current_chunk, &mut collector)?;
-
-            if !continue_processing || collector.is_empty() {
-                return Ok(continue_processing);
-            }
-
-            // Merge collected chunks for next operator
-            current_chunk = collector.into_single_chunk();
-        }
-
-        Ok(true)
+        push_chain(&mut self.operators, &mut *self.sink, chunk)
     }
 
-    /// Finalize all operators in reverse order.
+    /// Finalizes the operators, then the sink (see [`finalize_chain`]).
     fn finalize_all(&mut self) -> Result<(), OperatorError> {
-        // For pipeline breakers, finalize produces output
-        // We need to chain finalize calls through the operators
+        finalize_chain(&mut self.operators, &mut self.sink)
+    }
+}
 
-        if self.operators.is_empty() {
-            return self.sink.finalize();
+/// Pushes `chunk` through `operators`, each into the next and the last into
+/// `sink`. `Ok(false)` once one of them stops: an operator that stops still
+/// hands on the rows it emitted with the stop (a LIMIT reaching its count),
+/// and they go through the rest first.
+pub(crate) fn push_chain(
+    operators: &mut [Box<dyn PushOperator>],
+    sink: &mut dyn Sink,
+    chunk: DataChunk,
+) -> Result<bool, OperatorError> {
+    let Some((last, before)) = operators.split_last_mut() else {
+        return sink.consume(chunk);
+    };
+    let mut stopped = false;
+    let mut current = chunk;
+    for operator in before {
+        // One push's output, bounded by that push.
+        let mut collector = ChunkCollector::new();
+        stopped |= !operator.push(current, &mut collector)?;
+        if collector.is_empty() {
+            return Ok(!stopped);
         }
+        current = collector.into_single_chunk();
+    }
+    Ok(last.push(current, sink)? && !stopped)
+}
 
-        // Finalize operators in order, each pushing to the next
-        for i in 0..self.operators.len() {
-            let is_last = i == self.operators.len() - 1;
-
-            if is_last {
-                self.operators[i].finalize(&mut *self.sink)?;
-            } else {
-                // Collect finalize output and push through remaining operators
-                let mut collector = ChunkCollector::new();
-                self.operators[i].finalize(&mut collector)?;
-
-                for chunk in collector.into_chunks() {
-                    // Push through remaining operators
-                    self.push_through_from(chunk, i + 1)?;
-                }
-            }
+/// Finalizes `operators` in order, then `sink`. What a breaker emits as it
+/// finalizes goes through the operators after it a chunk as it comes, so a
+/// breaker's output is never held whole; once they stop, the breaker is told
+/// to stop and is sent nothing more. Each later operator is still finalized
+/// once, in order: a stop means no more input, not "skip your own output".
+pub(crate) fn finalize_chain(
+    operators: &mut Vec<Box<dyn PushOperator>>,
+    sink: &mut Box<dyn Sink>,
+) -> Result<(), OperatorError> {
+    for i in 0..operators.len() {
+        if i + 1 == operators.len() {
+            operators[i].finalize(&mut **sink)?;
+            break;
         }
+        // The rest of the chain, owned by the forwarding sink while operator
+        // `i` finalizes (a sink is `'static`), and taken back, error or not.
+        let mut forward = Forwarding {
+            operators: operators.split_off(i + 1),
+            sink: std::mem::replace(sink, Box::new(super::sink::NullSink)),
+            stopped: false,
+        };
+        let finalized = operators[i].finalize(&mut forward);
+        operators.append(&mut forward.operators);
+        *sink = forward.sink;
+        finalized?;
+    }
+    sink.finalize()
+}
 
-        self.sink.finalize()
+/// The sink a breaker finalizes into: each chunk goes through the rest of
+/// the chain at once. Once the rest has stopped it takes nothing more.
+struct Forwarding {
+    operators: Vec<Box<dyn PushOperator>>,
+    sink: Box<dyn Sink>,
+    stopped: bool,
+}
+
+impl Sink for Forwarding {
+    fn consume(&mut self, chunk: DataChunk) -> Result<bool, OperatorError> {
+        if self.stopped {
+            return Ok(false);
+        }
+        // A breaker's output is the query's work too: past the deadline it
+        // stops within a chunk.
+        super::deadline::check()?;
+        let go_on = push_chain(&mut self.operators, &mut *self.sink, chunk)?;
+        self.stopped = !go_on;
+        Ok(go_on)
     }
 
-    /// Push a chunk through operators starting at index.
-    fn push_through_from(&mut self, chunk: DataChunk, start: usize) -> Result<bool, OperatorError> {
-        let mut current_chunk = chunk;
+    fn finalize(&mut self) -> Result<(), OperatorError> {
+        Ok(())
+    }
 
-        for i in start..self.operators.len() {
-            let is_last = i == self.operators.len() - 1;
+    fn name(&self) -> &'static str {
+        "Forwarding"
+    }
 
-            if is_last {
-                return self.operators[i].push(current_chunk, &mut *self.sink);
-            }
-
-            let mut collector = ChunkCollector::new();
-            let continue_processing = self.operators[i].push(current_chunk, &mut collector)?;
-
-            if !continue_processing || collector.is_empty() {
-                return Ok(continue_processing);
-            }
-
-            current_chunk = collector.into_single_chunk();
-        }
-
-        self.sink.consume(current_chunk)
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
     }
 }
 
@@ -398,6 +409,198 @@ impl Sink for ChunkCollector {
 
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
         self
+    }
+}
+
+/// Stub operators and a sink that record what a finalize sends where: the
+/// pull pipeline's tests here and the parallel pipeline's use them.
+#[cfg(test)]
+pub(crate) mod finalize_stubs {
+    use super::{DataChunk, OperatorError, PushOperator, Sink};
+    use crate::execution::vector::ValueVector;
+    use grafeo_common::types::Value;
+    use std::sync::{Arc, Mutex};
+
+    /// What happened, in order: every operator's finalize, every chunk a
+    /// breaker emits, every chunk a limit gets, the sink's finalize.
+    pub(crate) type Log = Arc<Mutex<Vec<String>>>;
+
+    pub(crate) fn note(log: &Log, event: String) {
+        log.lock().unwrap().push(event);
+    }
+
+    /// How many entries of `log` start with `prefix`.
+    pub(crate) fn count(log: &Log, prefix: &str) -> usize {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.starts_with(prefix))
+            .count()
+    }
+
+    /// The finalize entries of `log`, in order.
+    pub(crate) fn finalizes(log: &Log) -> Vec<String> {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.starts_with("finalize"))
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn one_row(value: i64) -> DataChunk {
+        DataChunk::new(vec![ValueVector::from_values(&[Value::Int64(value)])])
+    }
+
+    /// The first column of every chunk, in order.
+    pub(crate) fn values(chunks: &[DataChunk]) -> Vec<i64> {
+        chunks
+            .iter()
+            .flat_map(|chunk| {
+                chunk.selected_indices().map(|row| {
+                    match chunk.column(0).and_then(|column| column.get_value(row)) {
+                        Some(Value::Int64(value)) => value,
+                        other => panic!("not an integer: {other:?}"),
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// A breaker: keeps no input, and its finalize emits `chunks` one-row
+    /// chunks (0, 1, ...). One that `honours` the flag stops at the first
+    /// `Ok(false)`; one that does not keeps emitting.
+    pub(crate) struct Emitter {
+        pub(crate) name: &'static str,
+        pub(crate) chunks: i64,
+        pub(crate) honours: bool,
+        pub(crate) log: Log,
+    }
+
+    impl PushOperator for Emitter {
+        fn push(&mut self, _chunk: DataChunk, _sink: &mut dyn Sink) -> Result<bool, OperatorError> {
+            Ok(true)
+        }
+
+        fn finalize(&mut self, sink: &mut dyn Sink) -> Result<(), OperatorError> {
+            note(&self.log, format!("finalize {}", self.name));
+            for value in 0..self.chunks {
+                note(&self.log, format!("{} emits {value}", self.name));
+                if !sink.consume(one_row(value))? && self.honours {
+                    break;
+                }
+            }
+            Ok(())
+        }
+
+        fn name(&self) -> &'static str {
+            self.name
+        }
+    }
+
+    /// A limit of `chunks` chunks: forwards the first ones and says
+    /// `Ok(false)` once it has them; forwards nothing after.
+    pub(crate) struct StopAfter {
+        pub(crate) name: &'static str,
+        pub(crate) chunks: usize,
+        pub(crate) seen: usize,
+        pub(crate) log: Log,
+    }
+
+    impl PushOperator for StopAfter {
+        fn push(&mut self, chunk: DataChunk, sink: &mut dyn Sink) -> Result<bool, OperatorError> {
+            self.seen += 1;
+            note(&self.log, format!("{} gets {}", self.name, self.seen));
+            if self.seen <= self.chunks {
+                sink.consume(chunk)?;
+            }
+            Ok(self.seen < self.chunks)
+        }
+
+        fn finalize(&mut self, _sink: &mut dyn Sink) -> Result<(), OperatorError> {
+            note(&self.log, format!("finalize {}", self.name));
+            Ok(())
+        }
+
+        fn name(&self) -> &'static str {
+            self.name
+        }
+    }
+
+    /// Forwards every chunk and returns what its sink says.
+    pub(crate) struct Pass {
+        pub(crate) name: &'static str,
+        pub(crate) log: Log,
+    }
+
+    impl PushOperator for Pass {
+        fn push(&mut self, chunk: DataChunk, sink: &mut dyn Sink) -> Result<bool, OperatorError> {
+            sink.consume(chunk)
+        }
+
+        fn finalize(&mut self, _sink: &mut dyn Sink) -> Result<(), OperatorError> {
+            note(&self.log, format!("finalize {}", self.name));
+            Ok(())
+        }
+
+        fn name(&self) -> &'static str {
+            self.name
+        }
+    }
+
+    /// A breaker that keeps what it gets and emits it at its finalize.
+    pub(crate) struct Hold {
+        pub(crate) name: &'static str,
+        pub(crate) held: Vec<DataChunk>,
+        pub(crate) log: Log,
+    }
+
+    impl PushOperator for Hold {
+        fn push(&mut self, chunk: DataChunk, _sink: &mut dyn Sink) -> Result<bool, OperatorError> {
+            self.held.push(chunk);
+            Ok(true)
+        }
+
+        fn finalize(&mut self, sink: &mut dyn Sink) -> Result<(), OperatorError> {
+            note(&self.log, format!("finalize {}", self.name));
+            for chunk in std::mem::take(&mut self.held) {
+                sink.consume(chunk)?;
+            }
+            Ok(())
+        }
+
+        fn name(&self) -> &'static str {
+            self.name
+        }
+    }
+
+    /// The pipeline's sink: keeps every chunk, and says `Ok(false)` from
+    /// its `stop_after`-th chunk on.
+    pub(crate) struct Recording {
+        pub(crate) chunks: Arc<Mutex<Vec<DataChunk>>>,
+        pub(crate) stop_after: Option<usize>,
+        pub(crate) log: Log,
+    }
+
+    impl Sink for Recording {
+        fn consume(&mut self, chunk: DataChunk) -> Result<bool, OperatorError> {
+            let mut chunks = self.chunks.lock().unwrap();
+            chunks.push(chunk);
+            Ok(self.stop_after.is_none_or(|stop| chunks.len() < stop))
+        }
+
+        fn finalize(&mut self) -> Result<(), OperatorError> {
+            note(&self.log, "finalize sink".to_string());
+            Ok(())
+        }
+
+        fn name(&self) -> &'static str {
+            "Recording"
+        }
+
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+            self
+        }
     }
 }
 
@@ -623,5 +826,188 @@ mod tests {
 
         let computed_size = pipeline.compute_chunk_size();
         assert!(computed_size <= SMALL_CHUNK_SIZE);
+    }
+
+    mod streamed_finalize {
+        use super::super::finalize_stubs::{
+            Emitter, Hold, Log, Pass, Recording, StopAfter, count, finalizes, values,
+        };
+        use super::*;
+        use std::sync::{Arc, Mutex};
+
+        /// Runs one input chunk through `operators` into a recording sink
+        /// that stops from its `stop_after`-th chunk on: the rows it got.
+        fn run(
+            operators: Vec<Box<dyn PushOperator>>,
+            stop_after: Option<usize>,
+            log: &Log,
+        ) -> Vec<i64> {
+            let chunks = Arc::new(Mutex::new(Vec::new()));
+            let sink = Recording {
+                chunks: Arc::clone(&chunks),
+                stop_after,
+                log: Arc::clone(log),
+            };
+            let mut pipeline =
+                Pipeline::new(Box::new(TestSource::new(1, 1)), operators, Box::new(sink));
+            pipeline.execute().unwrap();
+            values(&chunks.lock().unwrap())
+        }
+
+        fn emitter(log: &Log, honours: bool) -> Box<dyn PushOperator> {
+            Box::new(Emitter {
+                name: "A",
+                chunks: 5,
+                honours,
+                log: Arc::clone(log),
+            })
+        }
+
+        fn stop_after_one(log: &Log) -> Box<dyn PushOperator> {
+            Box::new(StopAfter {
+                name: "B",
+                chunks: 1,
+                seen: 0,
+                log: Arc::clone(log),
+            })
+        }
+
+        fn pass(log: &Log) -> Box<dyn PushOperator> {
+            Box::new(Pass {
+                name: "P",
+                log: Arc::clone(log),
+            })
+        }
+
+        /// A stop during a breaker's finalize reaches it at once: from the
+        /// operator right after it, from one further on through a pass, and
+        /// from the pipeline's sink through a pass. A breaker that honours
+        /// the flag then emits nothing more: one chunk of its five.
+        #[test]
+        fn a_stop_after_a_breaker_stops_its_finalize() {
+            let log = Log::default();
+            assert_eq!(
+                run(vec![emitter(&log, true), stop_after_one(&log)], None, &log),
+                [0]
+            );
+            assert_eq!(count(&log, "A emits"), 1, "from the next operator: {log:?}");
+
+            let log = Log::default();
+            let operators = vec![emitter(&log, true), pass(&log), stop_after_one(&log)];
+            assert_eq!(run(operators, None, &log), [0]);
+            assert_eq!(count(&log, "A emits"), 1, "from two on: {log:?}");
+
+            let log = Log::default();
+            assert_eq!(
+                run(vec![emitter(&log, true), pass(&log)], Some(1), &log),
+                [0]
+            );
+            assert_eq!(count(&log, "A emits"), 1, "from the sink: {log:?}");
+        }
+
+        /// A stop means no more input, not "skip your finalize": every
+        /// operator after the breaker is finalized once, in order, and a
+        /// later breaker still emits what it holds.
+        #[test]
+        fn every_operator_after_a_stop_is_finalized_once_in_order() {
+            let log = Log::default();
+            let hold = Box::new(Hold {
+                name: "H",
+                held: Vec::new(),
+                log: Arc::clone(&log),
+            });
+            let rows = run(
+                vec![emitter(&log, true), stop_after_one(&log), hold],
+                None,
+                &log,
+            );
+            assert_eq!(rows, [0], "the later breaker emits what it holds");
+            assert_eq!(
+                finalizes(&log),
+                ["finalize A", "finalize B", "finalize H", "finalize sink"]
+            );
+        }
+
+        /// A breaker that ignores the flag keeps emitting, and nothing of
+        /// it is delivered after the stop: the limit gets one chunk.
+        #[test]
+        fn a_breaker_that_ignores_the_stop_delivers_nothing_after_it() {
+            let log = Log::default();
+            assert_eq!(
+                run(vec![emitter(&log, false), stop_after_one(&log)], None, &log),
+                [0]
+            );
+            assert_eq!(count(&log, "A emits"), 5, "it ignores the flag");
+            assert_eq!(
+                count(&log, "B gets"),
+                1,
+                "delivered after the stop: {log:?}"
+            );
+
+            let log = Log::default();
+            assert_eq!(
+                run(vec![emitter(&log, false), pass(&log)], Some(1), &log),
+                [0]
+            );
+        }
+
+        /// A breaker that emits a chunk every 5 ms, 200 in all, and checks
+        /// no deadline itself: when each chunk went out.
+        struct Slow(Arc<Mutex<Vec<std::time::Instant>>>);
+
+        impl PushOperator for Slow {
+            fn push(
+                &mut self,
+                _chunk: DataChunk,
+                _sink: &mut dyn Sink,
+            ) -> Result<bool, OperatorError> {
+                Ok(true)
+            }
+
+            fn finalize(&mut self, sink: &mut dyn Sink) -> Result<(), OperatorError> {
+                for value in 0..200 {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    self.0.lock().unwrap().push(std::time::Instant::now());
+                    if !sink.consume(super::super::finalize_stubs::one_row(value))? {
+                        break;
+                    }
+                }
+                Ok(())
+            }
+
+            fn name(&self) -> &'static str {
+                "Slow"
+            }
+        }
+
+        /// A deadline that passes during a breaker's finalize stops the
+        /// pipeline with a timeout within about one chunk: at most two of
+        /// the breaker's chunks go out at or past it.
+        #[test]
+        fn a_deadline_during_a_finalize_stops_it_within_a_chunk() {
+            let log = Log::default();
+            let emitted = Arc::new(Mutex::new(Vec::new()));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+            let sink = Recording {
+                chunks: Arc::new(Mutex::new(Vec::new())),
+                stop_after: None,
+                log: Arc::clone(&log),
+            };
+            let mut pipeline = Pipeline::new(
+                Box::new(TestSource::new(1, 1)),
+                vec![Box::new(Slow(Arc::clone(&emitted))), pass(&log)],
+                Box::new(sink),
+            )
+            .with_deadline(Some(deadline));
+            let result = pipeline.execute();
+            let emitted = emitted.lock().unwrap();
+            let late = emitted.iter().filter(|at| **at >= deadline).count();
+            assert!(
+                matches!(result, Err(OperatorError::Timeout)),
+                "{result:?} after {} chunks",
+                emitted.len()
+            );
+            assert!(late <= 2, "{late} chunks went out past the deadline");
+        }
     }
 }

@@ -65,6 +65,9 @@ pub struct Applied {
     /// graph that exists and a `DROP` of a named graph that does not changed
     /// nothing.
     pub changed: Vec<bool>,
+    /// The bytes the published overlay entry keeps for readers at an older snapshot (its
+    /// changes and the partitions it swapped out); 0 when nothing was published.
+    pub kept: usize,
 }
 
 /// The overlay changes an apply collects, `None` when it publishes nothing.
@@ -154,14 +157,16 @@ impl RdfStore {
             }
         }
         run_during_rdf_apply(RdfApplyStep::BeforePublish);
+        let mut kept = 0;
         if let (ApplyMode::Publish(epoch), Some(collected)) = (mode, collected)
             && !collected.changes.is_empty()
         {
-            self.overlay
-                .publish(OverlayEntry::new(epoch, collected.changes));
+            let entry = OverlayEntry::new(epoch, collected.changes);
+            kept = entry.kept_bytes();
+            self.overlay.publish(entry);
         }
         drop(guard);
-        Applied { changed }
+        Applied { changed, kept }
     }
 
     /// Inserts `triples` into `graph` (`None` for the default graph), which

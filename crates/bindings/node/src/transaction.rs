@@ -5,9 +5,6 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use parking_lot::RwLock;
-
-use grafeo_engine::database::GrafeoDB;
 
 use crate::error::NodeGrafeoError;
 use crate::query::QueryResult;
@@ -29,7 +26,7 @@ use crate::query::QueryResult;
 /// nothing, so a `catch` that rolls back sees the commit's error.
 #[napi]
 pub struct Transaction {
-    db: Arc<RwLock<GrafeoDB>>,
+    db: crate::database::SharedDb,
     /// Shared with `spawn_blocking` tasks so queries run off the JS thread.
     /// Set to `None` once the transaction is committed or rolled back, so a
     /// query still queued on a worker finds it closed instead of running
@@ -65,6 +62,7 @@ impl Transaction {
     /// event loop.
     #[napi]
     pub fn commit(&self) -> Result<()> {
+        self.db.check()?;
         self.finish(COMMITTED)
     }
 
@@ -75,6 +73,7 @@ impl Transaction {
     /// the transaction.
     #[napi]
     pub fn rollback(&self) -> Result<()> {
+        self.db.check()?;
         if self.state.load(Ordering::Acquire) == COMMIT_FAILED {
             return Ok(());
         }
@@ -83,8 +82,9 @@ impl Transaction {
 
     /// Whether the transaction is still active.
     #[napi(getter, js_name = "isActive")]
-    pub fn is_active(&self) -> bool {
-        self.state.load(Ordering::Acquire) == ACTIVE
+    pub fn is_active(&self) -> Result<bool> {
+        self.db.check()?;
+        Ok(self.state.load(Ordering::Acquire) == ACTIVE)
     }
 }
 
@@ -149,6 +149,7 @@ impl Transaction {
         query: String,
         params: Option<crate::types::Params>,
     ) -> Result<QueryResult> {
+        self.db.check()?;
         if self.state.load(Ordering::Acquire) != ACTIVE {
             return Err(
                 NodeGrafeoError::transaction_state("Transaction is no longer active").into(),
@@ -171,7 +172,7 @@ impl Transaction {
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))??;
 
-        let db = self.db.read();
+        let db = self.db.read()?;
         let (nodes, edges) = crate::database::extract_entities(&result, &db);
         let columns = std::mem::take(&mut result.columns);
         let exec_time = result.execution_time_ms;
@@ -179,6 +180,7 @@ impl Transaction {
         let counters = result.counters;
         let profile = result.profile.take();
         let warnings = grafeo_bindings_common::warning::of_result(&result);
+        let cell_types = result.cell_types();
 
         Ok(QueryResult::with_metrics(
             columns,
@@ -190,17 +192,21 @@ impl Transaction {
         )
         .with_counters(counters)
         .with_profile(profile)
-        .with_warnings(warnings))
+        .with_warnings(warnings)
+        .with_cell_types(cell_types))
     }
 
-    pub(crate) fn new(db: Arc<RwLock<GrafeoDB>>, isolation_level: Option<&str>) -> Result<Self> {
-        let session = db.read().session();
+    pub(crate) fn new(
+        db: crate::database::SharedDb,
+        isolation_level: Option<&str>,
+    ) -> Result<Self> {
+        let session = db.read()?.session();
         Self::begin(db, session, isolation_level)
     }
 
     /// Begins a transaction in `session`, which works in the graph it selects.
     pub(crate) fn begin(
-        db: Arc<RwLock<GrafeoDB>>,
+        db: crate::database::SharedDb,
         mut session: grafeo_engine::Session,
         isolation_level: Option<&str>,
     ) -> Result<Self> {

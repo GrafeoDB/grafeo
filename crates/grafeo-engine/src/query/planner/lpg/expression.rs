@@ -348,15 +348,14 @@ impl super::Planner {
                     expression: Box::new(body),
                 })
             }
+            // The Cypher translator rewrites the ones in projections, aggregates
+            // and `WHERE`; one left here sits in a position it does not reach.
             LogicalExpression::PatternComprehension { .. } => {
-                // Pattern comprehensions should be rewritten by the Cypher translator
-                // into Apply + Aggregate(Collect) + ParameterScan before reaching the
-                // planner. If we get here, the rewrite was skipped.
-                Err(Error::Internal(
-                    "PatternComprehension reached the planner without being rewritten; \
-                     this is a bug in the Cypher translator"
-                        .to_string(),
-                ))
+                Err(Error::from(QueryError::unsupported(
+                    "a pattern comprehension is not supported here yet: it runs in RETURN, \
+                     WITH, an aggregate and WHERE, not yet in ORDER BY, SET, UNWIND, a \
+                     property map or the body of a list comprehension, list predicate or reduce",
+                )))
             }
         }
     }
@@ -507,7 +506,9 @@ impl super::Planner {
     /// without one under any label they would match no row, so the query is
     /// refused before it runs (#308). This replaced the rule that scored such
     /// a node 0 (user, 2026-10-22). A query over several labels runs while
-    /// one of them has the index; a node of the others scores null.
+    /// one of them has the index; a node of the others scores null. The store
+    /// is asked on a store of its own too, which scores each row as the
+    /// query's view sees it.
     #[cfg(feature = "text-index")]
     fn check_text_index(
         &self,
@@ -522,17 +523,19 @@ impl super::Planner {
         } else {
             "text_score"
         };
-        if self.store_kind == super::StoreKind::External {
-            return Err(Error::from(QueryError::unsupported(format!(
-                "{name} needs a text index, which only the built-in store has: this database is on a store of its own"
-            ))));
-        }
         let labels = self.store.all_labels()?;
         if labels
             .iter()
             .any(|label| self.store.has_text_index(label, property))
         {
             return Ok(());
+        }
+        // A store of its own may serve no CREATE INDEX, so it gets no hint (#809).
+        if self.store_kind == super::StoreKind::External {
+            return Err(Error::from(QueryError::unsupported(format!(
+                "{name}({variable}.{property}, ...) needs a text index on '{property}', \
+                 and the store reports none"
+            ))));
         }
         Err(Error::from(QueryError::semantic(format!(
             "{name}({variable}.{property}, ...) needs a text index on '{property}': \

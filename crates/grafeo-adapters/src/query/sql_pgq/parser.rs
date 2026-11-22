@@ -7,7 +7,9 @@
 use super::ast::*;
 use super::lexer::{Lexer, Token, TokenKind};
 use crate::query::keywords::unescape_string;
-use crate::query::limits::{Chain, Nesting, nesting_error_message};
+use crate::query::limits::{
+    Chain, DEFAULT_MAX_IDENTIFIER_LENGTH, NameLimit, Nesting, nesting_error_message,
+};
 use grafeo_common::types::{Decimal, DecimalError, DecimalType, MAX_DECIMAL_DIGITS};
 use grafeo_common::utils::error::{QueryError, QueryErrorKind, Result};
 
@@ -25,7 +27,19 @@ pub struct Parser<'a> {
 impl<'a> Parser<'a> {
     /// Creates a new parser for the given query.
     pub fn new(query: &'a str) -> Self {
-        let mut lexer = Lexer::new(query);
+        Self::with_max_identifier_length(query, DEFAULT_MAX_IDENTIFIER_LENGTH)
+    }
+
+    /// The identifier length limit, with the first name the parser read over
+    /// it, in its `GRAPH_TABLE`s' `MATCH` clauses too.
+    pub(crate) fn names(&self) -> NameLimit {
+        self.lexer.names()
+    }
+
+    /// A parser for `query` that records the first name longer than `max`
+    /// bytes (see [`Self::names`]).
+    pub(crate) fn with_max_identifier_length(query: &'a str, max: usize) -> Self {
+        let mut lexer = Lexer::new(query).with_max_identifier_length(max);
         let current = lexer.next_token();
         let previous = Token {
             kind: TokenKind::Eof,
@@ -437,14 +451,22 @@ impl<'a> Parser<'a> {
 
     /// The `MATCH` clause of a `GRAPH_TABLE`, as GQL parses it (SQL/PGQ's
     /// graph pattern is GQL's, ISO/IEC 9075-16): the GQL parser reads it
-    /// from the current token, and this parser goes on after it.
+    /// from the current token, nesting from this parser's depth and checking
+    /// its names against this parser's limit, and this parser goes on after
+    /// it.
     fn parse_match_clause(&mut self) -> Result<MatchClause> {
         if self.current.kind != TokenKind::Match {
             return Err(self.error(&format!("Expected Match, found {:?}", self.current.kind)));
         }
-        let (clause, next) =
-            crate::query::gql::Parser::parse_match_clause_at(self.source, self.current.span)
-                .map_err(as_sql_pgq_error)?;
+        let mut names = self.lexer.names();
+        let parsed = crate::query::gql::Parser::parse_match_clause_at(
+            self.source,
+            self.current.span,
+            &mut self.nesting,
+            &mut names,
+        );
+        self.lexer.set_names(names);
+        let (clause, next) = parsed.map_err(as_sql_pgq_error)?;
         self.lexer.seek(next);
         self.advance();
         Ok(clause)

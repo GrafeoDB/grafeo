@@ -889,6 +889,18 @@ impl Versions {
         })
     }
 
+    /// The rows a committed delete took out, with its epoch.
+    pub(super) fn deleted_rows(&self) -> impl Iterator<Item = (usize, u64)> + '_ {
+        self.stamped_vectors().flat_map(|(base, stamped)| {
+            stamped
+                .deleted
+                .iter()
+                .flat_map(|deletes| deletes.of(&stamped.exists))
+                .filter(|(_, deleter)| *deleter != ABSENT && deleter & PENDING == 0)
+                .map(move |(row, deleter)| (base + row, deleter))
+        })
+    }
+
     /// The vectors that hold stamps, with their first row.
     fn stamped_vectors(&self) -> impl Iterator<Item = (usize, &Stamped)> + '_ {
         self.vectors

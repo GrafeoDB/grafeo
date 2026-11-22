@@ -6,6 +6,14 @@ on:
   pull_request:
     branches: [main, 'release/*']
 
+# A push to a branch with an open PR starts both triggers; keyed on the head repository and
+# branch, the later run cancels the earlier one, and a newer push cancels a stale run. A fork's
+# branch never shares a group with ours. Every push to main gets a group of its own, so no main
+# run is cancelled or dropped while pending.
+concurrency:
+  group: ${{ github.ref == 'refs/heads/main' && format('ci-main-{0}', github.run_id) || format('ci-{0}-{1}', github.event.pull_request.head.repo.full_name || github.repository, github.head_ref || github.ref_name) }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -455,6 +463,16 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
+      - name: Test the query memory limit without spilling
+        run: |
+          cargo nextest run -p grafeo-core --no-default-features --lib -E 'test(/memory::operator_memory_tests::/)'
+          cargo nextest run -p grafeo-engine --no-default-features --features gql,cypher,sparql,triple-store,regex,algos --test memory_query_limit_operators --test sparql_order_under_limit
+          cargo nextest run -p grafeo-engine --no-default-features --features gql,regex-lite --test memory_query_limit_operators
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
       - name: Test and lint the grafeo crate with its default features
         run: |
           cargo nextest run -p grafeo --test main open_with_default_features::
@@ -845,8 +863,9 @@ jobs:
   # Memory per entity (#431): bytes per node, per edge and per property value on a fixed
   # workload, counted by an allocator and as `memory_usage()` reports them. Fails when a count
   # moves more than 5%, up or down, from benches/memory_per_entity.baseline.json, or is in one and
-  # not the other; a change that moves memory updates the baseline in the same commit
-  # (`-- --update-baseline`). The table goes to the job summary, with the compact store's targets
+  # not the other. Built with triple-store, so the RDF rows (bytes per triple) are checked too.
+  # A change that moves memory updates the baseline in the same commit (`-- --update-baseline`,
+  # with `--features triple-store`). The table goes to the job summary, with the compact store's targets
   # beside it.
   memory-per-entity:
     name: Memory per Entity
@@ -872,7 +891,7 @@ jobs:
             ${{ runner.os }}-cargo-memory-per-entity-
 
       - name: Measure and check against the baseline
-        run: cargo bench -p grafeo-engine --bench memory_per_entity -- --check
+        run: cargo bench -p grafeo-engine --features triple-store --bench memory_per_entity -- --check
         env:
           RUSTC_WRAPPER: sccache
 
@@ -1059,7 +1078,7 @@ jobs:
         shell: bash
         run: |
           uv pip install --system dist/*.whl
-          uv pip install --system pytest pytest-asyncio networkx numpy scipy solvor pandas pyarrow polars
+          uv pip install --system pytest pytest-asyncio networkx numpy scipy solvor pandas pyarrow polars tzdata
 
       - name: Run Python tests
         env:
@@ -1126,7 +1145,7 @@ jobs:
         shell: bash
         run: |
           uv pip install --system dist/*.whl
-          uv pip install --system pytest pytest-asyncio networkx numpy scipy solvor pandas pyarrow polars
+          uv pip install --system pytest pytest-asyncio networkx numpy scipy solvor pandas pyarrow polars tzdata
 
       - name: Run Python tests
         run: pytest crates/bindings/python/tests/ -v --ignore=crates/bindings/python/tests/benchmark_phases.py
@@ -1759,7 +1778,7 @@ jobs:
         run: python scripts/check_policy.py tree
       - name: Policy script tests
         run: |
-          uv pip install --system pytest
+          uv pip install --system pytest rdflib
           pytest scripts/tests -q
 
   # The one check to require on main and release/*: fails when any job it needs failed

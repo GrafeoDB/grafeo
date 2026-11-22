@@ -14,3 +14,4 @@ IndexName
 Procedure
 StoredConfig
 LabelIndex
+CdcConfig

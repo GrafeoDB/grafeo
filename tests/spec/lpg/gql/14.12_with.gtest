@@ -111,3 +111,64 @@ tests:
       rows:
         - [Amsterdam, 2]
         - [Berlin, 1]
+
+  # A LIMIT before another stage keeps the rows it stopped with: the stage
+  # after it sees them (in GQL it saw none when the LIMIT reached its count in
+  # the chunk it handed on).
+  - name: with_limit_then_distinct_keeps_its_rows
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30})"
+      - "INSERT (:Person {name: 'Gus', age: 30})"
+      - "INSERT (:Person {name: 'Vincent', age: 30})"
+      - "INSERT (:Person {name: 'Jules', age: 30})"
+    query: |
+      MATCH (n:Person)
+      WITH n.age AS a LIMIT 2
+      RETURN DISTINCT a
+    expect:
+      rows:
+        - [30]
+
+  - name: with_limit_then_grouping_key_keeps_its_rows
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30})"
+      - "INSERT (:Person {name: 'Gus', age: 30})"
+      - "INSERT (:Person {name: 'Vincent', age: 30})"
+      - "INSERT (:Person {name: 'Jules', age: 30})"
+    query: |
+      MATCH (n:Person)
+      WITH n.age AS a LIMIT 2
+      RETURN a, count(*) AS c
+    expect:
+      rows:
+        - [30, 2]
+
+  - name: with_limit_then_where_keeps_its_rows
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30})"
+      - "INSERT (:Person {name: 'Gus', age: 30})"
+      - "INSERT (:Person {name: 'Vincent', age: 30})"
+      - "INSERT (:Person {name: 'Jules', age: 30})"
+    query: |
+      MATCH (n:Person)
+      WITH n.age AS a LIMIT 2
+      WHERE a >= 0 RETURN a
+    expect:
+      rows:
+        - [30]
+        - [30]
+
+  - name: with_limit_then_order_by_keeps_its_rows
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30})"
+      - "INSERT (:Person {name: 'Gus', age: 30})"
+      - "INSERT (:Person {name: 'Vincent', age: 30})"
+      - "INSERT (:Person {name: 'Jules', age: 30})"
+    query: |
+      MATCH (n:Person)
+      WITH n.age AS a LIMIT 2
+      RETURN a ORDER BY a
+    expect:
+      rows:
+        - [30]
+        - [30]

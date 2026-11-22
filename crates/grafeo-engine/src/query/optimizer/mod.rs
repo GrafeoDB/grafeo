@@ -247,19 +247,36 @@ impl Optimizer {
     /// from the ones collected last, or none, when it does not: an `INSERT
     /// DATA` or a single pattern has no order to choose, so a load through
     /// statements does not read the whole store again every tenth of its
-    /// growth.
+    /// growth. A named graph the plan's patterns read is its own store, and
+    /// gives the statistics of those patterns under the same rule.
     #[cfg(feature = "triple-store")]
     #[must_use]
     pub fn for_rdf_plan(
         store: &grafeo_core::graph::rdf::RdfStore,
         plan: &crate::query::plan::LogicalPlan,
     ) -> Self {
-        let statistics = if joins_inputs(&plan.root) {
-            store.get_or_collect_statistics()
-        } else {
-            store.cached_statistics().unwrap_or_default()
+        let collect = joins_inputs(&plan.root);
+        let statistics_of = |store: &grafeo_core::graph::rdf::RdfStore| {
+            if collect {
+                store.get_or_collect_statistics()
+            } else {
+                store.cached_statistics().unwrap_or_default()
+            }
         };
-        Self::from_rdf_statistics(statistics)
+        let mut optimizer = Self::from_rdf_statistics(statistics_of(store));
+        let mut names = std::collections::BTreeSet::new();
+        rdf_order::graphs_read(&plan.root, store, &mut names);
+        let graphs = names
+            .into_iter()
+            .filter_map(|name| {
+                let graph = store.graph_latest(&name)?;
+                Some((name, statistics_of(&graph)))
+            })
+            .collect();
+        if let Some(order) = &mut optimizer.rdf_order {
+            order.set_graphs(graphs);
+        }
+        optimizer
     }
 
     /// Creates an optimizer from a Statistics snapshot.
@@ -3177,6 +3194,7 @@ mod tests {
                     alias: Some("cnt".to_string()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 }],
                 input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "n".to_string(),

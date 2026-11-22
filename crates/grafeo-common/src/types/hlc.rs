@@ -15,11 +15,11 @@
 //! serialized wall-clock timestamps (with counter = 0) remain valid.
 
 use std::fmt;
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const LOGICAL_BITS: u32 = 16;
 const LOGICAL_MASK: u64 = (1 << LOGICAL_BITS) - 1; // 0xFFFF
-const MAX_LOGICAL: u64 = LOGICAL_MASK;
 
 /// A Hybrid Logical Clock timestamp.
 ///
@@ -75,6 +75,14 @@ impl HlcTimestamp {
     #[must_use]
     pub const fn from_u64(raw: u64) -> Self {
         Self(raw)
+    }
+
+    /// The timestamp `steps` after this one in the raw encoding: past the
+    /// logical bits it carries into the milliseconds.
+    #[inline]
+    #[must_use]
+    pub const fn plus(self, steps: u64) -> Self {
+        Self(self.0.saturating_add(steps))
     }
 
     /// Returns zero (the smallest possible timestamp).
@@ -137,47 +145,48 @@ impl HlcClock {
         }
     }
 
-    /// Returns a monotonically increasing HLC timestamp.
+    /// A clock whose first timestamp is past `floor` and the wall clock: an
+    /// open starts its clock past the largest timestamp it replayed.
+    #[must_use]
+    pub fn starting_after(floor: HlcTimestamp) -> Self {
+        Self {
+            last: AtomicU64::new(HlcTimestamp::now().max(floor).as_u64()),
+        }
+    }
+
+    /// Returns a monotonically increasing HLC timestamp: a reservation of
+    /// one (see [`reserve`](Self::reserve)).
+    pub fn now(&self) -> HlcTimestamp {
+        self.reserve(NonZeroU64::MIN)
+    }
+
+    /// Reserves `count` consecutive timestamps, each larger than every
+    /// timestamp this clock gave before, and returns the first; the rest are
+    /// `first.plus(1)` to `first.plus(count - 1)`.
     ///
-    /// - If the wall clock has advanced past the last timestamp, resets
-    ///   the logical counter to 0.
-    /// - If the wall clock equals the last timestamp's physical time,
-    ///   increments the logical counter.
-    /// - If the wall clock went backward, keeps the last physical time
-    ///   and increments the logical counter.
+    /// The first is the wall clock's millisecond (logical 0) when that is
+    /// past the last timestamp given, else the one right after it, also when
+    /// the wall clock went back. A run carries past the logical bits into
+    /// the milliseconds instead of repeating a value.
     ///
     /// Uses a CAS loop for lock-free thread safety.
-    pub fn now(&self) -> HlcTimestamp {
+    pub fn reserve(&self, count: NonZeroU64) -> HlcTimestamp {
         let pt = wall_clock_ms();
         loop {
             let last_raw = self.last.load(Ordering::Acquire);
             let last = HlcTimestamp::from_u64(last_raw);
-            let last_pt = last.physical_ms();
-            let last_lc = last.logical() as u64;
-
-            let next = match pt.cmp(&last_pt) {
-                std::cmp::Ordering::Greater => {
-                    // Wall clock advanced: reset logical counter
-                    HlcTimestamp::new(pt, 0)
-                }
-                std::cmp::Ordering::Equal => {
-                    // Same millisecond: increment logical
-                    let lc = last_lc.saturating_add(1).min(MAX_LOGICAL);
-                    HlcTimestamp::new(pt, lc as u16)
-                }
-                std::cmp::Ordering::Less => {
-                    // Clock went backward: keep last physical, increment logical
-                    let lc = last_lc.saturating_add(1).min(MAX_LOGICAL);
-                    HlcTimestamp::new(last_pt, lc as u16)
-                }
+            let first = if pt > last.physical_ms() {
+                HlcTimestamp::new(pt, 0)
+            } else {
+                last.plus(1)
             };
-
+            let end = first.plus(count.get() - 1);
             if self
                 .last
-                .compare_exchange_weak(last_raw, next.as_u64(), Ordering::AcqRel, Ordering::Acquire)
+                .compare_exchange_weak(last_raw, end.as_u64(), Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                return next;
+                return first;
             }
             // CAS failed: retry with updated `last`
         }
@@ -193,30 +202,13 @@ impl HlcClock {
         let pt = wall_clock_ms();
         loop {
             let last_raw = self.last.load(Ordering::Acquire);
-            let last = HlcTimestamp::from_u64(last_raw);
-            let last_pt = last.physical_ms();
-            let recv_pt = received.physical_ms();
-
-            let max_pt = pt.max(last_pt).max(recv_pt);
-
-            let next = if max_pt == pt && pt > last_pt && pt > recv_pt {
+            let newest = HlcTimestamp::from_u64(last_raw).max(received);
+            let next = if pt > newest.physical_ms() {
                 // Local wall clock is the newest: reset counter
                 HlcTimestamp::new(pt, 0)
-            } else if max_pt == last_pt && last_pt == recv_pt {
-                // All three equal: take max of both logical counters + 1
-                let lc = last.logical().max(received.logical()) as u64;
-                let lc = lc.saturating_add(1).min(MAX_LOGICAL);
-                HlcTimestamp::new(max_pt, lc as u16)
-            } else if max_pt == last_pt {
-                // Local HLC is ahead of remote and wall clock
-                let lc = (last.logical() as u64).saturating_add(1).min(MAX_LOGICAL);
-                HlcTimestamp::new(max_pt, lc as u16)
             } else {
-                // Remote is ahead
-                let lc = (received.logical() as u64)
-                    .saturating_add(1)
-                    .min(MAX_LOGICAL);
-                HlcTimestamp::new(max_pt, lc as u16)
+                // The local clock or the remote is ahead: one past the newest
+                newest.plus(1)
             };
 
             if self
@@ -468,6 +460,21 @@ mod tests {
             "Local HLC physical should dominate"
         );
         assert_eq!(merged.logical(), 4, "Should increment local logical by 1");
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "requires wall clock (SystemTime::now) unavailable under Miri isolation"
+    )]
+    fn update_carries_past_the_logical_bits() {
+        let future_pt = wall_clock_ms() + 100_000;
+        let clock = HlcClock {
+            last: AtomicU64::new(HlcTimestamp::new(future_pt, 65_535).as_u64()),
+        };
+        let remote = HlcTimestamp::new(future_pt, 65_535);
+        let merged = clock.update(remote);
+        assert_eq!(merged, HlcTimestamp::new(future_pt + 1, 0));
     }
 
     #[test]

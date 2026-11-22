@@ -8,9 +8,12 @@
 //!
 //! Every write emits a [`ChangeEvent`] keyed by [`EntityId`]. Three id
 //! variants cover the three supported data models: `Node(NodeId)` and
-//! `Edge(EdgeId)` for LPG, `Triple(u64)` for RDF (hashed via a
-//! content-stable triple hash so the log can key events by triple
-//! content without maintaining a separate id registry).
+//! `Edge(EdgeId)` for LPG, `Triple(u64)` for RDF: the first 8 bytes of
+//! SHA-256 over the triple's terms and its graph, so the log keys events by
+//! triple content without a separate id registry, and the id is the same in
+//! every process and release. It is a 64-bit hash, unique in practice but
+//! not guaranteed: a consumer that must not conflate two triples keys on the
+//! terms the event carries.
 //! [`ChangeKind`] distinguishes
 //! `Create` / `Update` / `Delete`; the `before` and `after` property maps
 //! are populated only for the variants that can carry them (`Update` has
@@ -23,25 +26,32 @@
 //!
 //! # Thread safety and ordering
 //!
-//! [`CdcLog`] is the authoritative in-memory store, a
-//! `RwLock<HbHashMap<(graph, EntityId), Vec<ChangeEvent>>>` (entity ids
-//! repeat across graphs, so the graph is part of the key). Readers (history
-//! queries, retention probes) take the read lock; writers (commit-path
-//! recording) take the write lock. We use [`hashbrown`]'s `HashMap` for
-//! the Fx-hashed inner map, and [`parking_lot`]'s `RwLock` for cheap
-//! uncontended locking; under concurrent insert+read the typical pattern
-//! is short write critical sections (one `entry().or_default().push()`
-//! per event) and occasional long read critical sections for
-//! `history*()` snapshots that clone the event vector out of the lock.
+//! [`CdcLog`] is the authoritative in-memory store: under one `RwLock`, a
+//! map from `(graph, EntityId)` to the entity's events (entity ids repeat
+//! across graphs, so the graph is part of the key), and the commits held in
+//! epoch order, each with the keys of the entities it has events of.
+//! Readers (history queries, retention probes) take the read lock; writers
+//! (commit-path recording, prunes) take the write lock. We use
+//! [`hashbrown`]'s `HashMap` for the Fx-hashed inner map, and
+//! [`parking_lot`]'s `RwLock` for cheap uncontended locking; under
+//! concurrent insert+read the typical pattern is short write critical
+//! sections (one entry lookup and push per event) and occasional long read
+//! critical sections for `history*()` snapshots that clone the events out of
+//! the lock. A prune pops whole commits from the front of the queue and each
+//! of their entities' oldest events from the front of its list, so it costs
+//! what it drops, not the size of the log.
 //!
-//! Per-entity event order within the `Vec<ChangeEvent>` is insertion
+//! Per-entity event order within an entity's events is insertion
 //! order, which is monotonic by construction: the only writer is the
 //! commit path (see "Integration with the commit path" below) and each
 //! event carries the MVCC `epoch` that produced it plus an HLC
 //! timestamp from the embedded [`HlcClock`]. The clock guarantees
 //! strictly-increasing timestamps across all threads within a process
 //! (wall-clock ms in the upper 48 bits, logical counter in the lower
-//! 16, with the logical bits bumped on collision).
+//! 16, carrying into the milliseconds past 65,535). A commit reserves one
+//! run of consecutive timestamps for its writes, and write `i` (from 0, in
+//! the order applied) gets the run's first plus `i`, a write folded into a
+//! create included, so a later commit's timestamps are larger.
 //!
 //! # Integration with the commit path
 //!
@@ -123,7 +133,7 @@
 //! their documentation has a `# Stability: Experimental` section: see
 //! <https://grafeo.dev/stability/>.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -154,7 +164,9 @@ pub enum EntityId {
     Node(NodeId),
     /// An edge identifier.
     Edge(EdgeId),
-    /// An RDF triple, identified by a content hash of its terms.
+    /// An RDF triple, identified by a hash of its terms and its graph: the
+    /// same in every process and release, unique in practice but not
+    /// guaranteed (key on the event's terms when that matters).
     Triple(u64),
 }
 
@@ -267,8 +279,9 @@ pub struct ChangeEvent {
 ///
 /// Start from [`CdcRetentionConfig::default()`] (1,000 epochs and 100,000
 /// events) or [`CdcRetentionConfig::unlimited()`] and set a limit with
-/// [`with_max_epochs`](Self::with_max_epochs) and
-/// [`with_max_events`](Self::with_max_events). Later releases may add
+/// [`with_max_epochs`](Self::with_max_epochs),
+/// [`with_max_events`](Self::with_max_events) and
+/// [`with_max_bytes`](Self::with_max_bytes). Later releases may add
 /// settings, so outside this crate it cannot be built with a struct literal.
 ///
 /// # Examples
@@ -289,6 +302,7 @@ pub struct ChangeEvent {
 /// let retention = CdcRetentionConfig {
 ///     max_epochs: None,
 ///     max_events: Some(88_000),
+///     max_bytes: None,
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -302,6 +316,17 @@ pub struct CdcRetentionConfig {
     /// (by epoch) are pruned when this limit is exceeded.
     /// `None` disables count-based pruning.
     pub max_events: Option<usize>,
+    /// The bytes the log's events may hold, counted as they come.
+    /// When the log passes the bound, its oldest whole commits are dropped
+    /// until it is at or below three quarters of the bound; the newest
+    /// commit is always kept.
+    /// `None` here lets the database derive the bound: a sixteenth of its
+    /// memory limit (see [`Config::with_cdc_memory_limit`](crate::Config::with_cdc_memory_limit)).
+    /// A bound is capped at the memory limit. The eviction cycle may prune
+    /// further under memory pressure, the newest commit included. Pruning
+    /// the in-memory log leaves the log kept on disk for the change feed's
+    /// cursor alone.
+    pub max_bytes: Option<usize>,
 }
 
 impl Default for CdcRetentionConfig {
@@ -309,19 +334,30 @@ impl Default for CdcRetentionConfig {
         Self {
             max_epochs: Some(1000),
             max_events: Some(100_000),
+            max_bytes: None,
         }
     }
 }
 
 impl CdcRetentionConfig {
-    /// Keeps every event: no limit on epochs or events. Beware of unbounded
-    /// memory growth on long-running instances.
+    /// No limit on epochs or events. The byte bound stays: the one given
+    /// with [`with_max_bytes`](Self::with_max_bytes), or the one the database
+    /// derives from its memory limit.
     #[must_use]
     pub fn unlimited() -> Self {
         Self {
             max_epochs: None,
             max_events: None,
+            max_bytes: None,
         }
+    }
+
+    /// Bounds the bytes the log's events hold (see
+    /// [`max_bytes`](Self::max_bytes)).
+    #[must_use]
+    pub fn with_max_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_bytes = Some(max_bytes);
+        self
     }
 
     /// Prunes the events more than `max_epochs` epochs older than the
@@ -346,21 +382,29 @@ impl CdcRetentionConfig {
 /// Thread-safe: uses `RwLock<HashMap>` for concurrent access. Timestamps
 /// are assigned by the embedded [`HlcClock`] to guarantee monotonicity.
 ///
-/// Event retention is controlled by [`CdcRetentionConfig`]. Without retention
-/// limits, the log grows unbounded (see [#250]).
-///
-/// [#250]: https://github.com/GrafeoDB/grafeo/issues/250
+/// Event retention is controlled by [`CdcRetentionConfig`]. A log a
+/// database holds is bounded in bytes too (see
+/// [`CdcRetentionConfig::max_bytes`]), whatever the epoch and event limits.
 #[derive(Debug)]
 pub struct CdcLog {
-    events: RwLock<HbHashMap<(Option<String>, EntityId), Vec<ChangeEvent>>>,
+    events: RwLock<Held>,
     clock: Arc<HlcClock>,
     retention: CdcRetentionConfig,
+    /// The calls of the triple helpers that recorded nothing (see
+    /// [`dropped_lines`](Self::dropped_lines)).
+    dropped_lines: std::sync::atomic::AtomicU64,
     /// What [`heap_memory_bytes`](Self::heap_memory_bytes) walks, kept as
     /// events come and go, under the events' write lock (one writer: a load
     /// and a store, no read-modify-write).
     counted: AtomicUsize,
     /// The events the log holds, kept alike.
     held_events: AtomicUsize,
+    /// The entities and events the prunes visited (see
+    /// [`prune_visits`](Self::prune_visits)).
+    prune_visits: std::sync::atomic::AtomicU64,
+    /// The counts of the last byte prune (see
+    /// [`last_byte_prune`](Self::last_byte_prune)).
+    byte_prune: parking_lot::Mutex<Option<(usize, usize, usize)>>,
     /// The grant of the counted bytes, once a database attaches its memory.
     memory: LogMemory,
 }
@@ -382,25 +426,120 @@ impl std::fmt::Debug for LogMemory {
     }
 }
 
-/// The bytes an entity's entry takes besides its events: the walk's
-/// overhead per entry, the full key and value inline plus the control byte.
-const ENTRY_BYTES: usize = std::mem::size_of::<(Option<String>, EntityId, Vec<ChangeEvent>)>() + 8;
+/// An entity's key in the log: its graph's storage key and its id.
+type EntityKey = (Option<String>, EntityId);
+
+/// The log's events and the commits that hold them, under one lock.
+#[derive(Debug, Default)]
+struct Held {
+    /// Each entity's events, in epoch order.
+    entities: HbHashMap<EntityKey, VecDeque<ChangeEvent>>,
+    /// The commits held, oldest first: the entities each has events of (ids,
+    /// not events). A prune pops whole commits from the front.
+    commits: VecDeque<HeldCommit>,
+}
+
+/// A commit the log holds: its epoch and the keys of the entities it has
+/// events of, each once. The first key is inline, so a commit of one entity
+/// takes no allocation of its own.
+#[derive(Debug)]
+struct HeldCommit {
+    epoch: EpochId,
+    first: EntityKey,
+    rest: Vec<EntityKey>,
+}
+
+impl HeldCommit {
+    fn new(epoch: EpochId, key: EntityKey) -> Self {
+        Self {
+            epoch,
+            first: key,
+            rest: Vec::new(),
+        }
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &EntityKey> {
+        std::iter::once(&self.first).chain(&self.rest)
+    }
+
+    /// Adds `key`; the slots its list grew by.
+    fn add(&mut self, key: EntityKey) -> usize {
+        let before = self.rest.capacity();
+        self.rest.push(key);
+        self.rest.capacity() - before
+    }
+}
+
+/// The bytes a bucket of the entities table takes: an entry's key and
+/// value inline, and its control byte. The table itself is counted by its
+/// allocation (`allocation_size`), which removals leave as it is.
+const ENTRY_SLOT_BYTES: usize = std::mem::size_of::<(EntityKey, VecDeque<ChangeEvent>)>() + 1;
+
+/// The bytes a bucket of an event's property map takes: an entry's key and
+/// value inline, and its control byte.
+const PROPERTY_SLOT_BYTES: usize = std::mem::size_of::<(String, Value)>() + 1;
+
+/// The bytes an event's property map of `capacity` takes with buckets of
+/// `slot` bytes: its buckets, by hashbrown's own rounding from a capacity
+/// (4 below 4, 8 below 8, else the power of two at or above eight sevenths
+/// of it), and the group of control bytes past them. Exact for a map built
+/// by inserts; a removal that leaves a tombstone lowers the capacity, which
+/// the rounding takes back up to the buckets. An empty map allocates nothing.
+fn table_bytes(capacity: usize, slot: usize) -> usize {
+    /// The control bytes past the buckets: hashbrown's group (`Group::WIDTH`),
+    /// 16 where it scans with SSE2 or LSX, 8 with NEON on aarch64, and
+    /// otherwise the generic group's word, u64 or u32 as in its
+    /// `control/group/generic.rs`.
+    const GROUP_BYTES: usize = if cfg!(all(
+        any(target_arch = "x86", target_arch = "x86_64"),
+        target_feature = "sse2",
+        not(miri)
+    )) || cfg!(all(
+        target_arch = "loongarch64",
+        target_feature = "lsx",
+        not(miri)
+    )) {
+        16
+    } else if cfg!(any(
+        target_pointer_width = "64",
+        target_arch = "aarch64",
+        target_arch = "x86_64",
+        target_arch = "wasm32"
+    )) {
+        8
+    } else {
+        4
+    };
+    let buckets = match capacity {
+        0 => return 0,
+        1..4 => 4,
+        4..8 => 8,
+        _ => (capacity * 8 / 7).next_power_of_two(),
+    };
+    buckets * slot + GROUP_BYTES
+}
+
+/// The bytes a key takes in a commit's list, besides its heap bytes.
+const KEY_BYTES: usize = std::mem::size_of::<EntityKey>();
+
+/// The bytes a commit takes in the queue, besides its list's heap bytes.
+const COMMIT_BYTES: usize = std::mem::size_of::<HeldCommit>();
 
 /// The heap bytes an entry's key owns besides its inline slot: the graph
 /// name's string, cloned into the key when the entry is created (the event
 /// keeps its own copy, counted in [`event_heap_bytes`]).
-fn key_heap_bytes(key: &(Option<String>, EntityId)) -> usize {
+fn key_heap_bytes(key: &EntityKey) -> usize {
     key.0.as_ref().map_or(0, String::capacity)
 }
 
 /// The bytes the room of `events` takes, without what each event owns.
-fn room_bytes(events: &Vec<ChangeEvent>) -> usize {
+fn room_bytes(events: &VecDeque<ChangeEvent>) -> usize {
     events.capacity() * std::mem::size_of::<ChangeEvent>()
 }
 
-/// The bytes `events` take: their room and what each event owns.
-fn events_bytes(events: &Vec<ChangeEvent>) -> usize {
-    room_bytes(events) + events.iter().map(event_heap_bytes).sum::<usize>()
+/// The heap bytes a commit's list of keys takes.
+fn keys_bytes(commit: &HeldCommit) -> usize {
+    commit.rest.capacity() * KEY_BYTES + commit.keys().map(key_heap_bytes).sum::<usize>()
 }
 
 /// The heap bytes `event` owns besides its place in its entity's vector:
@@ -417,8 +556,7 @@ fn event_heap_bytes(event: &ChangeEvent) -> usize {
     };
     let properties = |properties: &Option<HashMap<String, Value>>| {
         properties.as_ref().map_or(0, |properties| {
-            // A slot per entry of the table's room, and a control byte each.
-            properties.capacity() * (std::mem::size_of::<(String, Value)>() + 1)
+            table_bytes(properties.capacity(), PROPERTY_SLOT_BYTES)
                 + properties
                     .iter()
                     .map(|(key, value)| key.capacity() + value.estimated_size_bytes())
@@ -437,9 +575,34 @@ fn event_heap_bytes(event: &ChangeEvent) -> usize {
         + properties(&event.after)
 }
 
-/// `bytes` rounded up to the grant step `step`.
-fn step_above(bytes: usize, step: usize) -> usize {
-    bytes.checked_next_multiple_of(step).unwrap_or(usize::MAX)
+/// Lists `key` under the commit of `epoch` in `commits`, adding the commit;
+/// the bytes the queue grew. A commit's events come in epoch order through
+/// the commit path; the public helpers take any epoch, so an older one finds
+/// its place. An entity's event recorded after a newer one of the entity
+/// goes with that newer one, which stands before it in the entity's events;
+/// its key may then be listed under two commits, which costs only the slot.
+fn list_key(commits: &mut VecDeque<HeldCommit>, epoch: EpochId, key: EntityKey) -> usize {
+    let queue_before = commits.capacity();
+    let key_bytes = key_heap_bytes(&key);
+    let grown_keys = match commits.back_mut() {
+        Some(last) if last.epoch == epoch => last.add(key),
+        Some(last) if last.epoch > epoch => {
+            let at = commits.partition_point(|commit| commit.epoch < epoch);
+            match commits.get_mut(at).filter(|commit| commit.epoch == epoch) {
+                Some(commit) if commit.keys().any(|listed| *listed == key) => return 0,
+                Some(commit) => commit.add(key),
+                None => {
+                    commits.insert(at, HeldCommit::new(epoch, key));
+                    0
+                }
+            }
+        }
+        _ => {
+            commits.push_back(HeldCommit::new(epoch, key));
+            0
+        }
+    };
+    (commits.capacity() - queue_before) * COMMIT_BYTES + grown_keys * KEY_BYTES + key_bytes
 }
 
 impl CdcLog {
@@ -453,13 +616,50 @@ impl CdcLog {
     #[must_use]
     pub fn with_retention(retention: CdcRetentionConfig) -> Self {
         Self {
-            events: RwLock::new(HbHashMap::new()),
+            events: RwLock::new(Held::default()),
             clock: Arc::new(HlcClock::new()),
             retention,
+            dropped_lines: std::sync::atomic::AtomicU64::new(0),
             counted: AtomicUsize::new(0),
             held_events: AtomicUsize::new(0),
+            prune_visits: std::sync::atomic::AtomicU64::new(0),
+            byte_prune: parking_lot::Mutex::new(None),
             memory: LogMemory::default(),
         }
+    }
+
+    /// How many calls of [`record_triple_insert`](Self::record_triple_insert)
+    /// and [`record_triple_delete`](Self::record_triple_delete) recorded
+    /// nothing: their terms were not one N-Triples triple (a blank argument
+    /// included), or the build has no triple store to read them. Each also
+    /// logs a warning, which a build without the `tracing` feature drops, so
+    /// this count is the signal there.
+    #[must_use]
+    pub fn dropped_lines(&self) -> u64 {
+        self.dropped_lines.load(Ordering::Relaxed)
+    }
+
+    /// How many entities and events the log's prunes have visited, all
+    /// prunes together: a prune visits what it drops, not the whole log. For
+    /// tests.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn prune_visits(&self) -> u64 {
+        self.prune_visits.load(Ordering::Relaxed)
+    }
+
+    /// The last prune the byte bound ran, as the counted bytes when it began,
+    /// before it dropped its last commit, and when it ended: `None` before
+    /// the first. For tests of the rule.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn last_byte_prune(&self) -> Option<(usize, usize, usize)> {
+        *self.byte_prune.lock()
+    }
+
+    /// Counts a helper call that recorded nothing.
+    fn drop_line(&self) {
+        self.dropped_lines.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Returns the next HLC timestamp from this log's clock.
@@ -481,15 +681,15 @@ impl CdcLog {
     }
 
     /// Brings the grant to the counted bytes, forced (a commit, which must
-    /// not fail, records the events): two loads and a compare while it is
-    /// within two steps above them.
+    /// not fail, records the events): two loads and a few compares while it
+    /// is within the bounds of `BufferManager::settled_size`.
     fn settle(&self) {
         let Some(manager) = self.memory.manager.get() else {
             return;
         };
         let counted = self.counted.load(Ordering::Relaxed);
         let granted = self.memory.granted.load(Ordering::Relaxed);
-        if counted <= granted && granted - counted < 2 * manager.grant_step() {
+        if manager.settled_size(granted, counted) == granted {
             return;
         }
         let mut grant = self.memory.grant.lock();
@@ -504,7 +704,7 @@ impl CdcLog {
     }
 
     /// [`settle`](Self::settle) without the slack: the grant keeps no more
-    /// than the step the counted bytes round up to, so what an eviction
+    /// than the counted bytes' `BufferManager::grant_size`, so what an eviction
     /// pruned leaves the buffer manager's count at once (the eviction cycle
     /// reads it). The bytes the grant gave back.
     fn settle_tight(&self) -> usize {
@@ -518,7 +718,7 @@ impl CdcLog {
         if held < counted {
             manager.settle_forced(&mut grant, MemoryRegion::ExecutionBuffers, counted);
         } else if let Some(grant) = grant.as_mut() {
-            given_back = held.saturating_sub(step_above(counted, manager.grant_step()));
+            given_back = held.saturating_sub(manager.grant_size(counted));
             grant.shrink(given_back);
         }
         self.memory.granted.store(
@@ -528,23 +728,37 @@ impl CdcLog {
         given_back
     }
 
-    /// Pushes `event` under `guard`, counting what it grew.
-    fn push(
-        &self,
-        guard: &mut HbHashMap<(Option<String>, EntityId), Vec<ChangeEvent>>,
-        event: ChangeEvent,
-    ) {
+    /// Pushes `event` under `held`, counting what it grew: its entity's
+    /// events and, for the commit's first event of the entity, the commit's
+    /// list of keys.
+    fn push(&self, held: &mut Held, event: ChangeEvent) {
         let mut grown = event_heap_bytes(&event);
-        let events = match guard.entry((event.graph.clone(), event.entity_id)) {
-            hashbrown::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-            hashbrown::hash_map::Entry::Vacant(entry) => {
-                grown += ENTRY_BYTES + key_heap_bytes(entry.key());
-                entry.insert(Vec::new())
-            }
-        };
-        let before = room_bytes(events);
-        events.push(event);
+        let epoch = event.epoch;
+        let table_before = held.entities.allocation_size();
+        let (events, before, listed) =
+            match held.entities.entry((event.graph.clone(), event.entity_id)) {
+                hashbrown::hash_map::Entry::Occupied(entry) => {
+                    let events = entry.into_mut();
+                    let listed = events.back().is_some_and(|last| last.epoch == epoch);
+                    let before = room_bytes(events);
+                    (events, before, listed)
+                }
+                hashbrown::hash_map::Entry::Vacant(entry) => {
+                    grown += key_heap_bytes(entry.key());
+                    // Room for the first event alone: pushes then keep at most twice
+                    // the room the events need, so a prune shrinks only what it took from.
+                    (entry.insert(VecDeque::with_capacity(1)), 0, false)
+                }
+            };
+        // The commit's first event of the entity lists it under the commit.
+        let key = (!listed).then(|| (event.graph.clone(), event.entity_id));
+        events.push_back(event);
         grown += room_bytes(events) - before;
+        // An insert grows the table or leaves it as it is.
+        grown += held.entities.allocation_size() - table_before;
+        if let Some(key) = key {
+            grown += list_key(&mut held.commits, epoch, key);
+        }
         // One writer, under the events' write lock: a load and a store.
         self.counted.store(
             self.counted.load(Ordering::Relaxed) + grown,
@@ -556,21 +770,118 @@ impl CdcLog {
         );
     }
 
+    /// Drops the oldest commit `held` holds: each of its entities' events of
+    /// its epoch or older, from the front of their lists, and an entity left
+    /// with none. Counts what it freed and visited; the events it dropped,
+    /// `None` when no commit is held.
+    fn pop_commit(&self, held: &mut Held) -> Option<usize> {
+        let queue_before = held.commits.capacity();
+        let commit = held.commits.pop_front()?;
+        let (mut freed, mut dropped, mut visits) = (keys_bytes(&commit), 0, 0_u64);
+        for key in commit.keys() {
+            visits += 1;
+            let Some(events) = held.entities.get_mut(key) else {
+                continue;
+            };
+            let before = room_bytes(events);
+            while events
+                .front()
+                .is_some_and(|event| event.epoch <= commit.epoch)
+            {
+                if let Some(event) = events.pop_front() {
+                    freed += event_heap_bytes(&event);
+                    dropped += 1;
+                    visits += 1;
+                }
+            }
+            if events.is_empty() {
+                freed += key_heap_bytes(key) + before;
+                held.entities.remove(key);
+            } else {
+                // Twice the room the events need at most: what a prune takes
+                // from a long history is given back.
+                if events.capacity() > 2 * events.len() {
+                    events.shrink_to_fit();
+                }
+                freed += before - room_bytes(events);
+            }
+        }
+        if held.commits.capacity() > 2 * held.commits.len() {
+            held.commits.shrink_to_fit();
+        }
+        freed += (queue_before - held.commits.capacity()) * COMMIT_BYTES;
+        // Under a quarter of its buckets full, or emptied, the table is cut
+        // to what it holds. Each cut follows the removal of a fixed share of
+        // the entries it held at its last growth or cut (about 3/7 after a
+        // growth, more after a cut), so it costs O(1) a removal amortised.
+        // (Its capacity is no measure here: a removal that leaves a tombstone
+        // lowers it.)
+        let table = held.entities.allocation_size();
+        if table > 0 && held.entities.len() * 4 * ENTRY_SLOT_BYTES < table {
+            held.entities.shrink_to_fit();
+            freed += table - held.entities.allocation_size();
+        }
+        // One writer, under the events' write lock: a load and a store.
+        let counted = self.counted.load(Ordering::Relaxed);
+        debug_assert!(freed <= counted, "freed {freed} of {counted} counted");
+        self.counted
+            .store(counted.saturating_sub(freed), Ordering::Relaxed);
+        self.held_events.store(
+            self.held_events.load(Ordering::Relaxed) - dropped,
+            Ordering::Relaxed,
+        );
+        self.prune_visits.fetch_add(visits, Ordering::Relaxed);
+        Some(dropped)
+    }
+
     /// Records a change event.
     pub fn record(&self, event: ChangeEvent) {
-        self.push(&mut self.events.write(), event);
+        {
+            let mut held = self.events.write();
+            self.push(&mut held, event);
+            self.prune_to_bytes(&mut held);
+        }
         self.settle();
     }
 
     /// Records a batch of change events with a single write-lock acquisition.
     pub fn record_batch(&self, events: impl IntoIterator<Item = ChangeEvent>) {
         {
-            let mut guard = self.events.write();
+            let mut held = self.events.write();
             for event in events {
-                self.push(&mut guard, event);
+                self.push(&mut held, event);
             }
+            self.prune_to_bytes(&mut held);
         }
         self.settle();
+    }
+
+    /// The byte bound in force (see
+    /// [`CdcRetentionConfig::max_bytes`]): `None` for a log no database
+    /// bounded.
+    #[must_use]
+    pub fn max_bytes(&self) -> Option<usize> {
+        self.retention.max_bytes
+    }
+
+    /// When the log passes the byte bound, drops its oldest whole commits
+    /// until it is at or below three quarters of the bound; the newest commit
+    /// is always kept. A prune costs what it drops.
+    fn prune_to_bytes(&self, held: &mut Held) {
+        let Some(max) = self.retention.max_bytes else {
+            return;
+        };
+        if self.counted.load(Ordering::Relaxed) <= max {
+            return;
+        }
+        let target = max - max / 4;
+        let began = self.counted.load(Ordering::Relaxed);
+        let mut before_last = began;
+        while self.counted.load(Ordering::Relaxed) > target && held.commits.len() > 1 {
+            before_last = self.counted.load(Ordering::Relaxed);
+            self.pop_commit(held);
+        }
+        *self.byte_prune.lock() = Some((began, before_last, self.counted.load(Ordering::Relaxed)));
     }
 
     /// The events whose count differs from the walk, as the line's name with
@@ -603,7 +914,7 @@ impl CdcLog {
     /// without a walk: `(bytes, entities, events)`.
     #[must_use]
     pub fn counted_memory_bytes(&self) -> (usize, usize, usize) {
-        let entities = self.events.read().len();
+        let entities = self.events.read().entities.len();
         (
             self.counted.load(Ordering::Relaxed),
             entities,
@@ -674,7 +985,16 @@ impl CdcLog {
     /// Records an RDF triple insertion.
     ///
     /// The terms must be N-Triples encoded (e.g. `<http://example.org/s>`,
-    /// `"hello"`, `"42"^^<http://www.w3.org/2001/XMLSchema#integer>`).
+    /// `"hello"`, `"42"^^<http://www.w3.org/2001/XMLSchema#integer>`). The
+    /// event carries the parsed terms and the id a commit gives the triple.
+    /// `graph` is the named graph's IRI without angle brackets (as SPARQL's
+    /// `GRAPH <iri>` names it), or `None` for the default graph.
+    ///
+    /// Terms that are not one N-Triples triple (a blank argument included),
+    /// or a build without the triple store (the `triple-store` feature) to
+    /// read them with, record nothing: the call logs a warning that names
+    /// why (in a build with `tracing`) and counts in
+    /// [`dropped_lines`](Self::dropped_lines).
     pub fn record_triple_insert(
         &self,
         subject: &str,
@@ -683,31 +1003,20 @@ impl CdcLog {
         graph: Option<&str>,
         epoch: EpochId,
     ) {
-        let id = triple_hash(subject, predicate, object, graph);
-        self.record(ChangeEvent {
-            entity_id: EntityId::Triple(id),
-            graph: graph.map(ToString::to_string),
-            kind: ChangeKind::Create,
+        self.record_parsed_triple(
+            [subject, predicate, object],
+            graph,
+            ChangeKind::Create,
             epoch,
-            timestamp: self.clock.now(),
-            before: None,
-            after: None,
-            labels: None,
-            before_labels: None,
-            edge_type: None,
-            src_id: None,
-            dst_id: None,
-            deleted_with: None,
-            triple_subject: Some(subject.to_string()),
-            triple_predicate: Some(predicate.to_string()),
-            triple_object: Some(object.to_string()),
-            triple_graph: graph.map(ToString::to_string),
-        });
+        );
     }
 
     /// Records an RDF triple deletion.
     ///
-    /// The terms must be N-Triples encoded.
+    /// The terms must be N-Triples encoded, and `graph` is as for
+    /// [`record_triple_insert`](Self::record_triple_insert); terms that do not
+    /// parse record nothing, warn and count in
+    /// [`dropped_lines`](Self::dropped_lines), as there.
     pub fn record_triple_delete(
         &self,
         subject: &str,
@@ -716,26 +1025,12 @@ impl CdcLog {
         graph: Option<&str>,
         epoch: EpochId,
     ) {
-        let id = triple_hash(subject, predicate, object, graph);
-        self.record(ChangeEvent {
-            entity_id: EntityId::Triple(id),
-            graph: graph.map(ToString::to_string),
-            kind: ChangeKind::Delete,
+        self.record_parsed_triple(
+            [subject, predicate, object],
+            graph,
+            ChangeKind::Delete,
             epoch,
-            timestamp: self.clock.now(),
-            before: None,
-            after: None,
-            labels: None,
-            before_labels: None,
-            edge_type: None,
-            src_id: None,
-            dst_id: None,
-            deleted_with: None,
-            triple_subject: Some(subject.to_string()),
-            triple_predicate: Some(predicate.to_string()),
-            triple_object: Some(object.to_string()),
-            triple_graph: graph.map(ToString::to_string),
-        });
+        );
     }
 
     /// Records a property update.
@@ -817,9 +1112,9 @@ impl CdcLog {
     pub fn history_in(&self, graph: Option<&str>, entity_id: EntityId) -> Vec<ChangeEvent> {
         self.events
             .read()
+            .entities
             .get(&(graph.map(str::to_string), entity_id))
-            .cloned()
-            .unwrap_or_default()
+            .map_or_default(|events| events.iter().cloned().collect())
     }
 
     /// Returns change events for an entity of the default graph since the
@@ -840,6 +1135,7 @@ impl CdcLog {
     ) -> Vec<ChangeEvent> {
         self.events
             .read()
+            .entities
             .get(&(graph.map(str::to_string), entity_id))
             .map_or_default(|events| {
                 events
@@ -858,7 +1154,7 @@ impl CdcLog {
     pub fn changes_between(&self, start_epoch: EpochId, end_epoch: EpochId) -> Vec<ChangeEvent> {
         let guard = self.events.read();
         let mut results = Vec::new();
-        for events in guard.values() {
+        for events in guard.entities.values() {
             for event in events {
                 if event.epoch >= start_epoch && event.epoch <= end_epoch {
                     results.push(event.clone());
@@ -872,92 +1168,79 @@ impl CdcLog {
     /// Returns the total number of recorded events.
     #[must_use]
     pub fn event_count(&self) -> usize {
-        self.events.read().values().map(Vec::len).sum()
+        self.events
+            .read()
+            .entities
+            .values()
+            .map(VecDeque::len)
+            .sum()
     }
 
     /// Estimates the heap footprint of the log in bytes.
     ///
-    /// Counts the entity-keyed hash map overhead, the per-entity `Vec<ChangeEvent>`
-    /// capacity, and what each event owns on the heap: its strings, labels and
-    /// property snapshots (a value as [`Value::estimated_size_bytes`] reads it).
+    /// Counts the entity-keyed hash table by its allocation, the room of each
+    /// entity's events, what each event owns on the heap (its strings, labels
+    /// and property snapshots, a value as [`Value::estimated_size_bytes`]
+    /// reads it), and the queue of commits with their lists of keys.
     #[must_use]
     pub fn heap_memory_bytes(&self) -> (usize, usize, usize) {
         let guard = self.events.read();
-        let entity_count = guard.len();
+        let entity_count = guard.entities.len();
         let mut event_count = 0usize;
-        let mut bytes = 0usize;
-        let entry_overhead = ENTRY_BYTES;
-        let event_size = std::mem::size_of::<ChangeEvent>();
-        for (key, events) in guard.iter() {
+        let mut bytes = guard.commits.capacity() * COMMIT_BYTES
+            + guard.commits.iter().map(keys_bytes).sum::<usize>()
+            + guard.entities.allocation_size();
+        for (key, events) in &guard.entities {
             event_count += events.len();
-            bytes += entry_overhead
-                + key_heap_bytes(key)
-                + events.capacity() * event_size
+            bytes += key_heap_bytes(key)
+                + room_bytes(events)
                 + events.iter().map(event_heap_bytes).sum::<usize>();
         }
-        debug_assert_eq!(entry_overhead, ENTRY_BYTES);
         (bytes, entity_count, event_count)
     }
 
-    /// Removes all events with `epoch < min_epoch`.
+    /// Removes all events with `epoch < min_epoch`: the commits before it,
+    /// oldest first.
     ///
     /// Entities whose entire history falls below the threshold are removed
     /// from the map entirely.
+    ///
+    /// The commit path records in epoch order. An event the public helpers
+    /// record with an epoch older than an event of its entity already held
+    /// goes with that newer event (see `list_key`), so it can outlive a
+    /// `min_epoch` above its own until the newer one goes.
     pub fn prune_before(&self, min_epoch: EpochId) {
-        self.prune(min_epoch);
+        {
+            let mut held = self.events.write();
+            while held
+                .commits
+                .front()
+                .is_some_and(|commit| commit.epoch < min_epoch)
+            {
+                self.pop_commit(&mut held);
+            }
+        }
         self.settle();
     }
 
-    /// [`prune_before`](Self::prune_before) without settling the grant. An
-    /// entity's events keep at most twice the room they need: what a prune
-    /// takes from a long history is given back.
-    fn prune(&self, min_epoch: EpochId) {
-        let mut guard = self.events.write();
-        let (mut bytes, mut held) = (0, 0);
-        guard.retain(|key, events| {
-            events.retain(|e| e.epoch >= min_epoch);
-            let kept = !events.is_empty();
-            if kept {
-                if events.capacity() > 2 * events.len() {
-                    events.shrink_to_fit();
-                }
-                bytes += ENTRY_BYTES + key_heap_bytes(key) + events_bytes(events);
-                held += events.len();
-            }
-            kept
-        });
-        // Every entity was visited: counted again with them.
-        self.counted.store(bytes, Ordering::Relaxed);
-        self.held_events.store(held, Ordering::Relaxed);
-    }
-
-    /// Prunes the oldest events to stay within `max_events`, if configured.
-    ///
-    /// Finds the epoch cutoff that brings the total count at or below the
-    /// limit, then calls [`prune_before`](Self::prune_before).
+    /// Prunes the oldest events to stay within `max_events`, if configured:
+    /// whole commits, oldest first, until the log holds at most that many.
     pub fn prune_to_limit(&self) {
         let Some(max) = self.retention.max_events else {
             return;
         };
-        let count = self.event_count();
-        if count <= max {
+        if self.held_events.load(Ordering::Relaxed) <= max {
             return;
         }
-
-        // Collect all epochs, sort, and find the cutoff
-        let guard = self.events.read();
-        let mut epochs: Vec<EpochId> = guard
-            .values()
-            .flat_map(|events| events.iter().map(|e| e.epoch))
-            .collect();
-        drop(guard);
-
-        epochs.sort();
-        let excess = count - max;
-        // The cutoff epoch: remove events up to and including this epoch
-        if let Some(&cutoff) = epochs.get(excess.saturating_sub(1)) {
-            self.prune_before(EpochId::new(cutoff.as_u64() + 1));
+        {
+            let mut held = self.events.write();
+            while self.held_events.load(Ordering::Relaxed) > max {
+                if self.pop_commit(&mut held).is_none() {
+                    break;
+                }
+            }
         }
+        self.settle();
     }
 
     /// Applies epoch-based and count-based retention limits.
@@ -1013,31 +1296,25 @@ impl MemoryConsumer for CdcLog {
     }
 
     fn evict(&self, target_bytes: usize) -> usize {
-        let before = self.counted.load(Ordering::Relaxed);
-        if before == 0 {
+        if target_bytes == 0 {
             return 0;
         }
-        // Estimate how many events to remove
-        let events_to_remove = target_bytes / 256;
-        if events_to_remove == 0 {
-            return 0;
-        }
-
-        // Find the epoch cutoff for the oldest N events
-        let guard = self.events.read();
-        let mut epochs: Vec<EpochId> = guard
-            .values()
-            .flat_map(|events| events.iter().map(|e| e.epoch))
-            .collect();
-        drop(guard);
-
-        if epochs.is_empty() {
-            return 0;
-        }
-        epochs.sort();
-        let cutoff_idx = events_to_remove.min(epochs.len()).saturating_sub(1);
-        let cutoff = epochs[cutoff_idx];
-        self.prune(EpochId::new(cutoff.as_u64() + 1));
+        // The oldest whole commits, until the count dropped by the target. The
+        // count is read under the write lock, so a record cannot land between
+        // the reading and the pops.
+        let before = {
+            let mut held = self.events.write();
+            let before = self.counted.load(Ordering::Relaxed);
+            if before == 0 {
+                return 0;
+            }
+            while before - self.counted.load(Ordering::Relaxed) < target_bytes {
+                if self.pop_commit(&mut held).is_none() {
+                    break;
+                }
+            }
+            before
+        };
         // The caller (the eviction cycle) reads the buffer manager's count:
         // what the grant gave back is what it freed. Without a manager the
         // counted bytes are all there is.
@@ -1068,49 +1345,208 @@ impl MemoryConsumer for CdcLog {
     }
 }
 
-/// Computes a stable-within-process content hash for an RDF triple.
-///
-/// Used as the raw `u64` in `EntityId::Triple` so the CDC log can key events
-/// by triple content without storing a separate ID registry.
-fn triple_hash(subject: &str, predicate: &str, object: &str, graph: Option<&str>) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    subject.hash(&mut h);
-    predicate.hash(&mut h);
-    object.hash(&mut h);
-    graph.hash(&mut h);
-    h.finish()
-}
-
 impl CdcLog {
-    /// Records the events of a commit at `epoch` that changed what `set`
-    /// holds (see [`events_for_commit`]). Called in the commit's ordered
-    /// step, where no other commit runs: the timestamps the log's clock
-    /// gives follow the commit epochs, so a later commit's events never
-    /// carry an earlier timestamp.
-    pub(crate) fn record_commit(&self, set: &grafeo_common::change::ChangeSet, epoch: EpochId) {
-        if set.is_empty() {
-            return;
+    /// Records the event of the N-Triples `terms` (subject, predicate,
+    /// object) in the graph with storage key `graph` (`None` for the default
+    /// graph), as a commit records it: the terms parsed, then the event
+    /// [`triple_event`] builds, with the normalised terms and their
+    /// [`triple_id`]. Terms that are not one triple (a blank argument
+    /// included, which a shifted line could hide) record nothing and take no
+    /// timestamp: the warning names why, and [`dropped_lines`](Self::dropped_lines)
+    /// counts it.
+    #[cfg(feature = "triple-store")]
+    fn record_parsed_triple(
+        &self,
+        [subject, predicate, object]: [&str; 3],
+        graph: Option<&str>,
+        kind: ChangeKind,
+        epoch: EpochId,
+    ) {
+        let line = format!("{subject} {predicate} {object} .");
+        let refused = |reason: String| {
+            grafeo_common::grafeo_warn!("no change event recorded: `{line}` {reason}");
+            self.drop_line();
+        };
+        if [subject, predicate, object]
+            .iter()
+            .any(|term| term.trim().is_empty())
+        {
+            return refused("has a blank term".to_string());
         }
-        self.record_batch(events_for_commit(set, epoch, &self.clock));
+        let triple = match grafeo_core::graph::rdf::parse_ntriples_text(&line) {
+            Ok(triples) => match triples.as_slice() {
+                [triple] => grafeo_common::storage::log_record::TripleRecord::from(triple),
+                _ => return refused("is not one N-Triples triple".to_string()),
+            },
+            Err(error) => return refused(format!("is no N-Triples triple: {error}")),
+        };
+        self.record(triple_event(graph, &triple, kind, epoch, self.clock.now()));
+    }
+
+    /// A build without the triple store has no reader for the terms, so it
+    /// records nothing, warns and counts the call.
+    #[cfg(not(feature = "triple-store"))]
+    fn record_parsed_triple(
+        &self,
+        terms: [&str; 3],
+        _graph: Option<&str>,
+        _kind: ChangeKind,
+        _epoch: EpochId,
+    ) {
+        grafeo_common::grafeo_warn!(
+            "no change event recorded for `{} {} {}`: reading N-Triples terms needs the triple \
+             store (the `triple-store` feature)",
+            terms[0],
+            terms[1],
+            terms[2]
+        );
+        self.drop_line();
     }
 }
 
-/// The change events of a commit at `epoch` from its change set, one per
-/// write in the order applied (see [`ChangeSet::ops`](grafeo_common::change::ChangeSet::ops):
-/// each data entry, and each row a bulk write kept with its range; a range
-/// without its rows, a bulk import's, has none), each naming its graph,
-/// timestamped by `clock` in that order. A triple's event names its RDF
-/// graph as `triple_graph`, as the RDF bulk writes report theirs. An event
-/// is built from the write's op and before-image: a create carries its
-/// labels or type and endpoints and the values it was created with, a
-/// delete what the entity held, an update the value or the labels before
-/// and after. The transaction's later changes to an entity it created are
-/// then folded into the create (see [`fold_into_creates`]).
-pub(crate) fn events_for_commit(
-    set: &grafeo_common::change::ChangeSet,
+/// The id of `triple` in the graph with storage key `graph` (`None` for the
+/// default graph): the first 8 bytes, little endian, of SHA-256 over
+/// [`canonical_triple_bytes`]. The same in every process and release. A
+/// 64-bit hash: unique in practice, not guaranteed, so a consumer that must
+/// not conflate two triples keys on the terms the event carries.
+#[cfg(feature = "triple-store")]
+pub(crate) fn triple_id(
+    triple: &grafeo_common::storage::log_record::TripleRecord,
+    graph: Option<&str>,
+) -> u64 {
+    use sha2::Digest as _;
+
+    let digest = sha2::Sha256::digest(canonical_triple_bytes(triple, graph));
+    let mut first = [0; 8];
+    first.copy_from_slice(&digest[..8]);
+    u64::from_le_bytes(first)
+}
+
+/// The encoding [`triple_id`] hashes, kept apart from the log's encoding so
+/// a revision of the log moves no id. For the subject, the predicate and the
+/// object in turn: a tag byte (0 an IRI, 1 a blank node, 2 a literal), then,
+/// each as its length (u64, little endian) and its UTF-8 bytes, the IRI, the
+/// blank node's label (without `_:`), or the literal's lexical form,
+/// datatype IRI and language tag (length 0 without one; a plain literal has
+/// the datatype `xsd:string`). Then a tag byte for the graph, 0 for the
+/// default graph and 1 for a named one, followed for a named graph by its
+/// storage key the same way: a named graph with an empty name keeps ids of
+/// its own.
+#[cfg(feature = "triple-store")]
+fn canonical_triple_bytes(
+    triple: &grafeo_common::storage::log_record::TripleRecord,
+    graph: Option<&str>,
+) -> Vec<u8> {
+    use grafeo_common::storage::log_record::TermRecord;
+
+    fn text(out: &mut Vec<u8>, text: &str) {
+        out.extend_from_slice(&(text.len() as u64).to_le_bytes());
+        out.extend_from_slice(text.as_bytes());
+    }
+    let mut out = Vec::new();
+    for term in [&triple.subject, &triple.predicate, &triple.object] {
+        match term {
+            TermRecord::Iri(iri) => {
+                out.push(0);
+                text(&mut out, iri);
+            }
+            TermRecord::Blank(label) => {
+                out.push(1);
+                text(&mut out, label);
+            }
+            TermRecord::Literal {
+                value,
+                datatype,
+                language,
+            } => {
+                out.push(2);
+                text(&mut out, value);
+                text(&mut out, datatype);
+                text(&mut out, language.as_deref().unwrap_or_default());
+            }
+        }
+    }
+    match graph {
+        None => out.push(0),
+        Some(key) => {
+            out.push(1);
+            text(&mut out, key);
+        }
+    }
+    out
+}
+
+/// The timestamps a commit reserved for its writes (see
+/// [`CdcLog::reserve_for`]): `writes` consecutive values from `first`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CommitStamps {
+    /// The first timestamp, write 0's.
+    pub first: HlcTimestamp,
+    /// How many writes the commit has, and so how many timestamps it holds.
+    pub writes: usize,
+}
+
+impl CdcLog {
+    /// The timestamps of a commit that changed `set`, reserved once for all
+    /// its writes: one per write of
+    /// [`ChangeSet::ops`](grafeo_common::change::ChangeSet::ops), a write
+    /// folded into a create included. `None` for a set without writes.
+    /// Called where commits are serialized in epoch order, so a later
+    /// commit's timestamps are larger.
+    pub(crate) fn reserve_for(
+        &self,
+        set: &grafeo_common::change::ChangeSet,
+    ) -> Option<CommitStamps> {
+        let writes = set.ops().count();
+        let count = std::num::NonZeroU64::new(u64::try_from(writes).ok()?)?;
+        Some(CommitStamps {
+            first: self.clock.reserve(count),
+            writes,
+        })
+    }
+
+    /// Records the events of a commit at `epoch` that changed what `set`
+    /// holds, with the timestamps `stamps` (from
+    /// [`reserve_for`](Self::reserve_for)); see [`events_for_ops`].
+    pub(crate) fn record_commit(
+        &self,
+        set: &grafeo_common::change::ChangeSet,
+        epoch: EpochId,
+        stamps: CommitStamps,
+    ) {
+        let ops = set.ops().map(|(slot, op, before)| {
+            let graph = set.graph(slot).and_then(|graph| graph.key.as_deref());
+            (graph, op, before)
+        });
+        self.record_batch(events_for_ops(ops, stamps.writes, epoch, stamps.first));
+    }
+}
+
+/// The change events of a commit at `epoch` whose writes are `ops`, in the
+/// order applied, each with its graph's storage key (`None` for the default
+/// graph): one per write of [`ChangeSet::ops`](grafeo_common::change::ChangeSet::ops)
+/// (each data entry, and each row a bulk write kept with its range; a range
+/// without its rows, a bulk import's, has none). Write `i` (from 0) is
+/// timestamped `first.plus(i)`; `writes` is how many there are (the room the
+/// events take). A triple's event names its RDF graph as
+/// `triple_graph`, as the RDF bulk writes report theirs. An event is built
+/// from the write's op and before-image: a create carries its labels or type
+/// and endpoints and the values it was created with, a delete what the
+/// entity held, an update the value or the labels before and after. The
+/// transaction's later changes to an entity it created are then folded into
+/// the create (see [`fold_into_creates`]); a folded write's timestamp is
+/// used up.
+pub(crate) fn events_for_ops<'a>(
+    ops: impl Iterator<
+        Item = (
+            Option<&'a str>,
+            &'a grafeo_common::change::DataOp,
+            &'a grafeo_common::change::Before,
+        ),
+    >,
+    writes: usize,
     epoch: EpochId,
-    clock: &HlcClock,
+    first: HlcTimestamp,
 ) -> Vec<ChangeEvent> {
     use grafeo_common::change::{Before, DataOp};
 
@@ -1128,10 +1564,11 @@ pub(crate) fn events_for_commit(
     let names = |labels: &grafeo_common::change::Labels| -> Vec<String> {
         labels.iter().map(ToString::to_string).collect()
     };
-    // Sized by the writes, not the entries: a batch is one entry for many
-    // rows.
-    let mut events = Vec::with_capacity(set.ops().count());
-    for (graph, op, before) in set.ops() {
+    let mut events = Vec::with_capacity(writes);
+    let mut timestamp = first;
+    for (graph, op, before) in ops {
+        let stamp = timestamp;
+        timestamp = timestamp.plus(1);
         let (entity_id, kind) = match op {
             DataOp::CreateNode { id, .. } => (EntityId::Node(*id), ChangeKind::Create),
             DataOp::CreateEdge { id, .. } => (EntityId::Edge(*id), ChangeKind::Create),
@@ -1147,24 +1584,22 @@ pub(crate) fn events_for_commit(
             #[cfg(feature = "triple-store")]
             DataOp::InsertTriple { triple } => {
                 events.push(triple_event(
-                    set,
                     graph,
                     triple,
                     ChangeKind::Create,
                     epoch,
-                    clock,
+                    stamp,
                 ));
                 continue;
             }
             #[cfg(feature = "triple-store")]
             DataOp::DeleteTriple { triple } => {
                 events.push(triple_event(
-                    set,
                     graph,
                     triple,
                     ChangeKind::Delete,
                     epoch,
-                    clock,
+                    stamp,
                 ));
                 continue;
             }
@@ -1174,12 +1609,10 @@ pub(crate) fn events_for_commit(
         };
         let mut event = ChangeEvent {
             entity_id,
-            graph: set
-                .graph(graph)
-                .and_then(|graph| graph.key.as_ref().map(ToString::to_string)),
+            graph: graph.map(ToString::to_string),
             kind,
             epoch,
-            timestamp: clock.now(),
+            timestamp: stamp,
             before: None,
             after: None,
             labels: None,
@@ -1270,28 +1703,26 @@ pub(crate) fn events_for_commit(
     fold_into_creates(events)
 }
 
-/// The event of a triple entry of graph `graph` (`kind` says whether it was
-/// inserted or deleted), as [`CdcLog::record_triple_insert`] and
-/// [`CdcLog::record_triple_delete`] build it: the terms as N-Triples strings.
+/// The event of a triple entry of the graph with storage key `graph`
+/// (`kind` says whether it was inserted or deleted), as
+/// [`CdcLog::record_triple_insert`] and [`CdcLog::record_triple_delete`]
+/// build it: the terms as N-Triples strings.
 #[cfg(feature = "triple-store")]
 fn triple_event(
-    set: &grafeo_common::change::ChangeSet,
-    graph: grafeo_common::change::GraphSlot,
+    graph: Option<&str>,
     triple: &grafeo_common::storage::log_record::TripleRecord,
     kind: ChangeKind,
     epoch: EpochId,
-    clock: &HlcClock,
+    timestamp: HlcTimestamp,
 ) -> ChangeEvent {
     let (subject, predicate, object) = crate::transaction::ntriples_terms(triple);
-    let graph = set
-        .graph(graph)
-        .and_then(|graph| graph.key.as_ref().map(ToString::to_string));
+    let graph = graph.map(ToString::to_string);
     ChangeEvent {
-        entity_id: EntityId::Triple(triple_hash(&subject, &predicate, &object, graph.as_deref())),
+        entity_id: EntityId::Triple(triple_id(triple, graph.as_deref())),
         graph: graph.clone(),
         kind,
         epoch,
-        timestamp: clock.now(),
+        timestamp,
         before: None,
         after: None,
         labels: None,
@@ -1503,6 +1934,7 @@ mod tests {
         let retention = CdcRetentionConfig {
             max_epochs: None,
             max_events: Some(5),
+            max_bytes: None,
         };
         let log = CdcLog::with_retention(retention);
 
@@ -1522,6 +1954,7 @@ mod tests {
         let retention = CdcRetentionConfig {
             max_epochs: Some(3),
             max_events: None,
+            max_bytes: None,
         };
         let log = CdcLog::with_retention(retention);
 
@@ -1608,6 +2041,7 @@ mod tests {
         let retention = CdcRetentionConfig {
             max_epochs: None,
             max_events: Some(4),
+            max_bytes: None,
         };
         let log = CdcLog::with_retention(retention);
 
@@ -1632,6 +2066,7 @@ mod tests {
         let retention = CdcRetentionConfig {
             max_epochs: Some(5),
             max_events: Some(3),
+            max_bytes: None,
         };
         let log = CdcLog::with_retention(retention);
 
@@ -1677,6 +2112,7 @@ mod tests {
         let retention = CdcRetentionConfig {
             max_epochs: None,
             max_events: Some(3),
+            max_bytes: None,
         };
         let log = CdcLog::with_retention(retention);
 
@@ -1701,18 +2137,38 @@ mod tests {
         );
     }
 
+    /// An eviction of fewer bytes than one commit holds drops that one
+    /// commit: it pops until what it asked for is freed.
     #[test]
-    fn test_evict_tiny_target_is_noop() {
+    fn a_tiny_eviction_drops_one_commit() {
         let log = CdcLog::new();
         for epoch in 1..=10 {
             log.record_create_node(NodeId::new(epoch), EpochId(epoch), None, None);
         }
         assert_eq!(log.event_count(), 10);
 
-        // target_bytes < 256 means events_to_remove rounds to 0, so nothing freed
         let freed = log.evict(100);
-        assert_eq!(freed, 0, "evict with target < 256 bytes should be a no-op");
-        assert_eq!(log.event_count(), 10);
+        assert!(freed >= 100, "{freed}");
+        assert_eq!(log.event_count(), 9);
+        assert_eq!(log.account_mismatches(), Vec::new());
+    }
+
+    /// An eviction drops the oldest commits until it freed what it was asked
+    /// for, counted, not an estimate of 256 bytes an event: asked for one
+    /// commit's bytes of 64 KiB commits, it drops one or two, not the log.
+    #[test]
+    fn an_eviction_frees_what_it_was_asked() {
+        let log = CdcLog::new();
+        for epoch in 1..=40 {
+            record_named(&log, epoch, epoch, 64 * 1024);
+        }
+        let before = log.counted_memory_bytes().0;
+        let freed = log.evict(64 * 1024);
+        let (counted, _, events) = log.counted_memory_bytes();
+        assert!(freed >= 64 * 1024, "{freed}");
+        assert_eq!(freed, before - counted);
+        assert!(events >= 38, "{events} events kept");
+        assert_eq!(log.account_mismatches(), Vec::new());
     }
 
     /// A create of node `id` at `epoch` whose `name` holds `bytes` bytes.
@@ -1758,10 +2214,113 @@ mod tests {
         let (counted, entities, events) = log.counted_memory_bytes();
         assert_eq!((entities, events), (1, 5));
         assert!(
-            counted <= ENTRY_BYTES + 2 * 5 * std::mem::size_of::<ChangeEvent>(),
+            counted < 16 * std::mem::size_of::<ChangeEvent>(),
             "{counted}"
         );
         assert_eq!(log.account_mismatches(), Vec::new());
+    }
+
+    /// A prune or an eviction that empties the log gives the entities table
+    /// back, so the count that reads nothing holds nothing (the allocator's
+    /// view is `tests/cdc_log_in_the_account.rs`).
+    #[test]
+    fn an_emptied_log_gives_its_table_back() {
+        for evict in [false, true] {
+            let log = CdcLog::new();
+            for id in 1..=10_000 {
+                log.record_create_node(NodeId::new(id), EpochId(id), None, None);
+            }
+            assert_eq!(log.account_mismatches(), Vec::new());
+            if evict {
+                log.evict(usize::MAX);
+            } else {
+                log.prune_before(EpochId(u64::MAX));
+            }
+            assert_eq!(log.event_count(), 0);
+            assert_eq!(
+                log.events.read().entities.capacity(),
+                0,
+                "the table is given back (eviction: {evict})"
+            );
+            assert_eq!(log.counted_memory_bytes().0, 0);
+            assert_eq!(log.account_mismatches(), Vec::new());
+        }
+    }
+
+    /// The table shrinks as a prune empties it, in steps: the prune of one
+    /// commit that leaves it under a quarter of its buckets full cuts it, and
+    /// no other does; the count follows the walk at every step.
+    #[test]
+    fn a_draining_table_shrinks_in_steps() {
+        let log = CdcLog::new();
+        for id in 1..=4_096 {
+            log.record_create_node(NodeId::new(id), EpochId(id), None, None);
+        }
+        let table = |log: &CdcLog| {
+            let held = log.events.read();
+            (held.entities.len(), held.entities.allocation_size())
+        };
+        let full = table(&log).1;
+        let mut cuts = 0;
+        for epoch in 2..=4_096 - 512 {
+            let (_, before) = table(&log);
+            log.prune_before(EpochId(epoch));
+            let (len, after) = table(&log);
+            if len * 4 * ENTRY_SLOT_BYTES < before {
+                assert!(after < before, "epoch {epoch}: {len} entries, not cut");
+                cuts += 1;
+            } else {
+                assert_eq!(after, before, "epoch {epoch}: {len} entries, cut");
+            }
+        }
+        let (len, after) = table(&log);
+        assert_eq!(len, 513);
+        assert_eq!(cuts, 2, "cut at about 2,048 and 1,024 entries");
+        assert!(after < full / 2, "{after} of {full}");
+        assert!(log.events.read().entities.capacity() >= len);
+        assert_eq!(log.account_mismatches(), Vec::new());
+    }
+
+    /// An entity's event with an epoch older than one it already holds (the
+    /// public helpers take any epoch) keeps the count equal to the walk as it
+    /// is listed, pruned and listed twice under one commit; the older event
+    /// goes with the newer one, and the emptied log counts nothing.
+    #[test]
+    fn an_older_epoch_of_a_held_entity_keeps_the_count() {
+        let log = CdcLog::new();
+        let check = |what: &str| assert_eq!(log.account_mismatches(), Vec::new(), "{what}");
+        log.record_create_node(NodeId::new(1), EpochId(5), None, None);
+        log.record_update(
+            EntityId::Node(NodeId::new(1)),
+            EpochId(3),
+            "w",
+            None,
+            Value::Int64(3),
+        );
+        log.record_create_node(NodeId::new(2), EpochId(3), None, None);
+        check("an older epoch listed");
+        // A third event of node 1 at epoch 5, after the older one: node 1 is
+        // listed twice under commit 5.
+        log.record_update(
+            EntityId::Node(NodeId::new(1)),
+            EpochId(5),
+            "w",
+            None,
+            Value::Int64(5),
+        );
+        check("listed twice under one commit");
+        log.prune_before(EpochId(4));
+        assert_eq!(log.history(EntityId::Node(NodeId::new(2))).len(), 0);
+        assert_eq!(
+            log.history(EntityId::Node(NodeId::new(1))).len(),
+            3,
+            "the older event stays with the newer one"
+        );
+        check("commit 3 pruned");
+        log.prune_before(EpochId(6));
+        assert_eq!(log.event_count(), 0);
+        check("commit 5 pruned");
+        assert_eq!(log.counted_memory_bytes().0, 0);
     }
 
     /// An eviction gives back what it pruned from the grant at once (no slack
@@ -1782,16 +2341,16 @@ mod tests {
             "{counted}"
         );
 
-        // The eviction removes an event per 256 bytes asked for: the 30
-        // oldest go, the 10 newest (about 640 KiB) stay.
-        let freed = log.evict(30 * 256);
+        // The eviction drops commits until it freed what it asked for: 30
+        // commits of a little over 64 KiB each, so the 30 oldest go and the
+        // 10 newest (about 640 KiB) stay.
+        let freed = log.evict(30 * 64 * 1024);
         let (counted, _, events) = log.counted_memory_bytes();
         assert_eq!(events, 10);
         assert_eq!(freed, granted - log.granted_bytes());
         assert!(freed > 0);
         assert!(
-            log.granted_bytes() >= counted
-                && log.granted_bytes() <= step_above(counted, manager.grant_step()),
+            log.granted_bytes() >= counted && log.granted_bytes() <= manager.grant_size(counted),
             "granted {} for {counted}",
             log.granted_bytes()
         );
@@ -1847,5 +2406,41 @@ mod tests {
             populated_bytes > empty_bytes,
             "heap estimate must grow when events are recorded"
         );
+    }
+}
+
+#[cfg(all(test, feature = "triple-store"))]
+#[path = "cdc_triple_id_tests.rs"]
+mod triple_id_tests;
+
+/// A build without the triple store reads no N-Triples: the helpers record nothing.
+#[cfg(all(test, not(feature = "triple-store")))]
+mod without_the_triple_store {
+    use super::*;
+
+    #[test]
+    fn the_triple_helpers_record_nothing() {
+        let log = CdcLog::new();
+        let () = log.record_triple_insert("<a>", "<b>", "<c>", None, EpochId(1));
+        let () = log.record_triple_delete("<a>", "<b>", "<c>", None, EpochId(1));
+        assert_eq!(log.event_count(), 0);
+        assert_eq!(log.dropped_lines(), 2, "the count is the signal");
+    }
+}
+
+/// A refused line is counted in every build: without `tracing` the warning compiles to nothing,
+/// so the count is what a caller sees.
+#[cfg(test)]
+mod refused_lines {
+    use super::*;
+
+    #[test]
+    fn refused_triple_lines_are_counted() {
+        eprintln!("tracing on: {}", cfg!(feature = "tracing"));
+        let log = CdcLog::new();
+        log.record_triple_insert("<a>", "<b>", "\"unterminated", None, EpochId(1));
+        log.record_triple_delete("", "<b>", "<c>", None, EpochId(1));
+        assert_eq!(log.event_count(), 0);
+        assert_eq!(log.dropped_lines(), 2);
     }
 }

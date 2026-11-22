@@ -1548,6 +1548,24 @@ mod tests {
             restored.accumulators[0].finalize().unwrap(),
             Value::List(vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)].into())
         );
+
+        // A `collect` that keeps nulls comes back as one, its null items kept,
+        // and keeps the nulls it reads after the restore.
+        let mut collect = AggregateState::CollectKeepingNulls(Vec::new());
+        collect.update(Some(Value::Int64(1)));
+        collect.update(Some(Value::Null));
+        let state = GroupState {
+            key_values: vec![Value::Int64(1)],
+            accumulators: vec![collect],
+        };
+        let mut buf = Vec::new();
+        serialize_group_state(&state, &mut buf).unwrap();
+        let mut restored = deserialize_group_state(&mut &buf[..]).unwrap();
+        restored.accumulators[0].update(Some(Value::Null));
+        assert_eq!(
+            restored.accumulators[0].finalize().unwrap(),
+            Value::List(vec![Value::Int64(1), Value::Null, Value::Null].into())
+        );
     }
 
     #[test]

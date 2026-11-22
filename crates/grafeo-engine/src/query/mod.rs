@@ -24,6 +24,15 @@ pub mod processor;
 pub mod profile;
 pub mod translators;
 
+#[cfg(all(
+    test,
+    feature = "gql",
+    feature = "cypher",
+    feature = "sparql",
+    feature = "triple-store"
+))]
+mod path_search_class_tests;
+
 // Core exports
 pub use cache::{CacheKey, CacheStats, CachingQueryProcessor, QueryCache};
 pub use executor::Executor;

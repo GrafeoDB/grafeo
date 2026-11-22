@@ -646,8 +646,9 @@ fn a_kept_plan_reads_the_column_again() {
     session.execute("MATCH (n:L {row: 0}) SET n.k = 2").unwrap();
     assert_eq!(session.execute(literal).unwrap().row_count(), 5);
     assert_eq!(rows_of(&session, parameter, &Value::Int64(2)).len(), 1);
+    let stats = db.query_cache().stats();
     assert!(
-        db.query_cache().stats().optimized_hits > 0,
+        stats.optimized_hits + stats.session_hits > 0,
         "the plan was kept, so this tests a kept plan"
     );
 }

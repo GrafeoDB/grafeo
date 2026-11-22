@@ -103,17 +103,26 @@ binaries() {
 
 # A package just published can take a moment to show up.
 published() {
-  local version=$1 names listed="" attempt
+  local version=$1 names listed="" waited=0 delay=10
   names=$(expected_names)
-  for attempt in 1 2 3 4 5 6; do
-    if listed=$(npm view "@grafeo-db/js@$version" optionalDependencies --json 2>/dev/null) &&
-      [ -n "$listed" ]; then
+  # npm takes minutes to serve a new version; its version document answers 404 until then.
+  while :; do
+    if listed=$(curl -fsS "https://registry.npmjs.org/@grafeo-db/js/$version" 2>/dev/null |
+      node -e '
+        const doc = JSON.parse(require("fs").readFileSync(0, "utf8"));
+        const listed = doc.optionalDependencies || {};
+        if (Object.keys(listed).length === 0) process.exit(1);
+        process.stdout.write(JSON.stringify(listed));
+      ' 2>/dev/null) && [ -n "$listed" ]; then
       break
     fi
     listed=""
-    [ "$attempt" -eq 6 ] || sleep 20
+    [ "$waited" -lt 600 ] || break
+    sleep "$delay"
+    waited=$((waited + delay))
+    delay=$((delay * 2 < 60 ? delay * 2 : 60))
   done
-  [ -n "$listed" ] || fail "@grafeo-db/js@$version lists no optional dependencies on npm"
+  [ -n "$listed" ] || fail "@grafeo-db/js@$version lists no optional dependencies on npm after ${waited}s"
   printf '%s' "$listed" | assert_lists_all "$version" "$names"
 }
 

@@ -40,6 +40,9 @@ pub struct Catalog {
     /// The configuration the database file stores (#551), when it stores
     /// one: the catalog section writes it and an open reads it.
     stored_config: RwLock<Option<grafeo_common::storage::catalog_record::StoredConfigRecord>>,
+    /// The change data capture setting the database file stores (#679), when
+    /// it stores one: written and read as the stored configuration is.
+    cdc_config: RwLock<Option<grafeo_common::storage::catalog_record::CdcConfigRecord>>,
     /// Moves with every change of the rules writes must meet, as a catalog op applies
     /// (`standalone::apply`): a commit compares it with its transaction's start, and checks
     /// its writes only when it moved.
@@ -69,6 +72,7 @@ impl Catalog {
             indexes: IndexCatalog::new(),
             schema: Some(SchemaCatalog::new()),
             stored_config: RwLock::new(None),
+            cdc_config: RwLock::new(None),
             rules_generation: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -88,6 +92,25 @@ impl Catalog {
         config: Option<grafeo_common::storage::catalog_record::StoredConfigRecord>,
     ) -> Option<grafeo_common::storage::catalog_record::StoredConfigRecord> {
         std::mem::replace(&mut *self.stored_config.write(), config)
+    }
+
+    /// The change data capture setting the database stores, when it stores
+    /// one.
+    #[must_use]
+    pub(crate) fn cdc_config(
+        &self,
+    ) -> Option<grafeo_common::storage::catalog_record::CdcConfigRecord> {
+        *self.cdc_config.read()
+    }
+
+    /// Sets (or with `None` clears) the change data capture setting the
+    /// database stores, written at the next checkpoint; returns the one it
+    /// replaced.
+    pub(crate) fn set_cdc_config(
+        &self,
+        config: Option<grafeo_common::storage::catalog_record::CdcConfigRecord>,
+    ) -> Option<grafeo_common::storage::catalog_record::CdcConfigRecord> {
+        std::mem::replace(&mut *self.cdc_config.write(), config)
     }
 
     /// Creates a new catalog with schema constraints enabled.

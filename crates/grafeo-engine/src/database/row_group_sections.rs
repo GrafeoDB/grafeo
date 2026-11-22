@@ -216,6 +216,11 @@ pub(super) fn continue_row_group_epochs(
         graph.sync_epoch(epoch);
     }
     transaction_manager.sync_epoch(epoch);
+    // What the load restored and the replay kept, counted before the collect below, so a limit
+    // smaller than the history the file holds drops its oldest part at the open.
+    if transaction_manager.history_counts_bytes() {
+        transaction_manager.count_kept_history(root.kept_superseded());
+    }
     root.gc_versions(transaction_manager.collect_horizon());
     transaction_manager.anchor_history();
 }

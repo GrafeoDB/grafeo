@@ -3,6 +3,7 @@
     "allocated per edge": 95.6,
     "allocated per node": 0.4,
     "allocated per property value": 10.7,
+    "allocated per triple": 605.2,
     "backward adjacency": 43.4,
     "edge records": 21.8,
     "edge version chains": 0.1,
@@ -14,7 +15,10 @@
     "node version chains": 0.1,
     "reported per edge": 95.6,
     "reported per node": 0.3,
-    "reported per property value": 10.7
+    "reported per property value": 10.7,
+    "reported per triple": 604.0,
+    "term dictionary": 45.7,
+    "triples and indexes": 558.3
   },
   "workload": {
     "edges": 300000,

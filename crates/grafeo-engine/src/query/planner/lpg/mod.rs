@@ -191,9 +191,9 @@ impl ColumnKinds {
 pub(super) enum StoreKind {
     /// The built-in store, with its vector and text indexes.
     BuiltIn,
-    /// A store of its own (`with_store`), which has none of the built-in
-    /// store's indexes: a text search is then the unsupported error rather
-    /// than a missing index.
+    /// A store of its own (`with_read_store` or `with_store`), which keeps
+    /// only the indexes it reports: a text search without one is then the
+    /// unsupported error, with no CREATE INDEX hint.
     External,
 }
 
@@ -330,6 +330,9 @@ pub struct Planner {
     /// one input row, or a shortest-path search for one (see
     /// [`Self::with_path_search_budget`]).
     path_search_budget: usize,
+    /// The path expansions the statement's path searches may still make,
+    /// shared by all of them (see [`Self::with_path_expansion_limit`]).
+    path_expansions: Arc<grafeo_core::execution::operators::PathExpansions>,
     /// The session's part of the planning of the statement being planned,
     /// so the body of a stored procedure it calls is planned as the same
     /// statement run directly (see `plan_user_procedure`); `None` for a
@@ -387,6 +390,7 @@ impl Planner {
             limit_hint: std::cell::Cell::new(None),
             reachability_expands: std::cell::RefCell::new(Some(Vec::new())),
             path_search_budget: grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,
+            path_expansions: Arc::default(),
             #[cfg(stored_procedures)]
             session_planning: None,
         }
@@ -456,6 +460,7 @@ impl Planner {
             limit_hint: std::cell::Cell::new(None),
             reachability_expands: std::cell::RefCell::new(Some(Vec::new())),
             path_search_budget: grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,
+            path_expansions: Arc::default(),
             #[cfg(stored_procedures)]
             session_planning: None,
         }
@@ -479,6 +484,40 @@ impl Planner {
     pub fn with_path_search_budget(mut self, bytes: usize) -> Self {
         self.path_search_budget = bytes;
         self
+    }
+
+    /// Sets the path expansions the statement's variable-length and
+    /// shortest-path searches may make together: each edge they read to
+    /// extend a path, and each node and edge id they copy out of a path into
+    /// a row. A search past it fails with `GRAFEO-Q009`. The default is
+    /// [`DEFAULT_PATH_EXPANSION_LIMIT`](grafeo_core::execution::operators::DEFAULT_PATH_EXPANSION_LIMIT).
+    #[must_use]
+    pub fn with_path_expansion_limit(mut self, expansions: u64) -> Self {
+        let limited = grafeo_core::execution::operators::PathExpansions::new(expansions);
+        // The planner's own count, not shared yet while it is built: set in place
+        match Arc::get_mut(&mut self.path_expansions) {
+            Some(count) => *count = limited,
+            None => self.path_expansions = Arc::new(limited),
+        }
+        self
+    }
+
+    /// Takes the expansions from `expansions` instead of a count of its own,
+    /// so the path searches of a stored procedure's body count for the
+    /// statement that calls it.
+    #[must_use]
+    pub fn with_path_expansions(
+        mut self,
+        expansions: Arc<grafeo_core::execution::operators::PathExpansions>,
+    ) -> Self {
+        self.path_expansions = expansions;
+        self
+    }
+
+    /// The path expansions the statement's path searches may still make.
+    #[must_use]
+    pub fn path_expansions(&self) -> Arc<grafeo_core::execution::operators::PathExpansions> {
+        Arc::clone(&self.path_expansions)
     }
 
     /// Returns the writable store, or `TransactionError::ReadOnly` if unavailable.
@@ -1218,7 +1257,11 @@ impl Planner {
                 input_column_count,
                 self.read_view(),
             )
-            .with_aggregate_options(ha.distinct, ha.percentile, ha.separator.clone())
+            .with_aggregate_options(
+                ha.distinct,
+                self.constant_percentile(ha.function, ha.percentile.as_ref())?,
+                ha.separator.clone(),
+            )
             .with_temporal(self.session_context.temporal_comparison),
         );
 
@@ -2321,6 +2364,7 @@ mod tests {
                     alias: Some("cnt".to_string()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 }],
                 input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "n".to_string(),
@@ -2354,6 +2398,7 @@ mod tests {
                 alias: Some("cnt".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "n".to_string(),
@@ -2386,6 +2431,7 @@ mod tests {
                 alias: Some("total".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "n".to_string(),
@@ -2418,6 +2464,7 @@ mod tests {
                 alias: Some("average".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "n".to_string(),
@@ -2451,6 +2498,7 @@ mod tests {
                     alias: Some("youngest".to_string()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 },
                 LogicalAggregateExpr {
                     function: LogicalAggregateFunction::Max,
@@ -2463,6 +2511,7 @@ mod tests {
                     alias: Some("oldest".to_string()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 },
             ],
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
@@ -3608,6 +3657,7 @@ mod tests {
             edge_variable: Some("r".to_string()),
             quantified: true,
             edge_condition: None,
+            steps: Vec::new(),
         }));
         let physical = planner.plan(&logical).unwrap();
         // The length, the edge variable, then the path's nodes, edges and
@@ -3640,6 +3690,7 @@ mod tests {
             edge_variable: None,
             quantified: true,
             edge_condition: None,
+            steps: Vec::new(),
         }));
         let err = planner.plan(&logical).err().expect("plan should fail");
         assert!(format!("{err}").contains("Source variable"));

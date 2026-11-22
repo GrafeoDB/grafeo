@@ -22,13 +22,16 @@ import 'transaction.dart';
 import 'types.dart';
 import 'value.dart';
 
-/// The memory and spill settings a database opens with, for
+/// The memory, spill and query limit settings a database opens with, for
 /// [GrafeoDB.openWithOptions]. A null setting is the default: 75% of the
 /// memory the process may use for [memoryLimit], [memoryLimit] for
 /// [queryMemoryLimit], a quarter of [memoryLimit] (at most 256 MiB) for
-/// [pathSearchBudget], half the spill volume's free space for [spillLimit]. A
-/// write past the memory limit throws `GRAFEO-S001`, and so does a path search
-/// over its budget. One object may open several databases.
+/// [pathSearchBudget], 100 million for [pathExpansionLimit], 16 MiB for
+/// [maxQueryLength], 16 KiB for [maxIdentifierLength], a quarter of
+/// [memoryLimit] (at least 1 MiB) for [snapshotRetentionLimit], half the spill
+/// volume's free space for [spillLimit]. A write past the memory limit throws
+/// `GRAFEO-S001`, and so does a path search over its budget. One object may
+/// open several databases.
 class GrafeoOptions {
   /// How many bytes the database may hold; zero fails at the open.
   final int? memoryLimit;
@@ -37,11 +40,48 @@ class GrafeoOptions {
   /// never more than [memoryLimit]; zero fails at the open.
   final int? queryMemoryLimit;
 
-  /// How many bytes one path search may hold: the paths a variable-length or
-  /// shortest-path search keeps at once, or what an RDF property path search
-  /// visits (the nodes an ANY SHORTEST or shortestPath search visits are not
-  /// counted yet). Never more than [memoryLimit]; zero fails at the open.
+  /// How many bytes the in-memory change log may hold: past it the oldest
+  /// commits go. A sixteenth of [memoryLimit] by default, never more than it;
+  /// zero fails at the open.
+  final int? cdcMemoryLimit;
+
+  /// How many bytes one path search may hold: everything a variable-length,
+  /// shortest-path or RDF property path search holds at once (the nodes it
+  /// visits, its queues and the paths it keeps), which counts against
+  /// [queryMemoryLimit] too. Never more than [memoryLimit]; zero fails at the
+  /// open.
   final int? pathSearchBudget;
+
+  /// How many path expansions one statement's variable-length and
+  /// shortest-path searches may make together: each edge they read to extend
+  /// a path, and each node and edge they copy out of a path into a row. 100
+  /// million by default; a statement over it throws `GRAFEO-Q009`. Zero fails
+  /// at the open.
+  final int? pathExpansionLimit;
+
+  /// How many bytes a statement's text may have; the values passed as
+  /// parameters do not count. 16 MiB by default; a longer statement throws
+  /// `GRAFEO-Q002`. Zero fails at the open.
+  final int? maxQueryLength;
+
+  /// How many bytes one name in a statement may have, as written between its
+  /// delimiters (string literals and IRIs are not names). 16 KiB by default; a
+  /// statement with a longer name throws `GRAFEO-Q002`. Zero fails at the
+  /// open.
+  final int? maxIdentifierLength;
+
+  /// How many bytes of replaced data an open transaction's snapshot may keep:
+  /// what the commits since it began replaced that it can still read. Past it
+  /// the transaction's next call throws the retryable `GRAFEO-T012` and rolls
+  /// it back. Below 1 MiB fails at the open.
+  final int? snapshotRetentionLimit;
+
+  /// How many bytes of replaced data the history window may keep: once the
+  /// commits since its start replaced more, the start moves forward, whichever
+  /// of time or bytes comes first, and a read before it is refused. No limit
+  /// by default; zero fails at the open. Not stored with the database: pass it
+  /// at every open.
+  final int? historyRetentionLimit;
 
   /// How many bytes may spill to disk; zero means nothing spills.
   final int? spillLimit;
@@ -50,12 +90,26 @@ class GrafeoOptions {
   /// spills nothing whatever the settings.
   final bool unlimitedSpill;
 
+  /// How many bytes of plans the database keeps for repeated statements, by a
+  /// deep estimate of what each plan holds; zero keeps none, so every
+  /// statement plans. By default a sixty-fourth of [memoryLimit], from 4 MiB
+  /// to 64 MiB; never more than [memoryLimit]. The report's
+  /// `caches.plan_cache_limit_bytes` reads it back.
+  final int? planCacheLimit;
+
   const GrafeoOptions({
     this.memoryLimit,
     this.queryMemoryLimit,
+    this.cdcMemoryLimit,
     this.pathSearchBudget,
+    this.pathExpansionLimit,
+    this.maxQueryLength,
+    this.maxIdentifierLength,
+    this.snapshotRetentionLimit,
+    this.historyRetentionLimit,
     this.spillLimit,
     this.unlimitedSpill = false,
+    this.planCacheLimit,
   });
 
   /// Sets these settings on the native options object [native].
@@ -79,12 +133,67 @@ class GrafeoOptions {
       }
       check(bindings.grafeoOptionsSetQueryMemoryLimit(native, query));
     }
+    final cdc = cdcMemoryLimit;
+    if (cdc != null) {
+      if (cdc < 0) {
+        throw ArgumentError.value(cdc, 'cdcMemoryLimit', 'must not be negative');
+      }
+      check(bindings.grafeoOptionsSetCdcMemoryLimit(native, cdc));
+    }
     final paths = pathSearchBudget;
     if (paths != null) {
       if (paths < 0) {
         throw ArgumentError.value(paths, 'pathSearchBudget', 'must not be negative');
       }
       check(bindings.grafeoOptionsSetPathSearchBudget(native, paths));
+    }
+    final expansions = pathExpansionLimit;
+    if (expansions != null) {
+      if (expansions < 0) {
+        throw ArgumentError.value(
+            expansions, 'pathExpansionLimit', 'must not be negative');
+      }
+      check(bindings.grafeoOptionsSetPathExpansionLimit(native, expansions));
+    }
+    final queryLength = maxQueryLength;
+    if (queryLength != null) {
+      if (queryLength < 0) {
+        throw ArgumentError.value(
+            queryLength, 'maxQueryLength', 'must not be negative');
+      }
+      check(bindings.grafeoOptionsSetMaxQueryLength(native, queryLength));
+    }
+    final identifierLength = maxIdentifierLength;
+    if (identifierLength != null) {
+      if (identifierLength < 0) {
+        throw ArgumentError.value(
+            identifierLength, 'maxIdentifierLength', 'must not be negative');
+      }
+      check(bindings.grafeoOptionsSetMaxIdentifierLength(
+          native, identifierLength));
+    }
+    final snapshots = snapshotRetentionLimit;
+    if (snapshots != null) {
+      if (snapshots < 0) {
+        throw ArgumentError.value(
+            snapshots, 'snapshotRetentionLimit', 'must not be negative');
+      }
+      check(bindings.grafeoOptionsSetSnapshotRetentionLimit(native, snapshots));
+    }
+    final history = historyRetentionLimit;
+    if (history != null) {
+      if (history < 0) {
+        throw ArgumentError.value(
+            history, 'historyRetentionLimit', 'must not be negative');
+      }
+      check(bindings.grafeoOptionsSetHistoryRetentionLimit(native, history));
+    }
+    final plans = planCacheLimit;
+    if (plans != null) {
+      if (plans < 0) {
+        throw ArgumentError.value(plans, 'planCacheLimit', 'must not be negative');
+      }
+      check(bindings.grafeoOptionsSetPlanCacheLimit(native, plans));
     }
     final spill = spillLimit;
     if (unlimitedSpill) {
@@ -233,7 +342,8 @@ class GrafeoDB implements Finalizable {
 
   /// Close the database, flushing all writes.
   ///
-  /// Safe to call multiple times. After close, all other methods throw.
+  /// Safe to call multiple times. After close, every other method, and every
+  /// method of what the database handed out, throws GRAFEO-T007.
   void close() {
     if (_closed) return;
     _closed = true;
@@ -261,9 +371,15 @@ class GrafeoDB implements Finalizable {
     return ptr.toDartString();
   }
 
+  /// Every call after [close] throws the GRAFEO-T007 error, as the native
+  /// layer reports a closed database to what the database handed out.
   void _checkOpen() {
     if (_closed) {
-      throw DatabaseException('Database is closed', GrafeoStatus.database);
+      throw const DatabaseException(
+        'GRAFEO-T007: the database is closed: open it again',
+        GrafeoStatus.database,
+        gqlStatus: '25000',
+      );
     }
   }
 
@@ -1004,10 +1120,14 @@ class GrafeoDB implements Finalizable {
     return _bindings.grafeoIsCdcEnabled(_handle);
   }
 
-  /// Turn change data capture on or off.
+  /// Turn change data capture on or off, and store the setting with the
+  /// database: a reopen has it as it was (an in-memory database keeps it while
+  /// it is open). Throws when the setting cannot be stored (a read-only open,
+  /// a failed checkpoint); it stays as it was.
   set cdcEnabled(bool enabled) {
     _checkOpen();
-    _bindings.grafeoSetCdcEnabled(_handle, enabled);
+    final status = _bindings.grafeoSetCdc(_handle, enabled);
+    if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
   }
 
   /// Every recorded change of node [id], oldest first.

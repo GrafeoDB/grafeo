@@ -159,11 +159,23 @@ fn every_deprecation_has_a_row_on_the_deprecations_page() {
     }
 }
 
-/// Each live warning has a trigger in [`TRIGGERS`], which raises it and nothing else, once.
+/// The warnings a statement raises only in a state a [`TRIGGERS`] row cannot set up, each with
+/// the test that raises it there.
+const RAISED_ELSEWHERE: &[(&str, &str)] = &[(
+    // A held snapshot, a snapshot retention limit and commits past it.
+    "01Y02",
+    "session::tests::gql_tests::a_held_snapshot_past_the_limit_is_noticed_once_on_the_crossing_statement",
+)];
+
+/// Each live warning has a trigger in [`TRIGGERS`], which raises it and nothing else, once, or
+/// a test of its own ([`RAISED_ELSEWHERE`]).
 #[test]
 fn every_warning_has_a_trigger_that_raises_it_once() {
     for warning in live() {
         let code = warning.spec().code.as_str().to_string();
+        if RAISED_ELSEWHERE.iter().any(|(c, _)| *c == code) {
+            continue;
+        }
         let (_, language, setup, query) = TRIGGERS
             .iter()
             .find(|(c, _, _, _)| *c == code)
@@ -180,7 +192,7 @@ fn every_warning_has_a_trigger_that_raises_it_once() {
         );
     }
     assert_eq!(
-        TRIGGERS.len(),
+        TRIGGERS.len() + RAISED_ELSEWHERE.len(),
         live().len(),
         "a trigger for a warning that is not live"
     );

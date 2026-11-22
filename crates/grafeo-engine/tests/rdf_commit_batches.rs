@@ -178,7 +178,7 @@ fn a_large_transaction_leaves_the_store_single_inserts_leave() {
                 .collect()
         };
         assert_eq!(db.rdf_store().len(), new + 100);
-        assert_eq!(names(db.rdf_store()), names(&single), "{new}");
+        assert_eq!(names(&db.rdf_store()), names(&single), "{new}");
         for subject in ["s0", "s500", "s996", "h7"] {
             let subject = Term::iri(format!("http://ex.org/{subject}"));
             assert_eq!(

@@ -86,8 +86,13 @@ func openWithHistory(cPath *C.char, history HistoryRetention) (*Database, error)
 }
 
 // CurrentEpoch returns the epoch of the last commit.
+// After Close it answers 0, as it has no error to return: check a closed
+// database with a call that returns one, such as Info() (GRAFEO-T007).
 func (db *Database) CurrentEpoch() uint64 {
 	defer runtime.KeepAlive(db)
+	if db.checkOpen() != nil {
+		return 0
+	}
 	return uint64(C.grafeo_current_epoch(db.handle))
 }
 
@@ -95,6 +100,10 @@ func (db *Database) CurrentEpoch() uint64 {
 // point before the history the database keeps.
 func (db *Database) EpochAsOf(point TimePoint) (uint64, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 uint64
+		return zero0, err
+	}
 	var epoch C.uint64_t
 	err := lockAndCheckStatus(func() C.GrafeoStatus {
 		return C.grafeo_epoch_as_of(db.handle, point.kind, point.value, &epoch)
@@ -106,6 +115,10 @@ func (db *Database) EpochAsOf(point TimePoint) (uint64, error) {
 // point; a query that writes fails.
 func (db *Database) ExecuteAsOf(query string, point TimePoint, params map[string]any) (*QueryResult, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 *QueryResult
+		return zero0, err
+	}
 	cQuery := C.CString(query)
 	defer C.free(unsafe.Pointer(cQuery))
 	cParams, err := optionalJSON(params)
@@ -130,6 +143,10 @@ type AsOfView struct {
 // before the history the database keeps.
 func (db *Database) AsOf(point TimePoint) (*AsOfView, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 *AsOfView
+		return zero0, err
+	}
 	runtime.LockOSThread()
 	handle := C.grafeo_as_of(db.handle, point.kind, point.value)
 	if handle == nil {
@@ -143,7 +160,9 @@ func (db *Database) AsOf(point TimePoint) (*AsOfView, error) {
 	return v, nil
 }
 
-// Epoch returns the epoch the view reads at.
+// Epoch returns the epoch the view reads at, the one it had at its open, also
+// after the database's Close, as it has no error to return; Execute returns the
+// GRAFEO-T007 error then.
 func (v *AsOfView) Epoch() uint64 {
 	return v.epoch
 }

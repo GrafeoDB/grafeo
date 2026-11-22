@@ -4,7 +4,7 @@
 //! | --- | --- | --- |
 //! | explicit [`Config::spill_path`](crate::config::Config::spill_path) | the spill path | `<spill_path>/grafeo-<name>-<pid>-<random>/` |
 //! | read-write file database | `<file>.spill` | `<file>.spill/cache/` |
-//! | read-only file database | `<temp>/grafeo-<name>-<pid>-<random>.spill` | the same directory |
+//! | read-only file database | `<temp>/grafeo-<name>-<pid>-<random>.spill`, with its `owner.lock` | the same directory |
 //! | in-memory without a spill path, encrypted | none | none |
 //!
 //! Several databases may share an explicit spill path, so each open's vector
@@ -17,13 +17,21 @@
 //! exclusively (with a random name, and readable only by its user on Unix),
 //! so another user of a shared temp directory cannot have made it first;
 //! when it cannot be created (a read-only or missing temp directory), the
-//! open warns and spills nothing. The other directories are created only
+//! open warns and spills nothing. It holds an exclusive lock on the
+//! directory's `owner.lock` while the directory lives, and the operating
+//! system drops the lock when the process dies. So once per process, the
+//! first read-only open, once it holds its own directory and before the spill
+//! account measures the free space, removes the directories of dead owners in
+//! the temp directory: those of its own user whose lock it can take (#450).
+//! Directories without an `owner.lock` (of 0.6.3 and earlier, or on a file
+//! system without file locks) stay, with one warning. The other directories are created only
 //! when something spills. Each is removed
 //! (when empty) once the last spilled column reading from it is gone.
 //! `<file>.spill/kept/` is not spilled data: it holds the old spill files of
 //! an older build that an open kept instead of folding them in completely
 //! (see `legacy_spill`), and nothing here reads or removes it.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(all(feature = "vector-index", feature = "wal"))]
@@ -34,6 +42,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// gives up: each is random, so a clash means someone made them on purpose.
 const NAME_ATTEMPTS: usize = 16;
 
+/// The file in a read-only open's temp directory whose exclusive lock the
+/// open holds while the directory lives: a directory whose lock a sweep can
+/// take belongs to a process that is gone (#450).
+const OWNER_LOCK: &str = "owner.lock";
+
 /// A directory an open spills into, removed when the last user lets go of
 /// it (only when it is empty: what is still in it was not ours to delete).
 pub(crate) struct SpillDirectory {
@@ -41,6 +54,9 @@ pub(crate) struct SpillDirectory {
     /// Also remove the parent when that leaves it empty: `<file>.spill`
     /// around `cache/`.
     remove_empty_parent: bool,
+    /// The locked `owner.lock` of a read-only open's temp directory, held for
+    /// the directory's whole life (#450).
+    owner: Option<File>,
     /// Set by `close()`: nothing more is written here (see the module docs).
     #[cfg(all(feature = "vector-index", feature = "wal"))]
     closed: AtomicBool,
@@ -51,9 +67,18 @@ impl SpillDirectory {
         Self {
             path,
             remove_empty_parent,
+            owner: None,
             #[cfg(all(feature = "vector-index", feature = "wal"))]
             closed: AtomicBool::new(false),
         }
+    }
+
+    /// A read-only open's temp directory at `path`, whose `owner.lock` it
+    /// holds locked in `owner`.
+    fn owned(path: PathBuf, owner: File) -> Self {
+        let mut directory = Self::new(path, false);
+        directory.owner = Some(owner);
+        directory
     }
 
     /// A directory at `path` that no other directory removes (tests).
@@ -99,6 +124,15 @@ impl SpillDirectory {
 
 impl Drop for SpillDirectory {
     fn drop(&mut self) {
+        // The lock is released at the end of this block, before the directory goes.
+        if let Some(_locked) = self.owner.take() {
+            // An emptied directory loses its lock file while still locked, so
+            // no sweep finds it unlocked. One with something left keeps it,
+            // unlocked: the next sweep removes it as a dead owner's.
+            if only_the_lock_is_left(&self.path) {
+                let _ = std::fs::remove_file(self.path.join(OWNER_LOCK));
+            }
+        }
         // Non-recursive: fails, and keeps the directory, while anything is
         // left in it.
         if std::fs::remove_dir(&self.path).is_ok()
@@ -181,19 +215,26 @@ impl SpillLayout {
                 return Self::none();
             }
             let temp_parent = temp_parent();
-            let created = match create_private_dir(&temp_parent, || unique_name(&name, ".spill")) {
-                Ok(created) => created,
-                Err(error) => {
-                    grafeo_common::grafeo_warn!(
-                        "the read-only open of {} spills nothing: it cannot create its spill \
+            let (created, owner) =
+                match create_owned_dir(&temp_parent, || unique_name(&name, ".spill")) {
+                    Ok(created) => created,
+                    Err(error) => {
+                        grafeo_common::grafeo_warn!(
+                            "the read-only open of {} spills nothing: it cannot create its spill \
                          directory in {}: {error}",
-                        database.map_or_else(String::new, |path| path.display().to_string()),
-                        temp_parent.display()
-                    );
-                    return Self::none();
-                }
-            };
-            let own = Arc::new(SpillDirectory::new(created, false));
+                            database.map_or_else(String::new, |path| path.display().to_string()),
+                            temp_parent.display()
+                        );
+                        return Self::none();
+                    }
+                };
+            // With its own directory held, and before the account measures
+            // the free space: dead owners' space is free again.
+            sweep_dead_once(&temp_parent, &created);
+            let own = Arc::new(match owner {
+                Some(owner) => SpillDirectory::owned(created, owner),
+                None => SpillDirectory::new(created, false),
+            });
             return Self {
                 root: Some(own.path.clone()),
                 root_guard: Some(Arc::clone(&own)),
@@ -268,6 +309,297 @@ fn create_private_dir(
             parent.display()
         ),
     ))
+}
+
+/// Creates a read-only open's directory in `parent` (see
+/// [`create_private_dir`]) and takes its owner lock: the directory, and the
+/// locked `owner.lock` in it. A sweep that took the directory between its
+/// creation and the lock costs one more name. On a file system without file
+/// locks the directory has no `owner.lock` (`None`), as in 0.6.3: it spills,
+/// and no sweep removes it after a crash.
+fn create_owned_dir(
+    parent: &Path,
+    mut next_name: impl FnMut() -> String,
+) -> std::io::Result<(PathBuf, Option<File>)> {
+    for _ in 0..NAME_ATTEMPTS {
+        let created = create_private_dir(parent, &mut next_name)?;
+        match take_owner(&created) {
+            Ok(Owner::Held(owner)) => return Ok((created, Some(owner))),
+            // A sweep had it: what it left of the directory goes (its handle
+            // is closed by now), and the next name is tried.
+            Ok(Owner::Lost) => {
+                let _ = std::fs::remove_dir(&created);
+            }
+            Ok(Owner::NoLocks(error)) => {
+                let _ = std::fs::remove_file(created.join(OWNER_LOCK));
+                grafeo_common::grafeo_warn!(
+                    "the file system of {} has no file locks ({error}): the spill directory {} \
+                     is not removed by a later open if this process crashes",
+                    parent.display(),
+                    created.display()
+                );
+                return Ok((created, None));
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(created.join(OWNER_LOCK));
+                let _ = std::fs::remove_dir(&created);
+                return Err(error);
+            }
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!(
+            "no spill directory in {} kept its owner lock after {NAME_ATTEMPTS} attempts",
+            parent.display()
+        ),
+    ))
+}
+
+/// What a creator got of its directory's owner lock.
+#[derive(Debug)]
+enum Owner {
+    /// The locked `owner.lock`.
+    Held(File),
+    /// A sweep took the directory first: it holds the lock, or removed the
+    /// directory once ours was taken.
+    Lost,
+    /// The file system takes no file locks.
+    NoLocks(std::io::Error),
+}
+
+/// Creates `dir`'s `owner.lock` and locks it.
+fn take_owner(dir: &Path) -> std::io::Result<Owner> {
+    let lock = dir.join(OWNER_LOCK);
+    let owner = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&lock)
+    {
+        Ok(owner) => owner,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Owner::Lost),
+        Err(error) => return Err(error),
+    };
+    Ok(lock_owner(&lock, owner))
+}
+
+/// Locks `owner`, the open handle of the `owner.lock` at `lock` its open just
+/// created.
+fn lock_owner(lock: &Path, owner: File) -> Owner {
+    match owner.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Owner::Lost,
+        Err(std::fs::TryLockError::Error(error)) => return Owner::NoLocks(error),
+    }
+    // Locked, but a sweep may have removed the directory just before.
+    if lock.exists() {
+        Owner::Held(owner)
+    } else {
+        Owner::Lost
+    }
+}
+
+/// Whether nothing but `owner.lock` is in `dir`.
+fn only_the_lock_is_left(dir: &Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .all(|entry| entry.file_name() == OWNER_LOCK)
+    })
+}
+
+/// Who owns a file: its user on Unix. Elsewhere (Windows) the temp directory
+/// is the user's own, and there is nothing to compare.
+#[cfg(unix)]
+type User = u32;
+#[cfg(not(unix))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct User;
+
+/// The user owning the file `metadata` describes (see [`User`]).
+fn user_of(metadata: &std::fs::Metadata) -> User {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::MetadataExt::uid(metadata)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        User
+    }
+}
+
+/// How old a directory without an `owner.lock` must be (by its modification time) to count as
+/// 0.6.3's: a younger one may be another open's, caught between creating its directory and
+/// taking its lock. Neither is ever removed.
+const UNOWNED_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What a sweep of a temp directory did (#450).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Swept {
+    /// Directories of dead owners, removed.
+    removed: usize,
+    /// Directories without an `owner.lock` (0.6.3 and earlier) a minute old or more, kept.
+    unowned: usize,
+    /// Their bytes.
+    unowned_bytes: u64,
+}
+
+/// [`sweep_dead`] of `parent` by the user owning `own` (the open's own
+/// directory, which it holds and the sweep skips), once per process for each
+/// parent, with one warning about the directories it kept for want of an
+/// owner lock.
+fn sweep_dead_once(parent: &Path, own: &Path) {
+    static SWEPT: parking_lot::Mutex<Vec<PathBuf>> = parking_lot::Mutex::new(Vec::new());
+    {
+        let mut swept = SWEPT.lock();
+        if swept.iter().any(|done| done == parent) {
+            return;
+        }
+        swept.push(parent.to_path_buf());
+    }
+    let Ok(metadata) = std::fs::symlink_metadata(own) else {
+        return;
+    };
+    let swept = sweep_dead(parent, own, user_of(&metadata));
+    if swept.unowned > 0 {
+        grafeo_common::grafeo_warn!(
+            "{} spill directories without an owner lock ({} bytes) are in {}: \
+             `grafeo-<name>-<pid>-<random>.spill`, made by read-only opens of Grafeo 0.6.3 or \
+             earlier (or on a file system without file locks); they can be deleted once no \
+             process of those versions runs",
+            swept.unowned,
+            swept.unowned_bytes,
+            parent.display()
+        );
+    }
+}
+
+/// Removes the read-only opens' directories in `parent` whose owner is gone:
+/// those named as [`unique_name`] names them, owned by `user`, whose
+/// `owner.lock` this sweep can lock; `own` (the sweeping open's directory) is
+/// skipped. Links, other names, files and other users' entries are left
+/// alone; so is a directory whose lock is held, cannot be opened, or is
+/// missing (see [`Swept::unowned`]).
+///
+/// Only the user's own entries: in a shared temp directory (`/tmp`, sticky)
+/// nobody else can rename or replace them, so the path the removal works on
+/// stays the directory checked here, never a link swapped in after the check
+/// (a non-sticky shared temp directory gives no such guarantee).
+fn sweep_dead(parent: &Path, own: &Path, user: User) -> Swept {
+    let mut swept = Swept::default();
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return swept;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        // `DirEntry::metadata` does not follow a link: a link named like ours
+        // is no directory, and stays.
+        let is_ours = entry.file_name().to_str().is_some_and(is_spill_name)
+            && dir != own
+            && entry
+                .metadata()
+                .is_ok_and(|metadata| metadata.is_dir() && user_of(&metadata) == user);
+        if !is_ours {
+            continue;
+        }
+        let owner = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(dir.join(OWNER_LOCK))
+        {
+            Ok(owner) => owner,
+            // A young one may be another open's, between creating its directory and its lock.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .is_ok_and(|modified| modified.elapsed().is_ok_and(|age| age >= UNOWNED_AFTER))
+                {
+                    swept.unowned += 1;
+                    swept.unowned_bytes += tree_size(&dir);
+                }
+                continue;
+            }
+            Err(_) => continue,
+        };
+        // Held: the owner lives (or another process sweeps it now).
+        if owner.try_lock().is_err() {
+            continue;
+        }
+        match remove_owned(&dir, owner) {
+            Ok(()) => swept.removed += 1,
+            Err(error) => grafeo_common::grafeo_warn!(
+                "could not remove the spill directory {} of a process that is gone: {error}",
+                dir.display()
+            ),
+        }
+    }
+    swept
+}
+
+/// Whether `name` is one [`unique_name`] gives a read-only open's directory:
+/// `grafeo-<name>-<pid>-<16 hex digits>.spill`.
+fn is_spill_name(name: &str) -> bool {
+    let Some(rest) = name
+        .strip_prefix("grafeo-")
+        .and_then(|rest| rest.strip_suffix(".spill"))
+    else {
+        return false;
+    };
+    let Some((rest, random)) = rest.rsplit_once('-') else {
+        return false;
+    };
+    let Some((database, pid)) = rest.rsplit_once('-') else {
+        return false;
+    };
+    !database.is_empty()
+        && !pid.is_empty()
+        && pid.bytes().all(|byte| byte.is_ascii_digit())
+        && random.len() == 16
+        && random.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Removes a dead owner's directory, holding its lock (`owner`) until only
+/// `owner.lock` is left: its contents (`remove_dir_all` follows no link in
+/// them), then `owner.lock`, then the directory.
+fn remove_owned(dir: &Path, owner: File) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        if entry.file_name() == OWNER_LOCK {
+            continue;
+        }
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            std::fs::remove_dir_all(&path)?;
+        } else {
+            // A link to a directory is removed as a directory on Windows.
+            std::fs::remove_file(&path).or_else(|_| std::fs::remove_dir(&path))?;
+        }
+    }
+    remove_lock(dir, owner)?;
+    std::fs::remove_dir(dir)
+}
+
+/// Removes `dir`'s `owner.lock` while `owner` holds it; the lock goes with `owner` at the end.
+/// On Windows the file goes once the handle closes.
+fn remove_lock(dir: &Path, _owner: File) -> std::io::Result<()> {
+    std::fs::remove_file(dir.join(OWNER_LOCK))
+}
+
+/// The bytes of the files under `dir`, links not followed.
+fn tree_size(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => tree_size(&entry.path()),
+            Ok(kind) if kind.is_file() => entry.metadata().map_or(0, |metadata| metadata.len()),
+            _ => 0,
+        })
+        .sum()
 }
 
 /// Removes the vector cache a previous read-write open (or a crash) left in
@@ -748,5 +1080,400 @@ mod tests {
                 std::fs::set_permissions(&held, std::fs::Permissions::from_mode(0o700)).unwrap();
             }
         }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Dead owners' directories in the temp directory (#450).
+    // -----------------------------------------------------------------------------------------
+
+    /// A directory named as a read-only open names its own, in `parent`, with a file and a
+    /// nested `query_*` directory in it, and with an `owner.lock` nobody holds when
+    /// `owner_lock` (without one, as 0.6.3 and earlier made them).
+    fn dead_dir(parent: &Path, database: &str, owner_lock: bool) -> PathBuf {
+        let dir = parent.join(unique_name(database, ".spill"));
+        std::fs::create_dir_all(dir.join("query_3")).unwrap();
+        std::fs::write(dir.join("columns_1_0_0.bin"), b"vincent").unwrap();
+        std::fs::write(dir.join("query_3").join("run_0.bin"), b"jules").unwrap();
+        if owner_lock {
+            std::fs::write(dir.join(OWNER_LOCK), b"").unwrap();
+        }
+        dir
+    }
+
+    /// Takes `dir`'s owner lock through a handle of its own, as a live owner holds it: std's
+    /// file locks conflict between two handles of one process too.
+    fn hold(dir: &Path) -> File {
+        let owner = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(dir.join(OWNER_LOCK))
+            .unwrap();
+        owner.try_lock().unwrap();
+        owner
+    }
+
+    /// Rows 1 to 3 of the matrix: a dead owner's directory goes, contents included; a held
+    /// one stays untouched; names that are not ours stay, whatever they hold.
+    #[test]
+    fn the_sweep_removes_only_the_directories_of_dead_owners() {
+        let temp = tempfile::tempdir().unwrap();
+        let dead = dead_dir(temp.path(), "amsterdam.grafeo", true);
+        let live = dead_dir(temp.path(), "berlin.grafeo", true);
+        let _live_owner = hold(&live);
+        let others = [
+            "grafeo-x.spill",
+            "grafeo-a-12-zz.spill",
+            "grafeo-paris.grafeo-12-0123456789abcdeg.spill",
+            "other",
+        ];
+        for other in others {
+            std::fs::create_dir(temp.path().join(other)).unwrap();
+            std::fs::write(temp.path().join(other).join(OWNER_LOCK), b"").unwrap();
+        }
+        let file_like_ours = temp.path().join(unique_name("prague.grafeo", ".spill"));
+        std::fs::write(&file_like_ours, b"mia").unwrap();
+
+        let swept = sweep_dead(temp.path(), &temp.path().join("own"), me(temp.path()));
+        assert_eq!(
+            swept,
+            Swept {
+                removed: 1,
+                unowned: 0,
+                unowned_bytes: 0
+            }
+        );
+        assert!(
+            !dead.exists(),
+            "the dead owner's directory goes, contents included"
+        );
+        assert_eq!(
+            std::fs::read(live.join("columns_1_0_0.bin")).unwrap(),
+            b"vincent",
+            "a live owner's directory is untouched"
+        );
+        assert!(live.join(OWNER_LOCK).exists());
+        for other in others {
+            assert!(
+                temp.path().join(other).join(OWNER_LOCK).exists(),
+                "{other} is not ours"
+            );
+        }
+        assert_eq!(std::fs::read(&file_like_ours).unwrap(), b"mia");
+    }
+
+    /// Row 4: a link named like ours, pointing at a directory with an `owner.lock` nobody
+    /// holds, is neither followed nor removed.
+    #[test]
+    fn the_sweep_leaves_a_link_named_like_ours() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("elsewhere");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join(OWNER_LOCK), b"").unwrap();
+        std::fs::write(target.join("gus.txt"), b"keep").unwrap();
+        let link = temp.path().join(unique_name("oslo.grafeo", ".spill"));
+        if let Err(error) = link_directory(&target, &link) {
+            eprintln!("skipped: this platform or user cannot create a directory link: {error}");
+            return;
+        }
+        assert_eq!(
+            sweep_dead(temp.path(), &temp.path().join("own"), me(temp.path())).removed,
+            0
+        );
+        assert_eq!(std::fs::read(target.join("gus.txt")).unwrap(), b"keep");
+        assert!(target.join(OWNER_LOCK).exists());
+        assert!(is_link(&link), "the link is left as it was");
+    }
+
+    /// Inside a dead owner's directory, a link to a directory outside it
+    /// goes as a link; what it points at stays.
+    #[test]
+    fn the_sweep_follows_no_link_inside_a_dead_owners_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(outside.join("nested")).unwrap();
+        std::fs::write(outside.join("nested").join("butch.txt"), b"keep").unwrap();
+        let dead = dead_dir(temp.path(), "lisbon.grafeo", true);
+        if let Err(error) = link_directory(&outside, &dead.join("query_9")) {
+            eprintln!("skipped: this platform or user cannot create a directory link: {error}");
+            return;
+        }
+        assert_eq!(
+            sweep_dead(temp.path(), &temp.path().join("own"), me(temp.path())).removed,
+            1
+        );
+        assert!(!dead.exists());
+        assert_eq!(
+            std::fs::read(outside.join("nested").join("butch.txt")).unwrap(),
+            b"keep"
+        );
+    }
+
+    /// Sets the modification time of `dir` two minutes back, past [`UNOWNED_AFTER`].
+    fn two_minutes_old(dir: &Path) {
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        #[cfg(windows)]
+        let handle = {
+            use std::os::windows::fs::OpenOptionsExt;
+            // FILE_WRITE_ATTRIBUTES, and FILE_FLAG_BACKUP_SEMANTICS to open a directory.
+            std::fs::OpenOptions::new()
+                .access_mode(0x100)
+                .custom_flags(0x0200_0000)
+                .open(dir)
+        };
+        #[cfg(not(windows))]
+        let handle = std::fs::File::open(dir);
+        handle.unwrap().set_modified(when).unwrap();
+    }
+
+    /// A directory without an `owner.lock` younger than a minute may be another open's, between
+    /// creating its directory and taking its lock: kept, and left out of the warning's count.
+    #[test]
+    fn the_sweep_counts_no_young_directory_without_an_owner_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let young = dead_dir(temp.path(), "vienna.grafeo", false);
+        let swept = sweep_dead(temp.path(), &temp.path().join("own"), me(temp.path()));
+        assert_eq!(swept, Swept::default());
+        assert!(young.join("columns_1_0_0.bin").exists(), "kept");
+    }
+
+    /// Row 5: a directory without an `owner.lock` (0.6.3 and earlier) is kept, and counted
+    /// with its bytes for the warning once it is a minute old.
+    #[test]
+    fn the_sweep_keeps_a_directory_without_an_owner_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = dead_dir(temp.path(), "vienna.grafeo", false);
+        two_minutes_old(&old);
+        let swept = sweep_dead(temp.path(), &temp.path().join("own"), me(temp.path()));
+        assert_eq!(
+            swept,
+            Swept {
+                removed: 0,
+                unowned: 1,
+                unowned_bytes: 12
+            },
+            "\"vincent\" and \"jules\""
+        );
+        assert_eq!(
+            std::fs::read(old.join("columns_1_0_0.bin")).unwrap(),
+            b"vincent"
+        );
+    }
+
+    /// For Windows as for Unix: the sweep removes a dead owner's
+    /// directory whole, `owner.lock` last, while it holds the lock it took.
+    #[test]
+    fn a_dead_owners_directory_goes_whole_its_lock_file_last() {
+        let temp = tempfile::tempdir().unwrap();
+        let dead = dead_dir(temp.path(), "madrid.grafeo", true);
+        let owner = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(dead.join(OWNER_LOCK))
+            .unwrap();
+        owner.try_lock().unwrap();
+        remove_owned(&dead, owner).expect("the removal, holding the lock");
+        assert!(!dead.exists());
+    }
+
+    /// The user owning `dir` (the test's own temp directory).
+    fn me(dir: &Path) -> User {
+        user_of(&std::fs::symlink_metadata(dir).unwrap())
+    }
+
+    /// Unix: a dead owner's directory of another user is kept (the predicate, given another
+    /// uid: CI cannot make a file of another user), so no entry anyone else could swap for a
+    /// link is ever removed through its path.
+    #[cfg(unix)]
+    #[test]
+    fn the_sweep_keeps_another_users_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let dead = dead_dir(temp.path(), "cairo.grafeo", true);
+        let someone_else = me(temp.path()).wrapping_add(1);
+        let swept = sweep_dead(temp.path(), &temp.path().join("own"), someone_else);
+        assert_eq!(swept.removed, 0);
+        assert!(dead.join("columns_1_0_0.bin").exists());
+        assert_eq!(
+            sweep_dead(temp.path(), &temp.path().join("own"), me(temp.path())).removed,
+            1,
+            "the positive control: its own user sweeps it"
+        );
+    }
+
+    /// The sweeping open's own directory is skipped, whatever its lock.
+    #[test]
+    fn the_sweep_skips_the_sweeping_opens_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let own = dead_dir(temp.path(), "dublin.grafeo", true);
+        assert_eq!(sweep_dead(temp.path(), &own, me(temp.path())).removed, 0);
+        assert!(own.join(OWNER_LOCK).exists());
+    }
+
+    /// A directory dropped with something left in it keeps its `owner.lock`, unlocked, and the
+    /// next sweep removes it as a dead owner's; an emptied one goes whole.
+    #[test]
+    fn a_directory_left_with_files_is_swept_later() {
+        let temp = tempfile::tempdir().unwrap();
+        let (left, owner) =
+            create_owned_dir(temp.path(), || unique_name("geneva.grafeo", ".spill")).unwrap();
+        std::fs::write(left.join("columns_2_0_0.bin"), b"shosanna").unwrap();
+        drop(SpillDirectory::owned(left.clone(), owner.unwrap()));
+        assert!(
+            left.join(OWNER_LOCK).exists(),
+            "the lock file stays, unlocked"
+        );
+        assert_eq!(
+            sweep_dead(temp.path(), &temp.path().join("own"), me(temp.path())),
+            Swept {
+                removed: 1,
+                unowned: 0,
+                unowned_bytes: 0
+            }
+        );
+        assert!(!left.exists());
+
+        let (emptied, owner) =
+            create_owned_dir(temp.path(), || unique_name("geneva.grafeo", ".spill")).unwrap();
+        drop(SpillDirectory::owned(emptied.clone(), owner.unwrap()));
+        assert!(!emptied.exists());
+    }
+
+    /// Rows 6 and 7: a read-only open sweeps its temp directory once per process: its own
+    /// directory, made after the sweep, holds its lock, and a second open in the same process
+    /// does not sweep again (a dead directory made between the two stays).
+    #[test]
+    fn a_read_only_open_sweeps_its_temp_directory_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().to_path_buf();
+        let dead = dead_dir(&parent, "rome.grafeo", true);
+        let first = SpillLayout::for_open_in(
+            || parent.clone(),
+            None,
+            Some(Path::new("db/rome.grafeo")),
+            true,
+        );
+        assert!(!dead.exists(), "the first read-only open swept it");
+        let own = first.root.clone().unwrap();
+        assert!(own.join(OWNER_LOCK).exists());
+        assert!(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(own.join(OWNER_LOCK))
+                .unwrap()
+                .try_lock()
+                .is_err(),
+            "the open holds its own lock"
+        );
+
+        let later = dead_dir(&parent, "rome.grafeo", true);
+        let second = SpillLayout::for_open_in(
+            || parent.clone(),
+            None,
+            Some(Path::new("db/rome.grafeo")),
+            true,
+        );
+        assert!(later.exists(), "no second sweep in this process");
+        assert!(
+            own.exists(),
+            "the first open's directory is never swept while it lives"
+        );
+        drop(first);
+        assert!(
+            !own.exists(),
+            "a clean close removes its directory, owner.lock included"
+        );
+        drop(second);
+    }
+
+    /// Row 8: the creator's race with a sweep. It created `owner.lock` and has not locked it
+    /// yet: a sweep that locked it first, or removed the directory already (Unix: a removed
+    /// directory with an open file in it), makes the creator give the name up.
+    #[test]
+    fn a_creator_that_loses_its_directory_to_a_sweep_gives_the_name_up() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join(unique_name("athens.grafeo", ".spill"));
+        std::fs::create_dir(&dir).unwrap();
+        let creator = std::fs::File::create_new(dir.join(OWNER_LOCK)).unwrap();
+        let sweeper = hold(&dir);
+        assert!(matches!(
+            lock_owner(&dir.join(OWNER_LOCK), creator),
+            Owner::Lost
+        ));
+        drop(sweeper);
+
+        #[cfg(unix)]
+        {
+            let dir = temp.path().join(unique_name("athens.grafeo", ".spill"));
+            std::fs::create_dir(&dir).unwrap();
+            let creator = std::fs::File::create_new(dir.join(OWNER_LOCK)).unwrap();
+            std::fs::remove_dir_all(&dir).unwrap();
+            assert!(matches!(
+                lock_owner(&dir.join(OWNER_LOCK), creator),
+                Owner::Lost
+            ));
+        }
+
+        let (created, owner) =
+            create_owned_dir(temp.path(), || unique_name("athens.grafeo", ".spill")).unwrap();
+        assert!(owner.is_some(), "this file system takes locks");
+        assert!(
+            created.join(OWNER_LOCK).exists(),
+            "an undisturbed creator keeps its name"
+        );
+    }
+
+    /// Row 9, end to end: a read-only open whose process dies without a close leaves its
+    /// directory, and the next process's first read-only open removes it.
+    #[test]
+    fn a_crashed_read_only_open_leaves_its_directory_to_the_next_sweep() {
+        let temp = tempfile::tempdir().unwrap();
+        let status = grafeo_common::testing::child_process::run(
+            grafeo_common::child_test!("a_read_only_open_that_dies_without_closing")
+                .env(CRASH_ROOT, temp.path()),
+        )
+        .unwrap();
+        assert!(status.success(), "the child ran: {status}");
+        let left: Vec<PathBuf> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        assert_eq!(
+            left.len(),
+            1,
+            "the dead process left its directory: {left:?}"
+        );
+        assert!(left[0].join("columns_1_0_0.bin").exists());
+        assert!(left[0].join(OWNER_LOCK).exists());
+
+        let parent = temp.path().to_path_buf();
+        let next = SpillLayout::for_open_in(
+            || parent.clone(),
+            None,
+            Some(Path::new("db/oslo.grafeo")),
+            true,
+        );
+        assert!(!left[0].exists(), "the next read-only open swept it");
+        drop(next);
+    }
+
+    /// Where the crash child makes its read-only open's directory.
+    const CRASH_ROOT: &str = "GRAFEO_TEST_DEAD_SPILL_ROOT";
+
+    /// The child of the test above: a read-only open that spills and dies, its destructors
+    /// never run. Run alone, it does nothing.
+    #[test]
+    fn a_read_only_open_that_dies_without_closing() {
+        let Some(root) = std::env::var_os(CRASH_ROOT).map(PathBuf::from) else {
+            return;
+        };
+        let layout = SpillLayout::for_open_in(
+            || root.clone(),
+            None,
+            Some(Path::new("db/oslo.grafeo")),
+            true,
+        );
+        std::fs::write(layout.root.unwrap().join("columns_1_0_0.bin"), b"hans").unwrap();
+        std::process::exit(0);
     }
 }

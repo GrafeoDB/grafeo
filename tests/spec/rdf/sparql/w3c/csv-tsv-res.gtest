@@ -1,0 +1,71 @@
+# W3C SPARQL 1.1 Test Suite: Csv Tsv Res
+# Generated from the W3C manifest by scripts/convert_w3c_sparql.py
+# Source: https://github.com/w3c/rdf-tests at 7b5afb91857a9c282c03d2e45d3f76485797c901
+# Copyright W3C (MIT, ERCIM, Keio, Beihang), used under the W3C test suite
+# licences: https://www.w3.org/Consortium/Legal/2008/04-testsuite-copyright.html
+# Not converted:
+#   csv01: CSVResultFormatTest: not a query evaluation test
+#   csv02: CSVResultFormatTest: not a query evaluation test
+#   csv03: CSVResultFormatTest: not a query evaluation test
+#   tsv03: spec-disagreement: the TSV result writes the stored 1.0E6 as 1.0e6; exact terms compare lexical forms
+#   csv04: CSVResultFormatTest: not a query evaluation test
+
+meta:
+  language: sparql
+  model: rdf
+  section: "w3c.csv-tsv-res"
+  title: W3C Csv Tsv Res
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # tsv01 - TSV Result Format
+  - name: tsv01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/p1> <http://example.org/s2> .
+          <http://example.org/s2> <http://example.org/p2> "foo" .
+          <http://example.org/s3> <http://example.org/p3> "bar"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s4> <http://example.org/p4> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s5> <http://example.org/p5> "5.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s6> <http://example.org/p6> _:b0 .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT * WHERE { ?s ?p ?o} ORDER BY ?s ?p ?o
+    expect:
+      terms:
+        - ['<http://example.org/s1>', '<http://example.org/p1>', '<http://example.org/s2>']
+        - ['<http://example.org/s2>', '<http://example.org/p2>', '"foo"']
+        - ['<http://example.org/s3>', '<http://example.org/p3>', '"bar"']
+        - ['<http://example.org/s4>', '<http://example.org/p4>', '"4"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/s5>', '<http://example.org/p5>', '"5.5"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://example.org/s6>', '<http://example.org/p6>', '_:b']
+
+  # tsv02 - TSV Result Format
+  - name: tsv02
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/p1> <http://example.org/s2> .
+          <http://example.org/s2> <http://example.org/p2> "foo" .
+          <http://example.org/s3> <http://example.org/p3> "bar"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s4> <http://example.org/p4> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s5> <http://example.org/p5> "5.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s6> <http://example.org/p6> _:b0 .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT * WHERE { ?s ?p ?o OPTIONAL {?o ?p2 ?o2 } } ORDER BY ?s ?p ?o ?p2 ?o2
+    expect:
+      terms:
+        - ['<http://example.org/s1>', '<http://example.org/p1>', '<http://example.org/s2>', '<http://example.org/p2>', '"foo"']
+        - ['<http://example.org/s2>', '<http://example.org/p2>', '"foo"', null, null]
+        - ['<http://example.org/s3>', '<http://example.org/p3>', '"bar"', null, null]
+        - ['<http://example.org/s4>', '<http://example.org/p4>', '"4"^^<http://www.w3.org/2001/XMLSchema#integer>', null, null]
+        - ['<http://example.org/s5>', '<http://example.org/p5>', '"5.5"^^<http://www.w3.org/2001/XMLSchema#decimal>', null, null]
+        - ['<http://example.org/s6>', '<http://example.org/p6>', '_:b', null, null]

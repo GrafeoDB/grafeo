@@ -3,8 +3,8 @@ import { EDGE_DATE_FIELDS, FLOAT_PROPS, NODE_DATE_FIELDS } from './model.mjs';
 import { cmp, compareEdges, compareNodes, sortedProps } from './sort.mjs';
 
 const PREFIXES = [
-  '@prefix sv: <https://grafeo.dev/datasets/silicon-valley/vocab#> .',
-  '@prefix svr: <https://grafeo.dev/datasets/silicon-valley/id/> .',
+  '@prefix sv: <https://docs.grafeo.dev/datasets/silicon-valley/vocab#> .',
+  '@prefix svr: <https://docs.grafeo.dev/datasets/silicon-valley/id#> .',
   '@prefix schema: <https://schema.org/> .',
   '@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .',
 ];

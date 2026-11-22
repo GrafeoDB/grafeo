@@ -1,0 +1,446 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/with-orderBy/WithOrderBy4.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.WithOrderBy4"
+  title: "WithOrderBy4 - Order by in combination with projection and aliasing"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Sort by a projected expression
+  - name: s1_sort_by_a_projected_expression
+    setup:
+      - |
+        CREATE (:A {num: 1, num2: 4}), //num + num2 = 5
+               (:A {num: 5, num2: 2}), //num + num2 = 7
+               (:A {num: 9, num2: 0}), //num + num2 = 9
+               (:A {num: 3, num2: 3}), //num + num2 = 6
+               (:A {num: 7, num2: 1})  //num + num2 = 8
+    query: |
+      MATCH (a:A)
+      WITH a, a.num + a.num2 AS sum
+        ORDER BY a.num + a.num2
+        LIMIT 3
+      RETURN a, sum
+    expect:
+      values: |
+        | a | sum |
+        | (:A {num: 1, num2: 4}) | 5 |
+        | (:A {num: 3, num2: 3}) | 6 |
+        | (:A {num: 5, num2: 2}) | 7 |
+      side_effects: {}
+
+  # [2] Sort by an alias of a projected expression
+  - name: s2_sort_by_an_alias_of_a_projected_expression
+    setup:
+      - |
+        CREATE (:A {num: 1, num2: 4}), //num + num2 = 5
+               (:A {num: 5, num2: 2}), //num + num2 = 7
+               (:A {num: 9, num2: 0}), //num + num2 = 9
+               (:A {num: 3, num2: 3}), //num + num2 = 6
+               (:A {num: 7, num2: 1})  //num + num2 = 8
+    query: |
+      MATCH (a:A)
+      WITH a, a.num + a.num2 AS sum
+        ORDER BY sum
+        LIMIT 3
+      RETURN a, sum
+    expect:
+      values: |
+        | a | sum |
+        | (:A {num: 1, num2: 4}) | 5 |
+        | (:A {num: 3, num2: 3}) | 6 |
+        | (:A {num: 5, num2: 2}) | 7 |
+      side_effects: {}
+
+  # [3] Sort by two projected expressions with order priority being different than projection order
+  - name: s3_sort_by_two_projected_expressions_with_order_priority_being_different_than_projection_order
+    setup:
+      - |
+        CREATE (:A {num: 1, num2: 4}), //num2 % 3 = 1, num + num2 = 5
+               (:A {num: 5, num2: 2}), //num2 % 3 = 2, num + num2 = 7
+               (:A {num: 9, num2: 0}), //num2 % 3 = 0, num + num2 = 9
+               (:A {num: 3, num2: 3}), //num2 % 3 = 0, num + num2 = 6
+               (:A {num: 7, num2: 1})  //num2 % 3 = 1, num + num2 = 8
+    query: |
+      MATCH (a:A)
+      WITH a, a.num + a.num2 AS sum, a.num2 % 3 AS mod
+        ORDER BY a.num2 % 3, a.num + a.num2
+        LIMIT 3
+      RETURN a, sum, mod
+    expect:
+      values: |
+        | a | sum | mod |
+        | (:A {num: 3, num2: 3}) | 6 | 0 |
+        | (:A {num: 9, num2: 0}) | 9 | 0 |
+        | (:A {num: 1, num2: 4}) | 5 | 1 |
+      side_effects: {}
+
+  # [4] Sort by one projected expression and one alias of a projected expression with order priority being different than projection order
+  - name: s4_sort_by_one_projected_expression_and_one_alias_of_a_projected_expression_with_order_priority_being_different_than_projection_order
+    setup:
+      - |
+        CREATE (:A {num: 1, num2: 4}), //num2 % 3 = 1, num + num2 = 5
+               (:A {num: 5, num2: 2}), //num2 % 3 = 2, num + num2 = 7
+               (:A {num: 9, num2: 0}), //num2 % 3 = 0, num + num2 = 9
+               (:A {num: 3, num2: 3}), //num2 % 3 = 0, num + num2 = 6
+               (:A {num: 7, num2: 1})  //num2 % 3 = 1, num + num2 = 8
+    query: |
+      MATCH (a:A)
+      WITH a, a.num + a.num2 AS sum, a.num2 % 3 AS mod
+        ORDER BY a.num2 % 3, sum
+        LIMIT 3
+      RETURN a, sum, mod
+    expect:
+      values: |
+        | a | sum | mod |
+        | (:A {num: 3, num2: 3}) | 6 | 0 |
+        | (:A {num: 9, num2: 0}) | 9 | 0 |
+        | (:A {num: 1, num2: 4}) | 5 | 1 |
+      side_effects: {}
+
+  # [5] Sort by one alias of a projected expression and one projected expression with order priority being different than projection order
+  - name: s5_sort_by_one_alias_of_a_projected_expression_and_one_projected_expression_with_order_priority_being_different_than_projection_order
+    setup:
+      - |
+        CREATE (:A {num: 1, num2: 4}), //num2 % 3 = 1, num + num2 = 5
+               (:A {num: 5, num2: 2}), //num2 % 3 = 2, num + num2 = 7
+               (:A {num: 9, num2: 0}), //num2 % 3 = 0, num + num2 = 9
+               (:A {num: 3, num2: 3}), //num2 % 3 = 0, num + num2 = 6
+               (:A {num: 7, num2: 1})  //num2 % 3 = 1, num + num2 = 8
+    query: |
+      MATCH (a:A)
+      WITH a, a.num + a.num2 AS sum, a.num2 % 3 AS mod
+        ORDER BY mod, a.num + a.num2
+        LIMIT 3
+      RETURN a, sum, mod
+    expect:
+      values: |
+        | a | sum | mod |
+        | (:A {num: 3, num2: 3}) | 6 | 0 |
+        | (:A {num: 9, num2: 0}) | 9 | 0 |
+        | (:A {num: 1, num2: 4}) | 5 | 1 |
+      side_effects: {}
+
+  # [6] Sort by aliases of two projected expressions with order priority being different than projection order
+  - name: s6_sort_by_aliases_of_two_projected_expressions_with_order_priority_being_different_than_projection_order
+    setup:
+      - |
+        CREATE (:A {num: 1, num2: 4}), //num2 % 3 = 1, num + num2 = 5
+               (:A {num: 5, num2: 2}), //num2 % 3 = 2, num + num2 = 7
+               (:A {num: 9, num2: 0}), //num2 % 3 = 0, num + num2 = 9
+               (:A {num: 3, num2: 3}), //num2 % 3 = 0, num + num2 = 6
+               (:A {num: 7, num2: 1})  //num2 % 3 = 1, num + num2 = 8
+    query: |
+      MATCH (a:A)
+      WITH a, a.num + a.num2 AS sum, a.num2 % 3 AS mod
+        ORDER BY mod, sum
+        LIMIT 3
+      RETURN a, sum, mod
+    expect:
+      values: |
+        | a | sum | mod |
+        | (:A {num: 3, num2: 3}) | 6 | 0 |
+        | (:A {num: 9, num2: 0}) | 9 | 0 |
+        | (:A {num: 1, num2: 4}) | 5 | 1 |
+      side_effects: {}
+
+  # [7] Sort by an alias of a projected expression where the alias shadows an existing variable
+  - name: s7_sort_by_an_alias_of_a_projected_expression_where_the_alias_shadows_an_existing_variable
+    setup:
+      - |
+        CREATE (:A {num: 1, num2: 4}), //num2 % 3 = 1, num + num2 = 5
+               (:A {num: 5, num2: 2}), //num2 % 3 = 2, num + num2 = 7
+               (:A {num: 9, num2: 0}), //num2 % 3 = 0, num + num2 = 9
+               (:A {num: 3, num2: 3}), //num2 % 3 = 0, num + num2 = 6
+               (:A {num: 7, num2: 1})  //num2 % 3 = 1, num + num2 = 8
+    query: |
+      MATCH (a:A)
+      WITH a, a.num2 % 3 AS x
+      WITH a, a.num + a.num2 AS x
+        ORDER BY x
+        LIMIT 3
+      RETURN a, x
+    expect:
+      values: |
+        | a | x |
+        | (:A {num: 1, num2: 4}) | 5 |
+        | (:A {num: 3, num2: 3}) | 6 |
+        | (:A {num: 5, num2: 2}) | 7 |
+      side_effects: {}
+
+  # [8] Sort by non-projected existing variable
+  - name: s8_sort_by_non_projected_existing_variable
+    setup:
+      - |
+        CREATE (:A {num: 1, num2: 4}), //num2 % 3 = 1, num + num2 = 5
+               (:A {num: 5, num2: 2}), //num2 % 3 = 2, num + num2 = 7
+               (:A {num: 9, num2: 0}), //num2 % 3 = 0, num + num2 = 9
+               (:A {num: 3, num2: 3}), //num2 % 3 = 0, num + num2 = 6
+               (:A {num: 7, num2: 1})  //num2 % 3 = 1, num + num2 = 8
+    query: |
+      MATCH (a:A)
+      WITH a, a.num + a.num2 AS sum
+      WITH a, a.num2 % 3 AS mod
+        ORDER BY sum
+        LIMIT 3
+      RETURN a, mod
+    expect:
+      values: |
+        | a | mod |
+        | (:A {num: 1, num2: 4}) | 1 |
+        | (:A {num: 3, num2: 3}) | 0 |
+        | (:A {num: 5, num2: 2}) | 2 |
+      side_effects: {}
+
+  # [9] Sort by an alias of a projected expression containing the variable shadowed by the alias
+  - name: s9_sort_by_an_alias_of_a_projected_expression_containing_the_variable_shadowed_by_the_alias
+    setup:
+      - |
+        CREATE (:A {num: 1, num2: 4}), //num2 % 3 = 1, num + num2 = 5
+               (:A {num: 5, num2: 2}), //num2 % 3 = 2, num + num2 = 7
+               (:A {num: 9, num2: 0}), //num2 % 3 = 0, num + num2 = 9
+               (:A {num: 3, num2: 3}), //num2 % 3 = 0, num + num2 = 6
+               (:A {num: 7, num2: 1})  //num2 % 3 = 1, num + num2 = 8
+    query: |
+      MATCH (a:A)
+      WITH a.num2 AS x
+      WITH x % 3 AS x
+        ORDER BY x
+        LIMIT 3
+      RETURN x
+    expect:
+      values: |
+        | x |
+        | 0 |
+        | 0 |
+        | 1 |
+      side_effects: {}
+
+  # [10] Sort by a non-projected expression containing an alias of a projected expression containing the variable shadowed by the alias
+  - name: s10_sort_by_a_non_projected_expression_containing_an_alias_of_a_projected_expression_containing_the_variable_shadowed_by_the_alias
+    setup:
+      - |
+        CREATE (:A {num: 1, num2: 4}), //num2 % 3 = 1, num + num2 = 5
+               (:A {num: 5, num2: 2}), //num2 % 3 = 2, num + num2 = 7
+               (:A {num: 9, num2: 0}), //num2 % 3 = 0, num + num2 = 9
+               (:A {num: 3, num2: 3}), //num2 % 3 = 0, num + num2 = 6
+               (:A {num: 7, num2: 1})  //num2 % 3 = 1, num + num2 = 8
+    query: |
+      MATCH (a:A)
+      WITH a.num2 AS x
+      WITH x % 3 AS x
+        ORDER BY x * -1
+        LIMIT 3
+      RETURN x
+    expect:
+      values: |
+        | x |
+        | 2 |
+        | 1 |
+        | 1 |
+      side_effects: {}
+
+  # [11] Sort by an aggregate projection
+  - name: s11_sort_by_an_aggregate_projection
+    setup:
+      - |
+        CREATE (:A {num: 1, num2: 4}), //num2 % 3 = 1, num + num2 = 5
+               (:A {num: 5, num2: 2}), //num2 % 3 = 2, num + num2 = 7
+               (:A {num: 9, num2: 0}), //num2 % 3 = 0, num + num2 = 9
+               (:A {num: 3, num2: 3}), //num2 % 3 = 0, num + num2 = 6
+               (:A {num: 7, num2: 1})  //num2 % 3 = 1, num + num2 = 8
+    query: |
+      MATCH (a:A)
+      WITH a.num2 % 3 AS mod, sum(a.num + a.num2) AS sum
+        ORDER BY sum(a.num + a.num2)
+        LIMIT 2
+      RETURN mod, sum
+    expect:
+      values: |
+        | mod | sum |
+        | 2 | 7 |
+        | 1 | 13 |
+      side_effects: {}
+
+  # [12] Sort by an aliased aggregate projection
+  - name: s12_sort_by_an_aliased_aggregate_projection
+    setup:
+      - |
+        CREATE (:A {num: 1, num2: 4}), //num2 % 3 = 1, num + num2 = 5
+               (:A {num: 5, num2: 2}), //num2 % 3 = 2, num + num2 = 7
+               (:A {num: 9, num2: 0}), //num2 % 3 = 0, num + num2 = 9
+               (:A {num: 3, num2: 3}), //num2 % 3 = 0, num + num2 = 6
+               (:A {num: 7, num2: 1})  //num2 % 3 = 1, num + num2 = 8
+    query: |
+      MATCH (a:A)
+      WITH a.num2 % 3 AS mod, sum(a.num + a.num2) AS sum
+        ORDER BY sum
+        LIMIT 2
+      RETURN mod, sum
+    expect:
+      values: |
+        | mod | sum |
+        | 2 | 7 |
+        | 1 | 13 |
+      side_effects: {}
+
+  # [13] Fail on sorting by a non-projected aggregation on a variable
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s13_fail_on_sorting_by_a_non_projected_aggregation_on_a_variable
+    setup:
+      - |
+        CREATE (:A {num: 1, num2: 4}), //num2 % 3 = 1, num + num2 = 5
+               (:A {num: 5, num2: 2}), //num2 % 3 = 2, num + num2 = 7
+               (:A {num: 9, num2: 0}), //num2 % 3 = 0, num + num2 = 9
+               (:A {num: 3, num2: 3}), //num2 % 3 = 0, num + num2 = 6
+               (:A {num: 7, num2: 1})  //num2 % 3 = 1, num + num2 = 8
+    query: |
+      MATCH (a:A)
+      WITH a, a.num + a.num2 AS sum
+      WITH a.num2 % 3 AS mod, min(sum) AS min
+        ORDER BY sum(sum)
+        LIMIT 2
+      RETURN mod, min
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [14] Fail on sorting by a non-projected aggregation on an expression
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s14_fail_on_sorting_by_a_non_projected_aggregation_on_an_expression
+    setup:
+      - |
+        CREATE (:A {num: 1, num2: 4}), //num2 % 3 = 1, num + num2 = 5
+               (:A {num: 5, num2: 2}), //num2 % 3 = 2, num + num2 = 7
+               (:A {num: 9, num2: 0}), //num2 % 3 = 0, num + num2 = 9
+               (:A {num: 3, num2: 3}), //num2 % 3 = 0, num + num2 = 6
+               (:A {num: 7, num2: 1})  //num2 % 3 = 1, num + num2 = 8
+    query: |
+      MATCH (a:A)
+      WITH a.num2 % 3 AS mod, min(a.num + a.num2) AS min
+        ORDER BY sum(a.num + a.num2)
+        LIMIT 2
+      RETURN mod, min
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [15] Sort by an aliased aggregate projection does allow subsequent matching
+  - name: s15_sort_by_an_aliased_aggregate_projection_does_allow_subsequent_matching
+    setup:
+      - |
+        CREATE ()-[:T1 {id: 0}]->(:X),
+               ()-[:T2 {id: 1}]->(:X),
+               ()-[:T2 {id: 2}]->()
+    query: |
+      MATCH (a)-[r]->(b:X)
+      WITH a, r, b, count(*) AS c
+        ORDER BY c
+      MATCH (a)-[r]->(b)
+      RETURN r AS rel
+        ORDER BY rel.id
+    expect:
+      ordered: true
+      values: |
+        | rel |
+        | [:T1 {id: 0}] |
+        | [:T2 {id: 1}] |
+      side_effects: {}
+
+  # [16] Handle constants and parameters inside an order by item which contains an aggregation expression
+  - name: s16_handle_constants_and_parameters_inside_an_order_by_item_which_contains_an_aggregation_expression
+    params:
+      age: 38
+    query: |
+      MATCH (person)
+      WITH avg(person.age) AS avgAge
+      ORDER BY $age + avg(person.age) - 1000
+      RETURN avgAge
+    expect:
+      values: |
+        | avgAge |
+        | null |
+      side_effects: {}
+
+  # [17] Handle projected variables inside an order by item which contains an aggregation expression
+  - name: s17_handle_projected_variables_inside_an_order_by_item_which_contains_an_aggregation_expression
+    query: |
+      MATCH (me: Person)--(you: Person)
+      WITH me.age AS age, count(you.age) AS cnt
+      ORDER BY age, age + count(you.age)
+      RETURN age
+    expect:
+      values: |
+        | age |
+      side_effects: {}
+
+  # [18]  Handle projected property accesses inside an order by item which contains an aggregation expression
+  - name: s18_handle_projected_property_accesses_inside_an_order_by_item_which_contains_an_aggregation_expression
+    query: |
+      MATCH (me: Person)--(you: Person)
+      WITH me.age AS age, count(you.age) AS cnt
+      ORDER BY me.age + count(you.age)
+      RETURN age
+    expect:
+      values: |
+        | age |
+      side_effects: {}
+
+  # [19] Fail if not projected variables are used inside an order by item which contains an aggregation expression
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s19_fail_if_not_projected_variables_are_used_inside_an_order_by_item_which_contains_an_aggregation_expression
+    query: |
+      MATCH (me: Person)--(you: Person)
+      WITH count(you.age) AS agg
+      ORDER BY me.age + count(you.age)
+      RETURN *
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [20] Fail if more complex expressions, even if projected, are used inside an order by item which contains an aggregation expression
+  # TCK: SyntaxError at compile time: AmbiguousAggregationExpression
+  - name: s20_fail_if_more_complex_expressions_even_if_projected_are_used_inside_an_order_by_item_which_contains_an_aggregation_expression
+    query: |
+      MATCH (me: Person)--(you: Person)
+      WITH me.age + you.age, count(*) AS cnt
+      ORDER BY me.age + you.age + count(*)
+      RETURN *
+    expect:
+      gql_status: "42"
+      side_effects: {}

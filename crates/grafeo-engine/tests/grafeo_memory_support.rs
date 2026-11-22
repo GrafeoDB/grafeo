@@ -1,6 +1,6 @@
 //! Tests for grafeo-memory engine enhancements:
 //! - batch_create_nodes_with_props
-//! - filter optimization in compute_filter_allowlist
+//! - filter optimization in filter_allowlist
 //! - temporal property versioning API
 //!
 //! ```bash

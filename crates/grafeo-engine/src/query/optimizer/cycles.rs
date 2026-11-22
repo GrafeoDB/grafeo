@@ -196,7 +196,7 @@ pub(crate) fn plan_names(op: &LogicalOperator, names: &mut HashSet<String>) {
         LogicalOperator::ShortestPath(path) => {
             [&path.source_var, &path.target_var, &path.path_alias]
                 .into_iter()
-                .chain(&path.edge_variable)
+                .chain(path.element_variables())
                 .collect()
         }
         LogicalOperator::VectorScan(scan) => vec![&scan.variable],

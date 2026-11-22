@@ -209,7 +209,7 @@ mod quantified_paths {
 
         // * is shorthand for 1..unlimited
         let result = session
-            .execute("MATCH (a:Person {name: 'Alix'})-[:KNOWS*]->(b) RETURN b.name ORDER BY b.name")
+            .execute("MATCH TRAIL (a:Person {name: 'Alix'})-[:KNOWS*]->(b) RETURN b.name ORDER BY b.name")
             .unwrap();
         assert_eq!(result.row_count(), 2, "* should reach all reachable nodes");
     }

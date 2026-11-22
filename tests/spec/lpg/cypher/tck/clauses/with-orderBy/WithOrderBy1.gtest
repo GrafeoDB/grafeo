@@ -1,0 +1,2263 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/with-orderBy/WithOrderBy1.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.WithOrderBy1"
+  title: "WithOrderBy1 - Order by a single variable"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Sort booleans in ascending order
+  - name: s1_sort_booleans_in_ascending_order
+    query: |
+      UNWIND [true, false] AS bools
+      WITH bools
+        ORDER BY bools
+        LIMIT 1
+      RETURN bools
+    expect:
+      ordered: true
+      values: |
+        | bools |
+        | false |
+      side_effects: {}
+
+  # [2] Sort booleans in descending order
+  - name: s2_sort_booleans_in_descending_order
+    query: |
+      UNWIND [true, false] AS bools
+      WITH bools
+        ORDER BY bools DESC
+        LIMIT 1
+      RETURN bools
+    expect:
+      ordered: true
+      values: |
+        | bools |
+        | true |
+      side_effects: {}
+
+  # [3] Sort integers in ascending order
+  - name: s3_sort_integers_in_ascending_order
+    query: |
+      UNWIND [1, 3, 2] AS ints
+      WITH ints
+        ORDER BY ints
+        LIMIT 2
+      RETURN ints
+    expect:
+      ordered: true
+      values: |
+        | ints |
+        | 1 |
+        | 2 |
+      side_effects: {}
+
+  # [4] Sort integers in descending order
+  - name: s4_sort_integers_in_descending_order
+    query: |
+      UNWIND [1, 3, 2] AS ints
+      WITH ints
+        ORDER BY ints DESC
+        LIMIT 2
+      RETURN ints
+    expect:
+      ordered: true
+      values: |
+        | ints |
+        | 3 |
+        | 2 |
+      side_effects: {}
+
+  # [5] Sort floats in ascending order
+  - name: s5_sort_floats_in_ascending_order
+    query: |
+      UNWIND [1.5, 1.3, 999.99] AS floats
+      WITH floats
+        ORDER BY floats
+        LIMIT 2
+      RETURN floats
+    expect:
+      ordered: true
+      values: |
+        | floats |
+        | 1.3 |
+        | 1.5 |
+      side_effects: {}
+
+  # [6] Sort floats in descending order
+  - name: s6_sort_floats_in_descending_order
+    query: |
+      UNWIND [1.5, 1.3, 999.99] AS floats
+      WITH floats
+        ORDER BY floats DESC
+        LIMIT 2
+      RETURN floats
+    expect:
+      ordered: true
+      values: |
+        | floats |
+        | 999.99 |
+        | 1.5 |
+      side_effects: {}
+
+  # [7] Sort strings in ascending order
+  - name: s7_sort_strings_in_ascending_order
+    query: |
+      UNWIND ['.*', '', ' ', 'one'] AS strings
+      WITH strings
+        ORDER BY strings
+        LIMIT 2
+      RETURN strings
+    expect:
+      ordered: true
+      values: |
+        | strings |
+        | '' |
+        | ' ' |
+      side_effects: {}
+
+  # [8] Sort strings in descending order
+  - name: s8_sort_strings_in_descending_order
+    query: |
+      UNWIND ['.*', '', ' ', 'one'] AS strings
+      WITH strings
+        ORDER BY strings DESC
+        LIMIT 2
+      RETURN strings
+    expect:
+      ordered: true
+      values: |
+        | strings |
+        | 'one' |
+        | '.*' |
+      side_effects: {}
+
+  # [9] Sort lists in ascending order
+  - name: s9_sort_lists_in_ascending_order
+    query: |
+      UNWIND [[], ['a'], ['a', 1], [1], [1, 'a'], [1, null], [null, 1], [null, 2]] AS lists
+      WITH lists
+        ORDER BY lists
+        LIMIT 4
+      RETURN lists
+    expect:
+      ordered: true
+      values: |
+        | lists |
+        | [] |
+        | ['a'] |
+        | ['a', 1] |
+        | [1] |
+      side_effects: {}
+
+  # [10] Sort lists in descending order
+  - name: s10_sort_lists_in_descending_order
+    query: |
+      UNWIND [[], ['a'], ['a', 1], [1], [1, 'a'], [1, null], [null, 1], [null, 2]] AS lists
+      WITH lists
+        ORDER BY lists DESC
+        LIMIT 4
+      RETURN lists
+    expect:
+      ordered: true
+      values: |
+        | lists |
+        | [null, 2] |
+        | [null, 1] |
+        | [1, null] |
+        | [1, 'a'] |
+      side_effects: {}
+
+  # [11] Sort dates in ascending order
+  - name: s11_sort_dates_in_ascending_order
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      UNWIND [date({year: 1910, month: 5, day: 6}),
+              date({year: 1980, month: 12, day: 24}),
+              date({year: 1984, month: 10, day: 12}),
+              date({year: 1985, month: 5, day: 6}),
+              date({year: 1980, month: 10, day: 24}),
+              date({year: 1984, month: 10, day: 11})] AS dates
+      WITH dates
+        ORDER BY dates
+        LIMIT 2
+      RETURN dates
+    expect:
+      ordered: true
+      values: |
+        | dates |
+        | '1910-05-06' |
+        | '1980-10-24' |
+      side_effects: {}
+
+  # [12] Sort dates in descending order
+  - name: s12_sort_dates_in_descending_order
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      UNWIND [date({year: 1910, month: 5, day: 6}),
+              date({year: 1980, month: 12, day: 24}),
+              date({year: 1984, month: 10, day: 12}),
+              date({year: 1985, month: 5, day: 6}),
+              date({year: 1980, month: 10, day: 24}),
+              date({year: 1984, month: 10, day: 11})] AS dates
+      WITH dates
+        ORDER BY dates DESC
+        LIMIT 2
+      RETURN dates
+    expect:
+      ordered: true
+      values: |
+        | dates |
+        | '1985-05-06' |
+        | '1984-10-12' |
+      side_effects: {}
+
+  # [13] Sort local times in ascending order
+  - name: s13_sort_local_times_in_ascending_order
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [13] Sort local times in ascending order"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      UNWIND [localtime({hour: 10, minute: 35}),
+              localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}),
+              localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876124}),
+              localtime({hour: 12, minute: 35, second: 13}),
+              localtime({hour: 12, minute: 30, second: 14, nanosecond: 645876123})] AS localtimes
+      WITH localtimes
+        ORDER BY localtimes
+        LIMIT 3
+      RETURN localtimes
+    expect:
+      ordered: true
+      values: |
+        | localtimes |
+        | '10:35' |
+        | '12:30:14.645876123' |
+        | '12:31:14.645876123' |
+      side_effects: {}
+
+  # [14] Sort local times in descending order
+  - name: s14_sort_local_times_in_descending_order
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      UNWIND [localtime({hour: 10, minute: 35}),
+              localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}),
+              localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876124}),
+              localtime({hour: 12, minute: 35, second: 13}),
+              localtime({hour: 12, minute: 30, second: 14, nanosecond: 645876123})] AS localtimes
+      WITH localtimes
+        ORDER BY localtimes DESC
+        LIMIT 3
+      RETURN localtimes
+    expect:
+      ordered: true
+      values: |
+        | localtimes |
+        | '12:35:13' |
+        | '12:31:14.645876124' |
+        | '12:31:14.645876123' |
+      side_effects: {}
+
+  # [15] Sort times in ascending order
+  - name: s15_sort_times_in_ascending_order
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      UNWIND [time({hour: 10, minute: 35, timezone: '-08:00'}),
+              time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}),
+              time({hour: 12, minute: 31, second: 14, nanosecond: 645876124, timezone: '+01:00'}),
+              time({hour: 12, minute: 35, second: 15, timezone: '+05:00'}),
+              time({hour: 12, minute: 30, second: 14, nanosecond: 645876123, timezone: '+01:01'})] AS times
+      WITH times
+        ORDER BY times
+        LIMIT 3
+      RETURN times
+    expect:
+      ordered: true
+      values: |
+        | times |
+        | '12:35:15+05:00' |
+        | '12:30:14.645876123+01:01' |
+        | '12:31:14.645876123+01:00' |
+      side_effects: {}
+
+  # [16] Sort times in descending order
+  - name: s16_sort_times_in_descending_order
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [16] Sort times in descending order"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      UNWIND [time({hour: 10, minute: 35, timezone: '-08:00'}),
+              time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}),
+              time({hour: 12, minute: 31, second: 14, nanosecond: 645876124, timezone: '+01:00'}),
+              time({hour: 12, minute: 35, second: 15, timezone: '+05:00'}),
+              time({hour: 12, minute: 30, second: 14, nanosecond: 645876123, timezone: '+01:01'})] AS times
+      WITH times
+        ORDER BY times DESC
+        LIMIT 3
+      RETURN times
+    expect:
+      ordered: true
+      values: |
+        | times |
+        | '10:35-08:00' |
+        | '12:31:14.645876124+01:00' |
+        | '12:31:14.645876123+01:00' |
+      side_effects: {}
+
+  # [17] Sort local date times in ascending order
+  - name: s17_sort_local_date_times_in_ascending_order
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [17] Sort local date times in ascending order"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      UNWIND [localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12}),
+              localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}),
+              localdatetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1}),
+              localdatetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999}),
+              localdatetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14})] AS localdatetimes
+      WITH localdatetimes
+        ORDER BY localdatetimes
+        LIMIT 3
+      RETURN localdatetimes
+    expect:
+      ordered: true
+      values: |
+        | localdatetimes |
+        | '0001-01-01T01:01:01.000000001' |
+        | '1980-12-11T12:31:14' |
+        | '1984-10-11T12:30:14.000000012' |
+      side_effects: {}
+
+  # [18] Sort local date times in descending order
+  - name: s18_sort_local_date_times_in_descending_order
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [18] Sort local date times in descending order"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      UNWIND [localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12}),
+              localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}),
+              localdatetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1}),
+              localdatetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999}),
+              localdatetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14})] AS localdatetimes
+      WITH localdatetimes
+        ORDER BY localdatetimes DESC
+        LIMIT 3
+      RETURN localdatetimes
+    expect:
+      ordered: true
+      values: |
+        | localdatetimes |
+        | '9999-09-09T09:59:59.999999999' |
+        | '1984-10-11T12:31:14.645876123' |
+        | '1984-10-11T12:30:14.000000012' |
+      side_effects: {}
+
+  # [19] Sort date times in ascending order
+  - name: s19_sort_date_times_in_ascending_order
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [19] Sort date times in ascending order"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      UNWIND [datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12, timezone: '+00:15'}),
+              datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+00:17'}),
+              datetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1, timezone: '-11:59'}),
+              datetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999, timezone: '+11:59'}),
+              datetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14, timezone: '-11:59'})] AS datetimes
+      WITH datetimes
+        ORDER BY datetimes
+        LIMIT 3
+      RETURN datetimes
+    expect:
+      ordered: true
+      values: |
+        | datetimes |
+        | '0001-01-01T01:01:01.000000001-11:59' |
+        | '1980-12-11T12:31:14-11:59' |
+        | '1984-10-11T12:31:14.645876123+00:17' |
+      side_effects: {}
+
+  # [20] Sort date times in descending order
+  - name: s20_sort_date_times_in_descending_order
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [20] Sort date times in descending order"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      UNWIND [datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12, timezone: '+00:15'}),
+              datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+00:17'}),
+              datetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1, timezone: '-11:59'}),
+              datetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999, timezone: '+11:59'}),
+              datetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14, timezone: '-11:59'})] AS datetimes
+      WITH datetimes
+        ORDER BY datetimes DESC
+        LIMIT 3
+      RETURN datetimes
+    expect:
+      ordered: true
+      values: |
+        | datetimes |
+        | '9999-09-09T09:59:59.999999999+11:59' |
+        | '1984-10-11T12:30:14.000000012+00:15' |
+        | '1984-10-11T12:31:14.645876123+00:17' |
+      side_effects: {}
+
+  # [21] Sort distinct types in ascending order
+  - name: s21_sort_distinct_types_in_ascending_order
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [21] Sort distinct types in ascending order"
+      issue: "#799"
+    setup:
+      - |
+        CREATE (:N)-[:REL]->()
+    query: |
+      MATCH p = (n:N)-[r:REL]->()
+      UNWIND [n, r, p, 1.5, ['list'], 'text', null, false, 0.0 / 0.0, {a: 'map'}] AS types
+      WITH types
+        ORDER BY types
+        LIMIT 5
+      RETURN types
+    expect:
+      values: |
+        | types |
+        | {a: 'map'} |
+        | (:N) |
+        | [:REL] |
+        | ['list'] |
+        | <(:N)-[:REL]->()> |
+      side_effects: {}
+
+  # [22] Sort distinct types in descending order
+  - name: s22_sort_distinct_types_in_descending_order
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [22] Sort distinct types in descending order"
+      issue: "#799"
+    setup:
+      - |
+        CREATE (:N)-[:REL]->()
+    query: |
+      MATCH p = (n:N)-[r:REL]->()
+      UNWIND [n, r, p, 1.5, ['list'], 'text', null, false, 0.0 / 0.0, {a: 'map'}] AS types
+      WITH types
+        ORDER BY types DESC
+        LIMIT 5
+      RETURN types
+    expect:
+      values: |
+        | types |
+        | null |
+        | NaN |
+        | 1.5 |
+        | false |
+        | 'text' |
+      side_effects: {}
+
+  # [23] Sort by a boolean variable projected from a node property in ascending order #1
+  - name: s23_sort_by_a_boolean_variable_projected_from_a_node_property_in_ascending_order_1
+    setup:
+      - |
+        CREATE (:A {bool: true}),
+               (:B {bool: false}),
+               (:C {bool: false}),
+               (:D {bool: true}),
+               (:E {bool: false})
+    query: |
+      MATCH (a)
+      WITH a, a.bool AS bool
+      WITH a, bool
+        ORDER BY bool
+        LIMIT 3
+      RETURN a, bool
+    expect:
+      values: |
+        | a | bool |
+        | (:B {bool: false}) | false |
+        | (:C {bool: false}) | false |
+        | (:E {bool: false}) | false |
+      side_effects: {}
+
+  # [23] Sort by a boolean variable projected from a node property in ascending order #2
+  - name: s23_sort_by_a_boolean_variable_projected_from_a_node_property_in_ascending_order_2
+    setup:
+      - |
+        CREATE (:A {bool: true}),
+               (:B {bool: false}),
+               (:C {bool: false}),
+               (:D {bool: true}),
+               (:E {bool: false})
+    query: |
+      MATCH (a)
+      WITH a, a.bool AS bool
+      WITH a, bool
+        ORDER BY bool ASC
+        LIMIT 3
+      RETURN a, bool
+    expect:
+      values: |
+        | a | bool |
+        | (:B {bool: false}) | false |
+        | (:C {bool: false}) | false |
+        | (:E {bool: false}) | false |
+      side_effects: {}
+
+  # [23] Sort by a boolean variable projected from a node property in ascending order #3
+  - name: s23_sort_by_a_boolean_variable_projected_from_a_node_property_in_ascending_order_3
+    setup:
+      - |
+        CREATE (:A {bool: true}),
+               (:B {bool: false}),
+               (:C {bool: false}),
+               (:D {bool: true}),
+               (:E {bool: false})
+    query: |
+      MATCH (a)
+      WITH a, a.bool AS bool
+      WITH a, bool
+        ORDER BY bool ASCENDING
+        LIMIT 3
+      RETURN a, bool
+    expect:
+      values: |
+        | a | bool |
+        | (:B {bool: false}) | false |
+        | (:C {bool: false}) | false |
+        | (:E {bool: false}) | false |
+      side_effects: {}
+
+  # [24] Sort by a boolean variable projected from a node property in descending order #1
+  - name: s24_sort_by_a_boolean_variable_projected_from_a_node_property_in_descending_order_1
+    setup:
+      - |
+        CREATE (:A {bool: true}),
+               (:B {bool: false}),
+               (:C {bool: false}),
+               (:D {bool: true}),
+               (:E {bool: false})
+    query: |
+      MATCH (a)
+      WITH a, a.bool AS bool
+      WITH a, bool
+        ORDER BY bool DESC
+        LIMIT 2
+      RETURN a, bool
+    expect:
+      values: |
+        | a | bool |
+        | (:A {bool: true}) | true |
+        | (:D {bool: true}) | true |
+      side_effects: {}
+
+  # [24] Sort by a boolean variable projected from a node property in descending order #2
+  - name: s24_sort_by_a_boolean_variable_projected_from_a_node_property_in_descending_order_2
+    setup:
+      - |
+        CREATE (:A {bool: true}),
+               (:B {bool: false}),
+               (:C {bool: false}),
+               (:D {bool: true}),
+               (:E {bool: false})
+    query: |
+      MATCH (a)
+      WITH a, a.bool AS bool
+      WITH a, bool
+        ORDER BY bool DESCENDING
+        LIMIT 2
+      RETURN a, bool
+    expect:
+      values: |
+        | a | bool |
+        | (:A {bool: true}) | true |
+        | (:D {bool: true}) | true |
+      side_effects: {}
+
+  # [25] Sort by an integer variable projected from a node property in ascending order #1
+  - name: s25_sort_by_an_integer_variable_projected_from_a_node_property_in_ascending_order_1
+    setup:
+      - |
+        CREATE (:A {num: 9}),
+               (:B {num: 5}),
+               (:C {num: 30}),
+               (:D {num: -11}),
+               (:E {num: 7054})
+    query: |
+      MATCH (a)
+      WITH a, a.num AS num
+      WITH a, num
+        ORDER BY num
+        LIMIT 3
+      RETURN a, num
+    expect:
+      values: |
+        | a | num |
+        | (:D {num: -11}) | -11 |
+        | (:B {num: 5}) | 5 |
+        | (:A {num: 9}) | 9 |
+      side_effects: {}
+
+  # [25] Sort by an integer variable projected from a node property in ascending order #2
+  - name: s25_sort_by_an_integer_variable_projected_from_a_node_property_in_ascending_order_2
+    setup:
+      - |
+        CREATE (:A {num: 9}),
+               (:B {num: 5}),
+               (:C {num: 30}),
+               (:D {num: -11}),
+               (:E {num: 7054})
+    query: |
+      MATCH (a)
+      WITH a, a.num AS num
+      WITH a, num
+        ORDER BY num ASC
+        LIMIT 3
+      RETURN a, num
+    expect:
+      values: |
+        | a | num |
+        | (:D {num: -11}) | -11 |
+        | (:B {num: 5}) | 5 |
+        | (:A {num: 9}) | 9 |
+      side_effects: {}
+
+  # [25] Sort by an integer variable projected from a node property in ascending order #3
+  - name: s25_sort_by_an_integer_variable_projected_from_a_node_property_in_ascending_order_3
+    setup:
+      - |
+        CREATE (:A {num: 9}),
+               (:B {num: 5}),
+               (:C {num: 30}),
+               (:D {num: -11}),
+               (:E {num: 7054})
+    query: |
+      MATCH (a)
+      WITH a, a.num AS num
+      WITH a, num
+        ORDER BY num ASCENDING
+        LIMIT 3
+      RETURN a, num
+    expect:
+      values: |
+        | a | num |
+        | (:D {num: -11}) | -11 |
+        | (:B {num: 5}) | 5 |
+        | (:A {num: 9}) | 9 |
+      side_effects: {}
+
+  # [26] Sort by an integer variable projected from a node property in descending order #1
+  - name: s26_sort_by_an_integer_variable_projected_from_a_node_property_in_descending_order_1
+    setup:
+      - |
+        CREATE (:A {num: 9}),
+               (:B {num: 5}),
+               (:C {num: 30}),
+               (:D {num: -11}),
+               (:E {num: 7054})
+    query: |
+      MATCH (a)
+      WITH a, a.num AS num
+      WITH a, num
+        ORDER BY num DESC
+        LIMIT 3
+      RETURN a, num
+    expect:
+      values: |
+        | a | num |
+        | (:E {num: 7054}) | 7054 |
+        | (:C {num: 30}) | 30 |
+        | (:A {num: 9}) | 9 |
+      side_effects: {}
+
+  # [26] Sort by an integer variable projected from a node property in descending order #2
+  - name: s26_sort_by_an_integer_variable_projected_from_a_node_property_in_descending_order_2
+    setup:
+      - |
+        CREATE (:A {num: 9}),
+               (:B {num: 5}),
+               (:C {num: 30}),
+               (:D {num: -11}),
+               (:E {num: 7054})
+    query: |
+      MATCH (a)
+      WITH a, a.num AS num
+      WITH a, num
+        ORDER BY num DESCENDING
+        LIMIT 3
+      RETURN a, num
+    expect:
+      values: |
+        | a | num |
+        | (:E {num: 7054}) | 7054 |
+        | (:C {num: 30}) | 30 |
+        | (:A {num: 9}) | 9 |
+      side_effects: {}
+
+  # [27] Sort by a float variable projected from a node property in ascending order #1
+  - name: s27_sort_by_a_float_variable_projected_from_a_node_property_in_ascending_order_1
+    setup:
+      - |
+        CREATE (:A {num: 5.025648}),
+               (:B {num: 30.94857}),
+               (:C {num: 30.94856}),
+               (:D {num: -11.2943}),
+               (:E {num: 7054.008})
+    query: |
+      MATCH (a)
+      WITH a, a.num AS num
+      WITH a, num
+        ORDER BY num
+        LIMIT 3
+      RETURN a, num
+    expect:
+      values: |
+        | a | num |
+        | (:D {num: -11.2943}) | -11.2943 |
+        | (:A {num: 5.025648}) | 5.025648 |
+        | (:C {num: 30.94856}) | 30.94856 |
+      side_effects: {}
+
+  # [27] Sort by a float variable projected from a node property in ascending order #2
+  - name: s27_sort_by_a_float_variable_projected_from_a_node_property_in_ascending_order_2
+    setup:
+      - |
+        CREATE (:A {num: 5.025648}),
+               (:B {num: 30.94857}),
+               (:C {num: 30.94856}),
+               (:D {num: -11.2943}),
+               (:E {num: 7054.008})
+    query: |
+      MATCH (a)
+      WITH a, a.num AS num
+      WITH a, num
+        ORDER BY num ASC
+        LIMIT 3
+      RETURN a, num
+    expect:
+      values: |
+        | a | num |
+        | (:D {num: -11.2943}) | -11.2943 |
+        | (:A {num: 5.025648}) | 5.025648 |
+        | (:C {num: 30.94856}) | 30.94856 |
+      side_effects: {}
+
+  # [27] Sort by a float variable projected from a node property in ascending order #3
+  - name: s27_sort_by_a_float_variable_projected_from_a_node_property_in_ascending_order_3
+    setup:
+      - |
+        CREATE (:A {num: 5.025648}),
+               (:B {num: 30.94857}),
+               (:C {num: 30.94856}),
+               (:D {num: -11.2943}),
+               (:E {num: 7054.008})
+    query: |
+      MATCH (a)
+      WITH a, a.num AS num
+      WITH a, num
+        ORDER BY num ASCENDING
+        LIMIT 3
+      RETURN a, num
+    expect:
+      values: |
+        | a | num |
+        | (:D {num: -11.2943}) | -11.2943 |
+        | (:A {num: 5.025648}) | 5.025648 |
+        | (:C {num: 30.94856}) | 30.94856 |
+      side_effects: {}
+
+  # [28] Sort by a float variable projected from a node property in descending order #1
+  - name: s28_sort_by_a_float_variable_projected_from_a_node_property_in_descending_order_1
+    setup:
+      - |
+        CREATE (:A {num: 5.025648}),
+               (:B {num: 30.94857}),
+               (:C {num: 30.94856}),
+               (:D {num: -11.2943}),
+               (:E {num: 7054.008})
+    query: |
+      MATCH (a)
+      WITH a, a.num AS num
+      WITH a, num
+        ORDER BY num DESC
+        LIMIT 3
+      RETURN a, num
+    expect:
+      values: |
+        | a | num |
+        | (:E {num: 7054.008}) | 7054.008 |
+        | (:B {num: 30.94857}) | 30.94857 |
+        | (:C {num: 30.94856}) | 30.94856 |
+      side_effects: {}
+
+  # [28] Sort by a float variable projected from a node property in descending order #2
+  - name: s28_sort_by_a_float_variable_projected_from_a_node_property_in_descending_order_2
+    setup:
+      - |
+        CREATE (:A {num: 5.025648}),
+               (:B {num: 30.94857}),
+               (:C {num: 30.94856}),
+               (:D {num: -11.2943}),
+               (:E {num: 7054.008})
+    query: |
+      MATCH (a)
+      WITH a, a.num AS num
+      WITH a, num
+        ORDER BY num DESCENDING
+        LIMIT 3
+      RETURN a, num
+    expect:
+      values: |
+        | a | num |
+        | (:E {num: 7054.008}) | 7054.008 |
+        | (:B {num: 30.94857}) | 30.94857 |
+        | (:C {num: 30.94856}) | 30.94856 |
+      side_effects: {}
+
+  # [29] Sort by a string variable projected from a node property in ascending order #1
+  - name: s29_sort_by_a_string_variable_projected_from_a_node_property_in_ascending_order_1
+    setup:
+      - |
+        CREATE (:A {name: 'lorem'}),
+               (:B {name: 'ipsum'}),
+               (:C {name: 'dolor'}),
+               (:D {name: 'sit'}),
+               (:E {name: 'amet'})
+    query: |
+      MATCH (a)
+      WITH a, a.name AS name
+      WITH a, name
+        ORDER BY name
+        LIMIT 3
+      RETURN a, name
+    expect:
+      values: |
+        | a | name |
+        | (:E {name: 'amet'}) | 'amet' |
+        | (:C {name: 'dolor'}) | 'dolor' |
+        | (:B {name: 'ipsum'}) | 'ipsum' |
+      side_effects: {}
+
+  # [29] Sort by a string variable projected from a node property in ascending order #2
+  - name: s29_sort_by_a_string_variable_projected_from_a_node_property_in_ascending_order_2
+    setup:
+      - |
+        CREATE (:A {name: 'lorem'}),
+               (:B {name: 'ipsum'}),
+               (:C {name: 'dolor'}),
+               (:D {name: 'sit'}),
+               (:E {name: 'amet'})
+    query: |
+      MATCH (a)
+      WITH a, a.name AS name
+      WITH a, name
+        ORDER BY name ASC
+        LIMIT 3
+      RETURN a, name
+    expect:
+      values: |
+        | a | name |
+        | (:E {name: 'amet'}) | 'amet' |
+        | (:C {name: 'dolor'}) | 'dolor' |
+        | (:B {name: 'ipsum'}) | 'ipsum' |
+      side_effects: {}
+
+  # [29] Sort by a string variable projected from a node property in ascending order #3
+  - name: s29_sort_by_a_string_variable_projected_from_a_node_property_in_ascending_order_3
+    setup:
+      - |
+        CREATE (:A {name: 'lorem'}),
+               (:B {name: 'ipsum'}),
+               (:C {name: 'dolor'}),
+               (:D {name: 'sit'}),
+               (:E {name: 'amet'})
+    query: |
+      MATCH (a)
+      WITH a, a.name AS name
+      WITH a, name
+        ORDER BY name ASCENDING
+        LIMIT 3
+      RETURN a, name
+    expect:
+      values: |
+        | a | name |
+        | (:E {name: 'amet'}) | 'amet' |
+        | (:C {name: 'dolor'}) | 'dolor' |
+        | (:B {name: 'ipsum'}) | 'ipsum' |
+      side_effects: {}
+
+  # [30] Sort by a string variable projected from a node property in descending order #1
+  - name: s30_sort_by_a_string_variable_projected_from_a_node_property_in_descending_order_1
+    setup:
+      - |
+        CREATE (:A {name: 'lorem'}),
+               (:B {name: 'ipsum'}),
+               (:C {name: 'dolor'}),
+               (:D {name: 'sit'}),
+               (:E {name: 'amet'})
+    query: |
+      MATCH (a)
+      WITH a, a.name AS name
+      WITH a, name
+        ORDER BY name DESC
+        LIMIT 3
+      RETURN a, name
+    expect:
+      values: |
+        | a | name |
+        | (:D {name: 'sit'}) | 'sit' |
+        | (:A {name: 'lorem'}) | 'lorem' |
+        | (:B {name: 'ipsum'}) | 'ipsum' |
+      side_effects: {}
+
+  # [30] Sort by a string variable projected from a node property in descending order #2
+  - name: s30_sort_by_a_string_variable_projected_from_a_node_property_in_descending_order_2
+    setup:
+      - |
+        CREATE (:A {name: 'lorem'}),
+               (:B {name: 'ipsum'}),
+               (:C {name: 'dolor'}),
+               (:D {name: 'sit'}),
+               (:E {name: 'amet'})
+    query: |
+      MATCH (a)
+      WITH a, a.name AS name
+      WITH a, name
+        ORDER BY name DESCENDING
+        LIMIT 3
+      RETURN a, name
+    expect:
+      values: |
+        | a | name |
+        | (:D {name: 'sit'}) | 'sit' |
+        | (:A {name: 'lorem'}) | 'lorem' |
+        | (:B {name: 'ipsum'}) | 'ipsum' |
+      side_effects: {}
+
+  # [31] Sort by a list variable projected from a node property in ascending order #1
+  - name: s31_sort_by_a_list_variable_projected_from_a_node_property_in_ascending_order_1
+    setup:
+      - |
+        CREATE (:A {list: [2, -2]}),
+               (:B {list: [1, 2]}),
+               (:C {list: [300, 0]}),
+               (:D {list: [1, -20]}),
+               (:E {list: [2, -2, 100]})
+    query: |
+      MATCH (a)
+      WITH a, a.list AS list
+      WITH a, list
+        ORDER BY list
+        LIMIT 3
+      RETURN a, list
+    expect:
+      values: |
+        | a | list |
+        | (:B {list: [1, 2]}) | [1, 2] |
+        | (:D {list: [1, -20]}) | [1, -20] |
+        | (:A {list: [2, -2]}) | [2, -2] |
+      side_effects: {}
+
+  # [31] Sort by a list variable projected from a node property in ascending order #2
+  - name: s31_sort_by_a_list_variable_projected_from_a_node_property_in_ascending_order_2
+    setup:
+      - |
+        CREATE (:A {list: [2, -2]}),
+               (:B {list: [1, 2]}),
+               (:C {list: [300, 0]}),
+               (:D {list: [1, -20]}),
+               (:E {list: [2, -2, 100]})
+    query: |
+      MATCH (a)
+      WITH a, a.list AS list
+      WITH a, list
+        ORDER BY list ASC
+        LIMIT 3
+      RETURN a, list
+    expect:
+      values: |
+        | a | list |
+        | (:B {list: [1, 2]}) | [1, 2] |
+        | (:D {list: [1, -20]}) | [1, -20] |
+        | (:A {list: [2, -2]}) | [2, -2] |
+      side_effects: {}
+
+  # [31] Sort by a list variable projected from a node property in ascending order #3
+  - name: s31_sort_by_a_list_variable_projected_from_a_node_property_in_ascending_order_3
+    setup:
+      - |
+        CREATE (:A {list: [2, -2]}),
+               (:B {list: [1, 2]}),
+               (:C {list: [300, 0]}),
+               (:D {list: [1, -20]}),
+               (:E {list: [2, -2, 100]})
+    query: |
+      MATCH (a)
+      WITH a, a.list AS list
+      WITH a, list
+        ORDER BY list ASCENDING
+        LIMIT 3
+      RETURN a, list
+    expect:
+      values: |
+        | a | list |
+        | (:B {list: [1, 2]}) | [1, 2] |
+        | (:D {list: [1, -20]}) | [1, -20] |
+        | (:A {list: [2, -2]}) | [2, -2] |
+      side_effects: {}
+
+  # [32] Sort by a list variable projected from a node property in descending order #1
+  - name: s32_sort_by_a_list_variable_projected_from_a_node_property_in_descending_order_1
+    setup:
+      - |
+        CREATE (:A {list: [2, -2]}),
+               (:B {list: [1, 2]}),
+               (:C {list: [300, 0]}),
+               (:D {list: [1, -20]}),
+               (:E {list: [2, -2, 100]})
+    query: |
+      MATCH (a)
+      WITH a, a.list AS list
+      WITH a, list
+        ORDER BY list DESC
+        LIMIT 3
+      RETURN a, list
+    expect:
+      values: |
+        | a | list |
+        | (:C {list: [300, 0]}) | [300, 0] |
+        | (:E {list: [2, -2, 100]}) | [2, -2, 100] |
+        | (:A {list: [2, -2]}) | [2, -2] |
+      side_effects: {}
+
+  # [32] Sort by a list variable projected from a node property in descending order #2
+  - name: s32_sort_by_a_list_variable_projected_from_a_node_property_in_descending_order_2
+    setup:
+      - |
+        CREATE (:A {list: [2, -2]}),
+               (:B {list: [1, 2]}),
+               (:C {list: [300, 0]}),
+               (:D {list: [1, -20]}),
+               (:E {list: [2, -2, 100]})
+    query: |
+      MATCH (a)
+      WITH a, a.list AS list
+      WITH a, list
+        ORDER BY list DESCENDING
+        LIMIT 3
+      RETURN a, list
+    expect:
+      values: |
+        | a | list |
+        | (:C {list: [300, 0]}) | [300, 0] |
+        | (:E {list: [2, -2, 100]}) | [2, -2, 100] |
+        | (:A {list: [2, -2]}) | [2, -2] |
+      side_effects: {}
+
+  # [33] Sort by a date variable projected from a node property in ascending order #1
+  - name: s33_sort_by_a_date_variable_projected_from_a_node_property_in_ascending_order_1
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {date: date({year: 1910, month: 5, day: 6})}),
+               (:B {date: date({year: 1980, month: 12, day: 24})}),
+               (:C {date: date({year: 1984, month: 10, day: 12})}),
+               (:D {date: date({year: 1985, month: 5, day: 6})}),
+               (:E {date: date({year: 1980, month: 10, day: 24})}),
+               (:F {date: date({year: 1984, month: 10, day: 11})})
+    query: |
+      MATCH (a)
+      WITH a, a.date AS date
+      WITH a, date
+        ORDER BY date
+        LIMIT 2
+      RETURN a, date
+    expect:
+      values: |
+        | a | date |
+        | (:A {date: '1910-05-06'}) | '1910-05-06' |
+        | (:E {date: '1980-10-24'}) | '1980-10-24' |
+      side_effects: {}
+
+  # [33] Sort by a date variable projected from a node property in ascending order #2
+  - name: s33_sort_by_a_date_variable_projected_from_a_node_property_in_ascending_order_2
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {date: date({year: 1910, month: 5, day: 6})}),
+               (:B {date: date({year: 1980, month: 12, day: 24})}),
+               (:C {date: date({year: 1984, month: 10, day: 12})}),
+               (:D {date: date({year: 1985, month: 5, day: 6})}),
+               (:E {date: date({year: 1980, month: 10, day: 24})}),
+               (:F {date: date({year: 1984, month: 10, day: 11})})
+    query: |
+      MATCH (a)
+      WITH a, a.date AS date
+      WITH a, date
+        ORDER BY date ASC
+        LIMIT 2
+      RETURN a, date
+    expect:
+      values: |
+        | a | date |
+        | (:A {date: '1910-05-06'}) | '1910-05-06' |
+        | (:E {date: '1980-10-24'}) | '1980-10-24' |
+      side_effects: {}
+
+  # [33] Sort by a date variable projected from a node property in ascending order #3
+  - name: s33_sort_by_a_date_variable_projected_from_a_node_property_in_ascending_order_3
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {date: date({year: 1910, month: 5, day: 6})}),
+               (:B {date: date({year: 1980, month: 12, day: 24})}),
+               (:C {date: date({year: 1984, month: 10, day: 12})}),
+               (:D {date: date({year: 1985, month: 5, day: 6})}),
+               (:E {date: date({year: 1980, month: 10, day: 24})}),
+               (:F {date: date({year: 1984, month: 10, day: 11})})
+    query: |
+      MATCH (a)
+      WITH a, a.date AS date
+      WITH a, date
+        ORDER BY date ASCENDING
+        LIMIT 2
+      RETURN a, date
+    expect:
+      values: |
+        | a | date |
+        | (:A {date: '1910-05-06'}) | '1910-05-06' |
+        | (:E {date: '1980-10-24'}) | '1980-10-24' |
+      side_effects: {}
+
+  # [34] Sort by a date variable projected from a node property in descending order #1
+  - name: s34_sort_by_a_date_variable_projected_from_a_node_property_in_descending_order_1
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {date: date({year: 1910, month: 5, day: 6})}),
+               (:B {date: date({year: 1980, month: 12, day: 24})}),
+               (:C {date: date({year: 1984, month: 10, day: 12})}),
+               (:D {date: date({year: 1985, month: 5, day: 6})}),
+               (:E {date: date({year: 1980, month: 10, day: 24})}),
+               (:F {date: date({year: 1984, month: 10, day: 11})})
+    query: |
+      MATCH (a)
+      WITH a, a.date AS date
+      WITH a, date
+        ORDER BY date DESC
+        LIMIT 2
+      RETURN a, date
+    expect:
+      values: |
+        | a | date |
+        | (:D {date: '1985-05-06'}) | '1985-05-06' |
+        | (:C {date: '1984-10-12'}) | '1984-10-12' |
+      side_effects: {}
+
+  # [34] Sort by a date variable projected from a node property in descending order #2
+  - name: s34_sort_by_a_date_variable_projected_from_a_node_property_in_descending_order_2
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {date: date({year: 1910, month: 5, day: 6})}),
+               (:B {date: date({year: 1980, month: 12, day: 24})}),
+               (:C {date: date({year: 1984, month: 10, day: 12})}),
+               (:D {date: date({year: 1985, month: 5, day: 6})}),
+               (:E {date: date({year: 1980, month: 10, day: 24})}),
+               (:F {date: date({year: 1984, month: 10, day: 11})})
+    query: |
+      MATCH (a)
+      WITH a, a.date AS date
+      WITH a, date
+        ORDER BY date DESCENDING
+        LIMIT 2
+      RETURN a, date
+    expect:
+      values: |
+        | a | date |
+        | (:D {date: '1985-05-06'}) | '1985-05-06' |
+        | (:C {date: '1984-10-12'}) | '1984-10-12' |
+      side_effects: {}
+
+  # [35] Sort by a local time variable projected from a node property in ascending order #1
+  - name: s35_sort_by_a_local_time_variable_projected_from_a_node_property_in_ascending_order_1
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [35] Sort by a local time variable projected from a node property in ascending order #1"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {time: localtime({hour: 10, minute: 35})}),
+               (:B {time: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123})}),
+               (:C {time: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876124})}),
+               (:D {time: localtime({hour: 12, minute: 30, second: 14, nanosecond: 645876123})}),
+               (:E {time: localtime({hour: 12, minute: 31, second: 15})})
+    query: |
+      MATCH (a)
+      WITH a, a.time AS time
+      WITH a, time
+        ORDER BY time
+        LIMIT 3
+      RETURN a, time
+    expect:
+      values: |
+        | a | time |
+        | (:A {time: '10:35'}) | '10:35' |
+        | (:D {time: '12:30:14.645876123'}) | '12:30:14.645876123' |
+        | (:B {time: '12:31:14.645876123'}) | '12:31:14.645876123' |
+      side_effects: {}
+
+  # [35] Sort by a local time variable projected from a node property in ascending order #2
+  - name: s35_sort_by_a_local_time_variable_projected_from_a_node_property_in_ascending_order_2
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [35] Sort by a local time variable projected from a node property in ascending order #2"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {time: localtime({hour: 10, minute: 35})}),
+               (:B {time: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123})}),
+               (:C {time: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876124})}),
+               (:D {time: localtime({hour: 12, minute: 30, second: 14, nanosecond: 645876123})}),
+               (:E {time: localtime({hour: 12, minute: 31, second: 15})})
+    query: |
+      MATCH (a)
+      WITH a, a.time AS time
+      WITH a, time
+        ORDER BY time ASC
+        LIMIT 3
+      RETURN a, time
+    expect:
+      values: |
+        | a | time |
+        | (:A {time: '10:35'}) | '10:35' |
+        | (:D {time: '12:30:14.645876123'}) | '12:30:14.645876123' |
+        | (:B {time: '12:31:14.645876123'}) | '12:31:14.645876123' |
+      side_effects: {}
+
+  # [35] Sort by a local time variable projected from a node property in ascending order #3
+  - name: s35_sort_by_a_local_time_variable_projected_from_a_node_property_in_ascending_order_3
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [35] Sort by a local time variable projected from a node property in ascending order #3"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {time: localtime({hour: 10, minute: 35})}),
+               (:B {time: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123})}),
+               (:C {time: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876124})}),
+               (:D {time: localtime({hour: 12, minute: 30, second: 14, nanosecond: 645876123})}),
+               (:E {time: localtime({hour: 12, minute: 31, second: 15})})
+    query: |
+      MATCH (a)
+      WITH a, a.time AS time
+      WITH a, time
+        ORDER BY time ASCENDING
+        LIMIT 3
+      RETURN a, time
+    expect:
+      values: |
+        | a | time |
+        | (:A {time: '10:35'}) | '10:35' |
+        | (:D {time: '12:30:14.645876123'}) | '12:30:14.645876123' |
+        | (:B {time: '12:31:14.645876123'}) | '12:31:14.645876123' |
+      side_effects: {}
+
+  # [36] Sort by a local time variable projected from a node property in descending order #1
+  - name: s36_sort_by_a_local_time_variable_projected_from_a_node_property_in_descending_order_1
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {time: localtime({hour: 10, minute: 35})}),
+               (:B {time: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123})}),
+               (:C {time: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876124})}),
+               (:D {time: localtime({hour: 12, minute: 30, second: 14, nanosecond: 645876123})}),
+               (:E {time: localtime({hour: 12, minute: 31, second: 15})})
+    query: |
+      MATCH (a)
+      WITH a, a.time AS time
+      WITH a, time
+        ORDER BY time DESC
+        LIMIT 3
+      RETURN a, time
+    expect:
+      values: |
+        | a | time |
+        | (:E {time: '12:31:15'}) | '12:31:15' |
+        | (:C {time: '12:31:14.645876124'}) | '12:31:14.645876124' |
+        | (:B {time: '12:31:14.645876123'}) | '12:31:14.645876123' |
+      side_effects: {}
+
+  # [36] Sort by a local time variable projected from a node property in descending order #2
+  - name: s36_sort_by_a_local_time_variable_projected_from_a_node_property_in_descending_order_2
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {time: localtime({hour: 10, minute: 35})}),
+               (:B {time: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123})}),
+               (:C {time: localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876124})}),
+               (:D {time: localtime({hour: 12, minute: 30, second: 14, nanosecond: 645876123})}),
+               (:E {time: localtime({hour: 12, minute: 31, second: 15})})
+    query: |
+      MATCH (a)
+      WITH a, a.time AS time
+      WITH a, time
+        ORDER BY time DESCENDING
+        LIMIT 3
+      RETURN a, time
+    expect:
+      values: |
+        | a | time |
+        | (:E {time: '12:31:15'}) | '12:31:15' |
+        | (:C {time: '12:31:14.645876124'}) | '12:31:14.645876124' |
+        | (:B {time: '12:31:14.645876123'}) | '12:31:14.645876123' |
+      side_effects: {}
+
+  # [37] Sort by a time variable projected from a node property in ascending order #1
+  - name: s37_sort_by_a_time_variable_projected_from_a_node_property_in_ascending_order_1
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {time: time({hour: 10, minute: 35, timezone: '-08:00'})}),
+               (:B {time: time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'})}),
+               (:C {time: time({hour: 12, minute: 31, second: 14, nanosecond: 645876124, timezone: '+01:00'})}),
+               (:D {time: time({hour: 12, minute: 35, second: 15, timezone: '+05:00'})}),
+               (:E {time: time({hour: 12, minute: 30, second: 14, nanosecond: 645876123, timezone: '+01:01'})})
+    query: |
+      MATCH (a)
+      WITH a, a.time AS time
+      WITH a, time
+        ORDER BY time
+        LIMIT 3
+      RETURN a, time
+    expect:
+      values: |
+        | a | time |
+        | (:D {time: '12:35:15+05:00'}) | '12:35:15+05:00' |
+        | (:E {time: '12:30:14.645876123+01:01'}) | '12:30:14.645876123+01:01' |
+        | (:B {time: '12:31:14.645876123+01:00'}) | '12:31:14.645876123+01:00' |
+      side_effects: {}
+
+  # [37] Sort by a time variable projected from a node property in ascending order #2
+  - name: s37_sort_by_a_time_variable_projected_from_a_node_property_in_ascending_order_2
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {time: time({hour: 10, minute: 35, timezone: '-08:00'})}),
+               (:B {time: time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'})}),
+               (:C {time: time({hour: 12, minute: 31, second: 14, nanosecond: 645876124, timezone: '+01:00'})}),
+               (:D {time: time({hour: 12, minute: 35, second: 15, timezone: '+05:00'})}),
+               (:E {time: time({hour: 12, minute: 30, second: 14, nanosecond: 645876123, timezone: '+01:01'})})
+    query: |
+      MATCH (a)
+      WITH a, a.time AS time
+      WITH a, time
+        ORDER BY time ASC
+        LIMIT 3
+      RETURN a, time
+    expect:
+      values: |
+        | a | time |
+        | (:D {time: '12:35:15+05:00'}) | '12:35:15+05:00' |
+        | (:E {time: '12:30:14.645876123+01:01'}) | '12:30:14.645876123+01:01' |
+        | (:B {time: '12:31:14.645876123+01:00'}) | '12:31:14.645876123+01:00' |
+      side_effects: {}
+
+  # [37] Sort by a time variable projected from a node property in ascending order #3
+  - name: s37_sort_by_a_time_variable_projected_from_a_node_property_in_ascending_order_3
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {time: time({hour: 10, minute: 35, timezone: '-08:00'})}),
+               (:B {time: time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'})}),
+               (:C {time: time({hour: 12, minute: 31, second: 14, nanosecond: 645876124, timezone: '+01:00'})}),
+               (:D {time: time({hour: 12, minute: 35, second: 15, timezone: '+05:00'})}),
+               (:E {time: time({hour: 12, minute: 30, second: 14, nanosecond: 645876123, timezone: '+01:01'})})
+    query: |
+      MATCH (a)
+      WITH a, a.time AS time
+      WITH a, time
+        ORDER BY time ASCENDING
+        LIMIT 3
+      RETURN a, time
+    expect:
+      values: |
+        | a | time |
+        | (:D {time: '12:35:15+05:00'}) | '12:35:15+05:00' |
+        | (:E {time: '12:30:14.645876123+01:01'}) | '12:30:14.645876123+01:01' |
+        | (:B {time: '12:31:14.645876123+01:00'}) | '12:31:14.645876123+01:00' |
+      side_effects: {}
+
+  # [38] Sort by a time variable projected from a node property in descending order #1
+  - name: s38_sort_by_a_time_variable_projected_from_a_node_property_in_descending_order_1
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [38] Sort by a time variable projected from a node property in descending order #1"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {time: time({hour: 10, minute: 35, timezone: '-08:00'})}),
+               (:B {time: time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'})}),
+               (:C {time: time({hour: 12, minute: 31, second: 14, nanosecond: 645876124, timezone: '+01:00'})}),
+               (:D {time: time({hour: 12, minute: 35, second: 15, timezone: '+05:00'})}),
+               (:E {time: time({hour: 12, minute: 30, second: 14, nanosecond: 645876123, timezone: '+01:01'})})
+    query: |
+      MATCH (a)
+      WITH a, a.time AS time
+      WITH a, time
+        ORDER BY time DESC
+        LIMIT 3
+      RETURN a, time
+    expect:
+      values: |
+        | a | time |
+        | (:A {time: '10:35-08:00'}) | '10:35-08:00' |
+        | (:C {time: '12:31:14.645876124+01:00'}) | '12:31:14.645876124+01:00' |
+        | (:B {time: '12:31:14.645876123+01:00'}) | '12:31:14.645876123+01:00' |
+      side_effects: {}
+
+  # [38] Sort by a time variable projected from a node property in descending order #2
+  - name: s38_sort_by_a_time_variable_projected_from_a_node_property_in_descending_order_2
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [38] Sort by a time variable projected from a node property in descending order #2"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {time: time({hour: 10, minute: 35, timezone: '-08:00'})}),
+               (:B {time: time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'})}),
+               (:C {time: time({hour: 12, minute: 31, second: 14, nanosecond: 645876124, timezone: '+01:00'})}),
+               (:D {time: time({hour: 12, minute: 35, second: 15, timezone: '+05:00'})}),
+               (:E {time: time({hour: 12, minute: 30, second: 14, nanosecond: 645876123, timezone: '+01:01'})})
+    query: |
+      MATCH (a)
+      WITH a, a.time AS time
+      WITH a, time
+        ORDER BY time DESCENDING
+        LIMIT 3
+      RETURN a, time
+    expect:
+      values: |
+        | a | time |
+        | (:A {time: '10:35-08:00'}) | '10:35-08:00' |
+        | (:C {time: '12:31:14.645876124+01:00'}) | '12:31:14.645876124+01:00' |
+        | (:B {time: '12:31:14.645876123+01:00'}) | '12:31:14.645876123+01:00' |
+      side_effects: {}
+
+  # [39] Sort by a local date time variable projected from a node property in ascending order #1
+  - name: s39_sort_by_a_local_date_time_variable_projected_from_a_node_property_in_ascending_order_1
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [39] Sort by a local date time variable projected from a node property in ascending order #1"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12})}),
+               (:B {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123})}),
+               (:C {datetime: localdatetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1})}),
+               (:D {datetime: localdatetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999})}),
+               (:E {datetime: localdatetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14})})
+    query: |
+      MATCH (a)
+      WITH a, a.datetime AS datetime
+      WITH a, datetime
+        ORDER BY datetime
+        LIMIT 3
+      RETURN a, datetime
+    expect:
+      values: |
+        | a | datetime |
+        | (:C {datetime: '0001-01-01T01:01:01.000000001'}) | '0001-01-01T01:01:01.000000001' |
+        | (:E {datetime: '1980-12-11T12:31:14'}) | '1980-12-11T12:31:14' |
+        | (:A {datetime: '1984-10-11T12:30:14.000000012'}) | '1984-10-11T12:30:14.000000012' |
+      side_effects: {}
+
+  # [39] Sort by a local date time variable projected from a node property in ascending order #2
+  - name: s39_sort_by_a_local_date_time_variable_projected_from_a_node_property_in_ascending_order_2
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [39] Sort by a local date time variable projected from a node property in ascending order #2"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12})}),
+               (:B {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123})}),
+               (:C {datetime: localdatetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1})}),
+               (:D {datetime: localdatetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999})}),
+               (:E {datetime: localdatetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14})})
+    query: |
+      MATCH (a)
+      WITH a, a.datetime AS datetime
+      WITH a, datetime
+        ORDER BY datetime ASC
+        LIMIT 3
+      RETURN a, datetime
+    expect:
+      values: |
+        | a | datetime |
+        | (:C {datetime: '0001-01-01T01:01:01.000000001'}) | '0001-01-01T01:01:01.000000001' |
+        | (:E {datetime: '1980-12-11T12:31:14'}) | '1980-12-11T12:31:14' |
+        | (:A {datetime: '1984-10-11T12:30:14.000000012'}) | '1984-10-11T12:30:14.000000012' |
+      side_effects: {}
+
+  # [39] Sort by a local date time variable projected from a node property in ascending order #3
+  - name: s39_sort_by_a_local_date_time_variable_projected_from_a_node_property_in_ascending_order_3
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [39] Sort by a local date time variable projected from a node property in ascending order #3"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12})}),
+               (:B {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123})}),
+               (:C {datetime: localdatetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1})}),
+               (:D {datetime: localdatetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999})}),
+               (:E {datetime: localdatetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14})})
+    query: |
+      MATCH (a)
+      WITH a, a.datetime AS datetime
+      WITH a, datetime
+        ORDER BY datetime ASCENDING
+        LIMIT 3
+      RETURN a, datetime
+    expect:
+      values: |
+        | a | datetime |
+        | (:C {datetime: '0001-01-01T01:01:01.000000001'}) | '0001-01-01T01:01:01.000000001' |
+        | (:E {datetime: '1980-12-11T12:31:14'}) | '1980-12-11T12:31:14' |
+        | (:A {datetime: '1984-10-11T12:30:14.000000012'}) | '1984-10-11T12:30:14.000000012' |
+      side_effects: {}
+
+  # [40] Sort by a local date time variable projected from a node property in descending order #1
+  - name: s40_sort_by_a_local_date_time_variable_projected_from_a_node_property_in_descending_order_1
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [40] Sort by a local date time variable projected from a node property in descending order #1"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12})}),
+               (:B {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123})}),
+               (:C {datetime: localdatetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1})}),
+               (:D {datetime: localdatetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999})}),
+               (:E {datetime: localdatetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14})})
+    query: |
+      MATCH (a)
+      WITH a, a.datetime AS datetime
+      WITH a, datetime
+        ORDER BY datetime DESC
+        LIMIT 3
+      RETURN a, datetime
+    expect:
+      values: |
+        | a | datetime |
+        | (:D {datetime: '9999-09-09T09:59:59.999999999'}) | '9999-09-09T09:59:59.999999999' |
+        | (:B {datetime: '1984-10-11T12:31:14.645876123'}) | '1984-10-11T12:31:14.645876123' |
+        | (:A {datetime: '1984-10-11T12:30:14.000000012'}) | '1984-10-11T12:30:14.000000012' |
+      side_effects: {}
+
+  # [40] Sort by a local date time variable projected from a node property in descending order #2
+  - name: s40_sort_by_a_local_date_time_variable_projected_from_a_node_property_in_descending_order_2
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [40] Sort by a local date time variable projected from a node property in descending order #2"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12})}),
+               (:B {datetime: localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123})}),
+               (:C {datetime: localdatetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1})}),
+               (:D {datetime: localdatetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999})}),
+               (:E {datetime: localdatetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14})})
+    query: |
+      MATCH (a)
+      WITH a, a.datetime AS datetime
+      WITH a, datetime
+        ORDER BY datetime DESCENDING
+        LIMIT 3
+      RETURN a, datetime
+    expect:
+      values: |
+        | a | datetime |
+        | (:D {datetime: '9999-09-09T09:59:59.999999999'}) | '9999-09-09T09:59:59.999999999' |
+        | (:B {datetime: '1984-10-11T12:31:14.645876123'}) | '1984-10-11T12:31:14.645876123' |
+        | (:A {datetime: '1984-10-11T12:30:14.000000012'}) | '1984-10-11T12:30:14.000000012' |
+      side_effects: {}
+
+  # [41] Sort by a date time variable projected from a node property in ascending order #1
+  - name: s41_sort_by_a_date_time_variable_projected_from_a_node_property_in_ascending_order_1
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [41] Sort by a date time variable projected from a node property in ascending order #1"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12, timezone: '+00:15'})}),
+               (:B {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+00:17'})}),
+               (:C {datetime: datetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1, timezone: '-11:59'})}),
+               (:D {datetime: datetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999, timezone: '+11:59'})}),
+               (:E {datetime: datetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14, timezone: '-11:59'})})
+    query: |
+      MATCH (a)
+      WITH a, a.datetime AS datetime
+      WITH a, datetime
+        ORDER BY datetime
+        LIMIT 3
+      RETURN a, datetime
+    expect:
+      values: |
+        | a | datetime |
+        | (:C {datetime: '0001-01-01T01:01:01.000000001-11:59'}) | '0001-01-01T01:01:01.000000001-11:59' |
+        | (:E {datetime: '1980-12-11T12:31:14-11:59'}) | '1980-12-11T12:31:14-11:59' |
+        | (:B {datetime: '1984-10-11T12:31:14.645876123+00:17'}) | '1984-10-11T12:31:14.645876123+00:17' |
+      side_effects: {}
+
+  # [41] Sort by a date time variable projected from a node property in ascending order #2
+  - name: s41_sort_by_a_date_time_variable_projected_from_a_node_property_in_ascending_order_2
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [41] Sort by a date time variable projected from a node property in ascending order #2"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12, timezone: '+00:15'})}),
+               (:B {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+00:17'})}),
+               (:C {datetime: datetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1, timezone: '-11:59'})}),
+               (:D {datetime: datetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999, timezone: '+11:59'})}),
+               (:E {datetime: datetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14, timezone: '-11:59'})})
+    query: |
+      MATCH (a)
+      WITH a, a.datetime AS datetime
+      WITH a, datetime
+        ORDER BY datetime ASC
+        LIMIT 3
+      RETURN a, datetime
+    expect:
+      values: |
+        | a | datetime |
+        | (:C {datetime: '0001-01-01T01:01:01.000000001-11:59'}) | '0001-01-01T01:01:01.000000001-11:59' |
+        | (:E {datetime: '1980-12-11T12:31:14-11:59'}) | '1980-12-11T12:31:14-11:59' |
+        | (:B {datetime: '1984-10-11T12:31:14.645876123+00:17'}) | '1984-10-11T12:31:14.645876123+00:17' |
+      side_effects: {}
+
+  # [41] Sort by a date time variable projected from a node property in ascending order #3
+  - name: s41_sort_by_a_date_time_variable_projected_from_a_node_property_in_ascending_order_3
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [41] Sort by a date time variable projected from a node property in ascending order #3"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12, timezone: '+00:15'})}),
+               (:B {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+00:17'})}),
+               (:C {datetime: datetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1, timezone: '-11:59'})}),
+               (:D {datetime: datetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999, timezone: '+11:59'})}),
+               (:E {datetime: datetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14, timezone: '-11:59'})})
+    query: |
+      MATCH (a)
+      WITH a, a.datetime AS datetime
+      WITH a, datetime
+        ORDER BY datetime ASCENDING
+        LIMIT 3
+      RETURN a, datetime
+    expect:
+      values: |
+        | a | datetime |
+        | (:C {datetime: '0001-01-01T01:01:01.000000001-11:59'}) | '0001-01-01T01:01:01.000000001-11:59' |
+        | (:E {datetime: '1980-12-11T12:31:14-11:59'}) | '1980-12-11T12:31:14-11:59' |
+        | (:B {datetime: '1984-10-11T12:31:14.645876123+00:17'}) | '1984-10-11T12:31:14.645876123+00:17' |
+      side_effects: {}
+
+  # [42] Sort by a date time variable projected from a node property in descending order #1
+  - name: s42_sort_by_a_date_time_variable_projected_from_a_node_property_in_descending_order_1
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [42] Sort by a date time variable projected from a node property in descending order #1"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12, timezone: '+00:15'})}),
+               (:B {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+00:17'})}),
+               (:C {datetime: datetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1, timezone: '-11:59'})}),
+               (:D {datetime: datetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999, timezone: '+11:59'})}),
+               (:E {datetime: datetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14, timezone: '-11:59'})})
+    query: |
+      MATCH (a)
+      WITH a, a.datetime AS datetime
+      WITH a, datetime
+        ORDER BY datetime DESC
+        LIMIT 3
+      RETURN a, datetime
+    expect:
+      values: |
+        | a | datetime |
+        | (:D {datetime: '9999-09-09T09:59:59.999999999+11:59'}) | '9999-09-09T09:59:59.999999999+11:59' |
+        | (:A {datetime: '1984-10-11T12:30:14.000000012+00:15'}) | '1984-10-11T12:30:14.000000012+00:15' |
+        | (:B {datetime: '1984-10-11T12:31:14.645876123+00:17'}) | '1984-10-11T12:31:14.645876123+00:17' |
+      side_effects: {}
+
+  # [42] Sort by a date time variable projected from a node property in descending order #2
+  - name: s42_sort_by_a_date_time_variable_projected_from_a_node_property_in_descending_order_2
+    xfail:
+      spec: "openCypher TCK 2024.3 WithOrderBy1: [42] Sort by a date time variable projected from a node property in descending order #2"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:A {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12, timezone: '+00:15'})}),
+               (:B {datetime: datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+00:17'})}),
+               (:C {datetime: datetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1, timezone: '-11:59'})}),
+               (:D {datetime: datetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999, timezone: '+11:59'})}),
+               (:E {datetime: datetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14, timezone: '-11:59'})})
+    query: |
+      MATCH (a)
+      WITH a, a.datetime AS datetime
+      WITH a, datetime
+        ORDER BY datetime DESCENDING
+        LIMIT 3
+      RETURN a, datetime
+    expect:
+      values: |
+        | a | datetime |
+        | (:D {datetime: '9999-09-09T09:59:59.999999999+11:59'}) | '9999-09-09T09:59:59.999999999+11:59' |
+        | (:A {datetime: '1984-10-11T12:30:14.000000012+00:15'}) | '1984-10-11T12:30:14.000000012+00:15' |
+        | (:B {datetime: '1984-10-11T12:31:14.645876123+00:17'}) | '1984-10-11T12:31:14.645876123+00:17' |
+      side_effects: {}
+
+  # [43] Sort by a variable that is only partially orderable on a non-distinct binding table #1
+  - name: s43_sort_by_a_variable_that_is_only_partially_orderable_on_a_non_distinct_binding_table_1
+    query: |
+      UNWIND [0, 2, 1, 2, 0, 1] AS x
+      WITH x
+        ORDER BY x ASC
+        LIMIT 2
+      RETURN x
+    expect:
+      values: |
+        | x |
+        | 0 |
+        | 0 |
+      side_effects: {}
+
+  # [43] Sort by a variable that is only partially orderable on a non-distinct binding table #2
+  - name: s43_sort_by_a_variable_that_is_only_partially_orderable_on_a_non_distinct_binding_table_2
+    query: |
+      UNWIND [0, 2, 1, 2, 0, 1] AS x
+      WITH x
+        ORDER BY x DESC
+        LIMIT 2
+      RETURN x
+    expect:
+      values: |
+        | x |
+        | 2 |
+        | 2 |
+      side_effects: {}
+
+  # [44] Sort by a variable that is only partially orderable on a non-distinct binding table, but made distinct #1
+  - name: s44_sort_by_a_variable_that_is_only_partially_orderable_on_a_non_distinct_binding_table_but_made_distinct_1
+    query: |
+      UNWIND [0, 2, 1, 2, 0, 1] AS x
+      WITH DISTINCT x
+        ORDER BY x ASC
+        LIMIT 1
+      RETURN x
+    expect:
+      values: |
+        | x |
+        | 0 |
+      side_effects: {}
+
+  # [44] Sort by a variable that is only partially orderable on a non-distinct binding table, but made distinct #2
+  - name: s44_sort_by_a_variable_that_is_only_partially_orderable_on_a_non_distinct_binding_table_but_made_distinct_2
+    query: |
+      UNWIND [0, 2, 1, 2, 0, 1] AS x
+      WITH DISTINCT x
+        ORDER BY x DESC
+        LIMIT 1
+      RETURN x
+    expect:
+      values: |
+        | x |
+        | 2 |
+      side_effects: {}
+
+  # [45] Sort order should be consistent with comparisons where comparisons are defined #Example: booleans #1
+  - name: s45_sort_order_should_be_consistent_with_comparisons_where_comparisons_are_defined_example_booleans_1
+    query: |
+      WITH [true, false] AS values
+      WITH values, size(values) AS numOfValues
+      UNWIND values AS value
+      WITH size([ x IN values WHERE x < value ]) AS x, value, numOfValues
+        ORDER BY value
+      WITH numOfValues, collect(x) AS orderedX
+      RETURN orderedX = range(0, numOfValues-1) AS equal
+    expect:
+      values: |
+        | equal |
+        | true |
+      side_effects: {}
+
+  # [45] Sort order should be consistent with comparisons where comparisons are defined #Example: integers #2
+  - name: s45_sort_order_should_be_consistent_with_comparisons_where_comparisons_are_defined_example_integers_2
+    query: |
+      WITH [351, -3974856, 93, -3, 123, 0, 3, -2, 20934587, 1, 20934585, 20934586, -10] AS values
+      WITH values, size(values) AS numOfValues
+      UNWIND values AS value
+      WITH size([ x IN values WHERE x < value ]) AS x, value, numOfValues
+        ORDER BY value
+      WITH numOfValues, collect(x) AS orderedX
+      RETURN orderedX = range(0, numOfValues-1) AS equal
+    expect:
+      values: |
+        | equal |
+        | true |
+      side_effects: {}
+
+  # [45] Sort order should be consistent with comparisons where comparisons are defined #Example: floats #3
+  - name: s45_sort_order_should_be_consistent_with_comparisons_where_comparisons_are_defined_example_floats_3
+    query: |
+      WITH [351.5, -3974856.01, -3.203957, 123.0002, 123.0001, 123.00013, 123.00011, 0.0100000, 0.0999999, 0.00000001, 3.0, 209345.87, -10.654] AS values
+      WITH values, size(values) AS numOfValues
+      UNWIND values AS value
+      WITH size([ x IN values WHERE x < value ]) AS x, value, numOfValues
+        ORDER BY value
+      WITH numOfValues, collect(x) AS orderedX
+      RETURN orderedX = range(0, numOfValues-1) AS equal
+    expect:
+      values: |
+        | equal |
+        | true |
+      side_effects: {}
+
+  # [45] Sort order should be consistent with comparisons where comparisons are defined #Example: string #4
+  - name: s45_sort_order_should_be_consistent_with_comparisons_where_comparisons_are_defined_example_string_4
+    query: |
+      WITH ['Sort', 'order', ' ', 'should', 'be', '', 'consistent', 'with', 'comparisons', ', ', 'where', 'comparisons are', 'defined', '!'] AS values
+      WITH values, size(values) AS numOfValues
+      UNWIND values AS value
+      WITH size([ x IN values WHERE x < value ]) AS x, value, numOfValues
+        ORDER BY value
+      WITH numOfValues, collect(x) AS orderedX
+      RETURN orderedX = range(0, numOfValues-1) AS equal
+    expect:
+      values: |
+        | equal |
+        | true |
+      side_effects: {}
+
+  # [45] Sort order should be consistent with comparisons where comparisons are defined #Example: lists #5
+  - name: s45_sort_order_should_be_consistent_with_comparisons_where_comparisons_are_defined_example_lists_5
+    query: |
+      WITH [[2, 2], [2, -2], [1, 2], [], [1], [300, 0], [1, -20], [2, -2, 100]] AS values
+      WITH values, size(values) AS numOfValues
+      UNWIND values AS value
+      WITH size([ x IN values WHERE x < value ]) AS x, value, numOfValues
+        ORDER BY value
+      WITH numOfValues, collect(x) AS orderedX
+      RETURN orderedX = range(0, numOfValues-1) AS equal
+    expect:
+      values: |
+        | equal |
+        | true |
+      side_effects: {}
+
+  # [45] Sort order should be consistent with comparisons where comparisons are defined #Example: dates #6
+  - name: s45_sort_order_should_be_consistent_with_comparisons_where_comparisons_are_defined_example_dates_6
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH [date({year: 1910, month: 5, day: 6}), date({year: 1980, month: 12, day: 24}), date({year: 1984, month: 10, day: 12}), date({year: 1985, month: 5, day: 6}), date({year: 1980, month: 10, day: 24}), date({year: 1984, month: 10, day: 11})] AS values
+      WITH values, size(values) AS numOfValues
+      UNWIND values AS value
+      WITH size([ x IN values WHERE x < value ]) AS x, value, numOfValues
+        ORDER BY value
+      WITH numOfValues, collect(x) AS orderedX
+      RETURN orderedX = range(0, numOfValues-1) AS equal
+    expect:
+      values: |
+        | equal |
+        | true |
+      side_effects: {}
+
+  # [45] Sort order should be consistent with comparisons where comparisons are defined #Example: localtimes #7
+  - name: s45_sort_order_should_be_consistent_with_comparisons_where_comparisons_are_defined_example_localtimes_7
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH [localtime({hour: 10, minute: 35}), localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876123}), localtime({hour: 12, minute: 31, second: 14, nanosecond: 645876124}), localtime({hour: 12, minute: 35, second: 13}), localtime({hour: 12, minute: 30, second: 14, nanosecond: 645876123}), localtime({hour: 12, minute: 31, second: 15})] AS values
+      WITH values, size(values) AS numOfValues
+      UNWIND values AS value
+      WITH size([ x IN values WHERE x < value ]) AS x, value, numOfValues
+        ORDER BY value
+      WITH numOfValues, collect(x) AS orderedX
+      RETURN orderedX = range(0, numOfValues-1) AS equal
+    expect:
+      values: |
+        | equal |
+        | true |
+      side_effects: {}
+
+  # [45] Sort order should be consistent with comparisons where comparisons are defined #Example: times #8
+  - name: s45_sort_order_should_be_consistent_with_comparisons_where_comparisons_are_defined_example_times_8
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH [time({hour: 10, minute: 35, timezone: '-08:00'}), time({hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+01:00'}), time({hour: 12, minute: 31, second: 14, nanosecond: 645876124, timezone: '+01:00'}), time({hour: 12, minute: 35, second: 15, timezone: '+05:00'}), time({hour: 12, minute: 30, second: 14, nanosecond: 645876123, timezone: '+01:01'}), time({hour: 12, minute: 35, second: 15, timezone: '+01:00'})] AS values
+      WITH values, size(values) AS numOfValues
+      UNWIND values AS value
+      WITH size([ x IN values WHERE x < value ]) AS x, value, numOfValues
+        ORDER BY value
+      WITH numOfValues, collect(x) AS orderedX
+      RETURN orderedX = range(0, numOfValues-1) AS equal
+    expect:
+      values: |
+        | equal |
+        | true |
+      side_effects: {}
+
+  # [45] Sort order should be consistent with comparisons where comparisons are defined #Example: localdatetimes #9
+  - name: s45_sort_order_should_be_consistent_with_comparisons_where_comparisons_are_defined_example_localdatetimes_9
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH [localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12}), localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123}), localdatetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1}), localdatetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999}), localdatetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14})] AS values
+      WITH values, size(values) AS numOfValues
+      UNWIND values AS value
+      WITH size([ x IN values WHERE x < value ]) AS x, value, numOfValues
+        ORDER BY value
+      WITH numOfValues, collect(x) AS orderedX
+      RETURN orderedX = range(0, numOfValues-1) AS equal
+    expect:
+      values: |
+        | equal |
+        | true |
+      side_effects: {}
+
+  # [45] Sort order should be consistent with comparisons where comparisons are defined #Example: datetimes #10
+  - name: s45_sort_order_should_be_consistent_with_comparisons_where_comparisons_are_defined_example_datetimes_10
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    query: |
+      WITH [datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 30, second: 14, nanosecond: 12, timezone: '+00:15'}), datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 645876123, timezone: '+00:17'}), datetime({year: 1, month: 1, day: 1, hour: 1, minute: 1, second: 1, nanosecond: 1, timezone: '-11:59'}), datetime({year: 9999, month: 9, day: 9, hour: 9, minute: 59, second: 59, nanosecond: 999999999, timezone: '+11:59'}), datetime({year: 1980, month: 12, day: 11, hour: 12, minute: 31, second: 14, timezone: '-11:59'})] AS values
+      WITH values, size(values) AS numOfValues
+      UNWIND values AS value
+      WITH size([ x IN values WHERE x < value ]) AS x, value, numOfValues
+        ORDER BY value
+      WITH numOfValues, collect(x) AS orderedX
+      RETURN orderedX = range(0, numOfValues-1) AS equal
+    expect:
+      values: |
+        | equal |
+        | true |
+      side_effects: {}
+
+  # [46] Fail on sorting by an undefined variable #Example: out of scope #1
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s46_fail_on_sorting_by_an_undefined_variable_example_out_of_scope_1
+    setup:
+      - |
+        CREATE (:A), (:A), (:B), (:B), (:C)
+    query: |
+      MATCH (a:A), (b:B), (c:C)
+      WITH a, b
+      WITH a
+        ORDER BY c
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [46] Fail on sorting by an undefined variable #Example: out of scope #2
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s46_fail_on_sorting_by_an_undefined_variable_example_out_of_scope_2
+    setup:
+      - |
+        CREATE (:A), (:A), (:B), (:B), (:C)
+    query: |
+      MATCH (a:A), (b:B), (c:C)
+      WITH a, b
+      WITH a
+        ORDER BY c ASC
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [46] Fail on sorting by an undefined variable #Example: out of scope #3
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s46_fail_on_sorting_by_an_undefined_variable_example_out_of_scope_3
+    setup:
+      - |
+        CREATE (:A), (:A), (:B), (:B), (:C)
+    query: |
+      MATCH (a:A), (b:B), (c:C)
+      WITH a, b
+      WITH a
+        ORDER BY c ASCENDING
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [46] Fail on sorting by an undefined variable #Example: out of scope #4
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s46_fail_on_sorting_by_an_undefined_variable_example_out_of_scope_4
+    setup:
+      - |
+        CREATE (:A), (:A), (:B), (:B), (:C)
+    query: |
+      MATCH (a:A), (b:B), (c:C)
+      WITH a, b
+      WITH a
+        ORDER BY c DESC
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [46] Fail on sorting by an undefined variable #Example: out of scope #5
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s46_fail_on_sorting_by_an_undefined_variable_example_out_of_scope_5
+    setup:
+      - |
+        CREATE (:A), (:A), (:B), (:B), (:C)
+    query: |
+      MATCH (a:A), (b:B), (c:C)
+      WITH a, b
+      WITH a
+        ORDER BY c DESCENDING
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [46] Fail on sorting by an undefined variable #Example: never defined #6
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s46_fail_on_sorting_by_an_undefined_variable_example_never_defined_6
+    setup:
+      - |
+        CREATE (:A), (:A), (:B), (:B), (:C)
+    query: |
+      MATCH (a:A), (b:B), (c:C)
+      WITH a, b
+      WITH a
+        ORDER BY d
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [46] Fail on sorting by an undefined variable #Example: never defined #7
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s46_fail_on_sorting_by_an_undefined_variable_example_never_defined_7
+    setup:
+      - |
+        CREATE (:A), (:A), (:B), (:B), (:C)
+    query: |
+      MATCH (a:A), (b:B), (c:C)
+      WITH a, b
+      WITH a
+        ORDER BY d ASC
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [46] Fail on sorting by an undefined variable #Example: never defined #8
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s46_fail_on_sorting_by_an_undefined_variable_example_never_defined_8
+    setup:
+      - |
+        CREATE (:A), (:A), (:B), (:B), (:C)
+    query: |
+      MATCH (a:A), (b:B), (c:C)
+      WITH a, b
+      WITH a
+        ORDER BY d ASCENDING
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [46] Fail on sorting by an undefined variable #Example: never defined #9
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s46_fail_on_sorting_by_an_undefined_variable_example_never_defined_9
+    setup:
+      - |
+        CREATE (:A), (:A), (:B), (:B), (:C)
+    query: |
+      MATCH (a:A), (b:B), (c:C)
+      WITH a, b
+      WITH a
+        ORDER BY d DESC
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [46] Fail on sorting by an undefined variable #Example: never defined #10
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s46_fail_on_sorting_by_an_undefined_variable_example_never_defined_10
+    setup:
+      - |
+        CREATE (:A), (:A), (:B), (:B), (:C)
+    query: |
+      MATCH (a:A), (b:B), (c:C)
+      WITH a, b
+      WITH a
+        ORDER BY d DESCENDING
+      RETURN a
+    expect:
+      gql_status: "42"
+      side_effects: {}

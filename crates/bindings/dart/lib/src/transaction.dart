@@ -121,40 +121,47 @@ class Transaction implements Finalizable {
   /// same.
   void commit() {
     _checkActive();
+    final status = _bindings.grafeoCommit(_handle);
+    if (status != GrafeoStatus.ok.code) {
+      final error = _endUnlessClosed(status);
+      if (_finished) _commitFailed = true;
+      throw error;
+    }
+    _end();
+  }
+
+  /// Ends the transaction after a failed commit or rollback, unless the
+  /// database was closed: the native layer then answers every later call
+  /// with GRAFEO-T007, so the transaction stays for it. Returns the error.
+  GrafeoException _endUnlessClosed(int status) {
+    final error = classifyError(
+      status,
+      lastError(_bindings),
+      gqlStatus: lastGqlStatus(_bindings),
+    );
+    if (!error.message.startsWith('GRAFEO-T007')) _end();
+    return error;
+  }
+
+  /// Marks the transaction finished and frees its native transaction.
+  void _end() {
     _finished = true;
     _finalizer!.detach(this);
-    final status = _bindings.grafeoCommit(_handle);
     _bindings.grafeoFreeTransaction(_handle);
     _handle = nullptr;
-    if (status != GrafeoStatus.ok.code) {
-      _commitFailed = true;
-      throw classifyError(
-        status,
-        lastError(_bindings),
-        gqlStatus: lastGqlStatus(_bindings),
-      );
-    }
   }
 
   /// Rollback the transaction, discarding all changes. After a [commit]
   /// that failed it does nothing, as in the other bindings: that commit
   /// ended the transaction, so a rollback in a catch block does not hide
-  /// the commit's error.
+  /// the commit's error. After the database closed it throws GRAFEO-T007,
+  /// as every call does.
   void rollback() {
     if (_commitFailed) return;
     _checkActive();
-    _finished = true;
-    _finalizer!.detach(this);
     final status = _bindings.grafeoRollback(_handle);
-    _bindings.grafeoFreeTransaction(_handle);
-    _handle = nullptr;
-    if (status != GrafeoStatus.ok.code) {
-      throw classifyError(
-        status,
-        lastError(_bindings),
-        gqlStatus: lastGqlStatus(_bindings),
-      );
-    }
+    if (status != GrafeoStatus.ok.code) throw _endUnlessClosed(status);
+    _end();
   }
 
   QueryResult _buildResult(Pointer<Void> resultPtr) =>

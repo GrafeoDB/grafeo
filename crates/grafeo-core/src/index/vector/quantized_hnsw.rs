@@ -79,8 +79,10 @@ pub struct QuantizedHnswIndex {
     rescore_factor: usize,
     /// Number of training samples before quantizer is trained.
     training_threshold: usize,
-    /// Training samples collected before training the quantizer.
-    training_samples: RwLock<Vec<Arc<[f32]>>>,
+    /// The ids of the vectors inserted before the quantizer is trained, in
+    /// insert order: ids, not vectors, so a removed vector is freed with its
+    /// entry in `vectors` (#712). Training reads the live ones from there.
+    training_samples: RwLock<Vec<NodeId>>,
     /// Whether the quantizer has been trained.
     quantizer_trained: RwLock<bool>,
 }
@@ -273,6 +275,31 @@ impl QuantizedHnswIndex {
         }
     }
 
+    /// Takes `id` in as a training sample and returns the vectors to train
+    /// on once enough are live: at the threshold, the samples whose vector
+    /// was removed and the repeats of an id (its first place kept) go, and
+    /// the rest train only when they still reach it, in insert order, with
+    /// each id's current vector. The caller holds the samples' lock through
+    /// the training.
+    fn live_training_set(&self, samples: &mut Vec<NodeId>, id: NodeId) -> Option<Vec<Arc<[f32]>>> {
+        samples.push(id);
+        if samples.len() < self.training_threshold {
+            return None;
+        }
+        let vectors = self.vectors.read();
+        let mut seen = std::collections::HashSet::with_capacity(samples.len());
+        samples.retain(|sample| vectors.contains_key(sample) && seen.insert(*sample));
+        if samples.len() < self.training_threshold {
+            return None;
+        }
+        Some(
+            samples
+                .iter()
+                .map(|sample| Arc::clone(&vectors[sample]))
+                .collect(),
+        )
+    }
+
     /// Inserts with scalar quantization.
     fn insert_scalar_quantized(&self, id: NodeId, vector: &[f32]) {
         let trained = *self.quantizer_trained.read();
@@ -285,13 +312,10 @@ impl QuantizedHnswIndex {
             }
         } else {
             // Still collecting training samples
-            let vector_arc: Arc<[f32]> = vector.into();
             let mut samples = self.training_samples.write();
-            samples.push(vector_arc);
-
-            if samples.len() >= self.training_threshold {
+            if let Some(set) = self.live_training_set(&mut samples, id) {
                 // Time to train the quantizer
-                let refs: Vec<&[f32]> = samples.iter().map(|v| v.as_ref()).collect();
+                let refs: Vec<&[f32]> = set.iter().map(AsRef::as_ref).collect();
                 let quantizer = ScalarQuantizer::train(&refs);
 
                 // Quantize all collected samples using our internal vector store
@@ -304,7 +328,7 @@ impl QuantizedHnswIndex {
                 // Store the quantizer and mark as trained
                 *self.scalar_quantizer.write() = Some(quantizer);
                 *self.quantizer_trained.write() = true;
-                samples.clear();
+                *samples = Vec::new();
             }
         }
     }
@@ -327,13 +351,10 @@ impl QuantizedHnswIndex {
             }
         } else {
             // Still collecting training samples
-            let vector_arc: Arc<[f32]> = vector.into();
             let mut samples = self.training_samples.write();
-            samples.push(vector_arc);
-
-            if samples.len() >= self.training_threshold {
+            if let Some(set) = self.live_training_set(&mut samples, id) {
                 // Time to train the product quantizer
-                let refs: Vec<&[f32]> = samples.iter().map(|v| v.as_ref()).collect();
+                let refs: Vec<&[f32]> = set.iter().map(AsRef::as_ref).collect();
                 let quantizer = ProductQuantizer::train(&refs, num_subvectors, 256, 10);
 
                 // Quantize all collected samples using our internal vector store
@@ -346,7 +367,7 @@ impl QuantizedHnswIndex {
                 // Store the quantizer and mark as trained
                 *self.product_quantizer.write() = Some(quantizer);
                 *self.quantizer_trained.write() = true;
-                samples.clear();
+                *samples = Vec::new();
             }
         }
     }
@@ -1188,5 +1209,105 @@ mod tests {
             index.heap_memory_bytes() > empty_mem,
             "memory should grow after insert"
         );
+    }
+
+    /// A quantizer trains on the samples still in the index alone, in their insert order, once
+    /// enough of them are live (#712): a vector removed before training, or replaced by a new
+    /// insert of its id, does not train it, and the samples hold ids, so a removed vector is
+    /// freed with its entry. Scalar and product quantization.
+    #[test]
+    fn training_waits_for_live_samples_and_uses_them_alone_in_insert_order() {
+        let vector = |id: u64| -> Vec<f32> {
+            (0..4u64)
+                .map(|dimension| (id * 4 + dimension) as f32 / 10.0)
+                .collect()
+        };
+        let extreme = vec![100.0_f32; 4];
+        let renewed = vec![0.5_f32, 0.25, 0.75, 0.125];
+        let probe = [0.3_f32, 0.9, 1.7, 2.2];
+        for quantization in [
+            QuantizationType::Scalar,
+            QuantizationType::Product { num_subvectors: 2 },
+        ] {
+            let index = QuantizedHnswIndex::with_seed(
+                HnswConfig::new(4, DistanceMetric::Euclidean),
+                quantization,
+                42,
+            )
+            .with_training_threshold(10);
+            for id in 1..=9 {
+                let inserted = if id == 2 { extreme.clone() } else { vector(id) };
+                index.insert(NodeId::new(id), &inserted);
+            }
+            assert!(
+                index.remove(NodeId::new(2)),
+                "{quantization:?}: the extreme one"
+            );
+            assert!(index.remove(NodeId::new(5)));
+            // The tenth sample, a new insert of id 1: seven distinct live ids.
+            index.insert(NodeId::new(1), &renewed);
+            assert!(
+                !*index.quantizer_trained.read(),
+                "{quantization:?}: ten samples, seven live"
+            );
+            index.insert(NodeId::new(10), &vector(10));
+            index.insert(NodeId::new(11), &vector(11));
+            assert!(
+                !*index.quantizer_trained.read(),
+                "{quantization:?}: nine live"
+            );
+            index.insert(NodeId::new(12), &vector(12));
+            assert!(
+                *index.quantizer_trained.read(),
+                "{quantization:?}: ten live"
+            );
+            assert!(
+                index.training_samples.read().is_empty(),
+                "{quantization:?}: the samples go once trained"
+            );
+
+            let live: Vec<Vec<f32>> = [1, 3, 4, 6, 7, 8, 9, 10, 11, 12]
+                .into_iter()
+                .map(|id| if id == 1 { renewed.clone() } else { vector(id) })
+                .collect();
+            let refs: Vec<&[f32]> = live.iter().map(Vec::as_slice).collect();
+            match quantization {
+                QuantizationType::Scalar => {
+                    assert_eq!(
+                        index
+                            .scalar_quantizer
+                            .read()
+                            .as_ref()
+                            .expect("trained")
+                            .quantize(&probe),
+                        ScalarQuantizer::train(&refs).quantize(&probe),
+                        "scalar: trained on the live samples in order"
+                    );
+                    assert_eq!(
+                        index.scalar_vectors.read().len(),
+                        10,
+                        "a code per live vector"
+                    );
+                }
+                QuantizationType::Product { num_subvectors } => {
+                    assert_eq!(
+                        index
+                            .product_quantizer
+                            .read()
+                            .as_ref()
+                            .expect("trained")
+                            .quantize(&probe),
+                        ProductQuantizer::train(&refs, num_subvectors, 256, 10).quantize(&probe),
+                        "product: trained on the live samples in order"
+                    );
+                    assert_eq!(
+                        index.product_codes.read().len(),
+                        10,
+                        "a code per live vector"
+                    );
+                }
+                _ => unreachable!("two quantizations"),
+            }
+        }
     }
 }

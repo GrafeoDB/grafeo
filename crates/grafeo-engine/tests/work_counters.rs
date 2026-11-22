@@ -410,3 +410,27 @@ fn the_memory_classes_read_nothing_yet() {
     assert_eq!(work.get(Work::BudgetCheck), 0);
     assert_eq!(work.get(Work::GrantGrowth), 0);
 }
+
+/// A statement repeated in one session finds its plan in the session's own map: that lookup
+/// counts one plan-cache hit and no miss, as a hit in the shared cache does, so each lookup
+/// counts once whichever cache answers it.
+#[cfg(grafeo_work_counters)]
+#[test]
+fn a_hit_in_the_sessions_own_map_counts_once() {
+    use grafeo_common::work::{self, Work};
+    let db = people();
+    let session = db.session();
+    let query = "MATCH (n:P) RETURN n.x";
+    session.execute(query).unwrap();
+    let _ = work::take();
+    session.execute(query).unwrap();
+    let repeat = work::take();
+    let cache = [
+        Work::Parse,
+        Work::PlanCacheHit,
+        Work::PlanCacheMiss,
+        Work::PlanBuilt,
+    ]
+    .map(|work| repeat.get(work));
+    assert_eq!(cache, [0, 1, 0, 1], "{}", repeat.describe());
+}

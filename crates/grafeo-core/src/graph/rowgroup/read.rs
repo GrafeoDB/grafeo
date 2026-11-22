@@ -2185,33 +2185,70 @@ mod tests {
     use crate::graph::rowgroup::RowGroupStore;
     use crate::graph::traits::GraphStore;
 
-    /// The zone maps of hot columns prune by every value a column held: a
-    /// value replaced since (a reader may still see it) still might match,
-    /// one never held does not; a key without a column always might.
+    /// The zone maps of hot columns prune by every value a reader may still
+    /// see: a value replaced since still might match, one never held does
+    /// not; a write that moves the greatest value inward leaves that side
+    /// stale, so anything above might match while the least still prunes,
+    /// until a collect that keeps no version rebuilds it from the live values
+    /// (#712: the bound owns no value); a key without a column always might.
     #[test]
     fn hot_zone_maps_cover_every_value_a_column_held() {
         use crate::graph::lpg::CompareOp;
 
         let store = RowGroupStore::new();
         let age = PropertyKey::new("age");
-        let alix = store.create_node_with_props(&["Person"], &[(age.clone(), Value::Int64(19))]);
-        store.set_node_property(alix, "age", Value::Int64(88));
-        for (op, value, might) in [
-            (CompareOp::Eq, 19, true),
-            (CompareOp::Eq, 88, true),
-            (CompareOp::Eq, 50, true),
-            (CompareOp::Eq, 89, false),
-            (CompareOp::Gt, 88, false),
-            (CompareOp::Ge, 88, true),
-            (CompareOp::Lt, 19, false),
-            (CompareOp::Le, 19, true),
-        ] {
-            assert_eq!(
-                store.node_property_might_match(&age, op, &Value::Int64(value)),
-                might,
-                "{op:?} {value}"
-            );
-        }
+        store.create_node_with_props(&["Person"], &[(age.clone(), Value::Int64(19))]);
+        let gus = store.create_node_with_props(&["Person"], &[(age.clone(), Value::Int64(50))]);
+        let mia = store.create_node_with_props(&["Person"], &[(age.clone(), Value::Int64(88))]);
+        let check = |step: &str, rows: &[(CompareOp, i64, bool)]| {
+            for (op, value, might) in rows {
+                assert_eq!(
+                    store.node_property_might_match(&age, *op, &Value::Int64(*value)),
+                    *might,
+                    "{step}: {op:?} {value}"
+                );
+            }
+        };
+        // Gus's 50 is neither the least nor the greatest: replaced, it is still covered.
+        store.set_node_property(gus, "age", Value::Int64(60));
+        check(
+            "a middle value replaced",
+            &[
+                (CompareOp::Eq, 19, true),
+                (CompareOp::Eq, 50, true),
+                (CompareOp::Eq, 88, true),
+                (CompareOp::Eq, 89, false),
+                (CompareOp::Gt, 88, false),
+                (CompareOp::Ge, 88, true),
+                (CompareOp::Lt, 19, false),
+                (CompareOp::Le, 19, true),
+            ],
+        );
+        // Mia's 88 is the greatest: replaced by a smaller value, that side is stale and
+        // bounds nothing, and the least side still prunes.
+        store.set_node_property(mia, "age", Value::Int64(70));
+        check(
+            "the greatest replaced",
+            &[
+                (CompareOp::Eq, 89, true),
+                (CompareOp::Gt, 88, true),
+                (CompareOp::Lt, 19, false),
+                (CompareOp::Le, 19, true),
+            ],
+        );
+        // Once no version is kept, the bound is the live 19 to 70.
+        store.collect(store.current_epoch());
+        check(
+            "collected",
+            &[
+                (CompareOp::Eq, 19, true),
+                (CompareOp::Eq, 70, true),
+                (CompareOp::Eq, 88, false),
+                (CompareOp::Gt, 70, false),
+                (CompareOp::Ge, 70, true),
+                (CompareOp::Lt, 19, false),
+            ],
+        );
         assert!(
             store.node_property_might_match(&age, CompareOp::Eq, &Value::from("Prague")),
             "a value that does not order against the column might"

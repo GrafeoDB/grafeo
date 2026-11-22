@@ -19,13 +19,13 @@ use crate::query::plan::{
     JoinCondition, JoinOp, JoinType, ListPredicateKind, LoadDataFormat, LoadDataOp,
     LogicalExpression, LogicalOperator, LogicalPlan, MapProjectionEntry, MergeOp, NodeScanOp,
     OtherwiseOp, ParameterScanOp, PathMode, PathSelection, ProcedureYield, ProjectOp, Projection,
-    RemoveLabelOp, ReturnItem, SetPropertyOp, ShortestPathEdgeCondition, ShortestPathOp, SortKey,
-    SortOrder, UnaryOp, UnionOp, UnwindOp,
+    RemoveLabelOp, ReturnItem, ReturnOp, SetPropertyOp, ShortestPathCondition, ShortestPathOp,
+    SortKey, SortOrder, UnaryOp, UnionOp, UnwindOp,
 };
 use grafeo_adapters::query::cypher::{self, ast};
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
 /// Whether aggregate substitution is reading a scalar wrapper or an argument.
@@ -56,8 +56,11 @@ pub enum CypherTranslationResult {
 ///
 /// Returns an error if parsing fails or the query is a schema command
 /// that cannot be represented as a logical plan.
-pub fn translate(query: &str) -> Result<LogicalPlan> {
-    match translate_full(query)? {
+pub fn translate(
+    query: &str,
+    limits: &grafeo_adapters::query::limits::ParseLimits,
+) -> Result<LogicalPlan> {
+    match translate_full(query, limits)? {
         CypherTranslationResult::Plan(plan) => Ok(plan),
         _ => Err(Error::from(QueryError::new(
             QueryErrorKind::Unsupported,
@@ -71,8 +74,11 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
 /// # Errors
 ///
 /// Returns an error if parsing fails or the AST contains unsupported constructs.
-pub fn translate_full(query: &str) -> Result<CypherTranslationResult> {
-    let statement = cypher::parse(query)?;
+pub fn translate_full(
+    query: &str,
+    limits: &grafeo_adapters::query::limits::ParseLimits,
+) -> Result<CypherTranslationResult> {
+    let statement = cypher::parse_with(query, limits)?;
     let translator = CypherTranslator::new(query);
     match translator.translate_statement_full(&statement)? {
         CypherTranslationResult::Plan(plan) => Ok(CypherTranslationResult::Plan(
@@ -100,6 +106,14 @@ struct CypherTranslator {
     /// What the clause just translated projects, when it is a WITH or a
     /// RETURN: what an ORDER BY right after it may read.
     sort_scope: RefCell<Option<SortScope>>,
+    /// The columns of a WITH whose WHERE read variables it does not project:
+    /// they stay in its rows for an ORDER BY, SKIP or LIMIT after it, and
+    /// the next other clause projects the rows to these columns.
+    with_columns: RefCell<Option<Vec<String>>>,
+    /// Whether the clause just translated is a CREATE that reads nothing of
+    /// the graph: a CREATE right after it, reading nothing either, joins its
+    /// operator (see [`CypherTranslator::translate_create_clause`]).
+    after_create: Cell<bool>,
     /// The variables the `CALL` body being translated imports, which a
     /// `WITH` in it passes on whether it names them or not.
     call_imports: CallImports,
@@ -143,6 +157,8 @@ impl CypherTranslator {
             return_aliases: RefCell::new(HashMap::new()),
             call_scope: RefCell::new(None),
             sort_scope: RefCell::new(None),
+            with_columns: RefCell::new(None),
+            after_create: Cell::new(false),
             call_imports: CallImports::default(),
         }
     }
@@ -277,6 +293,19 @@ impl CypherTranslator {
         // ORDER BY sorts it. A WITH or RETURN sets it again; any other clause
         // (a CALL subquery whose body ends with a RETURN among them) clears it.
         let sort_scope = self.sort_scope.take();
+        let after_create = self.after_create.take();
+        // After a WITH whose WHERE read variables it leaves out, a clause
+        // other than ORDER BY, SKIP and LIMIT sees only the WITH's columns.
+        let input = match (clause, input) {
+            (ast::Clause::OrderBy(_) | ast::Clause::Skip(_) | ast::Clause::Limit(_), input) => {
+                input
+            }
+            (_, Some(input)) => match self.with_columns.take() {
+                Some(columns) => Some(project_columns(input, columns)),
+                None => Some(input),
+            },
+            (_, None) => None,
+        };
         let plan = match clause {
             ast::Clause::Match(match_clause) => self.translate_match(match_clause, input),
             ast::Clause::OptionalMatch(match_clause) => {
@@ -292,7 +321,7 @@ impl CypherTranslator {
             ast::Clause::Skip(expr) => self.translate_skip(expr, input),
             ast::Clause::Limit(expr) => self.translate_limit(expr, input),
             ast::Clause::Create(create_clause) => {
-                self.translate_create_clause(create_clause, input)
+                self.translate_create_clause(create_clause, input, after_create)
             }
             ast::Clause::Merge(merge_clause) => self.translate_merge(merge_clause, input),
             ast::Clause::Delete(delete_clause) => self.translate_delete(delete_clause, input),
@@ -311,6 +340,10 @@ impl CypherTranslator {
         if !matches!(clause, ast::Clause::With(_) | ast::Clause::Return(_)) {
             self.sort_scope.replace(None);
         }
+        self.after_create.set(matches!(
+            clause,
+            ast::Clause::Create(create_clause) if !create_reads_graph(create_clause)
+        ));
         plan
     }
 
@@ -338,7 +371,7 @@ impl CypherTranslator {
             .map(|a| self.translate_expression(a))
             .collect::<Result<Vec<_>>>()?;
 
-        let yield_items = call.yield_items.as_ref().map(|items| {
+        let yield_items: Option<Vec<ProcedureYield>> = call.yield_items.as_ref().map(|items| {
             items
                 .iter()
                 .map(|item| ProcedureYield {
@@ -347,6 +380,13 @@ impl CypherTranslator {
                 })
                 .collect()
         });
+        if let Some(items) = &yield_items {
+            let bound = input
+                .as_ref()
+                .and_then(|input| input.bound_variables(self.call_scope.borrow().as_ref()))
+                .unwrap_or_default();
+            ProcedureYield::check_names(items, &bound)?;
+        }
 
         let call_plan = LogicalOperator::CallProcedure(CallProcedureOp {
             name: call.procedure_name.clone(),
@@ -475,6 +515,7 @@ impl CypherTranslator {
         // row's variables through `WITH *`, and keep the imports in scope
         // after a `WITH` that leaves them out
         let enclosing = self.call_scope.replace(outer_names.cloned());
+        let enclosing_with = self.with_columns.take();
         let imports = call_imports(&shared_variables, outer_names);
         let translated = self.call_imports.within(imports, || {
             let mut translated = Ok(inner_plan);
@@ -485,6 +526,7 @@ impl CypherTranslator {
             translated
         });
         self.call_scope.replace(enclosing);
+        self.with_columns.replace(enclosing_with);
         let mut inner_plan = translated?.ok_or_else(|| {
             Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
@@ -598,11 +640,13 @@ impl CypherTranslator {
         // nested FOREACH or CALL imports them through `*`)
         let outer_names = input.bound_variables(self.call_scope.borrow().as_ref());
         let enclosing = self.call_scope.replace(outer_names);
+        let enclosing_with = self.with_columns.take();
         let mut body = Ok(unwind);
         for clause in &foreach.clauses {
             body = body.and_then(|plan| self.translate_clause(clause, Some(plan)));
         }
         self.call_scope.replace(enclosing);
+        self.with_columns.replace(enclosing_with);
 
         Ok(LogicalOperator::Apply(ApplyOp {
             input: Box::new(input),
@@ -937,8 +981,9 @@ impl CypherTranslator {
 
         // A path variable on more than one relationship pattern binds the
         // path of all of them, which no single expand has: the hops are bound
-        // one by one and the path is put together after them.
-        let whole_path_alias = path_alias.clone().filter(|_| path.chain.len() > 1);
+        // one by one and the path is put together after them. On none, it
+        // binds the path of the one node, which no expand binds either.
+        let whole_path_alias = path_alias.clone().filter(|_| path.chain.len() != 1);
         let Some(alias) = whole_path_alias else {
             for rel in &path.chain {
                 plan = self
@@ -971,6 +1016,17 @@ impl CypherTranslator {
         path_alias: Option<String>,
     ) -> Result<LogicalOperator> {
         match pattern {
+            // A node alone under a path variable is a path of no relationships
+            ast::Pattern::Node(node_pattern) if path_alias.is_some() => self
+                .translate_path_pattern_with_alias(
+                    &ast::PathPattern {
+                        start: node_pattern.clone(),
+                        chain: Vec::new(),
+                        span: None,
+                    },
+                    input,
+                    path_alias,
+                ),
             ast::Pattern::Node(node_pattern) => self.translate_node_pattern(node_pattern, input),
             ast::Pattern::Path(path_pattern) => {
                 self.translate_path_pattern_with_alias(path_pattern, input, path_alias)
@@ -1142,7 +1198,7 @@ impl CypherTranslator {
                 op: BinaryOp::And,
                 right: Box::new(right),
             })
-            .map(|predicate| ShortestPathEdgeCondition {
+            .map(|predicate| ShortestPathCondition {
                 variable: candidate,
                 predicate,
             });
@@ -1181,6 +1237,7 @@ impl CypherTranslator {
             edge_variable,
             quantified,
             edge_condition,
+            steps: Vec::new(),
         });
 
         Ok(plan)
@@ -1364,7 +1421,7 @@ impl CypherTranslator {
                 "WHERE requires input",
             ))
         })?;
-        let predicate = self.translate_expression(&where_clause.predicate)?;
+        let predicate = self.translate_predicate(&where_clause.predicate)?;
 
         // When the input is a LeftJoin (from OPTIONAL MATCH), classify the
         // predicate so right-side references become join conditions rather
@@ -1432,7 +1489,7 @@ impl CypherTranslator {
             };
 
             if let Some(where_clause) = &with_clause.where_clause {
-                let predicate = self.translate_expression(&where_clause.predicate)?;
+                let predicate = self.translate_predicate(&where_clause.predicate)?;
                 plan = wrap_filter(plan, predicate);
             }
 
@@ -1455,7 +1512,7 @@ impl CypherTranslator {
                 self.extract_aggregates_and_groups_from_items(items)?;
             let imports_read = super::common::resolve_implicitly_grouped(
                 "WITH",
-                post_return.as_deref_mut().unwrap_or_default(),
+                &mut post_return,
                 &group_by,
                 &aggregates,
                 &self.call_imports,
@@ -1474,22 +1531,18 @@ impl CypherTranslator {
                 true,
             );
 
-            if let Some(return_items) = post_return {
-                let projections = return_items
-                    .into_iter()
-                    .map(|item| Projection {
-                        expression: item.expression,
-                        alias: item.alias,
-                    })
-                    .collect();
-                LogicalOperator::Project(ProjectOp {
-                    projections,
-                    input: Box::new(agg_op),
-                    pass_through_input: false,
+            let projections = post_return
+                .into_iter()
+                .map(|item| Projection {
+                    expression: item.expression,
+                    alias: item.alias,
                 })
-            } else {
-                agg_op
-            }
+                .collect();
+            LogicalOperator::Project(ProjectOp {
+                projections,
+                input: Box::new(agg_op),
+                pass_through_input: false,
+            })
         } else {
             let projections: Vec<Projection> = items
                 .iter()
@@ -1545,8 +1598,12 @@ impl CypherTranslator {
         plan = with_imports(plan, missing, has_aggregates);
 
         if let Some(where_clause) = &with_clause.where_clause {
-            let predicate = self.translate_expression(&where_clause.predicate)?;
-            plan = wrap_filter(plan, predicate);
+            let predicate = self.translate_predicate(&where_clause.predicate)?;
+            plan = if has_aggregates {
+                wrap_filter(plan, predicate)
+            } else {
+                self.filter_keeping_input(plan, predicate, items, with_clause.distinct)?
+            };
         }
 
         if with_clause.distinct {
@@ -1715,7 +1772,10 @@ impl CypherTranslator {
                 Some(variable.as_str()) != node_variable
             }
         });
-        if path.is_some() || sets_like_a_clause {
+        // A path variable is bound by the whole-pattern plan only, also on a
+        // node alone
+        let names_a_path = matches!(pattern, ast::Pattern::NamedPath { .. });
+        if path.is_some() || names_a_path || sets_like_a_clause {
             return self.translate_merge_pattern(merge_clause, input);
         }
         let input = input.unwrap_or(LogicalOperator::Empty);
@@ -2160,7 +2220,7 @@ impl CypherTranslator {
                 self.extract_aggregates_and_groups_from_items(items)?;
             let imports_read = super::common::resolve_implicitly_grouped(
                 "RETURN",
-                post_return.as_deref_mut().unwrap_or_default(),
+                &mut post_return,
                 &group_by,
                 &aggregates,
                 &self.call_imports,
@@ -2195,23 +2255,19 @@ impl CypherTranslator {
                 true,
             );
 
-            if let Some(return_items) = post_return {
-                // Post-projection renames columns using aliases.
-                // Register alias -> alias (identity) so ORDER BY resolves
-                // directly since the Return outputs alias names.
-                {
-                    let mut aliases = self.return_aliases.borrow_mut();
-                    for ri in &return_items {
-                        if let Some(ref alias) = ri.alias {
-                            let a = alias.clone();
-                            aliases.insert(a.clone(), a);
-                        }
+            // Post-projection renames columns using aliases. Register
+            // alias -> alias (identity) so ORDER BY resolves directly since
+            // the Return outputs alias names.
+            {
+                let mut aliases = self.return_aliases.borrow_mut();
+                for ri in &post_return {
+                    if let Some(ref alias) = ri.alias {
+                        let a = alias.clone();
+                        aliases.insert(a.clone(), a);
                     }
                 }
-                Ok(wrap_return(agg_op, return_items, distinct))
-            } else {
-                Ok(agg_op)
             }
+            Ok(wrap_return(agg_op, post_return, distinct))
         } else {
             // Normal return without aggregates
             let items = match items {
@@ -2260,25 +2316,18 @@ impl CypherTranslator {
     /// Returns `(aggregates, group_by, post_return)`. The Aggregate operator
     /// outputs its grouping keys first, then its aggregates, named by alias or
     /// [`aggregate_column_name`](crate::query::planner::common::aggregate_column_name).
-    /// `post_return` is `Some(...)` whenever that output differs from what the
-    /// items ask for: an item wraps an aggregate (`count(n) > 0 AS exists`),
-    /// an item has an alias, or a grouping key follows an aggregate (so
-    /// columns must be reordered). A post-aggregate projection must then be
-    /// chained.
+    /// `post_return` holds one item per RETURN item, reading that output:
+    /// the caller always chains it, so an item that wraps an aggregate
+    /// (`count(n) > 0 AS exists`), an alias, the item order and the entity
+    /// type of a grouping key come out as the items ask.
     fn extract_aggregates_and_groups_from_items(
         &self,
         items: &[ast::ProjectionItem],
-    ) -> Result<(
-        Vec<AggregateExpr>,
-        Vec<LogicalExpression>,
-        Option<Vec<ReturnItem>>,
-    )> {
+    ) -> Result<(Vec<AggregateExpr>, Vec<LogicalExpression>, Vec<ReturnItem>)> {
         let mut aggregates = Vec::new();
         let mut group_by = Vec::new();
-        let mut needs_post_return = false;
         let mut post_return_items = Vec::new();
         let mut agg_counter: u32 = 0;
-        let mut seen_aggregate = false;
 
         for item in items {
             if let Some(mut agg_expr) = self.try_extract_aggregate(&item.expression, &item.alias)? {
@@ -2292,7 +2341,6 @@ impl CypherTranslator {
                 let reads_as_zero = agg_expr.function == AggregateFunction::Sum;
                 aggregates.push(agg_expr);
                 if reads_as_zero {
-                    needs_post_return = true;
                     post_return_items.push(ReturnItem {
                         expression: sum_of_no_values_is_zero(LogicalExpression::Variable(
                             column.clone(),
@@ -2305,11 +2353,8 @@ impl CypherTranslator {
                         alias: item.alias.clone(),
                     });
                 }
-                seen_aggregate = true;
             } else if contains_aggregate(&item.expression) {
                 // Wrapped aggregate (e.g. `count(n) > 0 AS exists`)
-                needs_post_return = true;
-                seen_aggregate = true;
 
                 // Extract all aggregates and build a substitute expression
                 // with variable references replacing each aggregate.
@@ -2331,9 +2376,8 @@ impl CypherTranslator {
                 });
             } else {
                 // Non-aggregate expression: group-by key. Keys come first in
-                // the Aggregate's output, so a key after an aggregate needs the
-                // post-return to restore the item order.
-                needs_post_return |= seen_aggregate;
+                // the Aggregate's output; the post-return restores the item
+                // order.
                 let expr = self.translate_expression(&item.expression)?;
                 group_by.push(expr.clone());
                 // In the post-return, reference the Aggregate's output column
@@ -2346,12 +2390,10 @@ impl CypherTranslator {
             }
         }
 
-        let has_aliases = items.iter().any(|item| item.alias.is_some());
-        if needs_post_return || has_aliases {
-            Ok((aggregates, group_by, Some(post_return_items)))
-        } else {
-            Ok((aggregates, group_by, None))
-        }
+        // The post-return always runs: it reads the Aggregate's node and edge
+        // ids back as nodes and edges (without it, `RETURN n, count(n)` gave
+        // `n`'s id), and names and orders the columns as the items do.
+        Ok((aggregates, group_by, post_return_items))
     }
 
     /// Extracts all aggregates from inside a wrapping expression, assigning
@@ -2602,21 +2644,13 @@ impl CypherTranslator {
                     } else {
                         Some(self.translate_expression(&args[0])?)
                     };
-                    // Extract percentile parameter for percentile functions
+                    // The percentile, as written; the planner evaluates it.
                     let percentile = if matches!(
                         function,
                         AggregateFunction::PercentileDisc | AggregateFunction::PercentileCont
                     ) && args.len() >= 2
                     {
-                        // Second argument is the percentile value
-                        if let ast::Expression::Literal(ast::Literal::Float(p)) = &args[1] {
-                            Some((*p).clamp(0.0, 1.0))
-                        } else if let ast::Expression::Literal(ast::Literal::Integer(p)) = &args[1]
-                        {
-                            Some((*p as f64).clamp(0.0, 1.0))
-                        } else {
-                            Some(0.5) // Default to median
-                        }
+                        Some(self.translate_expression(&args[1])?)
                     } else {
                         None
                     };
@@ -2661,6 +2695,7 @@ impl CypherTranslator {
                         alias: alias.clone(),
                         percentile,
                         separator,
+                        keep_nulls: false,
                     }))
                 } else {
                     Ok(None)
@@ -2882,6 +2917,112 @@ impl CypherTranslator {
         }
     }
 
+    /// Filters the rows of a WITH that neither aggregates nor is `WITH *` by
+    /// `predicate`, which may read variables of its input the WITH does not
+    /// project (openCypher's WHERE of a WITH): the projection keeps them for
+    /// the filter. Without DISTINCT they stay for an ORDER BY, SKIP or LIMIT
+    /// after it, and the next other clause drops them (see `with_columns`);
+    /// with DISTINCT they go right after the filter, before the rows are
+    /// compared. The WITH's columns are its projection's, the imports of a
+    /// CALL body among them.
+    ///
+    /// # Errors
+    ///
+    /// A subquery in `predicate` (an `EXISTS`, a pattern comprehension) whose
+    /// names cannot be told apart into the input's and its own: run on the
+    /// projection alone, it would not see the input's.
+    fn filter_keeping_input(
+        &self,
+        plan: LogicalOperator,
+        predicate: LogicalExpression,
+        items: &[ast::ProjectionItem],
+        distinct: bool,
+    ) -> Result<LogicalOperator> {
+        let projected: Vec<String> = match &plan {
+            LogicalOperator::Project(project) => project
+                .projections
+                .iter()
+                .filter_map(
+                    |projection| match (&projection.alias, &projection.expression) {
+                        (Some(alias), _) => Some(alias.clone()),
+                        (None, LogicalExpression::Variable(name)) => Some(name.clone()),
+                        (None, _) => None,
+                    },
+                )
+                .collect(),
+            _ => Self::projected_names(items),
+        };
+        let mut read = HashSet::new();
+        collect_expression_variables(&predicate, &mut read);
+        // A subquery reads the input's variables it names, which the walk
+        // above does not enter. Names it reads that the WITH projects need
+        // nothing; any other is kept when the input binds it, and is the
+        // subquery's own otherwise. A subquery whose names cannot be read
+        // (one inside a list comprehension or a list predicate) keeps every
+        // variable of the input: more columns, never a row it should not see.
+        if super::common::has_subquery(&predicate) {
+            let outside: Option<Vec<String>> =
+                super::common::subquery_reads(&predicate).map(|names| {
+                    names
+                        .into_iter()
+                        .filter(|name| !projected.contains(name))
+                        .collect()
+                });
+            if outside.as_ref().is_none_or(|outside| !outside.is_empty()) {
+                let bound = match &plan {
+                    LogicalOperator::Project(project) => project
+                        .input
+                        .bound_variables(self.call_scope.borrow().as_ref()),
+                    _ => None,
+                };
+                let Some(bound) = bound else {
+                    return Err(Error::from(QueryError::new(
+                        QueryErrorKind::Unsupported,
+                        "a subquery in the WHERE of this WITH cannot tell which variables of \
+                         the input it reads: name them in the WITH",
+                    )));
+                };
+                match outside {
+                    Some(outside) => {
+                        read.extend(outside.into_iter().filter(|name| bound.contains(name)));
+                    }
+                    None => read.extend(bound.into_iter().filter(|name| !name.starts_with('_'))),
+                }
+            }
+        }
+        let mut kept: Vec<String> = read
+            .into_iter()
+            .filter(|name| !projected.contains(name))
+            .collect();
+        if kept.is_empty() {
+            return Ok(wrap_filter(plan, predicate));
+        }
+        kept.sort();
+        let (plan, kept_them) = super::common::keep_columns(plan, &kept);
+        let plan = wrap_filter(plan, predicate);
+        if !kept_them {
+            return Ok(plan);
+        }
+        if distinct {
+            return Ok(project_columns(plan, projected));
+        }
+        self.with_columns.replace(Some(projected));
+        Ok(plan)
+    }
+
+    /// The columns a projection's `items` give: an alias, or a variable
+    /// projected as itself.
+    fn projected_names(items: &[ast::ProjectionItem]) -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|item| match (&item.alias, &item.expression) {
+                (Some(alias), _) => Some(alias.clone()),
+                (None, ast::Expression::Variable(name)) => Some(name.clone()),
+                (None, _) => None,
+            })
+            .collect()
+    }
+
     /// Sorts the rows of a WITH by `keys` that read variables of its input
     /// it does not project (`WITH a.name AS name ORDER BY a.age`): the
     /// projection keeps those variables for the sort, and a projection of
@@ -2892,15 +3033,7 @@ impl CypherTranslator {
         keys: Vec<SortKey>,
         items: &[ast::ProjectionItem],
     ) -> LogicalOperator {
-        let projected: Vec<String> = items
-            .iter()
-            .filter_map(|item| match (&item.alias, &item.expression) {
-                (Some(alias), _) => Some(alias.clone()),
-                (None, ast::Expression::Variable(name)) => Some(name.clone()),
-                (None, _) => None,
-            })
-            .collect();
-        super::common::sort_keeping_input(plan, keys, projected)
+        super::common::sort_keeping_input(plan, keys, Self::projected_names(items))
     }
 
     fn translate_skip(
@@ -2935,10 +3068,20 @@ impl CypherTranslator {
         Ok(wrap_limit(input, count))
     }
 
+    /// A CREATE right after another (`after_create`, no clause between them),
+    /// where neither reads the graph, joins the other's operator: its
+    /// elements follow the other's, in order. For each row that creates what
+    /// the two clauses would, since a created element's properties read the
+    /// row built so far either way, and keeps a chain of CREATE clauses from
+    /// nesting a level per clause (see `limits`). A CREATE whose properties
+    /// read the graph (`EXISTS`, `COUNT`, a pattern comprehension) reads what
+    /// the clause before created, which joining would change, so neither is
+    /// joined to the other.
     fn translate_create_clause(
         &self,
         create_clause: &ast::CreateClause,
         input: Option<LogicalOperator>,
+        after_create: bool,
     ) -> Result<LogicalOperator> {
         let elements = self.create_elements(&create_clause.patterns)?;
         if elements.is_empty() {
@@ -2949,11 +3092,18 @@ impl CypherTranslator {
                 ))
             });
         }
-        Ok(LogicalOperator::Create(CreateOp {
-            elements,
-            input: input.map(Box::new),
-            claim: None,
-        }))
+        let joins = after_create && !create_reads_graph(create_clause);
+        match input {
+            Some(LogicalOperator::Create(mut previous)) if joins && previous.claim.is_none() => {
+                previous.elements.extend(elements);
+                Ok(LogicalOperator::Create(previous))
+            }
+            input => Ok(LogicalOperator::Create(CreateOp {
+                elements,
+                input: input.map(Box::new),
+                claim: None,
+            })),
+        }
     }
 
     /// The nodes and edges `patterns` create, in order: one [`CreateOp`] for
@@ -3413,7 +3563,7 @@ impl CypherTranslator {
                     self.translate_comma_patterns(std::slice::from_ref(pattern.as_ref()), None)?;
                 // Apply optional WHERE filter
                 let subplan = if let Some(where_expr) = where_clause {
-                    let pred = self.translate_expression(where_expr)?;
+                    let pred = self.translate_predicate(where_expr)?;
                     wrap_filter(pattern_plan, pred)
                 } else {
                     pattern_plan
@@ -3726,6 +3876,87 @@ impl CypherTranslator {
         Ok(self.rewrite_pattern_comprehensions(input, lifted)?.0)
     }
 
+    /// Translates a `WHERE` predicate, its pattern comprehensions as `VALUE`
+    /// subqueries (see [`Self::lower_pattern_comprehensions`]).
+    fn translate_predicate(&self, predicate: &ast::Expression) -> Result<LogicalExpression> {
+        let predicate = self.translate_expression(predicate)?;
+        Ok(self.lower_pattern_comprehensions(predicate))
+    }
+
+    /// `expression` with each pattern comprehension as the `VALUE` subquery
+    /// that collects its projection over its pattern, which the planner runs
+    /// per row. Comprehension and predicate bodies are left alone, as in
+    /// [`Self::take_pattern_comprehensions`].
+    fn lower_pattern_comprehensions(&self, expression: LogicalExpression) -> LogicalExpression {
+        match expression {
+            LogicalExpression::PatternComprehension {
+                subplan,
+                projection,
+            } => {
+                let alias = self.next_anon_var();
+                let collected = LogicalOperator::Aggregate(AggregateOp {
+                    group_by: vec![],
+                    aggregates: vec![AggregateExpr {
+                        function: AggregateFunction::Collect,
+                        expression: Some(self.lower_pattern_comprehensions(*projection)),
+                        expression2: None,
+                        distinct: false,
+                        alias: Some(alias.clone()),
+                        percentile: None,
+                        separator: None,
+                        keep_nulls: true,
+                    }],
+                    input: subplan,
+                    having: None,
+                });
+                LogicalExpression::ValueSubquery(Box::new(LogicalOperator::Return(ReturnOp {
+                    items: vec![ReturnItem {
+                        expression: LogicalExpression::Variable(alias.clone()),
+                        alias: Some(alias),
+                    }],
+                    distinct: false,
+                    input: Box::new(collected),
+                })))
+            }
+            LogicalExpression::ListComprehension {
+                variable,
+                list_expr,
+                filter_expr,
+                map_expr,
+            } => LogicalExpression::ListComprehension {
+                variable,
+                list_expr: Box::new(self.lower_pattern_comprehensions(*list_expr)),
+                filter_expr,
+                map_expr,
+            },
+            LogicalExpression::ListPredicate {
+                kind,
+                variable,
+                list_expr,
+                predicate,
+            } => LogicalExpression::ListPredicate {
+                kind,
+                variable,
+                list_expr: Box::new(self.lower_pattern_comprehensions(*list_expr)),
+                predicate,
+            },
+            LogicalExpression::Reduce {
+                accumulator,
+                initial,
+                variable,
+                list,
+                expression,
+            } => LogicalExpression::Reduce {
+                accumulator,
+                initial: Box::new(self.lower_pattern_comprehensions(*initial)),
+                variable,
+                list: Box::new(self.lower_pattern_comprehensions(*list)),
+                expression,
+            },
+            other => other.map_children(|child| self.lower_pattern_comprehensions(child)),
+        }
+    }
+
     /// Replaces each pattern comprehension in `expression` with a variable of
     /// its own and adds it to `lifted` as an item that collects into that
     /// variable. Comprehension and predicate bodies are left alone: they can
@@ -3868,6 +4099,7 @@ impl CypherTranslator {
                         alias: Some(alias.clone()),
                         percentile: None,
                         separator: None,
+                        keep_nulls: true,
                     }],
                     input: Box::new(rewritten_subplan),
                     having: None,
@@ -4008,6 +4240,90 @@ fn pattern_plan_names(op: &LogicalOperator, names: &mut HashSet<String>) {
     }
     for child in op.children() {
         pattern_plan_names(child, names);
+    }
+}
+
+/// Whether a property expression of the patterns of `create` reads the graph
+/// (see [`reads_graph`]).
+fn create_reads_graph(create: &ast::CreateClause) -> bool {
+    fn node_reads(node: &ast::NodePattern) -> bool {
+        node.properties.iter().any(|(_, value)| reads_graph(value))
+    }
+    fn pattern_reads(pattern: &ast::Pattern) -> bool {
+        match pattern {
+            ast::Pattern::Node(node) => node_reads(node),
+            ast::Pattern::Path(path) => {
+                node_reads(&path.start)
+                    || path.chain.iter().any(|rel| {
+                        rel.properties.iter().any(|(_, value)| reads_graph(value))
+                            || node_reads(&rel.target)
+                    })
+            }
+            ast::Pattern::NamedPath { pattern, .. } => pattern_reads(pattern),
+        }
+    }
+    create.patterns.iter().any(pattern_reads)
+}
+
+/// Checks if an AST expression reads the graph: an `EXISTS` or `COUNT`
+/// subquery or a pattern comprehension in it.
+fn reads_graph(expr: &ast::Expression) -> bool {
+    match expr {
+        ast::Expression::Exists(_)
+        | ast::Expression::CountSubquery(_)
+        | ast::Expression::PatternComprehension { .. } => true,
+        ast::Expression::FunctionCall { args, .. } | ast::Expression::List(args) => {
+            args.iter().any(reads_graph)
+        }
+        ast::Expression::Binary { left, right, .. }
+        | ast::Expression::IndexAccess {
+            base: left,
+            index: right,
+        } => reads_graph(left) || reads_graph(right),
+        ast::Expression::Unary { operand, .. } => reads_graph(operand),
+        ast::Expression::PropertyAccess { base, .. } => reads_graph(base),
+        ast::Expression::SliceAccess { base, start, end } => {
+            reads_graph(base)
+                || start.as_deref().is_some_and(reads_graph)
+                || end.as_deref().is_some_and(reads_graph)
+        }
+        ast::Expression::Case {
+            input,
+            whens,
+            else_clause,
+        } => {
+            input.as_deref().is_some_and(reads_graph)
+                || whens.iter().any(|(w, t)| reads_graph(w) || reads_graph(t))
+                || else_clause.as_deref().is_some_and(reads_graph)
+        }
+        ast::Expression::Map(entries) => entries.iter().any(|(_, value)| reads_graph(value)),
+        ast::Expression::ListComprehension {
+            list,
+            filter,
+            projection,
+            ..
+        } => {
+            reads_graph(list)
+                || filter.as_deref().is_some_and(reads_graph)
+                || projection.as_deref().is_some_and(reads_graph)
+        }
+        ast::Expression::ListPredicate {
+            list, predicate, ..
+        } => reads_graph(list) || reads_graph(predicate),
+        ast::Expression::Reduce {
+            initial,
+            list,
+            expression,
+            ..
+        } => reads_graph(initial) || reads_graph(list) || reads_graph(expression),
+        ast::Expression::MapProjection { entries, .. } => entries.iter().any(|entry| match entry {
+            ast::MapProjectionEntry::LiteralEntry(_, value) => reads_graph(value),
+            ast::MapProjectionEntry::PropertySelector(_)
+            | ast::MapProjectionEntry::AllProperties => false,
+        }),
+        ast::Expression::Literal(_)
+        | ast::Expression::Variable(_)
+        | ast::Expression::Parameter(_) => false,
     }
 }
 
@@ -4171,10 +4487,34 @@ fn merge_match_entries(mut path: ast::PathPattern) -> (ast::PathPattern, Option<
     (path, predicate)
 }
 
+/// `input` projected to `columns`, each read by its name: what a WITH passes
+/// on after the variables its WHERE or ORDER BY needed are dropped.
+fn project_columns(input: LogicalOperator, columns: Vec<String>) -> LogicalOperator {
+    LogicalOperator::Project(ProjectOp {
+        projections: columns
+            .into_iter()
+            .map(|name| Projection {
+                expression: LogicalExpression::Variable(name),
+                alias: None,
+            })
+            .collect(),
+        input: Box::new(input),
+        pass_through_input: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::query::plan::{FilterOp, LimitOp, SkipOp, SortOp};
+
+    /// [`super::translate`] under the default parse limits.
+    fn translate(query: &str) -> Result<LogicalPlan> {
+        super::translate(
+            query,
+            &grafeo_adapters::query::limits::ParseLimits::default(),
+        )
+    }
 
     /// The plan of a query that ends with an update, under the `RETURN` of
     /// no items that gives it no result.

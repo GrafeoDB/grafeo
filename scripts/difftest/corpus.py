@@ -96,8 +96,8 @@ def empty(grafeo):
 
 
 def writes(grafeo):
-    """An empty database for the cases that write (sections BR, BS and BU), which no other
-    case reads."""
+    """An empty database for the cases that write (sections BR, BS, BU, ES, EU, EV and FA),
+    which no other case reads."""
     return grafeo.GrafeoDB()
 
 
@@ -444,7 +444,7 @@ def rdf_complex_paths(grafeo):
 
 WRITE_FIXTURES = {
     "rdf_graphs_writes": {"DZ"},
-    "writes": {"BR", "BS", "BU", "CT", "DB"},
+    "writes": {"BR", "BS", "BU", "CT", "DB", "ES", "EU", "EV", "FA"},
     "rdf_writes": {"DD"},
     "merges": {"CC"},
     "leads": {"CF"},
@@ -464,6 +464,8 @@ WRITE_FIXTURES = {
     "rdf_clear": {"EP"},
     # Writes that break a listed standalone type, and a read of what went in
     "listed_type": {"EP"},
+    # A graph created, filled and replaced in one session
+    "graph_replace": {"EQ"},
 }
 
 
@@ -764,6 +766,7 @@ FIXTURES = {
     "index_graphs": index_graphs,
     "listed_type": listed_type,
     "string_id_square": string_id_square,
+    "graph_replace": empty,
 }
 
 CASES: list[Case] = []
@@ -1246,6 +1249,9 @@ for case_id, query, languages in [
     ("AA4", "MATCH (a:Person) RETURN sum(size([(a)-[:KNOWS]->(b) | b])) AS n", CYPHER),
     ("AA5", "MATCH (a:Person) RETURN a.name AS a, size([(a)-[:KNOWS]->(b) | b]) AS n", CYPHER),
     ("AA6", "MATCH (a:Person) RETURN a.name AS a, size(a{.name, knows: [(a)-[:KNOWS]->(b) | b]}.knows) AS n", CYPHER),
+    # A pattern comprehension in a WHERE runs (0.6.4); in 0.6.3 it was an internal error
+    ("AA7", "MATCH (a:Person) WHERE size([(a)-[:KNOWS]->(b) | b]) > 1 RETURN a.name AS a", CYPHER),
+    ("AA8", "MATCH (a:Person) OPTIONAL MATCH (a)-[:LIVES_IN]->(c) WHERE size([(c)<-[:LIVES_IN]-(p) | p]) = 1 RETURN a.name AS a, c.name AS c", CYPHER),
 ]:
     case(case_id, query, languages)
 
@@ -2615,8 +2621,9 @@ for case_id, query, languages in [
 # DK: a WHERE inside a GQL quantified pattern holds per step (#678 item 2; 0.6.0 checked it
 #     once over the edge list, and a node condition was an undefined variable): an edge
 #     condition (DK1), a node condition (DK2); a two-edge quantified pattern repeats within
-#     its bounds (DK3, DK4; 0.6.0 took the segment once); an unbounded walk has no hop cap
-#     (DK5, DK6; 0.6.0 stopped after min + 100 hops)
+#     its bounds (DK3, DK4; 0.6.0 took the segment once); an unbounded walk over a chain
+#     (DK5, DK6; 0.6.0 stopped after min + 100 hops; since 0.6.4 GQL refuses an unbounded
+#     quantifier without a path mode or a selector with 42001)
 for case_id, query, fixture in [
     ("DK1", "MATCH (s:Person {name: 'Alix'})((a)-[e:KNOWS]->(b) WHERE e.w > 1){1,3}(t) RETURN t.name AS t, [x IN e | x.w] AS ws", "social"),
     ("DK2", "MATCH (s:Person {name: 'Alix'})((a)-[e:KNOWS]->(b) WHERE a.age < b.age){1,3}(t) RETURN t.name AS t", "social"),
@@ -3704,12 +3711,153 @@ for case_id, query in [
     ("EP25", "MATCH (n:A) RETURN n.k AS k, n.h AS h"),
 ]:
     case(case_id, query, GQL, "listed_type")
+# An unbounded quantifier needs a path mode or a selector in GQL (0.6.4, ISO/IEC 39075 16.4 SR 14):
+#     with TRAIL, Cypher's semantics, GQL answers as Cypher's BJ3 does (EP26); without one GQL
+#     refuses it with 42001 before it runs (EP27; 0.6.3 walked, and failed with GRAFEO-S001 at
+#     the path search budget)
+case("EP26", "MATCH TRAIL (g:Person {name: 'Gus'})-[:KNOWS*]->(c) RETURN c.name AS c", GQL, "social")
+case("EP27", "MATCH (g:Person {name: 'Gus'})-[:KNOWS*]->(c) RETURN c.name AS c", GQL, "social")
+# ANY SHORTEST and shortestPath count the nodes they visit against the path search budget (0.6.4):
+#     over it they fail with GRAFEO-S001 naming the budget (EP28, EP29; 0.6.3 counted only the
+#     paths they kept, and answered)
+case("EP28", "MATCH p = ANY SHORTEST (s:Star)-[:E]->+(t:Leaf {n: 3}) RETURN length(p) AS l", GQL, "path_budget")
+case("EP29", "MATCH p = shortestPath((s:Star)-[:E*]->(t:Leaf {n: 3})) RETURN length(p) AS l", CYPHER, "path_budget")
 
-# FD: a SQL/PGQ comparison of two values of two kinds raises 22G04, so the optimizer moves
+# EQ: CREATE OR REPLACE GRAPH (ISO 12.4) replaces a graph in one change (it was a syntax error):
+#     the replaced graph is empty (EQ5); EQ6 is cleanup, returning the session to the default graph
+#     for the cases after it
+for case_id, query in [
+    ("EQ1", "CREATE GRAPH replaced"),
+    ("EQ2", "USE GRAPH replaced"),
+    ("EQ3", "INSERT (:Person {name: 'Beatrix'})"),
+    ("EQ4", "CREATE OR REPLACE GRAPH replaced"),
+    ("EQ5", "MATCH (n) RETURN count(n) AS c"),
+    ("EQ6", "USE GRAPH default"),
+]:
+    case(case_id, query, GQL, "graph_replace")
+
+# ER: a node or edge in a value an expression builds is the node or edge (0.6.4); in 0.6.3 these
+#     gave its id: a list comprehension's items, indexed and unwound (ER1 to ER3), a CASE (ER4),
+#     coalesce (ER5), the item `+` adds to a list (ER6) and what reduce collects (ER7)
+case("ER1", "MATCH p = (a:Person {name: 'Alix'})-[:LIVES_IN]->(c) RETURN [x IN nodes(p) | x][0] AS m")
+case("ER2", "MATCH (a:Person {name: 'Gus'}) WITH collect(a) AS l RETURN [x IN l | x] AS m")
+case("ER3", "MATCH p = (a:Person {name: 'Mia'})-[:LIVES_IN]->(c) UNWIND [x IN relationships(p) | x] AS y RETURN y")
+case("ER4", "MATCH (a:Person {name: 'Alix'})-[r:LIVES_IN]->(c) RETURN CASE WHEN a.age > 100 THEN a ELSE c END AS m")
+case("ER5", "MATCH (a:Person {name: 'Alix'})-[r:LIVES_IN]->(c) RETURN coalesce(null, r) AS m")
+case("ER6", "MATCH p = (a:Person {name: 'Gus'})-[:LIVES_IN]->(c) RETURN nodes(p) + [a] AS m", CYPHER)
+case("ER7", "MATCH p = (a:Person {name: 'Gus'})-[:LIVES_IN]->(c) RETURN reduce(acc = [], x IN nodes(p) | acc + [x]) AS m", CYPHER)
+
+# ES: null as openCypher and GQL's three-valued logic give it (0.6.4): a quantifier over a list with
+#     a null item is null where that item could decide it (ES1 to ES4), a slice with a null bound is
+#     null (ES5), nothing is IN an empty list (ES6, and ES11 for an absent property), nodes() of
+#     null is null (ES7), and a SET, REMOVE or DELETE of a null target is a no-op for its row
+#     (ES8 to ES10; they failed)
+case("ES1", "RETURN all(x IN [1, null, 3] WHERE x > 0) AS r")
+case("ES2", "RETURN any(x IN [-1, null] WHERE x > 0) AS r")
+case("ES3", "RETURN none(x IN [-1, null] WHERE x > 0) AS r")
+case("ES4", "RETURN single(x IN [1, null] WHERE x > 0) AS r")
+case("ES5", "RETURN [1, 2, 3][null..2] AS r")
+case("ES6", "RETURN null IN [] AS r")
+case("ES7", "RETURN nodes(null) AS r", CYPHER)
+case("ES8", "OPTIONAL MATCH (a:Robot) SET a.num = 42 RETURN a", BOTH, "writes")
+case("ES9", "OPTIONAL MATCH (a:Robot) REMOVE a:Person RETURN a", BOTH, "writes")
+case("ES10", "OPTIONAL MATCH (a:Robot) DETACH DELETE a RETURN a", BOTH, "writes")
+case("ES11", "MATCH (a:Person {name: 'Alix'}) RETURN a.missing IN [] AS r, NOT a.missing IN [] AS s")
+
+# ET: an aggregating RETURN with no alias gives its nodes and edges as nodes and edges (0.6.4); in
+#     0.6.3 they came back as ids: a node group key (ET1, ET2), an edge one (ET3), collect() of
+#     nodes (ET4, ET5)
+case("ET1", "MATCH (a:Person) RETURN a, count(a)")
+case("ET2", "MATCH (a:Person) OPTIONAL MATCH (a)-[:LIVES_IN]->(c) RETURN a, collect(c)")
+case("ET3", "MATCH (a:Person)-[r:KNOWS]->(b) RETURN r, count(*)")
+case("ET4", "MATCH (c:City) RETURN collect(c)")
+case("ET5", "MATCH (c:City) RETURN count(c), collect(c)")
+
+# EU: Cypher's ^ is left associative (EU1, EU2; 0.6.4, it was read right to left), and SET x = e
+#     and SET x += e copy a node's or relationship's properties (EU3 to EU6; they set nothing)
+case("EU1", "RETURN 2 ^ 3 ^ 2 AS r", CYPHER)
+case("EU2", "RETURN 4 ^ (3 * 2) ^ 3 AS r", CYPHER)
+for case_id, query in [
+    ("EU3", "INSERT (:Robot {name: 'R1', n: 1})-[:BUILT {w: 7}]->(:Robot {name: 'R2'})"),
+    ("EU4", "MATCH (a:Robot {name: 'R1'})-[r:BUILT]->() SET r = a"),
+    ("EU5", "MATCH (a:Robot {name: 'R1'})-[r:BUILT]->(b) SET b += r"),
+    ("EU6", "MATCH (a:Robot)-[r:BUILT]->(b) RETURN properties(r) AS r, properties(b) AS b"),
+]:
+    case(case_id, query, GQL, "writes")
+
+# EV: a stored procedure is called by its whole name (0.6.4; a dotted name was looked up by its last
+#     part, EV2), its arguments are checked against the parameter types (EV3), and one that returns
+#     nothing keeps each row of the query that calls it (EV5, a plain name so 0.6.3 finds it too; the
+#     rows were dropped)
+for case_id, query in [
+    ("EV1", "CREATE PROCEDURE `test.one`(in INT64) RETURNS (x INT64) AS { RETURN $in AS x }"),
+    ("EV2", "CALL test.one(1) YIELD x RETURN x"),
+    ("EV3", "CALL test.one(true) YIELD x RETURN x"),
+    ("EV4", "CREATE PROCEDURE `nothing`() RETURNS () AS { UNWIND [] AS r FINISH }"),
+]:
+    case(case_id, query, GQL, "writes")
+case("EV5", "UNWIND [1, 2, 3] AS i CALL nothing() RETURN count(i) AS c", CYPHER, "writes")
+
+# EW: the WHERE of a Cypher WITH reads the variables bound before the WITH (0.6.4; it failed with an
+#     undefined variable), also beside an ORDER BY (EW3) and after an OPTIONAL MATCH (EW4); a
+#     parameter may be named by a number (EW5); a pattern comprehension in the WHERE reads the row's
+#     variable (EW6), an EXISTS inside a list predicate does too (EW8), and in a CALL body the WITH keeps the imports
+#     (EW7)
+case("EW1", "MATCH (a:Person) WITH a.name AS name WHERE a.age > 30 RETURN name", CYPHER)
+case("EW2", "MATCH (a:Person) WITH a.name AS name WHERE name = 'Mia' OR a.age = 40 RETURN name", CYPHER)
+ordered("EW3", "MATCH (a:Person) WITH a.name AS name WHERE a.age > 26 ORDER BY a.age DESC RETURN name", CYPHER)
+case("EW4", "MATCH (p:Person) OPTIONAL MATCH (p)-[r:LIVES_IN]->() WITH p WHERE r IS NULL RETURN p.name AS name", CYPHER)
+case("EW5", "MATCH (a:Person) WITH a WHERE a.age = $1 RETURN a.name AS name", CYPHER, params={"1": 25})
+case("EW6", "MATCH (a:Person) WITH a.name AS name WHERE size([(a)-[:LIVES_IN]->() | 1]) > 0 RETURN name", CYPHER)
+case("EW7", "MATCH (p:Person {name: 'Alix'}) CALL { WITH p MATCH (p)-[:LIVES_IN]->(c) WITH c.name AS city WHERE c.name IS NOT NULL MATCH (p)-[:LIVES_IN]->(d) RETURN city, d.name AS d } RETURN city, d", CYPHER)
+case("EW8", "MATCH (a:Person) WITH a.name AS name WHERE any(x IN [1] WHERE EXISTS { (a)-[:LIVES_IN]->() }) RETURN name", CYPHER)
+
+# EX: the percentile of percentileDisc and percentileCont is a literal, a parameter or an expression
+#     of them, from 0 to 1 (0.6.4): a parameter was read as 0.5 (EX1, EX2) and a literal outside
+#     0 to 1 was moved to its end (EX3, now 22003)
+case("EX1", "MATCH (a:Person) RETURN percentileDisc(a.age, $p) AS p", CYPHER, params={"p": 0.0})
+case("EX2", "MATCH (a:Person) RETURN percentile_cont(a.age, $p) AS p", GQL, params={"p": 1.0})
+case("EX3", "MATCH (a:Person) RETURN percentileDisc(a.age, 1.5) AS p", CYPHER)
+
+# EY: a pattern comprehension has one item per match, a null projection among them (0.6.4; a match
+#     whose projection was null was dropped)
+case("EY1", "MATCH (a:Person {name: 'Alix'}) RETURN [(a)-[:LIVES_IN]->(c) | c.missing] AS l", CYPHER)
+
+# EZ: a GQL ^ chain without parentheses is a syntax error naming POWER (0.6.4; it was read from the
+#     right), a single ^ and POWER work as before
+case("EZ1", "RETURN 2 ^ 3 ^ 2 AS r", GQL)
+case("EZ2", "RETURN (2 ^ 3) ^ 2 AS r, POWER(2, POWER(3, 2)) AS s", GQL)
+
+# FA: SET of all properties with a value that is neither a map nor null raises invalid value type
+#     (22G12, 0.6.4; it succeeded and set nothing), in GQL and Cypher, on the robot EU3 inserts
+case("FA1", "MATCH (r:Robot {name: 'R1'}) SET r += 5 RETURN r.name AS n", CYPHER, "writes")
+case("FA2", "MATCH (r:Robot {name: 'R1'}) SET r = 'x' RETURN r.name AS n", GQL, "writes")
+
+# FB: a RETURN column whose parts are of different kinds gives each row the part it took: a node
+#     where it took the node (0.6.4; it gave the node's id), a plain value where it took that
+case("FB1", "MATCH (p:Person) RETURN p.name AS k, CASE WHEN p.age > 30 THEN p ELSE p.age END AS v", BOTH)
+case("FB2", "MATCH (p:Person) OPTIONAL MATCH (p)-[:LIVES_IN]->(c) RETURN p.name AS k, coalesce(c, p.age) AS v", BOTH)
+case("FB3", "MATCH (p:Person) RETURN p.name AS k, [p, p.age][p.age % 2] AS v", BOTH)
+
+# FC: a LIMIT before another stage keeps the rows it stopped with (0.6.4; in GQL a LIMIT that
+#     reached its count in the same chunk handed on nothing, so a DISTINCT (FC1, FC2), a grouping
+#     with a key (FC3), a WHERE (FC4) or an ORDER BY (FC5) after it saw no rows)
+case("FC1", "MATCH (n:Person) WITH n.age > 0 AS adult LIMIT 3 RETURN DISTINCT adult", BOTH)
+case("FC2", "MATCH (n:Person) WITH n.age AS a LIMIT 3 RETURN DISTINCT a", BOTH)
+case("FC3", "MATCH (n:Person) WITH n.age AS a LIMIT 3 RETURN a, count(*) AS c", BOTH)
+case("FC4", "MATCH (n:Person) WITH n.age AS a LIMIT 3 WHERE a >= 0 RETURN a", BOTH)
+ordered("FC5", "MATCH (n:Person) WITH n.age AS a LIMIT 3 RETURN a ORDER BY a", BOTH)
+
+# FD: a selective path pattern over several edge patterns selects whole paths per pair of
+#     endpoints, fixed edges counted in the length (0.6.4; it was refused, GRAFEO-Q004)
+case("FD1", "MATCH p = ANY SHORTEST (a:Person {name: 'Vincent'})-[:KNOWS]->*(b:Person)-[:LIVES_IN]->(c:City) RETURN b.name AS b, c.name AS c, length(p) AS len", GQL)
+case("FD2", "MATCH p = ALL SHORTEST (a:Person)-[:KNOWS]->{1,2}(b)-[l:LIVES_IN]->(c) RETURN a.name AS a, c.name AS c, l.years AS y, length(p) AS len", GQL)
+
+# FE: a SQL/PGQ comparison of two values of two kinds raises 22G04, so the optimizer moves
 #     none to rows the written statement never compares. The odd person 'x' knows person 3
 #     and lies on no square: FD1 gives the rows its GQL twin FD2 gives, where moving
 #     `b.id < d.id` under the intersection met 'x' and raised (0.6.4 development builds).
-case("FD1", "SELECT * FROM GRAPH_TABLE (MATCH (a:Person {n: 3})-[:KNOWS]-(b:Person)-[:FOLLOWS]-(c:Person)-[:FOLLOWS]-(d:Person)-[:KNOWS]-(a) WHERE b.id < d.id AND c.n <> 3 COLUMNS (b.id AS b, c.id AS c, d.id AS d))", SQL, "string_id_square")
-case("FD2", "MATCH (a:Person {n: 3})-[:KNOWS]-(b:Person)-[:FOLLOWS]-(c:Person)-[:FOLLOWS]-(d:Person)-[:KNOWS]-(a) WHERE b.id < d.id AND c.n <> 3 RETURN b.id AS b, c.id AS c, d.id AS d", GQL, "string_id_square")
+case("FE1", "SELECT * FROM GRAPH_TABLE (MATCH (a:Person {n: 3})-[:KNOWS]-(b:Person)-[:FOLLOWS]-(c:Person)-[:FOLLOWS]-(d:Person)-[:KNOWS]-(a) WHERE b.id < d.id AND c.n <> 3 COLUMNS (b.id AS b, c.id AS c, d.id AS d))", SQL, "string_id_square")
+case("FE2", "MATCH (a:Person {n: 3})-[:KNOWS]-(b:Person)-[:FOLLOWS]-(c:Person)-[:FOLLOWS]-(d:Person)-[:KNOWS]-(a) WHERE b.id < d.id AND c.n <> 3 RETURN b.id AS b, c.id AS c, d.id AS d", GQL, "string_id_square")
 
 # fmt: on

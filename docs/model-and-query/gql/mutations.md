@@ -88,6 +88,8 @@ SET p += {city: 'NYC', role: 'engineer'}
 -- Existing properties like name and age are preserved
 ```
 
+With either form, a null map (`SET p = null`, or a parameter that is null) changes nothing, and a value that is neither a map nor null (`SET p += 5`) raises an invalid value type error (`22G12`).
+
 ## Label Operations
 
 ```sql

@@ -980,8 +980,9 @@ impl RdfPlanner {
             .inputs
             .iter()
             .map(|branch| {
-                union_branch_pattern(branch)
-                    .and_then(|pattern| estimate_operator_cardinality(pattern, &self.store))
+                union_branch_pattern(branch).and_then(|pattern| {
+                    estimate_operator_cardinality(pattern, &self.store, &self.view)
+                })
             })
             .sum()
     }
@@ -2047,10 +2048,12 @@ impl RdfPlanner {
                 column2,
                 distinct: agg_expr.distinct,
                 alias: agg_expr.alias.clone(),
-                percentile: agg_expr.percentile,
+                // SPARQL has no percentile aggregate.
+                percentile: None,
                 separator: agg_expr.separator.clone(),
                 // SPARQL's SUM and AVG: XPath's division for AVG, and an
                 // argument that is no number an error (the result unbound).
+                keep_nulls: false,
                 rdf_literals: matches!(
                     agg_expr.function,
                     LogicalAggregateFunction::Sum | LogicalAggregateFunction::Avg
@@ -2336,8 +2339,8 @@ impl RdfPlanner {
         // until it runs, and is dropped). Of two patterns, the one estimated
         // to match more triples is looked up; a wrong guess costs at most
         // `LOOKUP_ROWS` lookups before the join hashes the scan.
-        let left_estimate = estimate_operator_cardinality(&join.left, &self.store);
-        let right_estimate = estimate_operator_cardinality(&join.right, &self.store);
+        let left_estimate = estimate_operator_cardinality(&join.left, &self.store, &self.view);
+        let right_estimate = estimate_operator_cardinality(&join.right, &self.store, &self.view);
         // A UNION of patterns with a variable the other side binds (an
         // alternative path is one): a lookup per row of that side in each
         // branch, the planned UNION what the join hashes past the limit. Of
@@ -2491,8 +2494,9 @@ impl RdfPlanner {
         }
 
         // Estimate cardinalities for build-side selection
-        let cardinalities = estimate_operator_cardinality(&join.left, &self.store)
-            .zip(estimate_operator_cardinality(&join.right, &self.store));
+        let cardinalities = estimate_operator_cardinality(&join.left, &self.store, &self.view).zip(
+            estimate_operator_cardinality(&join.right, &self.store, &self.view),
+        );
 
         Ok(common::build_inner_join(
             left_op,
@@ -2540,8 +2544,9 @@ impl RdfPlanner {
         if join.condition.is_none()
             && let LogicalOperator::TripleScan(scan) = join.right.as_ref()
         {
-            let left_estimate = estimate_operator_cardinality(&join.left, &self.store);
-            let right_estimate = estimate_operator_cardinality(&join.right, &self.store);
+            let left_estimate = estimate_operator_cardinality(&join.left, &self.store, &self.view);
+            let right_estimate =
+                estimate_operator_cardinality(&join.right, &self.store, &self.view);
             if let Some(parts) = self.triple_lookup(
                 scan,
                 &join.left,
@@ -2569,7 +2574,7 @@ impl RdfPlanner {
         if join.condition.is_none()
             && let LogicalOperator::Union(union) = join.right.as_ref()
         {
-            let left_estimate = estimate_operator_cardinality(&join.left, &self.store);
+            let left_estimate = estimate_operator_cardinality(&join.left, &self.store, &self.view);
             if let Some(plan) = self.union_lookup(
                 union,
                 &right_columns,
@@ -2578,8 +2583,11 @@ impl RdfPlanner {
                 left_estimate,
             ) {
                 let entries = right_entry..self.profile_entries.borrow().len();
-                let cardinalities =
-                    left_estimate.zip(estimate_operator_cardinality(&join.right, &self.store));
+                let cardinalities = left_estimate.zip(estimate_operator_cardinality(
+                    &join.right,
+                    &self.store,
+                    &self.view,
+                ));
                 return Ok(self.union_lookup_join(
                     plan,
                     (left_op, left_columns, left_types),
@@ -2706,7 +2714,8 @@ impl RdfPlanner {
         let mut planned: Vec<Planned> = Vec::new();
         for input in &mwj.inputs {
             let (op, cols, types) = self.plan_operator(input)?;
-            let card = estimate_operator_cardinality(input, &self.store).unwrap_or(1000.0);
+            let card =
+                estimate_operator_cardinality(input, &self.store, &self.view).unwrap_or(1000.0);
             let bound = crate::query::plan::always_bound(input);
             planned.push((op, cols, types, card, bound));
         }
@@ -2817,6 +2826,17 @@ impl RdfPlanner {
 
         let columns = all_vars.clone();
         let types = vec![LogicalType::RdfTermId; columns.len()];
+        // The join reads its patterns itself, unplanned: each scan's PROFILE
+        // entry is absorbed into its line, as a lookup's scan is.
+        if self.profiling.get() {
+            let mut entries = self.profile_entries.borrow_mut();
+            for input in &mwj.inputs {
+                entries.push(crate::query::profile::ProfileEntry::absorbed(
+                    "RdfTripleScan",
+                    input.display_label(),
+                ));
+            }
+        }
         let operator = Box::new(RdfLeapfrogOperator::new(
             ring,
             annotated,
@@ -3022,7 +3042,12 @@ impl RdfPlanner {
             },
             _ => GraphCheck::None,
         };
-        Ok(self.graph_operator("RdfClearGraph", RdfGraphOp::Clear { target }, check))
+        Ok(self.graph_operator(
+            "RdfClearGraph",
+            RdfGraphOp::Clear { target },
+            clear.silent,
+            check,
+        ))
     }
 
     /// Plans a CREATE GRAPH operator.
@@ -3037,7 +3062,7 @@ impl RdfPlanner {
             graph: create.graph.clone(),
             silent: create.silent,
         };
-        Ok(self.graph_operator("RdfCreateGraph", op, check))
+        Ok(self.graph_operator("RdfCreateGraph", op, create.silent, check))
     }
 
     /// Plans a DROP GRAPH operator.
@@ -3054,7 +3079,12 @@ impl RdfPlanner {
             },
             _ => GraphCheck::None,
         };
-        Ok(self.graph_operator("RdfDropGraph", RdfGraphOp::Drop { target }, check))
+        Ok(self.graph_operator(
+            "RdfDropGraph",
+            RdfGraphOp::Drop { target },
+            drop_op.silent,
+            check,
+        ))
     }
 
     /// Plans a COPY graph operator.
@@ -3067,7 +3097,7 @@ impl RdfPlanner {
             target: copy.destination.clone(),
         };
         let check = GraphCheck::source(&copy.source, copy.silent);
-        Ok(self.graph_operator("RdfCopyGraph", op, check))
+        Ok(self.graph_operator("RdfCopyGraph", op, copy.silent, check))
     }
 
     /// Plans a MOVE graph operator.
@@ -3080,7 +3110,7 @@ impl RdfPlanner {
             target: move_op.destination.clone(),
         };
         let check = GraphCheck::source(&move_op.source, move_op.silent);
-        Ok(self.graph_operator("RdfMoveGraph", op, check))
+        Ok(self.graph_operator("RdfMoveGraph", op, move_op.silent, check))
     }
 
     /// Plans an ADD graph operator.
@@ -3093,21 +3123,23 @@ impl RdfPlanner {
             target: add.destination.clone(),
         };
         let check = GraphCheck::source(&add.source, add.silent);
-        Ok(self.graph_operator("RdfAddGraph", op, check))
+        Ok(self.graph_operator("RdfAddGraph", op, add.silent, check))
     }
 
     /// The operator of the whole-graph operation `op`, named `name`, which
-    /// `check` checks before it applies.
+    /// `check` checks before it applies; `silent` for its `SILENT` form.
     fn graph_operator(
         &self,
         name: &'static str,
         op: RdfGraphOp,
+        silent: bool,
         check: GraphCheck,
     ) -> (Box<dyn Operator>, Vec<String>, Vec<LogicalType>) {
         let operator = Box::new(RdfGraphOperator {
             writer: self.writer.clone(),
             name,
             op,
+            silent,
             check,
             done: false,
         });
@@ -3142,6 +3174,7 @@ impl RdfPlanner {
             column_map,
             terms: Arc::clone(&self.terms),
             done: false,
+            memory: grafeo_core::execution::memory::capture(),
         });
 
         Ok((operator, Vec::new(), Vec::new()))
@@ -3482,6 +3515,8 @@ struct RdfGraphOperator {
     /// The operator's name in a plan.
     name: &'static str,
     op: RdfGraphOp,
+    /// Its `SILENT` form: a refusal of the operation is success with no effect.
+    silent: bool,
     check: GraphCheck,
     done: bool,
 }
@@ -3498,7 +3533,7 @@ impl Operator for RdfGraphOperator {
         let writer = update_writer(&self.writer)?;
         // Whether a graph exists, as the transaction sees it: its snapshot
         // with its own graph operations and inserts.
-        writer.graph_op(self.op.clone(), |writer| match check {
+        writer.graph_op(self.op.clone(), self.silent, |writer| match check {
             GraphCheck::None => Ok(true),
             GraphCheck::Absent { graph, silent } => match (writer.graph_exists(graph), silent) {
                 (false, _) => Ok(true),
@@ -3553,6 +3588,11 @@ struct RdfModifyOperator {
     column_map: HashMap<String, usize>,
     terms: Arc<QueryTermIds>,
     done: bool,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](grafeo_core::execution::memory::capture)): the chunks of the WHERE clause's solutions, kept until the templates run.
+    /// Past the query memory limit or the memory limit it fails with
+    /// `GRAFEO-S001`, before it writes anything.
+    memory: grafeo_core::execution::OperatorMemory,
 }
 
 impl Operator for RdfModifyOperator {
@@ -3562,26 +3602,31 @@ impl Operator for RdfModifyOperator {
         }
         let writer = update_writer(&self.writer)?;
 
-        // Step 1: every solution of the WHERE clause, before any change.
-        let mut bindings: Vec<(DataChunk, usize)> = Vec::new();
+        // Step 1: every solution of the WHERE clause, before any change: each
+        // chunk kept once, its selected rows the solutions.
+        let mut chunks: Vec<DataChunk> = Vec::new();
         while let Some(chunk) = self.input.next()? {
-            for row in chunk.selected_indices() {
-                bindings.push((chunk.clone(), row));
-            }
+            self.memory
+                .add_with(|| grafeo_core::execution::memory::chunk_bytes(&chunk))?;
+            chunks.push(chunk);
         }
+        let bindings: Vec<(&DataChunk, usize)> = chunks
+            .iter()
+            .flat_map(|chunk| chunk.selected_indices().map(move |row| (chunk, row)))
+            .collect();
 
         // Step 2: the DELETE templates, each variable its exact bound term.
         for template in &self.delete_templates {
             let graph = template.graph.as_deref();
             check_mutation_graph(graph)?;
-            for (chunk, row) in &bindings {
+            for &(chunk, row) in &bindings {
                 let mut blanks = FreshBlankNodes::default();
                 let mut term = |component| {
                     template_term(
                         component,
                         &self.column_map,
                         chunk,
-                        *row,
+                        row,
                         &self.terms,
                         &mut blanks,
                     )
@@ -3598,7 +3643,7 @@ impl Operator for RdfModifyOperator {
 
         // Step 3: the INSERT templates over the same solutions, a template
         // blank node fresh for each solution.
-        for (chunk, row) in &bindings {
+        for &(chunk, row) in &bindings {
             let mut blanks = FreshBlankNodes::default();
             for template in &self.insert_templates {
                 let graph = template.graph.as_deref();
@@ -3608,7 +3653,7 @@ impl Operator for RdfModifyOperator {
                         component,
                         &self.column_map,
                         chunk,
-                        *row,
+                        row,
                         &self.terms,
                         &mut blanks,
                     )
@@ -3623,6 +3668,9 @@ impl Operator for RdfModifyOperator {
                 }
             }
         }
+        drop(bindings);
+        drop(chunks);
+        self.memory.release();
 
         self.done = true;
         Ok(None)
@@ -4005,6 +4053,11 @@ struct RdfLeapfrogOperator {
     /// Whether the leapfrog join has been executed.
     executed: bool,
     terms: Arc<QueryTermIds>,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](grafeo_core::execution::memory::capture)): the matches it
+    /// buffers, a slot per matched triple (their terms are the ring's). Past
+    /// the query memory limit or the memory limit it fails with `GRAFEO-S001`.
+    memory: grafeo_core::execution::OperatorMemory,
 }
 
 #[cfg(feature = "ring-index")]
@@ -4023,12 +4076,15 @@ impl RdfLeapfrogOperator {
             position: 0,
             executed: false,
             terms,
+            memory: grafeo_core::execution::memory::capture(),
         }
     }
 
-    fn execute_join(&mut self) {
+    /// Runs the join once, buffering its matches against the statement's
+    /// memory.
+    fn execute_join(&mut self) -> std::result::Result<(), OperatorError> {
         if self.executed {
-            return;
+            return Ok(());
         }
         self.executed = true;
 
@@ -4036,7 +4092,18 @@ impl RdfLeapfrogOperator {
             &self.ring,
             self.annotated_patterns.clone(),
         );
-        self.results = join.collect();
+        for matched in join {
+            let bytes =
+                std::mem::size_of::<Vec<Triple>>() + matched.len() * std::mem::size_of::<Triple>();
+            if let Err(refused) = self.memory.add(bytes) {
+                // Refused: no call after this one serves the matches so far.
+                self.results = Vec::new();
+                self.memory.release();
+                return Err(refused);
+            }
+            self.results.push(matched);
+        }
+        Ok(())
     }
 
     /// The term a variable is bound to in a set of matched triples.
@@ -4069,7 +4136,7 @@ impl RdfLeapfrogOperator {
 #[cfg(feature = "ring-index")]
 impl Operator for RdfLeapfrogOperator {
     fn next(&mut self) -> grafeo_core::execution::operators::OperatorResult {
-        self.execute_join();
+        self.execute_join()?;
 
         if self.position >= self.results.len() {
             return Ok(None);
@@ -4897,94 +4964,114 @@ fn column_map(columns: &[String]) -> HashMap<String, usize> {
 ///
 /// Uses store index sizes to estimate how many rows an operator produces,
 /// without collecting full statistics. Returns `None` if estimation is
-/// not possible for this operator type.
+/// not possible for this operator type. A pattern is estimated from the
+/// graphs it reads ([`TripleScanOp::graphs_read`]) as `view` sees them: a
+/// named graph's store keeps its own counts, and `GRAPH ?g` sums the graphs'.
 fn estimate_operator_cardinality(
     op: &crate::query::plan::LogicalOperator,
     store: &RdfStore,
+    view: &RdfView,
 ) -> Option<f64> {
-    use crate::query::plan::LogicalOperator;
+    use crate::query::plan::{GraphsRead, LogicalOperator};
     match op {
         LogicalOperator::RowValues(_) => Some(1.0),
-        LogicalOperator::TripleScan(scan) => {
-            let stats = store.stats();
-            let total = stats.triple_count as f64;
-            if total == 0.0 {
-                return Some(0.0);
-            }
-
-            // Estimate based on which components are bound
-            let s_bound = matches!(
-                scan.subject,
-                crate::query::plan::TripleComponent::Iri(_)
-                    | crate::query::plan::TripleComponent::Literal(_)
-                    | crate::query::plan::TripleComponent::LangLiteral { .. }
-            );
-            let p_bound = matches!(
-                scan.predicate,
-                crate::query::plan::TripleComponent::Iri(_)
-                    | crate::query::plan::TripleComponent::Literal(_)
-                    | crate::query::plan::TripleComponent::LangLiteral { .. }
-            );
-            let o_bound = matches!(
-                scan.object,
-                crate::query::plan::TripleComponent::Iri(_)
-                    | crate::query::plan::TripleComponent::Literal(_)
-                    | crate::query::plan::TripleComponent::LangLiteral { .. }
-            );
-
-            // With a predicate, its own counts from the optimizer's
-            // statistics (cached, see `RdfStore::get_or_collect_statistics`).
-            if let crate::query::plan::TripleComponent::Iri(predicate) = &scan.predicate
-                && let Some(counted) = store
-                    .get_or_collect_statistics()
-                    .get_predicate(&format!("<{predicate}>"))
-            {
-                let triples = counted.triple_count as f64;
-                let estimate = match (s_bound, o_bound) {
-                    (true, true) => 1.0,
-                    (true, false) => triples / counted.distinct_subjects.max(1) as f64,
-                    (false, true) => triples / counted.distinct_objects.max(1) as f64,
-                    (false, false) => triples,
-                };
-                return Some(estimate.max(1.0));
-            }
-            let estimate = match (s_bound, p_bound, o_bound) {
-                (true, true, true) => 1.0,
-                (true, true, false) => total / stats.subject_count.max(1) as f64,
-                (true, false, true) => total / stats.subject_count.max(1) as f64,
-                (false, true, true) => total / stats.predicate_count.max(1) as f64,
-                (true, false, false) => total / stats.subject_count.max(1) as f64,
-                (false, true, false) => total / stats.predicate_count.max(1) as f64,
-                (false, false, true) => total / stats.object_count.max(1) as f64,
-                (false, false, false) => total,
-            };
-            Some(estimate.max(1.0))
-        }
+        LogicalOperator::TripleScan(scan) => Some(match scan.graphs_read() {
+            GraphsRead::Default => scan_estimate(scan, store),
+            GraphsRead::Named(names) => names
+                .into_iter()
+                .filter_map(|name| store.graph_at(view, name))
+                .map(|graph| scan_estimate(scan, &graph))
+                .sum(),
+            GraphsRead::EveryNamed => store
+                .graph_names(view)
+                .iter()
+                .filter_map(|name| store.graph_at(view, name))
+                .map(|graph| scan_estimate(scan, &graph))
+                .sum(),
+        }),
         LogicalOperator::Filter(f) => {
-            estimate_operator_cardinality(&f.input, store).map(|c| (c * 0.33).max(1.0))
+            estimate_operator_cardinality(&f.input, store, view).map(|c| (c * 0.33).max(1.0))
         }
         LogicalOperator::Join(j) => {
-            let left = estimate_operator_cardinality(&j.left, store)?;
-            let right = estimate_operator_cardinality(&j.right, store)?;
+            let left = estimate_operator_cardinality(&j.left, store, view)?;
+            let right = estimate_operator_cardinality(&j.right, store, view)?;
             Some((left * right * 0.1).max(1.0))
         }
         LogicalOperator::Limit(l) => {
             if let crate::query::plan::CountExpr::Literal(n) = l.count {
                 Some(n as f64)
             } else {
-                estimate_operator_cardinality(&l.input, store)
+                estimate_operator_cardinality(&l.input, store, view)
             }
         }
         // A VALUES block is a union of one row each (see the translator).
         LogicalOperator::Empty => Some(1.0),
-        LogicalOperator::Bind(bind) => estimate_operator_cardinality(&bind.input, store),
+        LogicalOperator::Bind(bind) => estimate_operator_cardinality(&bind.input, store, view),
         LogicalOperator::Union(union) => union
             .inputs
             .iter()
-            .map(|input| estimate_operator_cardinality(input, store))
+            .map(|input| estimate_operator_cardinality(input, store, view))
             .sum::<Option<f64>>(),
         _ => None,
     }
+}
+
+/// The rows `scan` is estimated to match in the graph whose store is `store`: from the
+/// predicate's counts when the statistics have it, else from the store's totals.
+fn scan_estimate(scan: &TripleScanOp, store: &RdfStore) -> f64 {
+    let stats = store.stats();
+    let total = stats.triple_count as f64;
+    if total == 0.0 {
+        return 0.0;
+    }
+
+    // Estimate based on which components are bound
+    let s_bound = matches!(
+        scan.subject,
+        crate::query::plan::TripleComponent::Iri(_)
+            | crate::query::plan::TripleComponent::Literal(_)
+            | crate::query::plan::TripleComponent::LangLiteral { .. }
+    );
+    let p_bound = matches!(
+        scan.predicate,
+        crate::query::plan::TripleComponent::Iri(_)
+            | crate::query::plan::TripleComponent::Literal(_)
+            | crate::query::plan::TripleComponent::LangLiteral { .. }
+    );
+    let o_bound = matches!(
+        scan.object,
+        crate::query::plan::TripleComponent::Iri(_)
+            | crate::query::plan::TripleComponent::Literal(_)
+            | crate::query::plan::TripleComponent::LangLiteral { .. }
+    );
+
+    // With a predicate, its own counts from the optimizer's
+    // statistics (cached, see `RdfStore::get_or_collect_statistics`).
+    if let crate::query::plan::TripleComponent::Iri(predicate) = &scan.predicate
+        && let Some(counted) = store
+            .get_or_collect_statistics()
+            .get_predicate(&format!("<{predicate}>"))
+    {
+        let triples = counted.triple_count as f64;
+        let estimate = match (s_bound, o_bound) {
+            (true, true) => 1.0,
+            (true, false) => triples / counted.distinct_subjects.max(1) as f64,
+            (false, true) => triples / counted.distinct_objects.max(1) as f64,
+            (false, false) => triples,
+        };
+        return estimate.max(1.0);
+    }
+    let estimate = match (s_bound, p_bound, o_bound) {
+        (true, true, true) => 1.0,
+        (true, true, false) => total / stats.subject_count.max(1) as f64,
+        (true, false, true) => total / stats.subject_count.max(1) as f64,
+        (false, true, true) => total / stats.predicate_count.max(1) as f64,
+        (true, false, false) => total / stats.subject_count.max(1) as f64,
+        (false, true, false) => total / stats.predicate_count.max(1) as f64,
+        (false, false, true) => total / stats.object_count.max(1) as f64,
+        (false, false, false) => total,
+    };
+    estimate.max(1.0)
 }
 
 /// How many rows of `other` look their triples up in patterns estimated to
@@ -5609,6 +5696,7 @@ mod tests {
                 alias: Some("cnt".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             having: None,
         });
@@ -5753,6 +5841,7 @@ mod tests {
                 alias: Some("cnt".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             having: None,
         });
@@ -5801,6 +5890,7 @@ mod tests {
                 alias: Some("cnt".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             having: Some(LogicalExpression::Binary {
                 left: Box::new(LogicalExpression::Variable("cnt".to_string())),
@@ -5852,6 +5942,7 @@ mod tests {
                     alias: Some("total".to_string()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 },
                 AggregateExpr {
                     function: AggregateFunction::Avg,
@@ -5861,6 +5952,7 @@ mod tests {
                     alias: Some("average".to_string()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 },
             ],
             having: None,
@@ -7033,6 +7125,7 @@ mod tests {
                 alias: Some("cnt".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             having: None,
         });
@@ -7131,12 +7224,66 @@ mod tests {
             op: RdfGraphOp::Clear {
                 target: RdfGraphTarget::Default,
             },
+            silent: false,
             check: GraphCheck::None,
             done: false,
         });
         assert_eq!(op.name(), "RdfClearGraph");
         let any = op.into_any();
         assert!(any.downcast::<RdfGraphOperator>().is_ok());
+    }
+
+    /// A refused leapfrog join serves no partial matches: every call after the
+    /// refusal fails or returns nothing, never rows.
+    #[cfg(feature = "ring-index")]
+    #[test]
+    fn a_refused_leapfrog_join_serves_no_partial_matches() {
+        use grafeo_common::memory::buffer::BufferManager;
+        use grafeo_core::execution::memory::{self, OperatorMemoryContext, StatementMemory};
+        use grafeo_core::graph::rdf::TriplePattern;
+        use grafeo_core::index::ring::{AnnotatedPattern, TripleRing};
+
+        let knows = Term::iri("urn:knows");
+        let triangles = (0..2_000).flat_map(|i| {
+            let [a, b, c] = ["a", "b", "c"].map(|name| Term::iri(format!("urn:{name}{i}")));
+            [
+                Triple::new(a.clone(), knows.clone(), b.clone()),
+                Triple::new(b, knows.clone(), c.clone()),
+                Triple::new(c, knows.clone(), a),
+            ]
+        });
+        let ring = Arc::new(TripleRing::from_triples(triangles));
+        let pattern = |subject: &str, object: &str| AnnotatedPattern {
+            pattern: TriplePattern {
+                subject: None,
+                predicate: Some(knows.clone()),
+                object: None,
+            },
+            subject_var: Some(subject.to_string()),
+            predicate_var: None,
+            object_var: Some(object.to_string()),
+        };
+        let ctx = OperatorMemoryContext::new(BufferManager::with_budget(256 << 20))
+            .with_query_limit(64 << 10);
+        let mut join = {
+            let _scope = memory::enter(StatementMemory::Budgeted(ctx.clone()));
+            RdfLeapfrogOperator::new(
+                ring,
+                vec![pattern("x", "y"), pattern("y", "z"), pattern("z", "x")],
+                ["x", "y", "z"].map(String::from).to_vec(),
+                Arc::new(QueryTermIds::default()),
+            )
+        };
+        assert!(join.next().is_err(), "refused at 64 KiB");
+        for call in 0..3 {
+            if let Ok(Some(chunk)) = join.next() {
+                panic!(
+                    "call {call} after the refusal served {} rows",
+                    chunk.row_count()
+                );
+            }
+        }
+        assert_eq!(ctx.query().used(), 0, "the refusal gave its grant back");
     }
 
     #[test]
@@ -7150,6 +7297,7 @@ mod tests {
             column_map: HashMap::new(),
             terms: Arc::default(),
             done: false,
+            memory: grafeo_core::execution::OperatorMemory::unbudgeted(),
         });
         let any = op.into_any();
         assert!(any.downcast::<RdfModifyOperator>().is_ok());

@@ -51,6 +51,7 @@ mod quantization;
 mod query;
 mod session;
 mod stream;
+mod temporal;
 mod time_travel;
 mod types;
 mod warning;
@@ -171,6 +172,11 @@ fn grafeo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AsyncQueryResult>()?;
     m.add_class::<AsyncQueryResultIter>()?;
     m.add_class::<PyValue>()?;
+    m.add_class::<temporal::PyGrafeoTime>()?;
+    m.add_class::<temporal::PyGrafeoDate>()?;
+    m.add_class::<temporal::PyGrafeoTimestamp>()?;
+    m.add_class::<temporal::PyGrafeoZonedDateTime>()?;
+    m.add_class::<temporal::PyGrafeoDuration>()?;
     m.add_class::<PyIsolationLevel>()?;
     #[cfg(feature = "algos")]
     {

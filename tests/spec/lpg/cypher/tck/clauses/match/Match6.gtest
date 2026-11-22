@@ -43,9 +43,6 @@ tests:
 
   # [1] Zero-length named path
   - name: s1_zero_length_named_path
-    xfail:
-      spec: "openCypher TCK 2024.3 Match6: [1] Zero-length named path"
-      issue: "#798"
     setup:
       - |
         CREATE ()

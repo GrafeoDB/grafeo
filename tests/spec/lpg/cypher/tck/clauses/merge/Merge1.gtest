@@ -236,9 +236,6 @@ tests:
 
   # [13] Merge should bind a path
   - name: s13_merge_should_bind_a_path
-    xfail:
-      spec: "openCypher TCK 2024.3 Merge1: [13] Merge should bind a path"
-      issue: "#798"
     query: |
       MERGE p = (a {num: 1})
       RETURN p

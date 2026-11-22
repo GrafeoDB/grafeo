@@ -43,9 +43,6 @@ tests:
 
   # [1] Generate the movie graph
   - name: s1_generate_the_movie_graph
-    xfail:
-      spec: "openCypher TCK 2024.3 Create4: [1] Generate the movie graph"
-      issue: "#798"
     query: |
       CREATE (theMatrix:Movie {title: 'The Matrix', released: 1999, tagline: 'Welcome to the Real World'})
       CREATE (keanu:Person {name: 'Keanu Reeves', born: 1964})
@@ -590,9 +587,6 @@ tests:
 
   # [2] Many CREATE clauses
   - name: s2_many_create_clauses
-    xfail:
-      spec: "openCypher TCK 2024.3 Create4: [2] Many CREATE clauses"
-      issue: "#798"
     query: |
       CREATE (hf:School {name: 'Hilly Fields Technical College'})
       CREATE (hf)-[:STAFF]->(mrb:Teacher {name: 'Mr Balls'})

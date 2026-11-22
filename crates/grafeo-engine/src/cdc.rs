@@ -486,8 +486,30 @@ const PROPERTY_SLOT_BYTES: usize = std::mem::size_of::<(String, Value)>() + 1;
 /// by inserts; a removal that leaves a tombstone lowers the capacity, which
 /// the rounding takes back up to the buckets. An empty map allocates nothing.
 fn table_bytes(capacity: usize, slot: usize) -> usize {
-    /// The control bytes past the buckets, at most a group of 16.
-    const GROUP_BYTES: usize = 16;
+    /// The control bytes past the buckets: hashbrown's group (`Group::WIDTH`),
+    /// 16 where it scans with SSE2 or LSX, 8 with NEON on aarch64, and
+    /// otherwise the generic group's word, u64 or u32 as in its
+    /// `control/group/generic.rs`.
+    const GROUP_BYTES: usize = if cfg!(all(
+        any(target_arch = "x86", target_arch = "x86_64"),
+        target_feature = "sse2",
+        not(miri)
+    )) || cfg!(all(
+        target_arch = "loongarch64",
+        target_feature = "lsx",
+        not(miri)
+    )) {
+        16
+    } else if cfg!(any(
+        target_pointer_width = "64",
+        target_arch = "aarch64",
+        target_arch = "x86_64",
+        target_arch = "wasm32"
+    )) {
+        8
+    } else {
+        4
+    };
     let buckets = match capacity {
         0 => return 0,
         1..4 => 4,

@@ -129,6 +129,7 @@ def test_the_plan_cache_limit_reads_back():
         grafeo.GrafeoDB(plan_cache_limit=-1)
 
 
+@pytest.mark.requires("cdc")
 def test_the_cdc_memory_limit_reads_back():
     """#679: `cdc_memory_limit` bounds the change log's bytes. It reads back as the report's
     `cdc.limit_bytes`, defaults to a sixteenth of the memory limit, is capped at the memory

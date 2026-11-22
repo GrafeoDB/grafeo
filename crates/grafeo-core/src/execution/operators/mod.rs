@@ -146,7 +146,8 @@ pub use scan_text::TextScanOperator;
 pub use scan_vector::VectorScanOperator;
 pub use set_ops::{ExceptOperator, IntersectOperator, OtherwiseOperator};
 pub use shortest_path::{
-    PathSelection as ExecutionPathSelection, PathStep as ExecutionPathStep, ShortestPathOperator,
+    PATH_RESTRICTIVE_QUEUE_ENTRY_BYTES, PathSelection as ExecutionPathSelection,
+    PathStep as ExecutionPathStep, ShortestPathOperator,
 };
 pub use shuffle::ShuffleOperator;
 pub use single_row::{EmptyOperator, NodeListOperator, SingleRowOperator};

@@ -8,8 +8,7 @@
 use super::expand::{EdgeWalk, stored_types, visible_edges_from};
 use super::path_expansions::{Allowance, PathExpansions, path_expansion_error};
 use super::variable_length_expand::{
-    DEFAULT_PATH_SEARCH_BUDGET, PathMode, PathSegment, SEGMENT_BYTES, path_budget_error,
-    release_segments, with_path_count,
+    DEFAULT_PATH_SEARCH_BUDGET, PathMode, path_budget_error, with_path_count,
 };
 use super::{Operator, OperatorError, OperatorResult, Predicate, ReadCounter};
 use crate::execution::DataChunk;
@@ -17,6 +16,7 @@ use crate::execution::chunk::DataChunkBuilder;
 use crate::execution::memory::OperatorMemory;
 use crate::execution::path_budget::{PathBudget, PathRefusal};
 use crate::execution::path_queue::PathQueue;
+use crate::execution::segment_arena::SegmentArena;
 use crate::graph::Direction;
 use crate::graph::GraphStore;
 use grafeo_common::types::{ArcStr, EdgeId, LogicalType, NodeId, ReadView, Value};
@@ -28,6 +28,14 @@ use std::mem::size_of;
 use std::sync::Arc;
 
 /// What to do about a shortest-path search over its budget.
+/// A path in the queue of a restrictive search over one edge pattern: the
+/// index of its last segment and its length.
+type RestrictiveEntry = (u32, u32);
+
+/// The bytes of one path's entry in the queue of a restrictive shortest-path
+/// search over one edge pattern, for capacity accounting and tests.
+pub const PATH_RESTRICTIVE_QUEUE_ENTRY_BYTES: usize = size_of::<RestrictiveEntry>();
+
 const SHORTEST_PATH_ADVICE: &str = "bound the quantifier (`*1..5` or `{1,5}`), \
      keep fewer paths (`ANY SHORTEST` or `SHORTEST 3` instead of `ALL SHORTEST`), or search \
      walks instead of trails or simple paths";
@@ -971,8 +979,9 @@ impl PathSearch<'_> {
     ///
     /// The paths followed and kept may hold at most the operator's budget:
     /// the allowed paths can multiply with every hop. A path's segment is
-    /// charged when it is queued and given back when the last path through
-    /// it is done.
+    /// made when it is queued, in an arena whose blocks are charged as it
+    /// grows, and freed for the next segment when the last path through it
+    /// is done.
     fn restricted_paths(
         &self,
         budget: &mut PathBudget,
@@ -986,70 +995,63 @@ impl PathSearch<'_> {
         let mut kept: FxHashMap<NodeId, Kept> = FxHashMap::default();
         let mut paths = KeptPaths::default();
         // In blocks, as the variable-length search queues: a doubling queue
-        // holds its old and new buffer at once while it grows
-        let mut queue: PathQueue<(Arc<PathSegment>, u32)> = PathQueue::new();
-        charge_paths(budget, SEGMENT_BYTES, 0)?;
-        let root = Arc::new(PathSegment {
-            node: source,
-            edge: None,
-            parent: None,
-        });
+        // holds its old and new buffer at once while it grows. Each queued
+        // path holds its last segment, and its length.
+        let mut queue: PathQueue<RestrictiveEntry> = PathQueue::new();
+        let mut segments = SegmentArena::within(budget.limit());
+        let root = segments
+            .root(budget, source)
+            .map_err(|error| with_path_count(error, REFUSED, 0, budget, SHORTEST_PATH_ADVICE))?;
         queue
             .reserve(budget)
             .map_err(|error| with_path_count(error, REFUSED, 0, budget, SHORTEST_PATH_ADVICE))?;
         queue.push((root, 0));
         // The path being expanded, out of the queue: held until the next is
-        // taken, then given back with the segments only it held
-        let mut expanded: Option<Arc<PathSegment>> = None;
+        // taken, then let go of with the segments only it held
+        let mut expanded: Option<u32> = None;
         while let Some((segment, depth)) = queue.pop(budget) {
             budget.tick()?;
-            if let Some(done) = expanded.replace(Arc::clone(&segment)) {
-                release_segments(budget, done);
+            if let Some(done) = expanded.replace(segment) {
+                segments.release(done);
             }
+            let node = segments.node(segment);
             // The target has its paths: every later path is as long or longer
             if let Some(end) = target.and_then(|target| kept.get(&target))
                 && end.done(depth, count, groups)
             {
                 break;
             }
-            if depth >= op.min_hops && target.is_none_or(|target| target == segment.node) {
-                if !kept.contains_key(&segment.node) {
+            if depth >= op.min_hops && target.is_none_or(|target| target == node) {
+                if !kept.contains_key(&node) {
                     budget.reserve_map(&mut kept, 1)?;
                 }
-                if kept
-                    .entry(segment.node)
-                    .or_default()
-                    .admits(depth, count, groups)
-                {
+                if kept.entry(node).or_default().admits(depth, count, groups) {
                     // The paths held besides the kept ones: those queued and
                     // the one expanded
                     let hops = usize::try_from(depth).unwrap_or(usize::MAX);
                     paths.keep(budget, path_bytes(hops), queue.len() + 1, || FoundPath {
-                        nodes: segment.collect_nodes(depth),
-                        edges: segment.collect_edges(depth),
+                        nodes: segments.collect_nodes(segment, depth),
+                        edges: segments.collect_edges(segment, depth),
                         starts: Vec::new(),
                     })?;
                 }
             }
-            let closed = op.path_mode == PathMode::Simple && depth > 0 && segment.node == source;
+            let closed = op.path_mode == PathMode::Simple && depth > 0 && node == source;
             if closed || op.max_hops.is_some_and(|max| depth >= max) {
                 continue;
             }
-            for (neighbor, edge) in self.neighbors(segment.node, op.direction) {
-                if allowed(op.path_mode, &segment, source, (neighbor, edge)) {
+            for (neighbor, edge) in self.neighbors(node, op.direction) {
+                if allowed(op.path_mode, &segments, segment, source, (neighbor, edge)) {
                     // The paths held: those queued, the one expanded and the
                     // kept ones
                     let held = queue.len() + 1 + paths.paths.len();
-                    charge_paths(budget, SEGMENT_BYTES, held)?;
-                    let next = PathSegment {
-                        node: neighbor,
-                        edge: Some(edge),
-                        parent: Some(Arc::clone(&segment)),
-                    };
-                    queue.reserve(budget).map_err(|error| {
-                        with_path_count(error, REFUSED, held, budget, SHORTEST_PATH_ADVICE)
-                    })?;
-                    queue.push((Arc::new(next), depth + 1));
+                    let next = queue
+                        .reserve(budget)
+                        .and_then(|()| segments.push(budget, segment, neighbor, edge))
+                        .map_err(|error| {
+                            with_path_count(error, REFUSED, held, budget, SHORTEST_PATH_ADVICE)
+                        })?;
+                    queue.push((next, depth + 1));
                 }
             }
         }
@@ -1722,8 +1724,10 @@ impl PathSearch<'_> {
     /// each path in the queue with its state at its last node (see
     /// [`program_walks`](Self::program_walks)) and where each edge pattern
     /// after the first began. The path mode holds for the whole path. A
-    /// path's segment and its starts are charged when they are made and given
-    /// back when the last path that holds them is done.
+    /// path's segment is made in an arena whose blocks are charged as it
+    /// grows, and freed for the next segment when the last path through it is
+    /// done; its starts are charged when they are made and given back when
+    /// the last path that holds them is done.
     fn program_paths(
         &self,
         budget: &mut PathBudget,
@@ -1732,7 +1736,7 @@ impl PathSearch<'_> {
     ) -> Result<Vec<FoundPath>, OperatorError> {
         /// A path in the queue: its last segment, its length, its state there,
         /// and where each edge pattern after the first began.
-        type Queued = (Arc<PathSegment>, u32, State, Arc<[usize]>);
+        type Queued = (u32, u32, State, Arc<[usize]>);
         const REFUSED: &str = "A shortest path search";
 
         let op = self.operator;
@@ -1747,12 +1751,10 @@ impl PathSearch<'_> {
         // The states one edge reaches, at most one per edge pattern and the end
         let mut landed = Vec::new();
         budget.reserve_vec(&mut landed, usize::from(last) + 1)?;
-        charge_paths(budget, SEGMENT_BYTES, 0)?;
-        let root = Arc::new(PathSegment {
-            node: source,
-            edge: None,
-            parent: None,
-        });
+        let mut segments = SegmentArena::within(budget.limit());
+        let root = segments
+            .root(budget, source)
+            .map_err(|error| with_path_count(error, REFUSED, 0, budget, SHORTEST_PATH_ADVICE))?;
         self.arrive(source, 0, 0, last, &mut landed);
         for &state in &landed {
             let starts = starts_up_to(state.step);
@@ -1760,23 +1762,17 @@ impl PathSearch<'_> {
             queue.reserve(budget).map_err(|error| {
                 with_path_count(error, REFUSED, queue.len(), budget, SHORTEST_PATH_ADVICE)
             })?;
-            queue.push((
-                Arc::clone(&root),
-                0,
-                state,
-                std::iter::repeat_n(0, starts).collect(),
-            ));
+            segments.hold(root);
+            queue.push((root, 0, state, std::iter::repeat_n(0, starts).collect()));
         }
-        drop(root);
+        segments.release(root);
         // The path being expanded, out of the queue: held until the next is
         // taken, then given back with the segments and starts only it held
-        let mut expanded: Option<(Arc<PathSegment>, Arc<[usize]>)> = None;
+        let mut expanded: Option<(u32, Arc<[usize]>)> = None;
         while let Some((segment, depth, state, starts)) = queue.pop(budget) {
             budget.tick()?;
-            if let Some((done, done_starts)) =
-                expanded.replace((Arc::clone(&segment), Arc::clone(&starts)))
-            {
-                release_segments(budget, done);
+            if let Some((done, done_starts)) = expanded.replace((segment, Arc::clone(&starts))) {
+                segments.release(done);
                 release_starts(budget, done_starts);
             }
             // The target has its paths: every later path is as long or longer
@@ -1801,8 +1797,8 @@ impl PathSearch<'_> {
                         let bytes = path_bytes(hops)
                             .saturating_add(starts.len().saturating_mul(size_of::<usize>()));
                         paths.keep(budget, bytes, queue.len() + 1, || FoundPath {
-                            nodes: segment.collect_nodes(depth),
-                            edges: segment.collect_edges(depth),
+                            nodes: segments.collect_nodes(segment, depth),
+                            edges: segments.collect_edges(segment, depth),
                             starts: starts.to_vec(),
                         })?;
                     }
@@ -1816,7 +1812,7 @@ impl PathSearch<'_> {
             for (neighbor, edge) in
                 self.edges_of(state.node, hop.direction, hop.edge_types, hop.condition)
             {
-                if !allowed(op.path_mode, &segment, source, (neighbor, edge)) {
+                if !allowed(op.path_mode, &segments, segment, source, (neighbor, edge)) {
                     continue;
                 }
                 landed.clear();
@@ -1827,12 +1823,11 @@ impl PathSearch<'_> {
                 // The paths held: those queued, the one expanded and the
                 // kept ones
                 let held = queue.len() + 1 + paths.paths.len();
-                charge_paths(budget, SEGMENT_BYTES, held)?;
-                let next = Arc::new(PathSegment {
-                    node: neighbor,
-                    edge: Some(edge),
-                    parent: Some(Arc::clone(&segment)),
-                });
+                let next = segments
+                    .push(budget, segment, neighbor, edge)
+                    .map_err(|error| {
+                        with_path_count(error, REFUSED, held, budget, SHORTEST_PATH_ADVICE)
+                    })?;
                 for &into in &landed {
                     // The edge patterns the path passes on to begin after this
                     // edge: new starts, charged; in the same one it shares them
@@ -1852,9 +1847,10 @@ impl PathSearch<'_> {
                     queue.reserve(budget).map_err(|error| {
                         with_path_count(error, REFUSED, held, budget, SHORTEST_PATH_ADVICE)
                     })?;
-                    queue.push((Arc::clone(&next), depth + 1, into, starts));
+                    segments.hold(next);
+                    queue.push((next, depth + 1, into, starts));
                 }
-                release_segments(budget, next);
+                segments.release(next);
             }
         }
         Ok(paths.paths)
@@ -1959,20 +1955,21 @@ fn note_expanded(
     push(budget, seen, (depth, state.hops))
 }
 
-/// Whether a path along `segment` from `source` may go on to `neighbor` over
-/// `edge` under `path_mode`: TRAIL repeats no edge, ACYCLIC no node, SIMPLE
-/// no node but the first, as the last.
+/// Whether a path along `segment` of `segments` from `source` may go on to
+/// `neighbor` over `edge` under `path_mode`: TRAIL repeats no edge, ACYCLIC no
+/// node, SIMPLE no node but the first, as the last.
 fn allowed(
     path_mode: PathMode,
-    segment: &PathSegment,
+    segments: &SegmentArena,
+    segment: u32,
     source: NodeId,
     (neighbor, edge): (NodeId, EdgeId),
 ) -> bool {
     match path_mode {
         PathMode::Walk => true,
-        PathMode::Trail => !segment.contains_edge(edge),
-        PathMode::Simple => neighbor == source || !segment.contains_node(neighbor),
-        PathMode::Acyclic => !segment.contains_node(neighbor),
+        PathMode::Trail => !segments.contains_edge(segment, edge),
+        PathMode::Simple => neighbor == source || !segments.contains_node(segment, neighbor),
+        PathMode::Acyclic => !segments.contains_node(segment, neighbor),
     }
 }
 
@@ -2384,6 +2381,7 @@ impl Operator for ShortestPathOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execution::segment_arena::SEGMENT_BYTES;
     use crate::graph::rowgroup::RowGroupStore;
 
     /// A mock operator that returns source/target node pairs, one chunk per
@@ -4491,9 +4489,11 @@ mod tests {
 
     /// A restrictive search refused for a block of its queue names the paths
     /// it held, as one refused for a path does. From a source to 600 leaves,
-    /// the last the target, every refusal names a count; one for a block
-    /// names the leaves queued, whole blocks of them, and the source's path
-    /// being expanded.
+    /// the last the target, every refusal names a count; one for a block of
+    /// the queue names the leaves queued, whole blocks of them, and the
+    /// source's path being expanded, and one for a block of segments names
+    /// as many paths as the full blocks hold segments (the source's and the
+    /// leaves queued).
     #[test]
     fn a_restrictive_search_refused_for_a_block_names_its_paths() {
         let store = Arc::new(RowGroupStore::new());
@@ -4503,8 +4503,8 @@ mod tests {
             target = store.create_node(&["Node"]);
             store.create_edge(source, target, "KNOWS");
         }
-        let entry = size_of::<(Arc<PathSegment>, u32)>();
-        let mut blocks = 0;
+        let entry = size_of::<(u32, u32)>();
+        let (mut queue_blocks, mut segment_blocks) = (0, 0);
         for budget in (1024..48 << 10).step_by(64) {
             let mut op = selective_search(
                 &store,
@@ -4520,13 +4520,21 @@ mod tests {
             };
             let (paths, requested) =
                 paths_named(&error).unwrap_or_else(|| panic!("{budget}: no path count: {error}"));
-            let block = PathQueue::<(Arc<PathSegment>, u32)>::block_items_within(budget) * entry;
-            if usize::try_from(requested).unwrap() == block {
-                blocks += 1;
-                assert_eq!((paths - 1) % (block / entry), 0, "{budget}: {error}");
+            let requested = usize::try_from(requested).unwrap();
+            let queue_block = PathQueue::<(u32, u32)>::block_items_within(budget) * entry;
+            let block = segment_block(budget);
+            let of_queue = requested == queue_block && (paths - 1) % (queue_block / entry) == 0;
+            let of_segments = requested == block && paths % (block / SEGMENT_BYTES) == 0;
+            if requested == queue_block || requested == block {
+                assert!(of_queue || of_segments, "{budget}: {error}");
+                queue_blocks += usize::from(requested != block);
+                segment_blocks += usize::from(requested != queue_block);
             }
         }
-        assert!(blocks > 0, "no budget refused a block");
+        assert!(
+            queue_blocks > 0 && segment_blocks > 0,
+            "budgets refused {queue_blocks} blocks of the queue, {segment_blocks} of segments"
+        );
     }
 
     /// A search that fails in the middle of a row, the row after one that
@@ -4563,6 +4571,11 @@ mod tests {
         len.max(4).next_power_of_two() * size_of::<T>()
     }
 
+    /// The bytes of a block of segments within a budget of `budget` bytes.
+    fn segment_block(budget: usize) -> usize {
+        PathQueue::<[u8; SEGMENT_BYTES]>::block_items_within(budget) * SEGMENT_BYTES
+    }
+
     /// What the budget of `op` holds after its rows.
     fn held_after(op: &mut ShortestPathOperator) -> usize {
         drain(op).unwrap();
@@ -4577,7 +4590,7 @@ mod tests {
     fn a_search_charges_every_map_and_queue_it_grows() {
         type Visited = (NodeId, (i64, Option<(NodeId, EdgeId)>));
         type Step = (NodeId, EdgeId);
-        type Queued = (Arc<PathSegment>, u32);
+        type Queued = (u32, u32);
         let (store, source, target) = fan(WIDTH);
         let n = WIDTH;
         let search = |selection, mode, to_every_node, hops| {
@@ -4782,9 +4795,10 @@ mod tests {
             + path_bytes(1);
         assert_eq!(budget.used(), want, "one way");
 
-        // A trail: two segments, the queue's one block (kept as its spare),
-        // the target's kept count
-        let want = 2 * SEGMENT_BYTES
+        // A trail: the block of its two segments with their index of one,
+        // the queue's one block (kept as its spare), the target's kept count
+        let want = segment_block(DEFAULT_PATH_SEARCH_BUDGET)
+            + size_of::<Vec<u8>>()
             + crate::execution::path_queue::BLOCK_BYTES
             + grown_table(1, <(usize, usize, u32)>::default)
             + kept(1);
@@ -4867,20 +4881,17 @@ mod tests {
         );
     }
 
-    /// A restrictive search within a small budget queues as many paths as
-    /// 0.6.3 did, less two: 0.6.3 charged a queued path 64 bytes (its entry
-    /// and its segment), and a block of the queue is a quarter of what the
-    /// budget leaves beside the index of four blocks: the entries' share less
-    /// a quarter of the index, 1.5 entries at 96 bytes, so 2 in whole
-    /// entries. From a source to each of
-    /// `leaves` leaves, the last the target, the search queues every leaf at
-    /// once, and answers as the unlimited run does; a budget under the
-    /// source's 64 bytes refuses, as in 0.6.3. Below 16 KiB the kept map and
-    /// the kept paths reserve what their first entries need, no more, so at
-    /// 1 KiB too the search is short by those two only.
+    /// A restrictive search within a small budget queues at least as many
+    /// paths as 0.6.3 did: 0.6.3 charged a queued path 64 bytes (its entry
+    /// and its segment), 0.6.4 holds it in 32 (an entry of 8 bytes and a
+    /// segment of 24), besides the blocks of each, a quarter of what the
+    /// budget leaves beside the index of four blocks, and their indexes.
+    /// From a source to each of `leaves` leaves, the last the target, the
+    /// search queues every leaf at once, and answers as the unlimited run
+    /// does; a budget under one entry and one segment refuses.
     #[test]
     fn a_small_budget_queues_as_many_paths_as_0_6_3() {
-        let entry = size_of::<(Arc<PathSegment>, u32)>();
+        let entry = size_of::<(u32, u32)>();
         let fan = |leaves: usize, budget: usize| {
             let store = Arc::new(RowGroupStore::new());
             let source = store.create_node(&["Node"]);
@@ -4901,20 +4912,14 @@ mod tests {
         };
         for kib in [1, 4, 8] {
             let budget = kib * 1024;
-            let by_0_6_3 = budget / (entry + SEGMENT_BYTES);
-            // One block holds them all: a quarter of what the budget leaves
-            // beside the index of four blocks, which 0.6.3 did not count
-            let index = crate::execution::path_budget::capacity_within(budget, 3)
-                * crate::execution::path_queue::INDEX_SLOT_BYTES;
-            let block = (budget - index) / 4 / entry;
-            let answered = (1..=by_0_6_3 + 1)
+            let by_0_6_3 = budget / 64;
+            let answered = (1..=2 * by_0_6_3)
                 .take_while(|&leaves| drain(&mut fan(leaves, budget)).is_ok())
                 .last()
                 .unwrap_or(0);
-            assert_eq!(
-                (answered, by_0_6_3 - answered),
-                (block, 2),
-                "{kib} KiB: 0.6.3 queued {by_0_6_3}; one block holds {block}"
+            assert!(
+                answered >= by_0_6_3,
+                "{kib} KiB: 0.6.3 queued {by_0_6_3}, 0.6.4 {answered}"
             );
             assert_eq!(
                 found(&mut fan(answered, budget), false),
@@ -4966,7 +4971,7 @@ mod tests {
         let (mut held, mut most) = (0, 0);
         for budget in (1024..=32 * 1024).step_by(8) {
             let paths = count(&mut held, budget);
-            let block = PathQueue::<(Arc<PathSegment>, u32)>::block_items_within(budget);
+            let block = PathQueue::<(u32, u32)>::block_items_within(budget);
             assert!(
                 paths + block >= most,
                 "{paths} at {budget} bytes, {most} below, blocks of {block}"

@@ -98,23 +98,24 @@ impl Optimizer {
             *closing.input = input;
         }
         let fresh = closing.to_variable.clone();
-        let Some(lifted) = LogicalExpression::conjunction(lifted.into_iter().rev()) else {
-            filter.pushdown_hint = Some(PushdownHint::IntersectExpand { target });
-            return filter;
-        };
-        // The closing check alone goes below them: what else the filter says may raise,
-        // and they were written first.
-        let intersection = LogicalOperator::Filter(FilterOp {
+        // The closing check alone, which the intersection makes true of every row it
+        // makes, so the planner checks it nowhere (see `plan_filter`). The checks lifted
+        // from between the hops go over it, then what else the filter says: it may
+        // raise, and they were written first.
+        let intersection = FilterOp {
             predicate: same(&fresh, target.clone()),
             pushdown_hint: Some(PushdownHint::IntersectExpand {
                 target: target.clone(),
             }),
             input: filter.input,
-        });
-        let checks = FilterOp {
-            predicate: lifted,
-            pushdown_hint: None,
-            input: Box::new(intersection),
+        };
+        let checks = match LogicalExpression::conjunction(lifted.into_iter().rev()) {
+            Some(lifted) => FilterOp {
+                predicate: lifted,
+                pushdown_hint: None,
+                input: Box::new(LogicalOperator::Filter(intersection)),
+            },
+            None => intersection,
         };
         match without_check(filter.predicate, &fresh, &target) {
             Some(predicate) => FilterOp {

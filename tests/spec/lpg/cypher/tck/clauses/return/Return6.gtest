@@ -1,0 +1,351 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/return/Return6.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Return6"
+  title: "Return6 - Implicit grouping with aggregates"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Return count aggregation over nodes
+  - name: s1_return_count_aggregation_over_nodes
+    setup:
+      - |
+        CREATE ({num: 42})
+    query: |
+      MATCH (n)
+      RETURN n.num AS n, count(n) AS count
+    expect:
+      values: |
+        | n | count |
+        | 42 | 1 |
+      side_effects: {}
+
+  # [2] Projecting an arithmetic expression with aggregation
+  - name: s2_projecting_an_arithmetic_expression_with_aggregation
+    setup:
+      - |
+        CREATE ({id: 42})
+    query: |
+      MATCH (a)
+      RETURN a, count(a) + 3
+    expect:
+      values: |
+        | a | count(a) + 3 |
+        | ({id: 42}) | 4 |
+      side_effects: {}
+
+  # [3] Aggregating by a list property has a correct definition of equality
+  - name: s3_aggregating_by_a_list_property_has_a_correct_definition_of_equality
+    setup:
+      - |
+        CREATE ({a: [1, 2, 3]}), ({a: [1, 2, 3]})
+    query: |
+      MATCH (a)
+      WITH a.num AS a, count(*) AS count
+      RETURN count
+    expect:
+      values: |
+        | count |
+        | 2 |
+      side_effects: {}
+
+  # [4] Support multiple divisions in aggregate function
+  - name: s4_support_multiple_divisions_in_aggregate_function
+    setup:
+      - |
+        UNWIND range(0, 7250) AS i
+        CREATE ()
+    query: |
+      MATCH (n)
+      RETURN count(n) / 60 / 60 AS count
+    expect:
+      values: |
+        | count |
+        | 2 |
+      side_effects: {}
+
+  # [5] Aggregates inside normal functions
+  - name: s5_aggregates_inside_normal_functions
+    setup:
+      - |
+        UNWIND range(0, 10) AS i
+        CREATE ()
+    query: |
+      MATCH (a)
+      RETURN size(collect(a))
+    expect:
+      values: |
+        | size(collect(a)) |
+        | 11 |
+      side_effects: {}
+
+  # [6] Handle aggregates inside non-aggregate expressions
+  - name: s6_handle_aggregates_inside_non_aggregate_expressions
+    xfail:
+      spec: "openCypher TCK 2024.3 Return6: [6] Handle aggregates inside non-aggregate expressions"
+      issue: "#798"
+    query: |
+      MATCH (a {name: 'Andres'})<-[:FATHER]-(child)
+      RETURN a.name, {foo: a.name='Andres', kids: collect(child.name)}
+    expect:
+      values: |
+        | a.name | {foo: a.name='Andres', kids: collect(child.name)} |
+      side_effects: {}
+
+  # [7] Aggregate on property
+  - name: s7_aggregate_on_property
+    setup:
+      - |
+        CREATE ({num: 33})
+        CREATE ({num: 33})
+        CREATE ({num: 42})
+    query: |
+      MATCH (n)
+      RETURN n.num, count(*)
+    expect:
+      values: |
+        | n.num | count(*) |
+        | 42 | 1 |
+        | 33 | 2 |
+      side_effects: {}
+
+  # [8] Handle aggregation on functions
+  - name: s8_handle_aggregation_on_functions
+    setup:
+      - |
+        CREATE (a:L), (b1), (b2)
+        CREATE (a)-[:A]->(b1), (a)-[:A]->(b2)
+    query: |
+      MATCH p=(a:L)-[*]->(b)
+      RETURN b, avg(length(p))
+    expect:
+      values: |
+        | b | avg(length(p)) |
+        | () | 1.0 |
+        | () | 1.0 |
+      side_effects: {}
+
+  # [9] Aggregates with arithmetics
+  - name: s9_aggregates_with_arithmetics
+    setup:
+      - |
+        CREATE ()
+    query: |
+      MATCH ()
+      RETURN count(*) * 10 AS c
+    expect:
+      values: |
+        | c |
+        | 10 |
+      side_effects: {}
+
+  # [10] Multiple aggregates on same variable
+  - name: s10_multiple_aggregates_on_same_variable
+    setup:
+      - |
+        CREATE ()
+    query: |
+      MATCH (n)
+      RETURN count(n), collect(n)
+    expect:
+      values: |
+        | count(n) | collect(n) |
+        | 1 | [()] |
+      side_effects: {}
+
+  # [11] Counting matches
+  - name: s11_counting_matches
+    setup:
+      - |
+        UNWIND range(1, 100) AS i
+        CREATE ()
+    query: |
+      MATCH ()
+      RETURN count(*)
+    expect:
+      values: |
+        | count(*) |
+        | 100 |
+      side_effects: {}
+
+  # [12] Counting matches per group
+  - name: s12_counting_matches_per_group
+    setup:
+      - |
+        CREATE (a:L), (b1), (b2)
+        CREATE (a)-[:A]->(b1), (a)-[:A]->(b2)
+    query: |
+      MATCH (a:L)-[rel]->(b)
+      RETURN a, count(*)
+    expect:
+      values: |
+        | a | count(*) |
+        | (:L) | 2 |
+      side_effects: {}
+
+  # [13] Returning the minimum length of paths
+  - name: s13_returning_the_minimum_length_of_paths
+    setup:
+      - |
+        CREATE (a:T {name: 'a'}), (b:T {name: 'b'}), (c:T {name: 'c'})
+        CREATE (a)-[:R]->(b)
+        CREATE (a)-[:R]->(c)
+        CREATE (c)-[:R]->(b)
+    query: |
+      MATCH p = (a:T {name: 'a'})-[:R*]->(other:T)
+      WHERE other <> a
+      WITH a, other, min(length(p)) AS len
+      RETURN a.name AS name, collect(other.name) AS others, len
+    expect:
+      unordered_lists: true
+      values: |
+        | name | others | len |
+        | 'a' | ['c', 'b'] | 1 |
+      side_effects: {}
+
+  # [14] Aggregates in aggregates
+  # TCK: SyntaxError at compile time: NestedAggregation
+  - name: s14_aggregates_in_aggregates
+    query: |
+      RETURN count(count(*))
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [15] Using `rand()` in aggregations
+  # TCK: SyntaxError at compile time: NonConstantExpression
+  - name: s15_using_rand_in_aggregations
+    xfail:
+      spec: "openCypher TCK 2024.3 Return6: [15] Using `rand()` in aggregations"
+      issue: "#798"
+    query: |
+      RETURN count(rand())
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [16] Aggregation on complex expressions
+  - name: s16_aggregation_on_complex_expressions
+    setup:
+      - |
+        CREATE (andres {name: 'Andres'}),
+               (michael {name: 'Michael'}),
+               (peter {name: 'Peter'}),
+               (bread {type: 'Bread'}),
+               (veggies {type: 'Veggies'}),
+               (meat {type: 'Meat'})
+        CREATE (andres)-[:ATE {times: 10}]->(bread),
+               (andres)-[:ATE {times: 8}]->(veggies),
+               (michael)-[:ATE {times: 4}]->(veggies),
+               (michael)-[:ATE {times: 6}]->(bread),
+               (michael)-[:ATE {times: 9}]->(meat),
+               (peter)-[:ATE {times: 7}]->(veggies),
+               (peter)-[:ATE {times: 7}]->(bread),
+               (peter)-[:ATE {times: 4}]->(meat)
+    query: |
+      MATCH (me)-[r1:ATE]->()<-[r2:ATE]-(you)
+      WHERE me.name = 'Michael'
+      WITH me, count(DISTINCT r1) AS H1, count(DISTINCT r2) AS H2, you
+      MATCH (me)-[r1:ATE]->()<-[r2:ATE]-(you)
+      RETURN me, you, sum((1 - abs(r1.times / H1 - r2.times / H2)) * (r1.times + r2.times) / (H1 + H2)) AS sum
+    expect:
+      values: |
+        | me | you | sum |
+        | ({name: 'Michael'}) | ({name: 'Andres'}) | -7 |
+        | ({name: 'Michael'}) | ({name: 'Peter'}) | 0 |
+      side_effects: {}
+
+  # [17] Handle constants and parameters inside an expression which contains an aggregation expression
+  - name: s17_handle_constants_and_parameters_inside_an_expression_which_contains_an_aggregation_expression
+    xfail:
+      spec: "openCypher TCK 2024.3 Return6: [17] Handle constants and parameters inside an expression which contains an aggregation expression"
+      issue: "#800"
+    params:
+      age: 38
+    query: |
+      MATCH (person)
+      RETURN $age + avg(person.age) - 1000
+    expect:
+      values: |
+        | $age + avg(person.age) - 1000 |
+        | null |
+      side_effects: {}
+
+  # [18] Handle returned variables inside an expression which contains an aggregation expression
+  - name: s18_handle_returned_variables_inside_an_expression_which_contains_an_aggregation_expression
+    query: |
+      MATCH (me: Person)--(you: Person)
+      WITH me.age AS age, you
+      RETURN age, age + count(you.age)
+    expect:
+      values: |
+        | age | age + count(you.age) |
+      side_effects: {}
+
+  # [19] Handle returned property accesses inside an expression which contains an aggregation expression
+  - name: s19_handle_returned_property_accesses_inside_an_expression_which_contains_an_aggregation_expression
+    query: |
+      MATCH (me: Person)--(you: Person)
+      RETURN me.age, me.age + count(you.age)
+    expect:
+      values: |
+        | me.age | me.age + count(you.age) |
+      side_effects: {}
+
+  # [20] Fail if not returned variables are used inside an expression which contains an aggregation expression
+  # TCK: SyntaxError at compile time: AmbiguousAggregationExpression
+  - name: s20_fail_if_not_returned_variables_are_used_inside_an_expression_which_contains_an_aggregation_expression
+    query: |
+      MATCH (me: Person)--(you: Person)
+      RETURN me.age + count(you.age)
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [21] Fail if more complex expressions, even if returned, are used inside expression which contains an aggregation expression
+  # TCK: SyntaxError at compile time: AmbiguousAggregationExpression
+  - name: s21_fail_if_more_complex_expressions_even_if_returned_are_used_inside_expression_which_contains_an_aggregation_expression
+    xfail:
+      spec: "openCypher TCK 2024.3 Return6: [21] Fail if more complex expressions, even if returned, are used inside expression which contains an aggregation expression"
+      issue: "#798"
+    query: |
+      MATCH (me: Person)--(you: Person)
+      RETURN me.age + you.age, me.age + you.age + count(*)
+    expect:
+      gql_status: "42"
+      side_effects: {}

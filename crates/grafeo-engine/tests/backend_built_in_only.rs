@@ -214,14 +214,13 @@ fn a_backup_needs_the_built_in_store() {
     assert_eq!(people(&db), [Value::from("Jules")]);
 }
 
-/// #308: a text search in a query fails with the unsupported error, never
-/// matches nothing (`text_match` and `text_score` read a score the backend
-/// cannot give, and an absent score filtered every row out). The search
-/// procedures fail the same way, and a distance between vectors, which needs
-/// no index, still works.
+/// #308: on a backend that keeps no text index, a text search in a query
+/// fails with the unsupported error, never matches nothing (an absent score
+/// filtered every row out). The search procedures need the built-in store,
+/// and a distance between vectors, which needs no index, still works.
 #[cfg(all(feature = "vector-index", feature = "text-index"))]
 #[test]
-fn a_text_search_in_a_query_needs_the_built_in_store() {
+fn a_text_search_in_a_query_needs_a_text_index_on_the_backend() {
     let db = on_backend();
     for query in [
         "MATCH (p:Person) WHERE text_match(p.bio, 'graph') RETURN p.name",
@@ -235,7 +234,7 @@ fn a_text_search_in_a_query_needs_the_built_in_store() {
             "{query}: {error}"
         );
         assert!(
-            error.to_string().contains("built-in store"),
+            error.to_string().contains("the store reports none"),
             "{query}: {error}"
         );
     }

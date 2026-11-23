@@ -30,11 +30,13 @@ use super::adjacency::{Adjacency, intersect_run_with_delta, intersect_runs};
 use super::column::Columns;
 #[cfg(feature = "text-index")]
 use super::index::TextLimit;
-use super::{Inner, ROWS_PER_GROUP, Read, RowGroupStore};
+use super::{Inner, ROWS_PER_GROUP, Read, RowGroupStore, StoreIdentity};
 use crate::graph::Direction;
 use crate::graph::lpg::{CompareOp, Edge, Node};
 use crate::graph::traits::GraphStore;
-use crate::graph::traits::{CommonEdge, HopFrom, KeyColumnGroup};
+use crate::graph::traits::{
+    CommonEdge, EdgeTypeFilter, FilteredHop, HopFrom, KeyColumnGroup, ResolvedEdgeTypes,
+};
 #[cfg(feature = "vector-index")]
 use crate::index::vector::{DistanceMetric, HnswConfig};
 use crate::statistics::{EdgeTypeStatistics, LabelStatistics, Statistics};
@@ -44,6 +46,59 @@ pub(super) use crate::graph::traits::compare_for_range;
 /// A count kept as a signed total, as a size.
 fn size(count: i64) -> usize {
     usize::try_from(count.max(0)).unwrap_or(usize::MAX)
+}
+
+/// Calls `seen` with each row of `group` that `read` sees with at least one
+/// of the label ids, ascending and each once: the label bitmaps give the
+/// newest labels, tested a word of rows at a time, and the rows a label chain
+/// holds are read at the view instead. A group without a label chain reads
+/// its bitmaps alone, and a group without the labels nothing.
+fn for_each_row_with_labels(
+    group: &super::NodeGroup,
+    label_ids: &[u32],
+    read: Read,
+    seen: impl FnMut(usize),
+) {
+    let changed = group.label_updates.rows();
+    // One label and no label chain, the common case: the rows of its bitmap
+    // `read` sees are the answer, ascending and once.
+    if changed.is_none()
+        && let [label] = label_ids
+    {
+        if let Some(rows) = group.labels.get(label) {
+            group.versions.for_each_visible(rows, read, seen);
+        }
+        return;
+    }
+    // The rows the newest label bitmaps hold that `read` sees, but those a
+    // label chain holds, which are read at the view.
+    let mut rows = Vec::new();
+    for label_rows in label_ids.iter().filter_map(|label| group.labels.get(label)) {
+        group.versions.for_each_visible(label_rows, read, |row| {
+            if changed.as_ref().is_none_or(|changed| !changed.get(row)) {
+                rows.push(row);
+            }
+        });
+    }
+    if let Some(changed) = &changed {
+        rows.extend(changed.rows().filter(|row| {
+            group.version(*row).visible(read)
+                && label_ids
+                    .iter()
+                    .any(|label| group.has_label_at(*row, *label, read))
+        }));
+    }
+    rows.sort_unstable();
+    rows.dedup();
+    rows.into_iter().for_each(seen);
+}
+
+/// A hop an intersection reads, its edge types as ids: `None` for every type, empty for
+/// types the store has none of.
+struct HopIds<'h> {
+    node: NodeId,
+    direction: Direction,
+    ids: Option<&'h [u32]>,
 }
 
 /// One way of a hop an intersection reads.
@@ -58,7 +113,7 @@ struct HopSide<'a> {
 struct HopSides<'a> {
     sides: SmallVec<[HopSide<'a>; 2]>,
     /// The edge types it follows, `None` for every type.
-    ids: Option<SmallVec<[u32; 4]>>,
+    ids: Option<&'a [u32]>,
     node: u64,
 }
 
@@ -88,7 +143,7 @@ impl<'a> HopSides<'a> {
     /// The sorted runs of `side` of the types the hop follows.
     fn runs(&self, side: &HopSide<'a>) -> impl Iterator<Item = &'a [Adjacent]> + use<'a, '_> {
         side.adjacency.runs_of(side.row).filter(|run| {
-            self.ids.as_ref().is_none_or(|ids| {
+            self.ids.is_none_or(|ids| {
                 run.first()
                     .is_some_and(|entry| ids.contains(&entry.edge_type))
             })
@@ -100,10 +155,7 @@ impl<'a> HopSides<'a> {
         let dropped_self_loop = side.skips_self_loops && entry.other == self.node;
         !dropped_self_loop
             && !side.adjacency.is_removed(entry)
-            && self
-                .ids
-                .as_ref()
-                .is_none_or(|ids| ids.contains(&entry.edge_type))
+            && self.ids.is_none_or(|ids| ids.contains(&entry.edge_type))
     }
 }
 
@@ -187,40 +239,40 @@ impl Inner {
         let mut ids = Vec::new();
         for (index, group) in &self.nodes {
             let base = index * ROWS_PER_GROUP;
-            let changed = group.label_updates.rows();
-            // One label and no label chain, the common case: the rows of
-            // its bitmap `read` sees are the answer, ascending and once.
-            if changed.is_none()
-                && let [label] = label_ids
-            {
-                if let Some(rows) = group.labels.get(label) {
-                    group.versions.for_each_visible(rows, read, |row| {
-                        ids.push(NodeId::new(base + row as u64));
-                    });
+            for_each_row_with_labels(group, label_ids, read, |row| {
+                ids.push(NodeId::new(base + row as u64));
+            });
+        }
+        ids
+    }
+
+    /// The nodes `read` sees with label `label` whose `property` lies within
+    /// the bounds, ascending: only the label's rows, selected as
+    /// [`nodes_with_labels_at`](Self::nodes_with_labels_at) selects them, each
+    /// value read at the view (a chained row's too, and a cold chunk's
+    /// through its cold read).
+    fn nodes_with_label_in_range_at(
+        &self,
+        label: u32,
+        property: &str,
+        range: &crate::graph::ValueRange,
+        read: Read,
+    ) -> Vec<NodeId> {
+        let Some(key) = self.keys.get_id(property) else {
+            return Vec::new();
+        };
+        let mut ids = Vec::new();
+        for (index, group) in &self.nodes {
+            let base = index * ROWS_PER_GROUP;
+            for_each_row_with_labels(group, &[label], read, |row| {
+                if group
+                    .columns
+                    .get_at(key, row, read)
+                    .is_some_and(|value| range.contains(&value))
+                {
+                    ids.push(NodeId::new(base + row as u64));
                 }
-                continue;
-            }
-            // The rows the newest label bitmaps hold that `read` sees, but
-            // those a label chain holds, which are read at the view.
-            let mut rows = Vec::new();
-            for label_rows in label_ids.iter().filter_map(|label| group.labels.get(label)) {
-                group.versions.for_each_visible(label_rows, read, |row| {
-                    if changed.as_ref().is_none_or(|changed| !changed.get(row)) {
-                        rows.push(row);
-                    }
-                });
-            }
-            if let Some(changed) = &changed {
-                rows.extend(changed.rows().filter(|row| {
-                    group.version(*row).visible(read)
-                        && label_ids
-                            .iter()
-                            .any(|label| group.has_label_at(*row, *label, read))
-                }));
-            }
-            rows.sort_unstable();
-            rows.dedup();
-            ids.extend(rows.into_iter().map(|row| NodeId::new(base + row as u64)));
+            });
         }
         ids
     }
@@ -309,7 +361,69 @@ impl Inner {
         })
     }
 
-    /// Every node row `read` sees whose `property` lies within the bounds.
+    /// Calls `visit` with the values of `read_keys` of each node `read` sees
+    /// with label `label` whose `property` lies within the bounds, ascending,
+    /// until it breaks: the rows of
+    /// [`nodes_with_label_in_range_at`](Self::nodes_with_label_in_range_at),
+    /// each key's column looked up once per group and each value read at the
+    /// view, a key that is `property` given the value the range read.
+    fn visit_label_range_at(
+        &self,
+        label: u32,
+        property: &str,
+        range: &crate::graph::ValueRange,
+        read_keys: &[&str],
+        read: Read,
+        visit: &mut dyn FnMut(&[Option<Value>]) -> std::ops::ControlFlow<()>,
+    ) {
+        use grafeo_common::work::{Work, count};
+        let Some(key) = self.keys.get_id(property) else {
+            return;
+        };
+        let keys: Vec<Option<u32>> = read_keys.iter().map(|key| self.keys.get_id(key)).collect();
+        let mut values: Vec<Option<Value>> = Vec::with_capacity(keys.len());
+        let mut stopped = false;
+        for group in self.nodes.values() {
+            // A group without the range's column holds no row in range.
+            let Some(column) = group.columns.column(key) else {
+                continue;
+            };
+            let columns: Vec<Option<&super::column::Column>> = keys
+                .iter()
+                .map(|read_key| read_key.and_then(|read_key| group.columns.column(read_key)))
+                .collect();
+            for_each_row_with_labels(group, &[label], read, |row| {
+                if stopped {
+                    return;
+                }
+                count(Work::ColumnRead, 1);
+                let Some(value) = column.value_at(row, read) else {
+                    return;
+                };
+                if !range.contains(&value) {
+                    return;
+                }
+                values.clear();
+                for (read_key, read_column) in keys.iter().zip(&columns) {
+                    values.push(if *read_key == Some(key) {
+                        Some(value.clone())
+                    } else {
+                        read_column.and_then(|read_column| {
+                            count(Work::ColumnRead, 1);
+                            read_column.value_at(row, read)
+                        })
+                    });
+                }
+                stopped = visit(&values).is_break();
+            });
+            if stopped {
+                return;
+            }
+        }
+    }
+
+    /// Every node row `read` sees whose `property` lies within the bounds,
+    /// ascending, the rows tested a word at a time.
     fn nodes_in_range_at(
         &self,
         property: &str,
@@ -321,13 +435,20 @@ impl Inner {
         let Some(key) = self.keys.get_id(property) else {
             return Vec::new();
         };
-        self.node_rows(|_, group, row| {
-            group.version(row).visible(read)
-                && group
+        let mut ids = Vec::new();
+        for (index, group) in &self.nodes {
+            let base = index * ROWS_PER_GROUP;
+            group.versions.for_each_visible_row(read, |row| {
+                if group
                     .columns
                     .get_at(key, row, read)
                     .is_some_and(|value| range.contains(&value))
-        })
+                {
+                    ids.push(NodeId::new(base + row as u64));
+                }
+            });
+        }
+        ids
     }
 
     /// Every node row, ascending, that `keep` accepts.
@@ -568,6 +689,36 @@ impl Inner {
         })
     }
 
+    /// The type ids of `filter`'s names in store `store`, as [`type_ids`](Self::type_ids)
+    /// gives them: from the filter's resolved form while it is this store's at the
+    /// dictionary's stamp, resolved again (and kept) otherwise, so a type created since or
+    /// a filter another store resolved reads this store's ids.
+    fn filter_ids<'f>(
+        &self,
+        store: StoreIdentity,
+        filter: &'f mut EdgeTypeFilter,
+    ) -> Option<&'f [u32]> {
+        if filter.names().is_empty() {
+            return None;
+        }
+        let stamp = self.edge_types.stamp();
+        let held = filter
+            .resolved
+            .as_ref()
+            .is_some_and(|resolved| resolved.store == store.0 && resolved.stamp == stamp);
+        if !held {
+            filter.resolved = Some(ResolvedEdgeTypes {
+                store: store.0,
+                stamp,
+                ids: self.type_ids(filter.names()).unwrap_or_default(),
+            });
+        }
+        filter
+            .resolved
+            .as_ref()
+            .map(|resolved| resolved.ids.as_slice())
+    }
+
     /// The other ends of the first `limit` of the edges [`edges_seen`](Self::edges_seen)
     /// lists, reading no further.
     pub(super) fn first_ends_seen(
@@ -616,8 +767,19 @@ impl Inner {
         types: &[ArcStr],
         read: Read,
     ) -> Vec<(NodeId, EdgeId)> {
-        let ids = self.type_ids(types);
-        if ids.as_ref().is_some_and(SmallVec::is_empty) {
+        self.edges_of(node, direction, self.type_ids(types).as_deref(), read)
+    }
+
+    /// [`edges_seen`](Self::edges_seen) of the type ids `ids` (every type for `None`).
+    fn edges_of(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        ids: Option<&[u32]>,
+        read: Read,
+    ) -> Vec<(NodeId, EdgeId)> {
+        grafeo_common::work::count(grafeo_common::work::Work::AdjacencyRead, 1);
+        if ids.is_some_and(<[u32]>::is_empty) {
             return Vec::new();
         }
         if ids.is_none()
@@ -638,7 +800,7 @@ impl Inner {
             return edges;
         }
         let mut edges = Vec::new();
-        self.each_seen(node, direction, ids.as_deref(), read, |other, edge| {
+        self.each_seen(node, direction, ids, read, |other, edge| {
             edges.push((other, edge));
         });
         edges
@@ -646,7 +808,7 @@ impl Inner {
 
     /// The adjacency a hop reads for an intersection, one per way it goes; a `Both`
     /// lists a self-loop once, going out. `None` when `read` does not see the node.
-    fn hop_sides<'a>(&'a self, hop: &HopFrom<'_>, read: Read) -> Option<HopSides<'a>> {
+    fn hop_sides<'a>(&'a self, hop: &HopIds<'a>, read: Read) -> Option<HopSides<'a>> {
         let (group, row) = self.node_seen(hop.node.as_u64(), read)?;
         let ways: &[bool] = match hop.direction {
             Direction::Outgoing => &[true],
@@ -662,7 +824,7 @@ impl Inner {
                     skips_self_loops: hop.direction == Direction::Both && !outgoing,
                 })
                 .collect(),
-            ids: self.type_ids(hop.edge_types),
+            ids: hop.ids,
             node: hop.node.as_u64(),
         })
     }
@@ -677,8 +839,34 @@ impl Inner {
         far: &HopFrom<'_>,
         read: Read,
     ) -> Option<(Vec<CommonEdge>, usize)> {
-        let kept =
-            |hop: &HopFrom<'_>| hop.direction == Direction::Outgoing || self.keeps_incoming();
+        let (near_ids, far_ids) = (
+            self.type_ids(near.edge_types),
+            self.type_ids(far.edge_types),
+        );
+        self.common_edges_of(
+            &HopIds {
+                node: near.node,
+                direction: near.direction,
+                ids: near_ids.as_deref(),
+            },
+            &HopIds {
+                node: far.node,
+                direction: far.direction,
+                ids: far_ids.as_deref(),
+            },
+            read,
+        )
+    }
+
+    /// [`common_edges_seen`](Self::common_edges_seen) of hops whose types are ids.
+    fn common_edges_of(
+        &self,
+        near: &HopIds<'_>,
+        far: &HopIds<'_>,
+        read: Read,
+    ) -> Option<(Vec<CommonEdge>, usize)> {
+        grafeo_common::work::count(grafeo_common::work::Work::AdjacencyRead, 2);
+        let kept = |hop: &HopIds<'_>| hop.direction == Direction::Outgoing || self.keeps_incoming();
         if !kept(near) || !kept(far) {
             return None;
         }
@@ -756,7 +944,7 @@ impl Inner {
     fn common_edges_by_far_ends(
         &self,
         short: &HopSides<'_>,
-        other: &HopFrom<'_>,
+        other: &HopIds<'_>,
         read: Read,
         flipped: bool,
     ) -> (Vec<CommonEdge>, usize) {
@@ -774,7 +962,7 @@ impl Inner {
                     continue;
                 }
                 let node = NodeId::new(entry.other);
-                let edges = self.edges_between_seen(node, other.node, back, other.edge_types, read);
+                let edges = self.edges_between_of(node, other.node, back, other.ids, read);
                 probes += edges.len();
                 for edge in edges {
                     let own = EdgeId::new(entry.edge);
@@ -801,13 +989,31 @@ impl Inner {
         types: &[ArcStr],
         read: Read,
     ) -> Vec<EdgeId> {
+        self.edges_between_of(
+            node,
+            other,
+            direction,
+            self.type_ids(types).as_deref(),
+            read,
+        )
+    }
+
+    /// [`edges_between_seen`](Self::edges_between_seen) of the type ids `ids` (every type
+    /// for `None`).
+    fn edges_between_of(
+        &self,
+        node: NodeId,
+        other: NodeId,
+        direction: Direction,
+        ids: Option<&[u32]>,
+        read: Read,
+    ) -> Vec<EdgeId> {
         if direction != Direction::Outgoing && !self.keeps_incoming() {
-            let mut edges = self.edges_seen(node, direction, types, read);
+            let mut edges = self.edges_of(node, direction, ids, read);
             edges.retain(|(end, _)| *end == other);
             return edges.into_iter().map(|(_, edge)| edge).collect();
         }
-        let ids = self.type_ids(types);
-        if ids.as_ref().is_some_and(SmallVec::is_empty) {
+        if ids.is_some_and(<[u32]>::is_empty) {
             return Vec::new();
         }
         let (raw, target) = (node.as_u64(), other.as_u64());
@@ -819,7 +1025,7 @@ impl Inner {
         // as a hub's delta is searched entry by entry.
         if direction != Direction::Both
             && self.keeps_incoming()
-            && ids.as_ref().is_some_and(|ids| ids.len() == 1)
+            && ids.is_some_and(|ids| ids.len() == 1)
             && let Some((far_group, far_row)) = self.node_seen(target, read)
         {
             let outgoing = direction == Direction::Outgoing;
@@ -830,8 +1036,7 @@ impl Inner {
                     .adjacency(!outgoing)
                     .to_other(far_row, raw)
                     .filter(|adjacent| {
-                        ids.as_ref()
-                            .is_none_or(|ids| ids.contains(&adjacent.edge_type))
+                        ids.is_none_or(|ids| ids.contains(&adjacent.edge_type))
                             && self.edge_visible(adjacent.edge, read)
                     })
                     .map(|adjacent| EdgeId::new(adjacent.edge))
@@ -856,8 +1061,7 @@ impl Inner {
                     .adjacency(outgoing)
                     .to_other(row, target)
                     .filter(|adjacent| {
-                        ids.as_ref()
-                            .is_none_or(|ids| ids.contains(&adjacent.edge_type))
+                        ids.is_none_or(|ids| ids.contains(&adjacent.edge_type))
                             && self.edge_visible(adjacent.edge, read)
                     })
                     .map(|adjacent| EdgeId::new(adjacent.edge)),
@@ -1299,6 +1503,52 @@ impl GraphStore for RowGroupStore {
         )
     }
 
+    /// The names resolved to the store's ids now; each read checks them against the
+    /// dictionary's stamp and this store.
+    fn edge_type_filter(&self, names: &[ArcStr]) -> EdgeTypeFilter {
+        let mut filter = EdgeTypeFilter::of_names(names);
+        self.inner.read().filter_ids(self.identity, &mut filter);
+        filter
+    }
+
+    fn edges_with_filter(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        filter: &mut EdgeTypeFilter,
+        view: ReadView,
+    ) -> Result<Vec<(NodeId, EdgeId)>> {
+        let inner = self.inner.read();
+        let ids = inner.filter_ids(self.identity, filter);
+        Ok(inner.edges_of(node, direction, ids, Read::view(view)))
+    }
+
+    fn common_edges_with_filter(
+        &self,
+        near: FilteredHop<'_>,
+        far: FilteredHop<'_>,
+        view: ReadView,
+    ) -> Result<(Vec<CommonEdge>, usize)> {
+        let (inner, read) = (self.inner.read(), Read::view(view));
+        let near = HopIds {
+            node: near.node,
+            direction: near.direction,
+            ids: inner.filter_ids(self.identity, near.filter),
+        };
+        let far = HopIds {
+            node: far.node,
+            direction: far.direction,
+            ids: inner.filter_ids(self.identity, far.filter),
+        };
+        if let Some(found) = inner.common_edges_of(&near, &far, read) {
+            return Ok(found);
+        }
+        crate::graph::traits::common_edges_by_lists(
+            inner.edges_of(near.node, near.direction, near.ids, read),
+            inner.edges_of(far.node, far.direction, far.ids, read),
+        )
+    }
+
     fn edges_between(
         &self,
         node: NodeId,
@@ -1725,6 +1975,35 @@ impl GraphStore for RowGroupStore {
             .nodes_in_range_at(property, range, Read::view(view)))
     }
 
+    fn find_nodes_with_label_in_range(
+        &self,
+        label: &str,
+        property: &str,
+        range: &crate::graph::ValueRange,
+        view: ReadView,
+    ) -> Result<Vec<NodeId>> {
+        let inner = self.inner.read();
+        Ok(inner.label_id(label).map_or_else(Vec::new, |label| {
+            inner.nodes_with_label_in_range_at(label, property, range, Read::view(view))
+        }))
+    }
+
+    fn visit_nodes_with_label_in_range(
+        &self,
+        label: &str,
+        property: &str,
+        range: &crate::graph::ValueRange,
+        read: &[&str],
+        view: ReadView,
+        visit: &mut dyn FnMut(&[Option<Value>]) -> std::ops::ControlFlow<()>,
+    ) -> Result<()> {
+        let inner = self.inner.read();
+        if let Some(label) = inner.label_id(label) {
+            inner.visit_label_range_at(label, property, range, read, Read::view(view), visit);
+        }
+        Ok(())
+    }
+
     fn node_property_might_match(
         &self,
         property: &PropertyKey,
@@ -1906,33 +2185,70 @@ mod tests {
     use crate::graph::rowgroup::RowGroupStore;
     use crate::graph::traits::GraphStore;
 
-    /// The zone maps of hot columns prune by every value a column held: a
-    /// value replaced since (a reader may still see it) still might match,
-    /// one never held does not; a key without a column always might.
+    /// The zone maps of hot columns prune by every value a reader may still
+    /// see: a value replaced since still might match, one never held does
+    /// not; a write that moves the greatest value inward leaves that side
+    /// stale, so anything above might match while the least still prunes,
+    /// until a collect that keeps no version rebuilds it from the live values
+    /// (#712: the bound owns no value); a key without a column always might.
     #[test]
     fn hot_zone_maps_cover_every_value_a_column_held() {
         use crate::graph::lpg::CompareOp;
 
         let store = RowGroupStore::new();
         let age = PropertyKey::new("age");
-        let alix = store.create_node_with_props(&["Person"], &[(age.clone(), Value::Int64(19))]);
-        store.set_node_property(alix, "age", Value::Int64(88));
-        for (op, value, might) in [
-            (CompareOp::Eq, 19, true),
-            (CompareOp::Eq, 88, true),
-            (CompareOp::Eq, 50, true),
-            (CompareOp::Eq, 89, false),
-            (CompareOp::Gt, 88, false),
-            (CompareOp::Ge, 88, true),
-            (CompareOp::Lt, 19, false),
-            (CompareOp::Le, 19, true),
-        ] {
-            assert_eq!(
-                store.node_property_might_match(&age, op, &Value::Int64(value)),
-                might,
-                "{op:?} {value}"
-            );
-        }
+        store.create_node_with_props(&["Person"], &[(age.clone(), Value::Int64(19))]);
+        let gus = store.create_node_with_props(&["Person"], &[(age.clone(), Value::Int64(50))]);
+        let mia = store.create_node_with_props(&["Person"], &[(age.clone(), Value::Int64(88))]);
+        let check = |step: &str, rows: &[(CompareOp, i64, bool)]| {
+            for (op, value, might) in rows {
+                assert_eq!(
+                    store.node_property_might_match(&age, *op, &Value::Int64(*value)),
+                    *might,
+                    "{step}: {op:?} {value}"
+                );
+            }
+        };
+        // Gus's 50 is neither the least nor the greatest: replaced, it is still covered.
+        store.set_node_property(gus, "age", Value::Int64(60));
+        check(
+            "a middle value replaced",
+            &[
+                (CompareOp::Eq, 19, true),
+                (CompareOp::Eq, 50, true),
+                (CompareOp::Eq, 88, true),
+                (CompareOp::Eq, 89, false),
+                (CompareOp::Gt, 88, false),
+                (CompareOp::Ge, 88, true),
+                (CompareOp::Lt, 19, false),
+                (CompareOp::Le, 19, true),
+            ],
+        );
+        // Mia's 88 is the greatest: replaced by a smaller value, that side is stale and
+        // bounds nothing, and the least side still prunes.
+        store.set_node_property(mia, "age", Value::Int64(70));
+        check(
+            "the greatest replaced",
+            &[
+                (CompareOp::Eq, 89, true),
+                (CompareOp::Gt, 88, true),
+                (CompareOp::Lt, 19, false),
+                (CompareOp::Le, 19, true),
+            ],
+        );
+        // Once no version is kept, the bound is the live 19 to 70.
+        store.collect(store.current_epoch());
+        check(
+            "collected",
+            &[
+                (CompareOp::Eq, 19, true),
+                (CompareOp::Eq, 70, true),
+                (CompareOp::Eq, 88, false),
+                (CompareOp::Gt, 70, false),
+                (CompareOp::Ge, 70, true),
+                (CompareOp::Lt, 19, false),
+            ],
+        );
         assert!(
             store.node_property_might_match(&age, CompareOp::Eq, &Value::from("Prague")),
             "a value that does not order against the column might"

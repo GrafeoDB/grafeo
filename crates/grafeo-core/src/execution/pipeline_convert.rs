@@ -141,6 +141,26 @@ fn decompose_recursive_memory(
             push_ops.push(Box::new(push_sort));
             decompose_recursive_memory(child, push_ops, ctx)
         }
+        "TopK" => {
+            // It stays a pull operator, and goes on in the spilling sort of its keys once its
+            // heap outgrows the statement's memory.
+            let any = op.into_any();
+            let top = *any
+                .downcast::<super::operators::TopKOperator>()
+                .expect("name() returned 'TopK' but downcast failed");
+            let temporal = top.temporal();
+            let output_width = top.output_width();
+            let push_keys: Vec<_> = top.sort_keys().iter().map(convert_sort_key).collect();
+            let ctx = ctx.clone();
+            Box::new(top.with_spill_fallback(Box::new(move || {
+                let mut sort = SpillableSortPushOperator::with_memory_context(push_keys, ctx)
+                    .with_temporal(temporal);
+                if let Some(width) = output_width {
+                    sort = sort.with_output_width(width);
+                }
+                Box::new(sort) as Box<dyn PushOperator>
+            })))
+        }
         "HashAggregate" => {
             let any = op.into_any();
             let agg = any
@@ -433,10 +453,8 @@ mod tests {
         use std::sync::Arc;
 
         let temp_dir = tempfile::TempDir::new().unwrap();
-        let context = OperatorMemoryContext::new(
-            BufferManager::with_budget(1024 * 1024),
-            Some(Arc::new(SpillManager::new(temp_dir.path()).unwrap())),
-        );
+        let context = OperatorMemoryContext::new(BufferManager::with_budget(1024 * 1024))
+            .with_spill_manager(Some(Arc::new(SpillManager::new(temp_dir.path()).unwrap())));
         let (source, push_ops) =
             convert_to_pipeline_with_memory(nodes_sorted_by_a_dropped_key(), Some(context));
         assert_eq!(source.name(), "NodesWithKeys");
@@ -526,6 +544,7 @@ mod tests {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: grafeo_common::types::TemporalComparison::TypesApart,
         }];

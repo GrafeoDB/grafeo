@@ -1,0 +1,228 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/boolean/Boolean5.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Boolean5"
+  title: "Boolean5 - Interop of logical operations"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Disjunction is distributive over conjunction on non-null
+  - name: s1_disjunction_is_distributive_over_conjunction_on_non_null
+    query: |
+      UNWIND [true, false] AS a
+      UNWIND [true, false] AS b
+      UNWIND [true, false] AS c
+      RETURN a, b, c, (a OR (b AND c)) = ((a OR b) AND (a OR c)) AS result
+    expect:
+      values: |
+        | a | b | c | result |
+        | true | true | true | true |
+        | true | true | false | true |
+        | true | false | true | true |
+        | true | false | false | true |
+        | false | true | true | true |
+        | false | true | false | true |
+        | false | false | true | true |
+        | false | false | false | true |
+      side_effects: {}
+
+  # [2] Disjunction is distributive over conjunction on null
+  - name: s2_disjunction_is_distributive_over_conjunction_on_null
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH a, b, c WHERE a IS NULL OR b IS NULL OR c IS NULL
+      RETURN a, b, c, (a OR (b AND c)) IS NULL = ((a OR b) AND (a OR c)) IS NULL AS result
+    expect:
+      values: |
+        | a | b | c | result |
+        | true | true | null | true |
+        | true | false | null | true |
+        | true | null | true | true |
+        | true | null | false | true |
+        | true | null | null | true |
+        | false | true | null | true |
+        | false | false | null | true |
+        | false | null | true | true |
+        | false | null | false | true |
+        | false | null | null | true |
+        | null | true | true | true |
+        | null | true | false | true |
+        | null | true | null | true |
+        | null | false | true | true |
+        | null | false | false | true |
+        | null | false | null | true |
+        | null | null | true | true |
+        | null | null | false | true |
+        | null | null | null | true |
+      side_effects: {}
+
+  # [3] Conjunction is distributive over disjunction on non-null
+  - name: s3_conjunction_is_distributive_over_disjunction_on_non_null
+    query: |
+      UNWIND [true, false] AS a
+      UNWIND [true, false] AS b
+      UNWIND [true, false] AS c
+      RETURN a, b, c, (a AND (b OR c)) = ((a AND b) OR (a AND c)) AS result
+    expect:
+      values: |
+        | a | b | c | result |
+        | true | true | true | true |
+        | true | true | false | true |
+        | true | false | true | true |
+        | true | false | false | true |
+        | false | true | true | true |
+        | false | true | false | true |
+        | false | false | true | true |
+        | false | false | false | true |
+      side_effects: {}
+
+  # [4] Conjunction is distributive over disjunction on null
+  - name: s4_conjunction_is_distributive_over_disjunction_on_null
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH a, b, c WHERE a IS NULL OR b IS NULL OR c IS NULL
+      RETURN a, b, c, (a AND (b OR c)) IS NULL = ((a AND b) OR (a AND c)) IS NULL AS result
+    expect:
+      values: |
+        | a | b | c | result |
+        | true | true | null | true |
+        | true | false | null | true |
+        | true | null | true | true |
+        | true | null | false | true |
+        | true | null | null | true |
+        | false | true | null | true |
+        | false | false | null | true |
+        | false | null | true | true |
+        | false | null | false | true |
+        | false | null | null | true |
+        | null | true | true | true |
+        | null | true | false | true |
+        | null | true | null | true |
+        | null | false | true | true |
+        | null | false | false | true |
+        | null | false | null | true |
+        | null | null | true | true |
+        | null | null | false | true |
+        | null | null | null | true |
+      side_effects: {}
+
+  # [5] Conjunction is distributive over exclusive disjunction on non-null
+  - name: s5_conjunction_is_distributive_over_exclusive_disjunction_on_non_null
+    query: |
+      UNWIND [true, false] AS a
+      UNWIND [true, false] AS b
+      UNWIND [true, false] AS c
+      RETURN a, b, c, (a AND (b XOR c)) = ((a AND b) XOR (a AND c)) AS result
+    expect:
+      values: |
+        | a | b | c | result |
+        | true | true | true | true |
+        | true | true | false | true |
+        | true | false | true | true |
+        | true | false | false | true |
+        | false | true | true | true |
+        | false | true | false | true |
+        | false | false | true | true |
+        | false | false | false | true |
+      side_effects: {}
+
+  # [6] Conjunction is not distributive over exclusive disjunction on null
+  - name: s6_conjunction_is_not_distributive_over_exclusive_disjunction_on_null
+    query: |
+      UNWIND [true, false, null] AS a
+      UNWIND [true, false, null] AS b
+      UNWIND [true, false, null] AS c
+      WITH a, b, c WHERE a IS NULL OR b IS NULL OR c IS NULL
+      RETURN a, b, c, (a AND (b XOR c)) IS NULL = ((a AND b) XOR (a AND c)) IS NULL AS result
+    expect:
+      values: |
+        | a | b | c | result |
+        | true | true | null | true |
+        | true | false | null | true |
+        | true | null | true | true |
+        | true | null | false | true |
+        | true | null | null | true |
+        | false | true | null | true |
+        | false | false | null | true |
+        | false | null | true | true |
+        | false | null | false | true |
+        | false | null | null | true |
+        | null | true | true | false |
+        | null | true | false | true |
+        | null | true | null | true |
+        | null | false | true | true |
+        | null | false | false | true |
+        | null | false | null | true |
+        | null | null | true | true |
+        | null | null | false | true |
+        | null | null | null | true |
+      side_effects: {}
+
+  # [7] De Morgan's law on non-null: the negation of a disjunction is the conjunction of the negations
+  - name: s7_de_morgan_s_law_on_non_null_the_negation_of_a_disjunction_is_the_conjunction_of_the_negations
+    query: |
+      UNWIND [true, false] AS a
+      UNWIND [true, false] AS b
+      RETURN a, b, NOT (a OR b) = (NOT (a) AND NOT (b)) AS result
+    expect:
+      values: |
+        | a | b | result |
+        | true | true | true |
+        | true | false | true |
+        | false | true | true |
+        | false | false | true |
+      side_effects: {}
+
+  # [8] De Morgan's law on non-null: the negation of a conjunction is the disjunction of the negations
+  - name: s8_de_morgan_s_law_on_non_null_the_negation_of_a_conjunction_is_the_disjunction_of_the_negations
+    query: |
+      UNWIND [true, false] AS a
+      UNWIND [true, false] AS b
+      RETURN a, b, NOT (a AND b) = (NOT (a) OR NOT (b)) AS result
+    expect:
+      values: |
+        | a | b | result |
+        | true | true | true |
+        | true | false | true |
+        | false | true | true |
+        | false | false | true |
+      side_effects: {}

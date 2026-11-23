@@ -21,7 +21,7 @@ tests:
       - "INSERT (:Graph:Directory {id: 'top'})-[:CONTAINS]->(:Graph:Directory {id: 'sub'})-[:CONTAINS]->(:Graph:File {id: 'f'})"
       - "MATCH (f:File) INSERT (:Graph:Directory:Archive {id: 'lone'})-[:CONTAINS]->(f)"
     variants:
-      gql: "MATCH (n:Directory) WHERE EXISTS { MATCH (n)-[:CONTAINS]->{1,}(f:File) } RETURN n.id ORDER BY n.id"
+      gql: "MATCH (n:Directory) WHERE EXISTS { MATCH TRAIL (n)-[:CONTAINS]->{1,}(f:File) } RETURN n.id ORDER BY n.id"
       cypher: "MATCH (n:Directory) WHERE EXISTS { MATCH (n)-[:CONTAINS*]->(f:File) } RETURN n.id ORDER BY n.id"
     expect:
       ordered: true
@@ -60,7 +60,7 @@ tests:
       - "INSERT (:Graph:Directory {id: 'top'})-[:CONTAINS]->(:Graph:Directory {id: 'sub'})-[:CONTAINS]->(:Graph:File {id: 'f'})"
       - "MATCH (f:File) INSERT (:Graph:Directory:Archive {id: 'lone'})-[:CONTAINS]->(f)"
     variants:
-      gql: "MATCH (n:Directory) WHERE NOT EXISTS { MATCH (n)-[:CONTAINS]->{2,}(:File) } RETURN n.id ORDER BY n.id"
+      gql: "MATCH (n:Directory) WHERE NOT EXISTS { MATCH TRAIL (n)-[:CONTAINS]->{2,}(:File) } RETURN n.id ORDER BY n.id"
       cypher: "MATCH (n:Directory) WHERE NOT EXISTS { MATCH (n)-[:CONTAINS*2..]->(:File) } RETURN n.id ORDER BY n.id"
     expect:
       ordered: true
@@ -73,7 +73,7 @@ tests:
       - "INSERT (:Graph:Directory {id: 'top'})-[:CONTAINS]->(:Graph:Directory {id: 'sub'})-[:CONTAINS]->(:Graph:File {id: 'f'})"
       - "MATCH (f:File) INSERT (:Graph:Directory:Archive {id: 'lone'})-[:CONTAINS]->(f)"
     variants:
-      gql: "MATCH (n:Graph) WHERE EXISTS { MATCH (n)-[:CONTAINS]->{1,}() } RETURN n.id ORDER BY n.id"
+      gql: "MATCH (n:Graph) WHERE EXISTS { MATCH TRAIL (n)-[:CONTAINS]->{1,}() } RETURN n.id ORDER BY n.id"
       cypher: "MATCH (n:Graph) WHERE EXISTS { MATCH (n)-[:CONTAINS*]->() } RETURN n.id ORDER BY n.id"
     expect:
       ordered: true

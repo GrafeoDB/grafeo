@@ -16,15 +16,16 @@ pub type FxHasher = FoldHasher<'static>;
 
 /// A fast hash builder using foldhash, seeded per process and table, so a
 /// crafted set of keys cannot make a table's probes long (hash flooding).
-#[cfg(not(grafeo_codspeed))]
+#[cfg(not(any(grafeo_codspeed, grafeo_work_counters)))]
 pub type FxBuildHasher = foldhash::fast::RandomState;
 
 /// A fast hash builder using foldhash with a fixed seed: only in the build of
 /// CodSpeed's simulation (`--cfg grafeo_codspeed`, which only the CodSpeed
-/// workflow sets), whose instruction counts would otherwise move with each
-/// run's seed through the tables' collision chains. A shipped build never sets
-/// the cfg.
-#[cfg(grafeo_codspeed)]
+/// workflow sets) and in the work counters' build (`--cfg grafeo_work_counters`,
+/// see `crate::work`), whose instruction counts and work counts would otherwise
+/// move with each run's seed through the tables' collision chains. A shipped
+/// build never sets either cfg.
+#[cfg(any(grafeo_codspeed, grafeo_work_counters))]
 pub type FxBuildHasher = foldhash::fast::FixedState;
 
 /// A `HashMap` using fast hashing.

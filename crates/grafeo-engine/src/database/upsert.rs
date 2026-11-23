@@ -17,10 +17,12 @@ use grafeo_core::execution::operators::value_utils::equals;
 use grafeo_core::execution::operators::{HashKey, OperatorError};
 use grafeo_core::graph::GraphStore;
 
+use super::Open;
 use super::graph_handle::GraphHandle;
 use super::{GrafeoDB, QueryResult};
 use crate::query::planner::lpg::value_join::rows_beat_a_seek;
 use crate::session::Session;
+use crate::session::SessionInner;
 
 /// At most this many skipped row indices are reported.
 const MAX_SKIPPED_ROWS: usize = 1_000;
@@ -207,7 +209,7 @@ fn upsert_nodes(
 /// matches, and finding them all first gives what the rows one by one
 /// would.
 fn update_nodes(
-    session: &Session,
+    session: &SessionInner,
     labels: &[&str],
     key: &str,
     rows: Vec<HashMap<PropertyKey, Value>>,
@@ -387,7 +389,7 @@ fn equal(stored: &Value, value: &Value) -> bool {
 /// target field, or when no node or more than one node has its endpoint
 /// key; endpoints are never created.
 fn upsert_edges(
-    session: &Session,
+    session: &SessionInner,
     edge_type: &str,
     rows: Vec<HashMap<PropertyKey, Value>>,
     options: &EdgeUpsertOptions,
@@ -592,21 +594,8 @@ fn check_name(what: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
-impl GrafeoDB {
-    /// Creates or updates one node per row in the current graph, matched by
-    /// `key` and all of `labels`, in one statement.
-    ///
-    /// With `replace`, a node's properties become exactly the row's (key
-    /// included); without, the row's properties are merged into the node's
-    /// and none is removed. Labels are never removed. Rows apply in order: a
-    /// key repeated within one call creates one node, which the later rows
-    /// update. A row without the key is skipped.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a row breaks a constraint or the schema; nothing
-    /// of the call is written then.
-    pub fn upsert_nodes(
+impl Open {
+    pub(crate) fn upsert_nodes(
         &self,
         labels: &[&str],
         key: &str,
@@ -622,58 +611,22 @@ impl GrafeoDB {
         )
     }
 
-    /// Creates or updates one edge of `edge_type` per row in the current
-    /// graph, between the nodes the row's source and target fields name, in
-    /// one statement (see [`EdgeUpsertOptions`]).
-    ///
-    /// A row is skipped when it lacks the edge key, the source field or the
-    /// target field, or when no node or more than one node has its endpoint
-    /// key; endpoints are never created. Rows
-    /// apply in order: a key repeated within one call creates one edge, which
-    /// the later rows update.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a row breaks the schema, nothing of the call is
-    /// written then, or if the edge key, source field and target field are
-    /// not three different fields.
-    pub fn upsert_edges(
+    pub(crate) fn upsert_edges(
         &self,
         edge_type: &str,
         rows: Vec<HashMap<PropertyKey, Value>>,
         options: &EdgeUpsertOptions,
     ) -> Result<UpsertSummary> {
-        upsert_edges(&self.session(), edge_type, rows, options)
+        upsert_edges(&self.session_unlisted(), edge_type, rows, options)
     }
 
-    /// Updates the existing nodes in the current graph that have `key` and
-    /// all of `labels`, one row at a time, and creates none.
-    ///
-    /// A row's properties are merged into each node its key matches (the
-    /// others stay), as `UNWIND $rows AS r MATCH (n:Labels {key: r.key}) SET
-    /// n += r` does: a null value removes the property, and a key that
-    /// several nodes have updates all of them. A row whose key matches no
-    /// such node, or without the key, is skipped. The call is one write,
-    /// logged and reported to change data capture as that statement is.
-    ///
-    /// Without a property index on `key`, it reads the nodes of the first
-    /// label once, so it takes time linear in the rows and those nodes. With
-    /// one, rows up to a third of those nodes look their nodes up through
-    /// the index instead, as the statement does.
-    ///
-    /// The summary counts the updated and the skipped rows; `created` is 0.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a row breaks a constraint or the schema; nothing
-    /// of the call is written then.
-    pub fn update_nodes(
+    pub(crate) fn update_nodes(
         &self,
         labels: &[&str],
         key: &str,
         rows: Vec<HashMap<PropertyKey, Value>>,
     ) -> Result<UpsertSummary> {
-        update_nodes(&self.session(), labels, key, rows)
+        update_nodes(&self.session_unlisted(), labels, key, rows)
     }
 }
 
@@ -712,7 +665,7 @@ impl GraphHandle<'_> {
         rows: Vec<HashMap<PropertyKey, Value>>,
         options: &EdgeUpsertOptions,
     ) -> Result<UpsertSummary> {
-        upsert_edges(&self.session()?, edge_type, rows, options)
+        self.with_one_call_session(|session| upsert_edges(session, edge_type, rows, options))
     }
 
     /// [`GrafeoDB::update_nodes`] in this graph.
@@ -727,18 +680,12 @@ impl GraphHandle<'_> {
         key: &str,
         rows: Vec<HashMap<PropertyKey, Value>>,
     ) -> Result<UpsertSummary> {
-        update_nodes(&self.session()?, labels, key, rows)
+        self.with_one_call_session(|session| update_nodes(session, labels, key, rows))
     }
 }
 
-impl Session {
-    /// [`GrafeoDB::upsert_nodes`] in the session's graph, inside its
-    /// transaction when one is open.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a row breaks a constraint or the schema.
-    pub fn upsert_nodes(
+impl SessionInner {
+    pub(crate) fn upsert_nodes(
         &self,
         labels: &[&str],
         key: &str,
@@ -754,6 +701,123 @@ impl Session {
         )
     }
 
+    pub(crate) fn upsert_edges(
+        &self,
+        edge_type: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+        options: &EdgeUpsertOptions,
+    ) -> Result<UpsertSummary> {
+        upsert_edges(self, edge_type, rows, options)
+    }
+
+    pub(crate) fn update_nodes(
+        &self,
+        labels: &[&str],
+        key: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+    ) -> Result<UpsertSummary> {
+        update_nodes(self, labels, key, rows)
+    }
+}
+
+// The database's public methods: each reaches the open state for its call (#712).
+impl GrafeoDB {
+    /// Creates or updates one node per row in the current graph, matched by
+    /// `key` and all of `labels`, in one statement.
+    ///
+    /// With `replace`, a node's properties become exactly the row's (key
+    /// included); without, the row's properties are merged into the node's
+    /// and none is removed. Labels are never removed. Rows apply in order: a
+    /// key repeated within one call creates one node, which the later rows
+    /// update. A row without the key is skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a row breaks a constraint or the schema; nothing
+    /// of the call is written then.
+    pub fn upsert_nodes(
+        &self,
+        labels: &[&str],
+        key: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+        replace: bool,
+    ) -> Result<UpsertSummary> {
+        self.live()?.upsert_nodes(labels, key, rows, replace)
+    }
+
+    /// Creates or updates one edge of `edge_type` per row in the current
+    /// graph, between the nodes the row's source and target fields name, in
+    /// one statement (see [`EdgeUpsertOptions`]).
+    ///
+    /// A row is skipped when it lacks the edge key, the source field or the
+    /// target field, or when no node or more than one node has its endpoint
+    /// key; endpoints are never created. Rows
+    /// apply in order: a key repeated within one call creates one edge, which
+    /// the later rows update.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a row breaks the schema, nothing of the call is
+    /// written then, or if the edge key, source field and target field are
+    /// not three different fields.
+    pub fn upsert_edges(
+        &self,
+        edge_type: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+        options: &EdgeUpsertOptions,
+    ) -> Result<UpsertSummary> {
+        self.live()?.upsert_edges(edge_type, rows, options)
+    }
+
+    /// Updates the existing nodes in the current graph that have `key` and
+    /// all of `labels`, one row at a time, and creates none.
+    ///
+    /// A row's properties are merged into each node its key matches (the
+    /// others stay), as `UNWIND $rows AS r MATCH (n:Labels {key: r.key}) SET
+    /// n += r` does: a null value removes the property, and a key that
+    /// several nodes have updates all of them. A row whose key matches no
+    /// such node, or without the key, is skipped. The call is one write,
+    /// logged and reported to change data capture as that statement is.
+    ///
+    /// Without a property index on `key`, it reads the nodes of the first
+    /// label once, so it takes time linear in the rows and those nodes. With
+    /// one, rows up to a third of those nodes look their nodes up through
+    /// the index instead, as the statement does.
+    ///
+    /// The summary counts the updated and the skipped rows; `created` is 0.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a row breaks a constraint or the schema; nothing
+    /// of the call is written then.
+    pub fn update_nodes(
+        &self,
+        labels: &[&str],
+        key: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+    ) -> Result<UpsertSummary> {
+        self.live()?.update_nodes(labels, key, rows)
+    }
+}
+
+// The session's public methods: each reaches the session's slot for its call (#712).
+impl Session {
+    /// [`GrafeoDB::upsert_nodes`] in the session's graph, inside its
+    /// transaction when one is open.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a row breaks a constraint or the schema.
+    pub fn upsert_nodes(
+        &self,
+        labels: &[&str],
+        key: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+        replace: bool,
+    ) -> Result<UpsertSummary> {
+        self.inner()?.upsert_nodes(labels, key, rows, replace)
+    }
+
     /// [`GrafeoDB::upsert_edges`] in the session's graph, inside its
     /// transaction when one is open.
     ///
@@ -766,7 +830,7 @@ impl Session {
         rows: Vec<HashMap<PropertyKey, Value>>,
         options: &EdgeUpsertOptions,
     ) -> Result<UpsertSummary> {
-        upsert_edges(self, edge_type, rows, options)
+        self.inner()?.upsert_edges(edge_type, rows, options)
     }
 
     /// [`GrafeoDB::update_nodes`] in the session's graph, inside its
@@ -781,6 +845,6 @@ impl Session {
         key: &str,
         rows: Vec<HashMap<PropertyKey, Value>>,
     ) -> Result<UpsertSummary> {
-        update_nodes(self, labels, key, rows)
+        self.inner()?.update_nodes(labels, key, rows)
     }
 }

@@ -12,10 +12,13 @@ use crate::database::{
     grafeo_open_memory,
 };
 use crate::error::GrafeoStatus;
+#[cfg(feature = "cdc")]
+use crate::options::grafeo_options_set_cdc_memory_limit;
 use crate::options::{
     grafeo_open_with_options, grafeo_options_free, grafeo_options_new,
-    grafeo_options_set_memory_limit, grafeo_options_set_query_memory_limit,
-    grafeo_options_set_spill_limit, grafeo_options_set_unlimited_spill,
+    grafeo_options_set_memory_limit, grafeo_options_set_plan_cache_limit,
+    grafeo_options_set_query_memory_limit, grafeo_options_set_spill_limit,
+    grafeo_options_set_unlimited_spill,
 };
 use crate::types::GrafeoDatabase;
 
@@ -247,4 +250,74 @@ fn a_clean_open_lists_no_warning() {
         "{codes:?}"
     );
     grafeo_free_database(db);
+}
+
+/// The plan cache's limit (#674): set through the options, read back as the report's
+/// `caches.plan_cache_limit_bytes`; capped at the memory limit, and 0 turns the cache off.
+#[test]
+fn the_plan_cache_limit_reads_back_through_the_report() {
+    for (memory, limit, expected) in [
+        (64 * MIB, 8 * MIB, 8 * MIB),
+        (32 * MIB, 1024 * MIB, 32 * MIB),
+        (64 * MIB, 0, 0),
+    ] {
+        let options = grafeo_options_new();
+        assert_eq!(
+            grafeo_options_set_memory_limit(options, memory),
+            GrafeoStatus::Ok
+        );
+        assert_eq!(
+            grafeo_options_set_plan_cache_limit(options, limit),
+            GrafeoStatus::Ok
+        );
+        let db = grafeo_open_with_options(std::ptr::null(), options);
+        grafeo_options_free(options);
+        assert!(!db.is_null());
+        assert_eq!(
+            usage(db)["caches"]["plan_cache_limit_bytes"],
+            expected,
+            "{limit} under {memory}"
+        );
+        grafeo_free_database(db);
+    }
+}
+
+/// The change log's memory limit (#679): set through the options, read back as the report's
+/// `cdc.limit_bytes`; a sixteenth of the memory limit when unset, capped at the memory limit, and
+/// 0 refused at the setter.
+#[cfg(feature = "cdc")]
+#[test]
+fn the_cdc_memory_limit_reads_back_through_the_report() {
+    for (memory, limit, expected) in [
+        (64 * MIB, Some(MIB / 2), MIB / 2),
+        (64 * MIB, None, 4 * MIB),
+        (32 * MIB, Some(1024 * MIB), 32 * MIB),
+    ] {
+        let options = grafeo_options_new();
+        assert_eq!(
+            grafeo_options_set_memory_limit(options, memory),
+            GrafeoStatus::Ok
+        );
+        if let Some(limit) = limit {
+            assert_eq!(
+                grafeo_options_set_cdc_memory_limit(options, limit),
+                GrafeoStatus::Ok
+            );
+        }
+        let db = grafeo_open_with_options(std::ptr::null(), options);
+        grafeo_options_free(options);
+        assert!(!db.is_null());
+        assert_eq!(
+            usage(db)["cdc"]["limit_bytes"],
+            expected,
+            "{limit:?} under {memory}"
+        );
+        grafeo_free_database(db);
+    }
+    let options = grafeo_options_new();
+    assert_ne!(
+        grafeo_options_set_cdc_memory_limit(options, 0),
+        GrafeoStatus::Ok
+    );
+    grafeo_options_free(options);
 }

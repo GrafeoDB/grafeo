@@ -29,7 +29,7 @@ use grafeo_common::change::{DataModel, DataOp, StandaloneOp};
 use grafeo_common::storage::{LogRecord, read_log_records};
 use grafeo_common::types::EpochId;
 use grafeo_common::utils::error::{Error, Result, StorageError};
-use grafeo_core::graph::apply::{GraphBackend, Writer};
+use grafeo_core::graph::apply::{CHUNK_ROWS, GraphBackend, Writer};
 #[cfg(feature = "triple-store")]
 use grafeo_core::graph::rdf::RdfStore;
 use grafeo_core::graph::rowgroup::RowGroupStore;
@@ -106,20 +106,101 @@ pub(crate) fn replay<S: RootStore>(
             return Err(failed("it does not start with its GroupBegin".to_string()));
         };
         let mut rdf = RdfGroup::default();
+        let mut creates = Creates::default();
         for record in records {
+            let record = match record {
+                LogRecord::Data { graph, op } if creates.takes(&op) => {
+                    if let Some((graph, ops)) = creates.push(graph, op) {
+                        apply_creates(graph.as_deref(), &ops, begin.epoch, targets)
+                            .map_err(|error| failed(error.to_string()))?;
+                    }
+                    continue;
+                }
+                other => other,
+            };
+            if let Some((graph, ops)) = creates.take() {
+                apply_creates(graph.as_deref(), &ops, begin.epoch, targets)
+                    .map_err(|error| failed(error.to_string()))?;
+            }
             apply_record(record, begin.epoch, targets, &mut rdf)
+                .map_err(|error| failed(error.to_string()))?;
+        }
+        if let Some((graph, ops)) = creates.take() {
+            apply_creates(graph.as_deref(), &ops, begin.epoch, targets)
                 .map_err(|error| failed(error.to_string()))?;
         }
         rdf.apply(targets)
             .map_err(|error| failed(error.to_string()))?;
         targets.store.sync_epoch(begin.epoch);
         if let Some(manager) = targets.history {
-            manager.record_commit_time(begin.epoch, begin.timestamp_ms);
+            manager.record_commit_time(begin.epoch, begin.timestamp_ms, 0);
         }
         groups += 1;
     }
     let end = scan.finish().map_err(Error::from)?;
     Ok(Replayed { end, groups })
+}
+
+/// The consecutive creates of one kind (nodes or edges) for one graph that
+/// replay meets in a group, applied as one chunk through
+/// [`GraphBackend::apply_chunk`], the function a live bulk write calls.
+#[derive(Default)]
+struct Creates {
+    graph: Option<String>,
+    ops: Vec<DataOp>,
+}
+
+impl Creates {
+    /// Whether `op` is a create replay applies in chunks (an LPG node or
+    /// edge create).
+    fn takes(&self, op: &DataOp) -> bool {
+        op.model() != DataModel::Rdf
+            && matches!(op, DataOp::CreateNode { .. } | DataOp::CreateEdge { .. })
+    }
+
+    /// Adds `op`, a create of `graph`; returns the chunk to apply first when
+    /// `op` does not join it (another graph or kind), or the chunk with `op`
+    /// once it is full.
+    fn push(&mut self, graph: Option<String>, op: DataOp) -> Option<(Option<String>, Vec<DataOp>)> {
+        let joins = self.ops.first().is_none_or(|first| {
+            self.graph == graph
+                && matches!(first, DataOp::CreateNode { .. })
+                    == matches!(op, DataOp::CreateNode { .. })
+        });
+        let before = if joins { None } else { self.take() };
+        self.graph = graph;
+        self.ops.push(op);
+        if before.is_some() {
+            return before;
+        }
+        (self.ops.len() == CHUNK_ROWS)
+            .then(|| self.take())
+            .flatten()
+    }
+
+    /// The chunk gathered so far, if any, leaving none.
+    fn take(&mut self) -> Option<(Option<String>, Vec<DataOp>)> {
+        (!self.ops.is_empty()).then(|| (self.graph.take(), std::mem::take(&mut self.ops)))
+    }
+}
+
+/// Applies `ops`, creates of one kind, to `graph` (`None`: the default
+/// graph) at `epoch`, as one chunk.
+fn apply_creates<S: RootStore>(
+    graph: Option<&str>,
+    ops: &[DataOp],
+    epoch: EpochId,
+    targets: &Targets<'_, S>,
+) -> Result<()> {
+    let store = match graph {
+        None => Arc::clone(targets.store),
+        Some(name) => targets.store.graph(name).ok_or_else(|| {
+            Error::Internal(format!("a write to the graph {name}, which does not exist"))
+        })?,
+    };
+    store
+        .apply_chunk(ops, Writer::Replay { epoch })
+        .map_err(|error| Error::Internal(error.to_string()))
 }
 
 /// Applies one record of a group at `epoch`; an RDF record joins `rdf`,
@@ -311,12 +392,34 @@ pub(crate) fn replay_into_backend(
             return Err(failed("it does not start with its GroupBegin".to_string()));
         };
         let new = begin.epoch > durable;
+        let mut creates = Creates::default();
+        let writer = Writer::Replay { epoch: begin.epoch };
         for record in records {
+            let record = match record {
+                LogRecord::Data { graph: None, op } if creates.takes(&op) => {
+                    if let Some((_, ops)) = creates.push(None, op)
+                        && new
+                    {
+                        backend
+                            .apply_chunk(&ops, writer)
+                            .map_err(|error| failed(error.to_string()))?;
+                    }
+                    continue;
+                }
+                other => other,
+            };
+            if let Some((_, ops)) = creates.take()
+                && new
+            {
+                backend
+                    .apply_chunk(&ops, writer)
+                    .map_err(|error| failed(error.to_string()))?;
+            }
             match record {
                 LogRecord::Data { graph: None, op } if op.model() != DataModel::Rdf => {
                     if new {
                         backend
-                            .apply(&op, Writer::Replay { epoch: begin.epoch })
+                            .apply(&op, writer)
                             .map_err(|error| failed(error.to_string()))?;
                     }
                 }
@@ -338,9 +441,16 @@ pub(crate) fn replay_into_backend(
                 }
             }
         }
+        if let Some((_, ops)) = creates.take()
+            && new
+        {
+            backend
+                .apply_chunk(&ops, writer)
+                .map_err(|error| failed(error.to_string()))?;
+        }
         last_epoch = last_epoch.max(begin.epoch);
         if let Some(manager) = history {
-            manager.record_commit_time(begin.epoch, begin.timestamp_ms);
+            manager.record_commit_time(begin.epoch, begin.timestamp_ms, 0);
         }
     }
     let end = scan.finish().map_err(Error::from)?;

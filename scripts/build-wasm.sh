@@ -151,6 +151,18 @@ echo "  Gzip:   $(( GZ_SIZE / 1024 )) KB"
 # (0.6.2 as published: 2020 KB; Rust 1.100 added under 1 KB) and lite at
 # 1396 KB, so the limits are 2304 KB and 1536 KB (full has room for about
 # five releases growing as 0.6.3 did, 44 KB); each warns 128 KB below.
+# 0.6.4, both releases measured on Rust 1.100: 0.6.3 is lite 1410 KB, full
+# 2077 KB; 0.6.4 is lite 1421 KB (+12 KB, +0.8%), full 2093 KB (+17 KB,
+# +0.8%), all of it features. Lite, gzipped, per feature: close() and its
+# session slots 3.1 KB, the typed entity mark 3.1 KB (the engine's column
+# types and the `cellTypes` builder, which makes JS values without
+# serde_json), openCypher TCK fixes 2.7 KB, nodes and edges built into values
+# 2.6 KB, the rest under 1 KB. Lite sits just over the 1408 KB warn line, as
+# 0.6.3 did, and under the 1536 KB limit. Later in 0.6.4, the snapshot and
+# history retention limits (in every binding) and the query memory limit in
+# every build took lite to 1442 KB (1,476,588 bytes), +32 KB (+2.3%) over
+# 0.6.3, after boxing the expired snapshot's error saved 9 KB; the release
+# measures again at its end.
 if [[ "$FEATURES" == *"full"* ]]; then
     WARN_THRESHOLD=2228224   # 2176 KB
     FAIL_THRESHOLD=2359296   # 2304 KB

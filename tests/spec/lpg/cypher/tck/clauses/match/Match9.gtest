@@ -1,0 +1,193 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/match/Match9.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Match9"
+  title: "Match9 - Match deprecated scenarios"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Variable length relationship variables are lists of relationships
+  - name: s1_variable_length_relationship_variables_are_lists_of_relationships
+    setup:
+      - |
+        CREATE (a), (b), (c)
+        CREATE (a)-[:T]->(b)
+    query: |
+      MATCH ()-[r*0..1]-()
+      RETURN last(r) AS l
+    expect:
+      values: |
+        | l |
+        | [:T] |
+        | [:T] |
+        | null |
+        | null |
+        | null |
+      side_effects: {}
+
+  # [2] Return relationships by collecting them as a list - directed, one way
+  - name: s2_return_relationships_by_collecting_them_as_a_list_directed_one_way
+    setup:
+      - |
+        CREATE (a:A)-[:REL {num: 1}]->(b:B)-[:REL {num: 2}]->(e:End)
+    query: |
+      MATCH (a)-[r:REL*2..2]->(b:End)
+      RETURN r
+    expect:
+      values: |
+        | r |
+        | [[:REL {num: 1}], [:REL {num: 2}]] |
+      side_effects: {}
+
+  # [3] Return relationships by collecting them as a list - undirected, starting from two extremes
+  - name: s3_return_relationships_by_collecting_them_as_a_list_undirected_starting_from_two_extremes
+    setup:
+      - |
+        CREATE (a:End)-[:REL {num: 1}]->(b:B)-[:REL {num: 2}]->(c:End)
+    query: |
+      MATCH (a)-[r:REL*2..2]-(b:End)
+      RETURN r
+    expect:
+      values: |
+        | r |
+        | [[:REL {num:1}], [:REL {num:2}]] |
+        | [[:REL {num:2}], [:REL {num:1}]] |
+      side_effects: {}
+
+  # [4] Return relationships by collecting them as a list - undirected, starting from one extreme
+  - name: s4_return_relationships_by_collecting_them_as_a_list_undirected_starting_from_one_extreme
+    setup:
+      - |
+        CREATE (s:Start)-[:REL {num: 1}]->(b:B)-[:REL {num: 2}]->(c:C)
+    query: |
+      MATCH (a:Start)-[r:REL*2..2]-(b)
+      RETURN r
+    expect:
+      values: |
+        | r |
+        | [[:REL {num: 1}], [:REL {num: 2}]] |
+      side_effects: {}
+
+  # [5] Variable length pattern with label predicate on both sides
+  - name: s5_variable_length_pattern_with_label_predicate_on_both_sides
+    setup:
+      - |
+        CREATE (a:Blue), (b:Red), (c:Green), (d:Yellow)
+        CREATE (a)-[:T]->(b),
+               (b)-[:T]->(c),
+               (b)-[:T]->(d)
+    query: |
+      MATCH (a:Blue)-[r*]->(b:Green)
+      RETURN count(r)
+    expect:
+      values: |
+        | count(r) |
+        | 1 |
+      side_effects: {}
+
+  # [6] Matching relationships into a list and matching variable length using the list, with bound nodes
+  - name: s6_matching_relationships_into_a_list_and_matching_variable_length_using_the_list_with_bound_nodes
+    setup:
+      - |
+        CREATE (a:A), (b:B), (c:C)
+        CREATE (a)-[:Y]->(b),
+               (b)-[:Y]->(c)
+    query: |
+      MATCH (a)-[r1]->()-[r2]->(b)
+      WITH [r1, r2] AS rs, a AS first, b AS second
+        LIMIT 1
+      MATCH (first)-[rs*]->(second)
+      RETURN first, second
+    expect:
+      values: |
+        | first | second |
+        | (:A) | (:C) |
+      side_effects: {}
+
+  # [7] Matching relationships into a list and matching variable length using the list, with bound nodes, wrong direction
+  - name: s7_matching_relationships_into_a_list_and_matching_variable_length_using_the_list_with_bound_nodes_wrong_direction
+    setup:
+      - |
+        CREATE (a:A), (b:B), (c:C)
+        CREATE (a)-[:Y]->(b),
+               (b)-[:Y]->(c)
+    query: |
+      MATCH (a)-[r1]->()-[r2]->(b)
+      WITH [r1, r2] AS rs, a AS second, b AS first
+        LIMIT 1
+      MATCH (first)-[rs*]->(second)
+      RETURN first, second
+    expect:
+      values: |
+        | first | second |
+      side_effects: {}
+
+  # [8] Variable length relationship in OPTIONAL MATCH
+  - name: s8_variable_length_relationship_in_optional_match
+    setup:
+      - |
+        CREATE (:A), (:B)
+    query: |
+      MATCH (a:A), (b:B)
+      OPTIONAL MATCH (a)-[r*]-(b)
+      WHERE r IS NULL
+        AND a <> b
+      RETURN b
+    expect:
+      values: |
+        | b |
+        | (:B) |
+      side_effects: {}
+
+  # [9] Optionally matching named paths with variable length patterns
+  - name: s9_optionally_matching_named_paths_with_variable_length_patterns
+    setup:
+      - |
+        CREATE (a {name: 'A'}), (b {name: 'B'}), (c {name: 'C'})
+        CREATE (a)-[:X]->(b)
+    query: |
+      MATCH (a {name: 'A'}), (x)
+      WHERE x.name IN ['B', 'C']
+      OPTIONAL MATCH p = (a)-[r*]->(x)
+      RETURN r, x, p
+    expect:
+      values: |
+        | r | x | p |
+        | [[:X]] | ({name: 'B'}) | <({name: 'A'})-[:X]->({name: 'B'})> |
+        | null | ({name: 'C'}) | null |
+      side_effects: {}

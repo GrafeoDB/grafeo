@@ -41,6 +41,9 @@ pub struct TopKOperator {
     limit: usize,
     /// The column types of the input chunks: the output keeps them.
     column_types: ColumnTypes,
+    /// How many leading columns the output keeps, when the trailing ones are
+    /// sort keys added only to sort by (see [`with_output_width`](Self::with_output_width)).
+    output_width: Option<usize>,
     state: TopKState,
     /// How the sort keys read a local datetime against a zoned one (see
     /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
@@ -48,9 +51,13 @@ pub struct TopKOperator {
     temporal: TemporalComparison,
     /// What it holds under the statement's memory, captured at construction
     /// (see [`capture`](crate::execution::memory::capture)); it counts nothing
-    /// outside a budgeted statement. Its heap of up to `limit` rows cannot spill: past the query memory limit or
-    /// the memory limit it fails with `GRAFEO-S001`.
+    /// outside a budgeted statement. Its heap of up to `limit` rows cannot spill: past the query
+    /// memory limit or the memory limit it goes on in the sort of
+    /// [`with_spill_fallback`](Self::with_spill_fallback), or without one fails with `GRAFEO-S001`.
     memory: crate::execution::memory::OperatorMemory,
+    /// Makes the spilling sort the rows go on in once the heap outgrows the statement's memory;
+    /// `None` fails there instead.
+    spill: Option<SpillSort>,
     #[cfg(test)]
     materialized_rows: std::sync::atomic::AtomicUsize,
 }
@@ -64,7 +71,60 @@ enum TopKState {
         rows: Vec<HeapEntry>,
         position: usize,
     },
+    /// The first `limit` rows of the spilling sort the heap went on in, as its output chunks.
+    Spilled(std::collections::VecDeque<DataChunk>),
     Done,
+}
+
+/// Makes the spilling sort a top-k goes on in: the sort of the top-k's keys over all its
+/// columns, keeping its output width.
+pub type SpillSort =
+    Box<dyn FnOnce() -> Box<dyn crate::execution::pipeline::PushOperator> + Send + Sync>;
+
+/// Whether `error` refuses at the query memory limit or the memory limit (`GRAFEO-S001`), which
+/// a spilling sort answers by spilling.
+fn is_memory_refusal(error: &super::OperatorError) -> bool {
+    use grafeo_common::utils::error::LimitBound;
+    matches!(error, super::OperatorError::Wrapped(inner)
+    if inner.limit_refusal().is_some_and(|refusal| {
+        matches!(refusal.bound(), LimitBound::QueryMemoryLimit | LimitBound::MemoryLimit)
+    }))
+}
+
+/// A sink that keeps the first `remaining` rows it is given, then stops the sort.
+struct FirstRows {
+    remaining: usize,
+    chunks: std::collections::VecDeque<DataChunk>,
+}
+
+impl crate::execution::pipeline::Sink for FirstRows {
+    fn consume(&mut self, mut chunk: DataChunk) -> Result<bool, super::OperatorError> {
+        if chunk.row_count() > self.remaining {
+            let keep: Vec<usize> = chunk.selected_indices().take(self.remaining).collect();
+            chunk.set_selection(
+                crate::execution::selection::SelectionVector::from_predicate(chunk.len(), |row| {
+                    keep.binary_search(&row).is_ok()
+                }),
+            );
+        }
+        self.remaining -= chunk.row_count();
+        if chunk.row_count() > 0 {
+            self.chunks.push_back(chunk);
+        }
+        Ok(self.remaining > 0)
+    }
+
+    fn finalize(&mut self) -> Result<(), super::OperatorError> {
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        "TopKSpilledRows"
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
 }
 
 /// What the values of a kept row hold on the heap, as
@@ -139,15 +199,27 @@ impl TopKOperator {
             sort_keys: Arc::new(sort_keys),
             limit,
             column_types: ColumnTypes::default(),
+            output_width: None,
             state: TopKState::Building {
                 heap: BinaryHeap::new(),
                 next_insertion_id: 0,
             },
             temporal: TemporalComparison::TypesApart,
             memory: crate::execution::memory::capture(),
+            spill: None,
             #[cfg(test)]
             materialized_rows: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// The operator going on in the sort `spill` makes once its heap outgrows the statement's
+    /// memory: the rows it keeps, in the order they came, then the rest of its input, of which
+    /// the sort's first `limit` rows are the output. A row the heap dropped was beaten by `limit`
+    /// rows before it, so it is in no top `limit`.
+    #[must_use]
+    pub fn with_spill_fallback(mut self, spill: SpillSort) -> Self {
+        self.spill = Some(spill);
+        self
     }
 
     /// The operator with `temporal` as the reading of its sort keys (the
@@ -158,10 +230,32 @@ impl TopKOperator {
         self
     }
 
+    /// The operator returning only the first `width` columns: the ones after
+    /// them are sort keys added only to sort by, as for
+    /// [`SortOperator::with_output_width`](super::SortOperator::with_output_width).
+    #[must_use]
+    pub fn with_output_width(mut self, width: usize) -> Self {
+        self.output_width = Some(width);
+        self
+    }
+
+    /// How many leading columns each output row keeps, when the top-k drops
+    /// trailing sort-key columns.
+    #[must_use]
+    pub fn output_width(&self) -> Option<usize> {
+        self.output_width
+    }
+
     /// How the sort keys read temporal values (see [`Self::with_temporal`]).
     #[must_use]
     pub fn temporal(&self) -> TemporalComparison {
         self.temporal
+    }
+
+    /// The keys the rows are ordered by.
+    #[must_use]
+    pub fn sort_keys(&self) -> &[SortKey] {
+        &self.sort_keys
     }
 
     /// Decomposes this operator into its child, sort keys, and limit.
@@ -176,6 +270,43 @@ impl TopKOperator {
     pub fn into_parts(self) -> (Box<dyn Operator>, Vec<SortKey>, usize) {
         let sort_keys = Arc::try_unwrap(self.sort_keys).unwrap_or_else(|arc| (*arc).clone());
         (self.child, sort_keys, self.limit)
+    }
+
+    /// Goes on in the spilling sort: the rows `heap` keeps, in the order they came, then the
+    /// rest of the input; the sort's first `limit` rows are what the operator returns.
+    fn spill_the_rest(
+        &mut self,
+        heap: BinaryHeap<HeapEntry>,
+    ) -> Result<std::collections::VecDeque<DataChunk>, super::OperatorError> {
+        let mut sort = (self.spill.take().expect("checked by the caller"))();
+        let mut kept = heap.into_vec();
+        kept.sort_unstable_by_key(|entry| entry.insertion_id);
+        let types = self.column_types.types().to_vec();
+        let mut first = FirstRows {
+            remaining: self.limit,
+            chunks: std::collections::VecDeque::new(),
+        };
+        for rows in kept.chunks(2048) {
+            let mut builder = DataChunkBuilder::with_capacity(&types, rows.len());
+            for entry in rows {
+                for (col_idx, value) in entry.row_values.iter().enumerate() {
+                    if let Some(column) = builder.column_mut(col_idx) {
+                        column.push_value(value.clone().unwrap_or(Value::Null));
+                    }
+                }
+                builder.advance_row();
+            }
+            sort.push(builder.finish(), &mut first)?;
+        }
+        // The rows are the sort's now: the heap's grant goes.
+        drop(kept);
+        self.memory.clear();
+        while let Some(chunk) = self.child.next()? {
+            crate::execution::deadline::check()?;
+            sort.push(chunk, &mut first)?;
+        }
+        sort.finalize(&mut first)?;
+        Ok(first.chunks)
     }
 }
 
@@ -251,7 +382,7 @@ impl Operator for TopKOperator {
                 // The heap and what its rows' values hold, against the
                 // statement's memory: a chunk at a time, a compare within the
                 // grant (a literal LIMIT can be large).
-                self.memory.set(
+                let counted = self.memory.set(
                     heap.capacity()
                         .saturating_mul(
                             std::mem::size_of::<HeapEntry>()
@@ -259,25 +390,49 @@ impl Operator for TopKOperator {
                                     * std::mem::size_of::<Option<Value>>(),
                         )
                         .saturating_add(kept_heap),
-                )?;
+                );
+                match counted {
+                    Ok(()) => {}
+                    Err(error) if self.spill.is_some() && is_memory_refusal(&error) => {
+                        let chunks = self.spill_the_rest(heap)?;
+                        self.state = TopKState::Spilled(chunks);
+                        return self.next();
+                    }
+                    Err(error) => return Err(error),
+                }
             }
 
             let rows = heap.into_sorted_vec();
             self.state = TopKState::Draining { rows, position: 0 };
         }
 
+        if let TopKState::Spilled(chunks) = &mut self.state {
+            if let Some(chunk) = chunks.pop_front() {
+                return Ok(Some(chunk));
+            }
+            self.state = TopKState::Done;
+            return Ok(None);
+        }
+
         if let TopKState::Draining { rows, position } = &mut self.state {
             if *position < rows.len() {
                 let types = self.column_types.types();
-                let mut builder = DataChunkBuilder::with_capacity(types, 2048);
+                let width = self
+                    .output_width
+                    .map_or(types.len(), |width| width.min(types.len()));
+                let mut builder = DataChunkBuilder::with_capacity(&types[..width], 2048);
                 while *position < rows.len() && !builder.is_full() {
                     let entry = &rows[*position];
-                    for col_idx in 0..types.len() {
+                    for col_idx in 0..width {
                         if let Some(dst_col) = builder.column_mut(col_idx) {
                             let val = entry.row_values[col_idx].clone().unwrap_or(Value::Null);
                             dst_col.push_value(val);
                         }
                     }
+                    grafeo_common::work::count(
+                        grafeo_common::work::Work::ColumnCopied,
+                        width as u64,
+                    );
                     builder.advance_row();
                     *position += 1;
                 }

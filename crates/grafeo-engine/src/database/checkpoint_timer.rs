@@ -567,7 +567,7 @@ impl Run<'_> {
                     // stop.
                     if (self.job.hopeless)() {
                         grafeo_common::grafeo_error!(
-                            "automatic checkpoints stop: {error}; the file keeps its last checkpoint"
+                            "automatic checkpoints stop until the database is opened again: {error}"
                         );
                         self.shared.failures.failed(error.to_string(), true);
                         return;

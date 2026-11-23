@@ -270,6 +270,12 @@ impl HavingScope {
             LogicalExpression::List(items) => {
                 LogicalExpression::List(items.into_iter().map(|item| self.resolve(item)).collect())
             }
+            LogicalExpression::Map(entries) => LogicalExpression::Map(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, self.resolve(value)))
+                    .collect(),
+            ),
             LogicalExpression::Case {
                 operand,
                 when_clauses,
@@ -289,6 +295,11 @@ impl HavingScope {
             LogicalExpression::MapAccess { base, key } => LogicalExpression::MapAccess {
                 base: Box::new(self.resolve(*base)),
                 key,
+            },
+            LogicalExpression::SliceAccess { base, start, end } => LogicalExpression::SliceAccess {
+                base: Box::new(self.resolve(*base)),
+                start: start.map(|start| Box::new(self.resolve(*start))),
+                end: end.map(|end| Box::new(self.resolve(*end))),
             },
             other => other,
         }
@@ -451,22 +462,34 @@ pub(crate) fn group_key_reference(key: &LogicalExpression) -> LogicalExpression 
 /// says whether it did. A plan of another shape, or a WHERE that reads one
 /// of them (where they are not in scope), comes back unchanged.
 pub(crate) fn keep_columns(plan: LogicalOperator, kept: &[String]) -> (LogicalOperator, bool) {
+    /// Whether the projection of a WITH (`plan`, maybe under the filter of
+    /// its WHERE) gives a column `name`.
+    fn projects(plan: &LogicalOperator, name: &str) -> bool {
+        match plan {
+            LogicalOperator::Project(project) => gives_column(&project.projections, name),
+            LogicalOperator::Filter(filter) => projects(&filter.input, name),
+            _ => false,
+        }
+    }
+
+    /// Whether one of `projections` gives a column `name`.
+    fn gives_column(projections: &[Projection], name: &str) -> bool {
+        projections.iter().any(
+            |projection| match (&projection.alias, &projection.expression) {
+                (Some(alias), _) => alias == name,
+                (None, LogicalExpression::Variable(variable)) => variable == name,
+                (None, _) => false,
+            },
+        )
+    }
+
     match plan {
         LogicalOperator::Project(mut project) if !project.pass_through_input => {
             // A name it projects already (an import a CALL body's WITH passes
-            // on) is not projected twice.
-            let projects = |name: &str| {
-                project.projections.iter().any(|projection| {
-                    match (&projection.alias, &projection.expression) {
-                        (Some(alias), _) => alias == name,
-                        (None, LogicalExpression::Variable(variable)) => variable == name,
-                        (None, _) => false,
-                    }
-                })
-            };
+            // on, a variable its WHERE keeps) is not projected twice.
             let added: Vec<Projection> = kept
                 .iter()
-                .filter(|name| !projects(name))
+                .filter(|name| !gives_column(&project.projections, name))
                 .map(|name| Projection {
                     expression: LogicalExpression::Variable(name.clone()),
                     alias: None,
@@ -478,7 +501,13 @@ pub(crate) fn keep_columns(plan: LogicalOperator, kept: &[String]) -> (LogicalOp
         LogicalOperator::Filter(mut filter) => {
             let mut read = HashSet::new();
             collect_expression_variables(&filter.predicate, &mut read);
-            if kept.iter().any(|name| read.contains(name)) {
+            // A name the WHERE reads is in its scope only when the projection
+            // below keeps it already (a Cypher WITH's WHERE, see
+            // `filter_keeping_input`).
+            if kept
+                .iter()
+                .any(|name| read.contains(name) && !projects(&filter.input, name))
+            {
                 return (LogicalOperator::Filter(filter), false);
             }
             let (input, kept_them) = keep_columns(*filter.input, kept);
@@ -1410,7 +1439,7 @@ pub(crate) fn classify_optional_predicates(
 /// what is not known here or `expression` holds another kind (a pattern
 /// comprehension, a subquery inside a list comprehension).
 #[cfg(any(feature = "gql", feature = "cypher", test))]
-fn subquery_reads(expression: &LogicalExpression) -> Option<HashSet<String>> {
+pub(crate) fn subquery_reads(expression: &LogicalExpression) -> Option<HashSet<String>> {
     let mut rest = expression.clone();
     let mut read = Some(HashSet::new());
     let _ = crate::query::planner::lpg::subquery::visit_subqueries(&mut rest, &mut |subquery| {
@@ -1620,7 +1649,7 @@ fn collect_filter_reads(op: &LogicalOperator, read: &mut HashSet<String>) {
     match op {
         LogicalOperator::Filter(filter) => collect_expression_variables(&filter.predicate, read),
         LogicalOperator::ShortestPath(path) => {
-            if let Some(condition) = &path.edge_condition {
+            for condition in path.conditions() {
                 collect_expression_variables(&condition.predicate, read);
             }
         }

@@ -55,6 +55,8 @@ dev = [
     "pytest-asyncio>=1.3",
     "ty>=0.0.24",
     "ruff>=0.15",
+    # zoneinfo's time zones on Windows, which has no system database.
+    "tzdata>=2024.1",
 ]
 
 [tool.maturin]

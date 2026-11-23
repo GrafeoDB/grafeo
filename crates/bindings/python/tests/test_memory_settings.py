@@ -106,3 +106,42 @@ def test_an_open_over_the_limit_warns_and_reads(tmp_path):
         roomy = grafeo.GrafeoDB(path)
     roomy.close()
     assert not [w for w in caught if "MEMORY_LIMIT_PASSED" in str(w.message)]
+
+
+def test_the_plan_cache_limit_reads_back():
+    """#674: `plan_cache_limit` reads back as the report's `caches.plan_cache_limit_bytes`;
+    it is capped at the memory limit, and 0 turns the cache off."""
+
+    def caches(db):
+        return db.memory_usage()["caches"]
+
+    db = grafeo.GrafeoDB(memory_limit=64 * MIB, plan_cache_limit=8 * MIB)
+    assert caches(db)["plan_cache_limit_bytes"] == 8 * MIB
+    capped = grafeo.GrafeoDB(memory_limit=32 * MIB, plan_cache_limit=1024 * MIB)
+    assert caches(capped)["plan_cache_limit_bytes"] == 32 * MIB
+    assert caches(grafeo.GrafeoDB())["plan_cache_limit_bytes"] > 0, "the default is a share"
+    off = grafeo.GrafeoDB(plan_cache_limit=0)
+    for _ in range(2):
+        off.execute("RETURN 1 AS one")
+    assert caches(off)["plan_cache_limit_bytes"] == 0
+    assert caches(off)["cached_plan_count"] == 0
+    with pytest.raises((OverflowError, ValueError, TypeError)):
+        grafeo.GrafeoDB(plan_cache_limit=-1)
+
+
+@pytest.mark.requires("cdc")
+def test_the_cdc_memory_limit_reads_back():
+    """#679: `cdc_memory_limit` bounds the change log's bytes. It reads back as the report's
+    `cdc.limit_bytes`, defaults to a sixteenth of the memory limit, is capped at the memory
+    limit, and 0 is refused."""
+
+    def cdc(db):
+        return db.memory_usage()["cdc"]
+
+    db = grafeo.GrafeoDB(memory_limit=64 * MIB, cdc_memory_limit=512 * 1024)
+    assert cdc(db)["limit_bytes"] == 512 * 1024
+    assert cdc(grafeo.GrafeoDB(memory_limit=64 * MIB))["limit_bytes"] == 4 * MIB, "a sixteenth"
+    capped = grafeo.GrafeoDB(memory_limit=32 * MIB, cdc_memory_limit=1024 * MIB)
+    assert cdc(capped)["limit_bytes"] == 32 * MIB
+    with pytest.raises((ValueError, grafeo.GrafeoError)):
+        grafeo.GrafeoDB(cdc_memory_limit=0)

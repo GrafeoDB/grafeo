@@ -32,6 +32,7 @@ use grafeo_common::change::{
 use grafeo_common::memory::buffer::BufferManager;
 use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
 use grafeo_common::utils::error::LimitBound;
+use grafeo_common::utils::hash::FxHashSet;
 
 use super::account::{Line, Needed};
 use super::checkpoint::Marks;
@@ -41,7 +42,9 @@ use super::{
     ABSENT, Adjacent, Inner, PENDING, ROWS_PER_GROUP, Read, RowGroupStore, Touched, kept_label_ids,
     locate,
 };
-use crate::graph::apply::{Applied, ApplyError, BackendTransaction, GraphBackend, Writer};
+use crate::graph::apply::{
+    Applied, ApplyError, BackendTransaction, GraphBackend, Writer, check_bulk_row, check_chunk,
+};
 
 /// How a write is applied.
 #[derive(Debug, Clone, Copy)]
@@ -368,11 +371,11 @@ impl Inner {
     fn create_edge(
         &mut self,
         id: EdgeId,
-        src: NodeId,
-        dst: NodeId,
+        (src, dst): (NodeId, NodeId),
         edge_type: &ArcStr,
         properties: &Properties,
         mode: Mode,
+        mut chunk: Option<&mut ChunkEntries>,
     ) -> Result<Applied, ApplyError> {
         let raw = id.as_u64();
         if self.edge(raw).is_some() {
@@ -397,19 +400,22 @@ impl Inner {
             }
         }
         for (node, other, outgoing) in self.kept_ends(src.as_u64(), dst.as_u64()) {
+            let adjacent = Adjacent {
+                edge_type: type_id,
+                other,
+                edge: raw,
+            };
+            if let Some(chunk) = chunk.as_deref_mut() {
+                // The chunk's entries go to the lists at its end (`push_chunk`).
+                chunk[usize::from(outgoing)].push((node, adjacent));
+                continue;
+            }
             let (group, row) = locate(node);
             let group = self
                 .nodes
                 .get_mut(&group)
                 .ok_or(ApplyError::Missing(Entity::Node(NodeId::new(node))))?;
-            group.adjacency_mut(outgoing).push(
-                row,
-                Adjacent {
-                    edge_type: type_id,
-                    other,
-                    edge: raw,
-                },
-            );
+            group.adjacency_mut(outgoing).push(row, adjacent);
             if mode.stamped() {
                 group.marks.mark_adjacency(outgoing);
             }
@@ -509,7 +515,7 @@ impl Inner {
                 dst,
                 edge_type,
                 properties,
-            } => self.create_edge(*id, *src, *dst, edge_type, properties, mode),
+            } => self.create_edge(*id, (*src, *dst), edge_type, properties, mode, None),
             DataOp::DeleteNode { id } => self.delete_node(*id, mode),
             DataOp::DeleteEdge { id } => self.delete_edge(*id, mode),
             DataOp::SetNodeProperty { id, key, value } => {
@@ -529,6 +535,191 @@ impl Inner {
             DataOp::InsertTriple { .. } | DataOp::DeleteTriple { .. } => Err(refuse_triple(op)),
         }
     }
+
+    /// Checks every create of a chunk (see `check_chunk`) as its own apply
+    /// would, before any of them is written: an id below the largest, not
+    /// taken, not twice in the chunk, and an edge's ends seen by the writer.
+    /// The ends are looked up once each: the chunk creates no node they could
+    /// meet, and the lock is held from here to the last write.
+    fn check_chunk_rows(&self, ops: &[DataOp], read: Read) -> Result<(), ApplyError> {
+        let mut ids = Vec::with_capacity(ops.len());
+        let mut seen_ends = FxHashSet::default();
+        for op in ops {
+            refuse_the_largest_id(op)?;
+            match op {
+                DataOp::CreateNode { id, .. } => {
+                    if self.node(id.as_u64()).is_some() {
+                        return Err(ApplyError::Exists(Entity::Node(*id)));
+                    }
+                    ids.push(id.as_u64());
+                }
+                DataOp::CreateEdge { id, src, dst, .. } => {
+                    if self.edge(id.as_u64()).is_some() {
+                        return Err(ApplyError::Exists(Entity::Edge(*id)));
+                    }
+                    for end in [src, dst] {
+                        if !seen_ends.contains(end) {
+                            if !self.node_visible(end.as_u64(), read) {
+                                return Err(ApplyError::Missing(Entity::Node(*end)));
+                            }
+                            seen_ends.insert(*end);
+                        }
+                    }
+                    ids.push(id.as_u64());
+                }
+                _ => return check_chunk(std::slice::from_ref(op)),
+            }
+        }
+        if !ids.is_sorted_by(|a, b| a < b) {
+            ids.sort_unstable();
+            if let Some(twice) = ids.windows(2).find(|pair| pair[0] == pair[1]) {
+                return Err(ApplyError::Exists(match ops[0] {
+                    DataOp::CreateNode { .. } => Entity::Node(NodeId::new(twice[0])),
+                    _ => Entity::Edge(EdgeId::new(twice[0])),
+                }));
+            }
+        }
+        Ok(())
+    }
+
+    /// What admission takes for a chunk: its values' bytes, the decoded bytes
+    /// of the cold columns they go to (each column once, as the first create
+    /// thaws it for the rest), and whether it may grow the index buffers.
+    fn chunk_admission(&self, ops: &[DataOp]) -> (usize, usize, bool) {
+        // A row at a time, the bracket counts a row's structure within 64 ops, and the
+        // grant's step covers that; a chunk admits its structure with its values.
+        let payload = ops
+            .iter()
+            .map(|op| op.payload_bytes() + structure_bytes(op))
+            .sum();
+        let indexes = ops.iter().any(|op| self.may_grow_indexes(op));
+        if !self.account.holds_cold() {
+            return (payload, 0, indexes);
+        }
+        let mut thawed = FxHashSet::default();
+        let mut thaw = 0;
+        for op in ops {
+            let (nodes, raw, properties) = match op {
+                DataOp::CreateNode { id, properties, .. } => (true, id.as_u64(), properties),
+                DataOp::CreateEdge { id, properties, .. } => (false, id.as_u64(), properties),
+                _ => continue,
+            };
+            let group = locate(raw).0;
+            let columns = if nodes {
+                self.nodes.get(&group).map(|group| &group.columns)
+            } else {
+                self.edges.get(&group).map(|group| &group.columns)
+            };
+            for (key, _) in properties {
+                if let (Some(columns), Some(key)) = (columns, self.keys.get_id(key.as_str()))
+                    && thawed.insert((nodes, group, key))
+                {
+                    thaw += columns.thaw_bytes(key);
+                }
+            }
+        }
+        (payload, thaw, indexes)
+    }
+
+    /// Writes one create of a chunk, an edge's adjacency into `chunk`.
+    fn create_in_chunk(
+        &mut self,
+        op: &DataOp,
+        mode: Mode,
+        chunk: &mut ChunkEntries,
+    ) -> Result<Applied, ApplyError> {
+        match op {
+            DataOp::CreateNode {
+                id,
+                labels,
+                properties,
+            } => self.create_node(*id, labels, properties, mode),
+            DataOp::CreateEdge {
+                id,
+                src,
+                dst,
+                edge_type,
+                properties,
+            } => self.create_edge(*id, (*src, *dst), edge_type, properties, mode, Some(chunk)),
+            _ => check_chunk(std::slice::from_ref(op)).map(|()| Applied::Unchanged),
+        }
+    }
+
+    /// Puts a chunk's adjacency entries in its nodes' lists: per direction,
+    /// sorted, one run per node row group, each group taken into the bracket
+    /// right before its lists change (see [`Adjacency::push_run`]).
+    fn push_chunk(&mut self, chunk: &mut ChunkEntries, mode: Mode) -> Result<(), ApplyError> {
+        let mut rows = Vec::new();
+        for (direction, entries) in chunk.iter_mut().enumerate() {
+            let outgoing = direction == 1;
+            entries.sort_unstable();
+            for run in entries.chunk_by(|a, b| locate(a.0).0 == locate(b.0).0) {
+                let index = locate(run[0].0).0;
+                self.touch(Touched {
+                    nodes: [Some(index), None],
+                    edge: None,
+                });
+                let group = self
+                    .nodes
+                    .get_mut(&index)
+                    .ok_or(ApplyError::Missing(Entity::Node(NodeId::new(run[0].0))))?;
+                rows.clear();
+                rows.extend(run.iter().map(|(node, entry)| (locate(*node).1, *entry)));
+                group.adjacency_mut(outgoing).push_run(&rows);
+                if mode.stamped() {
+                    group.marks.mark_adjacency(outgoing);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The bytes a created node's row adds besides its values' own bytes, at most: its
+/// version and its labels (checked by
+/// `account::tests::a_chunk_adds_no_more_structure_than_admission_takes`).
+pub(super) const NODE_ROW_BYTES: usize = 32;
+
+/// The bytes a created edge's row adds besides its values' own bytes, at most: its
+/// version, its ends and type, and in each adjacency direction a new delta row (a map
+/// slot with the map's room to grow, and a list's first room for four entries).
+pub(super) const EDGE_ROW_BYTES: usize = 512;
+
+/// The bytes a value adds to its column besides its own bytes, at most: its slot, and a
+/// string's header.
+pub(super) const VALUE_BYTES: usize = 32;
+
+/// The bytes a create adds besides its values' own bytes ([`DataOp::payload_bytes`]), at
+/// most, which a chunk's admission takes for it: what a row at a time is counted for
+/// within a bracket of 64 ops, and the grant's step covers. Not the offsets a row group's
+/// lists pad for rows below a new one, once per group, which neither path admits.
+pub(super) fn structure_bytes(op: &DataOp) -> usize {
+    match op {
+        DataOp::CreateNode { properties, .. } => NODE_ROW_BYTES + properties.len() * VALUE_BYTES,
+        DataOp::CreateEdge { properties, .. } => EDGE_ROW_BYTES + properties.len() * VALUE_BYTES,
+        _ => 0,
+    }
+}
+
+/// A chunk's adjacency entries, (node, entry), incoming at 0 and outgoing
+/// at 1: written to the lists at the chunk's end, a run per row group.
+type ChunkEntries = [Vec<(u64, Adjacent)>; 2];
+
+/// Refuses a create at the largest id: the next id is one past the largest,
+/// and the last id has none, so it is refused before anything of it is
+/// stored.
+fn refuse_the_largest_id(op: &DataOp) -> Result<(), ApplyError> {
+    let (what, raw) = match op {
+        DataOp::CreateNode { id, .. } => ("node", id.as_u64()),
+        DataOp::CreateEdge { id, .. } => ("edge", id.as_u64()),
+        _ => return Ok(()),
+    };
+    if raw == u64::MAX {
+        return Err(ApplyError::Refused(format!(
+            "{what} id {raw}: the largest id leaves no next one"
+        )));
+    }
+    Ok(())
 }
 
 impl RowGroupStore {
@@ -537,23 +728,7 @@ impl RowGroupStore {
     fn apply_once(&self, op: &DataOp, writer: Writer) -> Result<Applied, ApplyError> {
         let mode = Mode::of(writer, self.keeps_history())?;
         self.refuse_if_dropped()?;
-        // The next id is one past the largest: the last id has none, so it
-        // is refused before anything of it is stored.
-        match op {
-            DataOp::CreateNode { id, .. } if id.as_u64() == u64::MAX => {
-                return Err(ApplyError::Refused(format!(
-                    "node id {}: the largest id leaves no next one",
-                    id.as_u64()
-                )));
-            }
-            DataOp::CreateEdge { id, .. } if id.as_u64() == u64::MAX => {
-                return Err(ApplyError::Refused(format!(
-                    "edge id {}: the largest id leaves no next one",
-                    id.as_u64()
-                )));
-            }
-            _ => {}
-        }
+        refuse_the_largest_id(op)?;
         let (applied, moved) = {
             let mut inner = self.inner.write();
             // Admitted before any change, so a refusal changes nothing.
@@ -625,6 +800,96 @@ impl RowGroupStore {
         }
         Ok(applied)
     }
+
+    /// Applies a chunk of creates (see [`GraphBackend::apply_chunk`]) once,
+    /// under one hold of the lock: every row checked and the chunk admitted
+    /// before the first write, so a refusal or a bad row changes nothing;
+    /// each create then applies and is listed as [`apply_once`](Self::apply_once)
+    /// applies it, and the chunk's adjacency goes to the lists at its end.
+    fn apply_chunk_once(&self, ops: &[DataOp], writer: Writer) -> Result<(), ApplyError> {
+        let mode = Mode::of(writer, self.keeps_history())?;
+        self.refuse_if_dropped()?;
+        let moved = {
+            let mut inner = self.inner.write();
+            inner.check_chunk_rows(ops, mode.read)?;
+            if mode.refusable() {
+                let (payload, thaw, indexes) = inner.chunk_admission(ops);
+                inner
+                    .account
+                    .admit(payload, thaw, indexes)
+                    .map_err(|Needed(bytes)| ApplyError::Memory(bytes))?;
+            }
+            let inner = &mut *inner;
+            let mut chunk = ChunkEntries::default();
+            let mut applied = Ok(());
+            for op in ops {
+                inner.touch(Touched::of(op));
+                let created = inner.create_in_chunk(op, mode, &mut chunk);
+                if let Some((table, raw)) = mode.lists(op)
+                    && inner.list(table, raw)
+                {
+                    self.note_listed();
+                }
+                if let Err(error) = created {
+                    // Checked above, so a broken invariant; marked as a failed
+                    // op of `apply_once` is.
+                    if mode.stamped() {
+                        inner.mark_op(op);
+                    }
+                    applied = Err(error);
+                    break;
+                }
+            }
+            if applied.is_ok() {
+                applied = inner.push_chunk(&mut chunk, mode);
+            }
+            if mode.stamped() {
+                self.note_settled(ops.len());
+                inner.close_bracket();
+            }
+            applied?;
+            if let Some(epoch) = mode.epoch {
+                self.sync_epoch(epoch);
+            }
+            matches!(writer, Writer::Immediate { .. }) && inner.counts.plan_statistics_moved()
+        };
+        self.note_plan_statistics(moved);
+        for op in ops {
+            match op {
+                DataOp::CreateNode { id, .. } => {
+                    self.next_node_id
+                        .fetch_max(id.as_u64() + 1, Ordering::AcqRel);
+                }
+                DataOp::CreateEdge { id, .. } => {
+                    self.next_edge_id
+                        .fetch_max(id.as_u64() + 1, Ordering::AcqRel);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs `attempt`; when the memory limit refuses it before any change,
+    /// frees what it can outside the store's lock and runs it once more
+    /// (see `account`).
+    fn with_room<T>(&self, attempt: impl Fn() -> Result<T, ApplyError>) -> Result<T, ApplyError> {
+        match attempt() {
+            Err(ApplyError::Memory(needed)) => {
+                let Some(manager) = self.memory_manager() else {
+                    return Err(ApplyError::Memory(needed));
+                };
+                if !manager.make_room(needed) {
+                    return Err(memory_refused(manager, needed));
+                }
+                match attempt() {
+                    Err(ApplyError::Memory(needed)) => Err(memory_refused(manager, needed)),
+                    applied => applied,
+                }
+            }
+            applied => applied,
+        }
+    }
 }
 
 /// The refusal of `needed` more bytes against the memory limit.
@@ -653,21 +918,23 @@ impl GraphBackend for RowGroupStore {
     /// change, frees what it can outside the store's lock and applies it once
     /// more (see `account`).
     fn apply(&self, op: &DataOp, writer: Writer) -> Result<Applied, ApplyError> {
-        match self.apply_once(op, writer) {
-            Err(ApplyError::Memory(needed)) => {
-                let Some(manager) = self.memory_manager() else {
-                    return Err(ApplyError::Memory(needed));
-                };
-                if !manager.make_room(needed) {
-                    return Err(memory_refused(manager, needed));
-                }
-                match self.apply_once(op, writer) {
-                    Err(ApplyError::Memory(needed)) => Err(memory_refused(manager, needed)),
-                    applied => applied,
-                }
+        self.with_room(|| self.apply_once(op, writer))
+    }
+
+    /// Checks every row and admits the whole chunk before its first write,
+    /// so on `Err` nothing of the chunk changed; then applies the rows in one
+    /// hold of the lock, and their adjacency at the end, a run per row group
+    /// and direction. A refusal by the memory limit frees what it can and
+    /// tries the chunk once more, as [`apply`](GraphBackend::apply) does.
+    fn apply_chunk(&self, ops: &[DataOp], writer: Writer) -> Result<(), ApplyError> {
+        check_chunk(ops)?;
+        if matches!(writer, Writer::Transaction { .. }) {
+            // A bulk write's rows, as `apply_bulk_row` takes them.
+            for op in ops {
+                check_bulk_row(op, writer)?;
             }
-            applied => applied,
         }
+        self.with_room(|| self.apply_chunk_once(ops, writer))
     }
 
     /// The row-group store's pending versions need no opening: the handle

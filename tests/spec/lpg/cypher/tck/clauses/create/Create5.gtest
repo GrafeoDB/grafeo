@@ -1,0 +1,164 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/create/Create5.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Create5"
+  title: "Create5 - Multiple hops create patterns"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Create a pattern with multiple hops
+  - name: s1_create_a_pattern_with_multiple_hops
+    query: |
+      CREATE (:A)-[:R]->(:B)-[:R]->(:C)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 3
+        +relationships: 2
+        +labels: 3
+
+  # [1] Create a pattern with multiple hops (control query)
+  - name: s1_create_a_pattern_with_multiple_hops_control
+    setup:
+      - |
+        CREATE (:A)-[:R]->(:B)-[:R]->(:C)
+    query: |
+      MATCH (a:A)-[:R]->(b:B)-[:R]->(c:C)
+      RETURN a, b, c
+    expect:
+      values: |
+        | a | b | c |
+        | (:A) | (:B) | (:C) |
+
+  # [2] Create a pattern with multiple hops in the reverse direction
+  - name: s2_create_a_pattern_with_multiple_hops_in_the_reverse_direction
+    query: |
+      CREATE (:A)<-[:R]-(:B)<-[:R]-(:C)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 3
+        +relationships: 2
+        +labels: 3
+
+  # [2] Create a pattern with multiple hops in the reverse direction (control query)
+  - name: s2_create_a_pattern_with_multiple_hops_in_the_reverse_direction_control
+    setup:
+      - |
+        CREATE (:A)<-[:R]-(:B)<-[:R]-(:C)
+    query: |
+      MATCH (a)<-[:R]-(b)<-[:R]-(c)
+      RETURN a, b, c
+    expect:
+      values: |
+        | a | b | c |
+        | (:A) | (:B) | (:C) |
+
+  # [3] Create a pattern with multiple hops in varying directions
+  - name: s3_create_a_pattern_with_multiple_hops_in_varying_directions
+    query: |
+      CREATE (:A)-[:R]->(:B)<-[:R]-(:C)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 3
+        +relationships: 2
+        +labels: 3
+
+  # [3] Create a pattern with multiple hops in varying directions (control query)
+  - name: s3_create_a_pattern_with_multiple_hops_in_varying_directions_control
+    setup:
+      - |
+        CREATE (:A)-[:R]->(:B)<-[:R]-(:C)
+    query: |
+      MATCH (a:A)-[r1:R]->(b:B)<-[r2:R]-(c:C)
+      RETURN a, b, c
+    expect:
+      values: |
+        | a | b | c |
+        | (:A) | (:B) | (:C) |
+
+  # [4] Create a pattern with multiple hops with multiple types and varying directions
+  - name: s4_create_a_pattern_with_multiple_hops_with_multiple_types_and_varying_directions
+    query: |
+      CREATE ()-[:R1]->()<-[:R2]-()-[:R3]->()
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 4
+        +relationships: 3
+
+  # [4] Create a pattern with multiple hops with multiple types and varying directions (control query)
+  - name: s4_create_a_pattern_with_multiple_hops_with_multiple_types_and_varying_directions_control
+    setup:
+      - |
+        CREATE ()-[:R1]->()<-[:R2]-()-[:R3]->()
+    query: |
+      MATCH ()-[r1:R1]->()<-[r2:R2]-()-[r3:R3]->()
+      RETURN r1, r2, r3
+    expect:
+      values: |
+        | r1 | r2 | r3 |
+        | [:R1] | [:R2] | [:R3] |
+
+  # [5] Create a pattern with multiple hops and varying directions
+  - name: s5_create_a_pattern_with_multiple_hops_and_varying_directions
+    query: |
+      CREATE (:A)<-[:R1]-(:B)-[:R2]->(:C)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 3
+        +relationships: 2
+        +labels: 3
+
+  # [5] Create a pattern with multiple hops and varying directions (control query)
+  - name: s5_create_a_pattern_with_multiple_hops_and_varying_directions_control
+    xfail:
+      spec: "openCypher TCK 2024.3 Create5: [5] Create a pattern with multiple hops and varying directions (control query)"
+      issue: "fix in 0.6.5"
+    setup:
+      - |
+        CREATE (:A)<-[:R1]-(:B)-[:R2]->(:C)
+    query: |
+      MATCH (a:A)<-[r1:R1]-(b:B)-[r2:R2]->(c:C)
+      RETURN *
+    expect:
+      values: |
+        | a | b | c | r1 | r2 |
+        | (:A) | (:B) | (:C) | [:R1] | [:R2] |

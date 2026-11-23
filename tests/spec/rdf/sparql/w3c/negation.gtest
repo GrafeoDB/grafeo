@@ -1,0 +1,522 @@
+# W3C SPARQL 1.1 Test Suite: Negation
+# Generated from the W3C manifest by scripts/convert_w3c_sparql.py
+# Source: https://github.com/w3c/rdf-tests at 7b5afb91857a9c282c03d2e45d3f76485797c901
+# Copyright W3C (MIT, ERCIM, Keio, Beihang), used under the W3C test suite
+# licences: https://www.w3.org/Consortium/Legal/2008/04-testsuite-copyright.html
+# Not converted:
+#   graph-minus: named graphs (qt:graphData)
+
+meta:
+  language: sparql
+  model: rdf
+  section: "w3c.negation"
+  title: W3C Negation
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # Subsets by exclusion (NOT EXISTS)
+  - name: subset_by_exclusion_nex_1
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#lifeForm1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#Animal> .
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#lifeForm1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#Mammal> .
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#lifeForm2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#Animal> .
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#lifeForm2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#Reptile> .
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#lifeForm3> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#Animal> .
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#lifeForm3> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#Insect> .
+        }
+    query: |
+      PREFIX ex: <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#>
+      SELECT ?animal {
+        ?animal a ex:Animal
+        FILTER NOT EXISTS { ?animal a ex:Insect }
+      }
+    expect:
+      terms:
+        - ['<http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#lifeForm1>']
+        - ['<http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#lifeForm2>']
+
+  # Subsets by exclusion (MINUS)
+  - name: subset_by_exclusion_minus_1
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#lifeForm1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#Animal> .
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#lifeForm1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#Mammal> .
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#lifeForm2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#Animal> .
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#lifeForm2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#Reptile> .
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#lifeForm3> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#Animal> .
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#lifeForm3> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#Insect> .
+        }
+    query: |
+      PREFIX ex: <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#>
+      SELECT ?animal {
+        ?animal a ex:Animal MINUS {
+          ?animal a ?type
+          FILTER(?type = ex:Reptile || ?type = ex:Insect)
+        }
+      }
+    expect:
+      terms:
+        - ['<http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#lifeForm1>']
+
+  # Medical, temporal proximity by exclusion (NOT EXISTS)
+  - name: temporal_proximity_by_exclusion_nex_1
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#examination1> <http://purl.org/dc/elements/1.1/date> "2010-01-10"^^<http://www.w3.org/2001/XMLSchema#date> .
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#examination1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#PhysicalExamination> .
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#examination1> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#follows> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#examination2> .
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#examination1> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#precedes> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#operation1> .
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#examination2> <http://purl.org/dc/elements/1.1/date> "2010-01-02"^^<http://www.w3.org/2001/XMLSchema#date> .
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#examination2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#PhysicalExamination> .
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#examination2> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#precedes> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#examination1> .
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#examination2> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#precedes> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#operation1> .
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#operation1> <http://purl.org/dc/elements/1.1/date> "2010-01-15"^^<http://www.w3.org/2001/XMLSchema#date> .
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#operation1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#SurgicalProcedure> .
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#operation1> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#follows> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#examination1> .
+          <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#operation1> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#follows> <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#examination2> .
+        }
+    query: |
+      PREFIX ex: <http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#>
+      PREFIX dc: <http://purl.org/dc/elements/1.1/>
+
+      # The closest pre-operative physical examination
+      SELECT ?exam ?date {
+        ?exam a ex:PhysicalExamination;
+              dc:date ?date;
+              ex:precedes ex:operation1 .
+        ?op   a ex:SurgicalProcedure; dc:date ?opDT .
+        FILTER NOT EXISTS {
+          ?otherExam a ex:PhysicalExamination;
+                     ex:follows ?exam;
+                     ex:precedes ex:operation1
+        }
+      }
+    expect:
+      terms:
+        - ['<http://www.w3.org/2009/sparql/docs/tests/data-sparql11/negation#examination1>', '"2010-01-10"^^<http://www.w3.org/2001/XMLSchema#date>']
+
+  # Calculate which sets are subsets of others (include A subsetOf A)
+  - name: subset_01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example/a> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/a> <http://example/member> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/a> <http://example/member> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/b> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/b> <http://example/member> "9"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/c> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/c> <http://example/member> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/c> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/d> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/d> <http://example/member> "9"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/d> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/e> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/e> <http://example/member> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/e> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/empty> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+        }
+    query: |
+      PREFIX :    <http://example/>
+      PREFIX  rdf:    <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+      # SPARQL 1.1
+      SELECT (?s1 AS ?subset) (?s2 AS ?superset)
+      WHERE
+      {
+          # All pairs of sets except (S,S)
+          ?s2 rdf:type :Set .
+          ?s1 rdf:type :Set .
+          FILTER(?s1 != ?s2)
+          MINUS
+          {
+              # The MINUS RHS is (?s1, ?s2) where
+              # ?s1 has a member not in ?s2
+              ?s1 rdf:type :Set .
+              ?s2 rdf:type :Set .
+              FILTER(?s1 != ?s2)
+
+              ?s1 :member ?x .
+              FILTER NOT EXISTS { ?s2 :member ?x . }
+          }
+      }
+    expect:
+      terms:
+        - ['<http://example/empty>', '<http://example/e>']
+        - ['<http://example/c>', '<http://example/e>']
+        - ['<http://example/empty>', '<http://example/d>']
+        - ['<http://example/b>', '<http://example/d>']
+        - ['<http://example/empty>', '<http://example/c>']
+        - ['<http://example/e>', '<http://example/c>']
+        - ['<http://example/empty>', '<http://example/b>']
+        - ['<http://example/d>', '<http://example/b>']
+        - ['<http://example/empty>', '<http://example/a>']
+        - ['<http://example/e>', '<http://example/a>']
+        - ['<http://example/c>', '<http://example/a>']
+
+  # Calculate which sets are subsets of others (exclude A subsetOf A)
+  - name: subset_02
+    setup:
+      - |
+        INSERT DATA {
+          <http://example/a> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/a> <http://example/member> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/a> <http://example/member> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/b> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/b> <http://example/member> "9"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/c> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/c> <http://example/member> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/c> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/d> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/d> <http://example/member> "9"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/d> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/e> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/e> <http://example/member> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/e> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/empty> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+        }
+    query: |
+      PREFIX :    <http://example/>
+      PREFIX  rdf:    <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
+      SELECT (?s1 AS ?subset) (?s2 AS ?superset)
+      WHERE
+      {
+          # All pairs of sets
+          ?s2 rdf:type :Set .
+          ?s1 rdf:type :Set .
+
+          MINUS {
+              ?s1 rdf:type :Set .
+              ?s2 rdf:type :Set .
+              # Assumes ?s1 has at least one member
+              ?s1 :member ?x .
+              # If we want to exclude A as a subset of A.
+              # This is not perfect as "?s1 = ?s2" is not a
+              # contents based comparison.
+              FILTER ( ?s1 = ?s2 || NOT EXISTS { ?s2 :member ?x . } )
+          }
+          MINUS {
+              # If we don't want the empty set being a subset of itself.
+              ?s1 rdf:type :Set .
+              ?s2 rdf:type :Set .
+              # Choose the pair (empty set, empty set)
+              FILTER ( NOT EXISTS { ?s1 :member ?y . } )
+              FILTER ( NOT EXISTS { ?s2 :member ?y . } )
+          }
+      }
+    expect:
+      terms:
+        - ['<http://example/empty>', '<http://example/e>']
+        - ['<http://example/c>', '<http://example/e>']
+        - ['<http://example/empty>', '<http://example/d>']
+        - ['<http://example/b>', '<http://example/d>']
+        - ['<http://example/empty>', '<http://example/c>']
+        - ['<http://example/e>', '<http://example/c>']
+        - ['<http://example/empty>', '<http://example/b>']
+        - ['<http://example/d>', '<http://example/b>']
+        - ['<http://example/empty>', '<http://example/a>']
+        - ['<http://example/e>', '<http://example/a>']
+        - ['<http://example/c>', '<http://example/a>']
+
+  # Calculate which sets have the same elements
+  - name: set_equals_1
+    setup:
+      - |
+        INSERT DATA {
+          <http://example/a> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/a> <http://example/member> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/a> <http://example/member> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/b> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/b> <http://example/member> "9"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/c> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/c> <http://example/member> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/c> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/d> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/d> <http://example/member> "9"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/d> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/e> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/e> <http://example/member> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/e> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/empty> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+        }
+    query: |
+      PREFIX :    <http://example/>
+      PREFIX  rdf:    <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
+      # Find sets that have exactly the same members.
+      # Find all (s1,s2) such that (s1 subset of s) and (s2 subset of s1).
+
+      SELECT DISTINCT ?s1 ?s2
+      WHERE
+      {
+          # All pairs of sets (no duplicates, not reveres pairs)
+          ?s2 rdf:type :Set .
+          ?s1 rdf:type :Set .
+          FILTER(str(?s1) < str(?s2))
+          MINUS
+          {
+              ?s1 rdf:type :Set .
+              ?s2 rdf:type :Set .
+              ?s1 :member ?x .
+              FILTER NOT EXISTS { ?s2 :member ?x . }
+          }
+          MINUS
+          {
+              ?s1 rdf:type :Set .
+              ?s2 rdf:type :Set .
+              ?s2 :member ?x .
+              FILTER NOT EXISTS { ?s1 :member ?x . }
+          }
+      }
+    expect:
+      terms:
+        - ['<http://example/c>', '<http://example/e>']
+        - ['<http://example/b>', '<http://example/d>']
+
+  # Calculate proper subset
+  - name: subset_03
+    setup:
+      - |
+        INSERT DATA {
+          <http://example/a> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/a> <http://example/member> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/a> <http://example/member> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/b> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/b> <http://example/member> "9"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/c> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/c> <http://example/member> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/c> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/d> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/d> <http://example/member> "9"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/d> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/e> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/e> <http://example/member> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/e> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/empty> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+        }
+    query: |
+      PREFIX :    <http://example/>
+      PREFIX  rdf:    <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+
+      SELECT (?s1 AS ?subset) (?s2 AS ?superset)
+      WHERE
+      {
+          # All pairs of sets except (S,S)
+          ?s2 rdf:type :Set .
+          ?s1 rdf:type :Set .
+          MINUS {
+              # See subset-01 ...
+              ?s1 rdf:type :Set .
+              ?s2 rdf:type :Set .
+              ?s1 :member ?x .
+              FILTER ( NOT EXISTS { ?s2 :member ?x . } )
+          }
+          # Remove those that are the pairs with the same elements.
+          # See set-equals-1
+          MINUS {
+              ?s2 rdf:type :Set .
+              ?s1 rdf:type :Set .
+              MINUS
+              {
+                  ?s1 rdf:type :Set .
+                  ?s2 rdf:type :Set .
+                  ?s1 :member ?x .
+                  FILTER NOT EXISTS { ?s2 :member ?x . }
+              }
+              MINUS
+              {
+                  ?s1 rdf:type :Set .
+                  ?s2 rdf:type :Set .
+                  ?s2 :member ?x .
+                  FILTER NOT EXISTS { ?s1 :member ?x . }
+              }
+          }
+      }
+    expect:
+      terms:
+        - ['<http://example/empty>', '<http://example/e>']
+        - ['<http://example/empty>', '<http://example/d>']
+        - ['<http://example/empty>', '<http://example/c>']
+        - ['<http://example/empty>', '<http://example/b>']
+        - ['<http://example/empty>', '<http://example/a>']
+        - ['<http://example/e>', '<http://example/a>']
+        - ['<http://example/c>', '<http://example/a>']
+
+  # Positive EXISTS 1
+  - name: exists_01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example/a> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/a> <http://example/member> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/a> <http://example/member> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/b> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/b> <http://example/member> "9"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/c> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/c> <http://example/member> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/c> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/d> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/d> <http://example/member> "9"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/d> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/e> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/e> <http://example/member> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/e> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/empty> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+        }
+    query: |
+      PREFIX :    <http://example/>
+      PREFIX  rdf:    <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+      # SPARQL 1.1
+      SELECT *
+      WHERE
+      {
+          ?set a :Set .
+          FILTER EXISTS {
+              ?set :member 9
+          }
+      }
+    expect:
+      terms:
+        - ['<http://example/b>']
+        - ['<http://example/d>']
+
+  # Positive EXISTS 2
+  - name: exists_02
+    setup:
+      - |
+        INSERT DATA {
+          <http://example/a> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/a> <http://example/member> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/a> <http://example/member> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/b> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/b> <http://example/member> "9"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/c> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/c> <http://example/member> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/c> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/d> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/d> <http://example/member> "9"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/d> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/e> <http://example/member> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/e> <http://example/member> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/e> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+          <http://example/empty> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Set> .
+        }
+    query: |
+      PREFIX :    <http://example/>
+      PREFIX  rdf:    <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+      # SPARQL 1.1
+      SELECT *
+      WHERE
+      {
+          ?set a :Set .
+          FILTER EXISTS {
+              ?set :member 7
+          }
+      }
+    expect:
+      empty: true
+
+  # Subtraction with MINUS from a fully bound minuend
+  - name: full_minuend
+    xfail:
+      spec: "W3C SPARQL 1.1 negation/full-minuend"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        INSERT DATA {
+          <http://example/a0> <http://example/p1> <http://example/b0> .
+          <http://example/a0> <http://example/p2> <http://example/c0> .
+          <http://example/a1> <http://example/p1> <http://example/b1> .
+          <http://example/a1> <http://example/p2> <http://example/c1> .
+          <http://example/a2> <http://example/p1> <http://example/b2> .
+          <http://example/a2> <http://example/p2> <http://example/c2> .
+          <http://example/a3> <http://example/p1> <http://example/b3> .
+          <http://example/a3> <http://example/p2> <http://example/c3> .
+          <http://example/d0> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Sub> .
+          <http://example/d1> <http://example/q1> <http://example/b1> .
+          <http://example/d1> <http://example/q2> <http://example/c1> .
+          <http://example/d1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Sub> .
+          <http://example/d2> <http://example/q1> <http://example/b2> .
+          <http://example/d2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Sub> .
+          <http://example/d3> <http://example/q1> <http://example/b3> .
+          <http://example/d3> <http://example/q2> <http://example/cx> .
+          <http://example/d3> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Sub> .
+        }
+    query: |
+      prefix : <http://example/>
+
+      select ?a ?b ?c {
+        ?a :p1 ?b; :p2 ?c
+        MINUS {
+          ?d a :Sub
+          OPTIONAL { ?d :q1 ?b }
+          OPTIONAL { ?d :q2 ?c }
+        }
+      }
+      order by ?a
+    expect:
+      terms:
+        - ['<http://example/a0>', '<http://example/b0>', '<http://example/c0>']
+        - ['<http://example/a3>', '<http://example/b3>', '<http://example/c3>']
+
+  # Subtraction with MINUS from a partially bound minuend
+  - name: partial_minuend
+    xfail:
+      spec: "W3C SPARQL 1.1 negation/partial-minuend"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        INSERT DATA {
+          <http://example/a1> <http://example/p1> <http://example/b1> .
+          <http://example/a1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Min> .
+          <http://example/a2> <http://example/p1> <http://example/b2> .
+          <http://example/a2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Min> .
+          <http://example/a3> <http://example/p1> <http://example/b3> .
+          <http://example/a3> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Min> .
+          <http://example/a4> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Min> .
+          <http://example/d1> <http://example/q1> <http://example/b1> .
+          <http://example/d1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Sub> .
+          <http://example/d3> <http://example/q1> <http://example/b3> .
+          <http://example/d3> <http://example/q2> <http://example/c3> .
+          <http://example/d3> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Sub> .
+          <http://example/d4> <http://example/q1> <http://example/b4> .
+          <http://example/d4> <http://example/q2> <http://example/c4> .
+          <http://example/d4> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Sub> .
+          <http://example/d5> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example/Sub> .
+        }
+    query: |
+      prefix : <http://example/>
+
+      select ?a ?b ?c {
+        ?a a :Min
+        OPTIONAL { ?a :p1 ?b }
+        OPTIONAL { ?a :p2 ?c }
+        MINUS {
+          ?d a :Sub
+          OPTIONAL { ?d :q1 ?b }
+          OPTIONAL { ?d :q2 ?c }
+        }
+      }
+      order by ?a
+    expect:
+      terms:
+        - ['<http://example/a2>', '<http://example/b2>', null]
+        - ['<http://example/a4>', null, null]

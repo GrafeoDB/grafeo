@@ -61,7 +61,7 @@ tests:
       - "MATCH (b:Node {name: 'B'}), (c:Node {name: 'C'}) INSERT (b)-[:LINK]->(c)"
       - "MATCH (c:Node {name: 'C'}), (d:Node {name: 'D'}) INSERT (c)-[:LINK]->(d)"
       - "MATCH (d:Node {name: 'D'}), (e:Node {name: 'E'}) INSERT (d)-[:LINK]->(e)"
-    query: "MATCH (a:Node {name: 'A'})-[:LINK*]->(b:Node) RETURN b.name AS name ORDER BY name"
+    query: "MATCH TRAIL (a:Node {name: 'A'})-[:LINK*]->(b:Node) RETURN b.name AS name ORDER BY name"
     expect:
       ordered: true
       rows:

@@ -5,13 +5,12 @@
 //! `TypeError`: it does not say whether it is an epoch or a time.
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::time::Duration;
 
 use wasm_bindgen::prelude::*;
 
 use grafeo_common::types::{EpochId, Timestamp};
-use grafeo_engine::{AsOfView as EngineAsOfView, GrafeoDB, HistoryRetention, TimePoint};
+use grafeo_engine::{AsOfView as EngineAsOfView, HistoryRetention, TimePoint};
 
 use crate::{Database, database_error, js_error, raw_result_to_js, rows_to_js};
 
@@ -108,7 +107,7 @@ impl Database {
     #[wasm_bindgen(js_name = "currentEpoch")]
     pub fn current_epoch(&self) -> Result<u64, JsValue> {
         self.check_open()?;
-        Ok(self.db().current_epoch().as_u64())
+        Ok(self.db()?.current_epoch().as_u64())
     }
 
     /// The epoch a point in time reads at, as a `bigint`: the epoch itself
@@ -123,7 +122,7 @@ impl Database {
     pub fn epoch_as_of(&self, point: JsValue) -> Result<u64, JsValue> {
         self.check_open()?;
         let point = time_point(&point)?;
-        let epoch = self.db().epoch_as_of(point).map_err(database_error)?;
+        let epoch = self.db()?.epoch_as_of(point).map_err(database_error)?;
         Ok(epoch.as_u64())
     }
 
@@ -143,8 +142,8 @@ impl Database {
     pub fn as_of(&self, point: JsValue) -> Result<AsOfView, JsValue> {
         self.check_open()?;
         let point = time_point(&point)?;
-        let view = self.db().as_of(point).map_err(database_error)?;
-        Ok(AsOfView::new(Rc::clone(&self.inner), view))
+        let view = self.db()?.as_of(point).map_err(database_error)?;
+        Ok(AsOfView::new(self.inner.share()?, view))
     }
 
     /// Runs one GQL query, with optional parameters, as the database was at
@@ -164,7 +163,7 @@ impl Database {
         self.check_open()?;
         let point = time_point(&point)?;
         let params = Self::convert_params(Some(params))?;
-        let db = self.db();
+        let db = self.db()?;
         let epoch = db.epoch_as_of(point).map_err(database_error)?;
         let result = db
             .session()
@@ -179,17 +178,17 @@ impl Database {
 /// that writes throws. It keeps the history of its epoch until `close()`.
 #[wasm_bindgen]
 pub struct AsOfView {
-    /// Keeps the database alive while the view lives.
-    _db: Rc<RefCell<GrafeoDB>>,
+    /// The database the view reads; every call fails with `GRAFEO-T007` once it is closed.
+    db: crate::SharedDb,
     view: RefCell<Option<EngineAsOfView>>,
     epoch: u64,
 }
 
 impl AsOfView {
-    fn new(db: Rc<RefCell<GrafeoDB>>, view: EngineAsOfView) -> Self {
+    fn new(db: crate::SharedDb, view: EngineAsOfView) -> Self {
         let epoch = view.epoch().as_u64();
         Self {
-            _db: db,
+            db,
             view: RefCell::new(Some(view)),
             epoch,
         }
@@ -200,6 +199,7 @@ impl AsOfView {
         query: &str,
         params: Option<JsValue>,
     ) -> Result<grafeo_engine::database::QueryResult, JsValue> {
+        self.db.check()?;
         let params = Database::convert_params(params)?;
         let view = self.view.borrow();
         let view = view
@@ -216,9 +216,14 @@ impl AsOfView {
 #[wasm_bindgen]
 impl AsOfView {
     /// The epoch the view reads at, as a `bigint`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` (`GRAFEO-T007`) once the database is closed.
     #[wasm_bindgen(getter)]
-    pub fn epoch(&self) -> u64 {
-        self.epoch
+    pub fn epoch(&self) -> Result<u64, JsValue> {
+        self.db.check()?;
+        Ok(self.epoch)
     }
 
     /// Runs a GQL query as the database was at the view's epoch; rows as

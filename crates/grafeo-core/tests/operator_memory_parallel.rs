@@ -38,7 +38,7 @@ fn distinct_in(ctx: &OperatorMemoryContext) -> Result<usize, OperatorError> {
 }
 
 fn statement(limit: usize) -> OperatorMemoryContext {
-    OperatorMemoryContext::new(BufferManager::with_budget(256 * MIB), None).with_query_limit(limit)
+    OperatorMemoryContext::new(BufferManager::with_budget(256 * MIB)).with_query_limit(limit)
 }
 
 #[test]

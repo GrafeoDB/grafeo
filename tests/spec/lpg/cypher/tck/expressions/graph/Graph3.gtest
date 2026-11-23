@@ -1,0 +1,175 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/graph/Graph3.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Graph3"
+  title: "Graph3 - Node labels"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Creating node without label
+  - name: s1_creating_node_without_label
+    query: |
+      CREATE (node)
+      RETURN labels(node)
+    expect:
+      values: |
+        | labels(node) |
+        | [] |
+      side_effects:
+        +nodes: 1
+
+  # [2] Creating node with two labels
+  - name: s2_creating_node_with_two_labels
+    query: |
+      CREATE (node:Foo:Bar {name: 'Mattias'})
+      RETURN labels(node)
+    expect:
+      unordered_lists: true
+      values: |
+        | labels(node) |
+        | ['Foo', 'Bar'] |
+      side_effects:
+        +nodes: 1
+        +labels: 2
+        +properties: 1
+
+  # [3] Ignore space when creating node with labels
+  - name: s3_ignore_space_when_creating_node_with_labels
+    query: |
+      CREATE (node :Foo:Bar)
+      RETURN labels(node)
+    expect:
+      unordered_lists: true
+      values: |
+        | labels(node) |
+        | ['Foo', 'Bar'] |
+      side_effects:
+        +nodes: 1
+        +labels: 2
+
+  # [4] Create node with label in pattern
+  - name: s4_create_node_with_label_in_pattern
+    query: |
+      CREATE (n:Person)-[:OWNS]->(:Dog)
+      RETURN labels(n)
+    expect:
+      values: |
+        | labels(n) |
+        | ['Person'] |
+      side_effects:
+        +nodes: 2
+        +relationships: 1
+        +labels: 2
+
+  # [5] Using `labels()` in return clauses
+  - name: s5_using_labels_in_return_clauses
+    setup:
+      - |
+        CREATE ()
+    query: |
+      MATCH (n)
+      RETURN labels(n)
+    expect:
+      values: |
+        | labels(n) |
+        | [] |
+      side_effects: {}
+
+  # [6] `labels()` should accept type Any
+  - name: s6_labels_should_accept_type_any
+    setup:
+      - |
+        CREATE (:Foo), (:Foo:Bar)
+    query: |
+      MATCH (a)
+      WITH [a, 1] AS list
+      RETURN labels(list[0]) AS l
+    expect:
+      unordered_lists: true
+      values: |
+        | l |
+        | ['Foo'] |
+        | ['Foo', 'Bar'] |
+      side_effects: {}
+
+  # [7] `labels()` on null node
+  - name: s7_labels_on_null_node
+    xfail:
+      spec: "openCypher TCK 2024.3 Graph3: [7] `labels()` on null node"
+      issue: "#800"
+    query: |
+      OPTIONAL MATCH (n:DoesNotExist)
+      RETURN labels(n), labels(null)
+    expect:
+      values: |
+        | labels(n) | labels(null) |
+        | null | null |
+      side_effects: {}
+
+  # [8] `labels()` failing on a path
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s8_labels_failing_on_a_path
+    xfail:
+      spec: "openCypher TCK 2024.3 Graph3: [8] `labels()` failing on a path"
+      issue: fix in 0.7.0
+    setup:
+      - |
+        CREATE (:Foo), (:Foo:Bar)
+    query: |
+      MATCH p = (a)
+      RETURN labels(p) AS l
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [9] `labels()` failing on invalid arguments
+  # TCK: TypeError at runtime: InvalidArgumentValue
+  - name: s9_labels_failing_on_invalid_arguments
+    xfail:
+      spec: "openCypher TCK 2024.3 Graph3: [9] `labels()` failing on invalid arguments"
+      issue: "fix in 0.7.0"
+    setup:
+      - |
+        CREATE (:Foo), (:Foo:Bar)
+    query: |
+      MATCH (a)
+      WITH [a, 1] AS list
+      RETURN labels(list[1]) AS l
+    expect:
+      gql_status: "22"
+      side_effects: {}

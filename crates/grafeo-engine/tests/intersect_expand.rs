@@ -117,6 +117,46 @@ fn triangles_and_squares_intersect() {
     assert!(!explain(&plain, TRIANGLE).contains(MARK));
 }
 
+/// The intersection makes only rows that meet at the node the cycle closes on, so no filter
+/// checks that again: PROFILE runs no filter on the closing variable, in either way the hops
+/// meet (the triangle goes on from where they meet, the join ends there). A condition on the
+/// closing nodes still filters, with the rows of the plain plan.
+#[test]
+fn the_closing_equality_is_not_checked_again() {
+    let db = people(Config::in_memory(), 200, 6, 2);
+    // Tags liked by two people each: the join's cycle ends at the tag.
+    db.execute(
+        "UNWIND range(0, 119) AS i MATCH (p:Person {k: i % 37}) INSERT (p)-[:LIKES]->(:Tag {k: i})",
+    )
+    .unwrap();
+    db.execute("MATCH (t:Tag), (p:Person) WHERE p.k = (t.k * 7) % 50 INSERT (p)-[:LIKES]->(t)")
+        .unwrap();
+    let usual = db.session();
+    let off = without(&db);
+    let join = "MATCH (p:Person)-[:LIKES]->(t:Tag), (q:Person)-[:LIKES]->(t), (q)-[:KNOWS]->(p) RETURN t.k, count(*)";
+    let closing_condition = "MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person)-[:KNOWS]->(a) \
+         WHERE c.k + a.k > 150 RETURN a.k, b.k, c.k";
+    let unlabelled = "MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c)-[:KNOWS]->(a) WHERE c.k + a.k > 150 AND b.k < 190 RETURN a.k, b.k, c.k";
+    for query in [TRIANGLE, SQUARE, join, closing_condition, unlabelled] {
+        let profile = text(&usual, &format!("PROFILE {query}"));
+        if profile.contains("IntersectExpand") {
+            assert!(
+                !profile
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("Filter (_cycle_end")),
+                "{query}\n{profile}"
+            );
+        }
+        assert_eq!(rows(&usual, query), rows(&off, query), "{query}");
+    }
+    for query in [TRIANGLE, SQUARE] {
+        assert!(
+            text(&usual, &format!("PROFILE {query}")).contains("IntersectExpand"),
+            "{query}"
+        );
+    }
+}
+
 /// The reason for it: a hub's lists are not walked for each row. The lookup alone reads every
 /// edge from the hub at the middle hop; the intersection reads a fraction.
 #[test]

@@ -62,6 +62,9 @@ pub enum AggregateState {
     Last(Option<Value>),
     /// Collect state.
     Collect(Vec<Value>),
+    /// Collect state that keeps a null operand as an item: the list a
+    /// pattern comprehension builds, one item per match.
+    CollectKeepingNulls(Vec<Value>),
     /// Collect distinct state (values, seen).
     CollectDistinct(Vec<Value>, HashSet<HashableValue>),
     /// Sample standard deviation state using Welford's algorithm (count, mean, M2).
@@ -234,6 +237,7 @@ impl AggregateState {
             | Self::SumFloatDistinct(..)
             | Self::AvgDistinct(..)
             | Self::Collect(..)
+            | Self::CollectKeepingNulls(..)
             | Self::CollectDistinct(..)
             | Self::PercentileDisc { .. }
             | Self::PercentileCont { .. }
@@ -256,7 +260,9 @@ impl AggregateState {
             | Self::SumIntDistinct(_, _, set)
             | Self::SumFloatDistinct(_, _, _, set)
             | Self::AvgDistinct(_, _, set) => seen(set),
-            Self::Collect(values) => values.capacity() * std::mem::size_of::<Value>(),
+            Self::Collect(values) | Self::CollectKeepingNulls(values) => {
+                values.capacity() * std::mem::size_of::<Value>()
+            }
             Self::CollectDistinct(values, set) => {
                 values.capacity() * std::mem::size_of::<Value>() + seen(set)
             }
@@ -277,6 +283,9 @@ impl AggregateState {
     /// with its parameters, and SPARQL's SUM and AVG for RDF operands.
     #[must_use]
     pub fn for_expr(expr: &AggregateExpr) -> Self {
+        if expr.keep_nulls && expr.function == AggregateFunction::Collect && !expr.distinct {
+            return AggregateState::CollectKeepingNulls(Vec::new());
+        }
         let state = Self::new(
             expr.function,
             expr.distinct,
@@ -453,6 +462,10 @@ impl AggregateState {
     /// MIN and MAX reading a local datetime against a zoned one as
     /// `temporal` reads it (the statement's `=` and `<`).
     pub fn update_under(&mut self, value: Option<Value>, temporal: TemporalComparison) {
+        if let AggregateState::CollectKeepingNulls(list) = self {
+            list.push(value.unwrap_or(Value::Null));
+            return;
+        }
         if matches!(value, Some(Value::Null)) {
             return;
         }
@@ -672,6 +685,8 @@ impl AggregateState {
                     list.push(v);
                 }
             }
+            // Pushed before the nulls are skipped (above).
+            AggregateState::CollectKeepingNulls(_) => {}
             AggregateState::CollectDistinct(list, seen) => {
                 if let Some(v) = value {
                     let hashable = HashableValue::under(&v, temporal);
@@ -977,9 +992,9 @@ impl AggregateState {
             }
             AggregateState::First(first) => first.clone().unwrap_or(Value::Null),
             AggregateState::Last(last) => last.clone().unwrap_or(Value::Null),
-            AggregateState::Collect(list) | AggregateState::CollectDistinct(list, _) => {
-                Value::List(list.clone().into())
-            }
+            AggregateState::Collect(list)
+            | AggregateState::CollectKeepingNulls(list)
+            | AggregateState::CollectDistinct(list, _) => Value::List(list.clone().into()),
             // Sample standard deviation: sqrt(M2 / (n - 1))
             AggregateState::StdDev { count, m2, .. } => {
                 if *count < 2 {
@@ -1377,8 +1392,11 @@ impl HashAggregateOperator {
                                 states[i].update_under(value, agg.temporal);
                             }
                         }
+                        // A `collect` that keeps nulls reads them too.
                         _ => {
-                            if value.is_some() && !matches!(value, Some(Value::Null)) {
+                            if agg.keep_nulls
+                                || (value.is_some() && !matches!(value, Some(Value::Null)))
+                            {
                                 states[i].update_under(value, agg.temporal);
                             }
                         }
@@ -1446,6 +1464,10 @@ impl Operator for HashAggregateOperator {
                 }
             }
 
+            grafeo_common::work::count(
+                grafeo_common::work::Work::ColumnCopied,
+                (self.group_columns.len() + self.aggregates.len()) as u64,
+            );
             builder.advance_row();
 
             if builder.is_full() {
@@ -1504,6 +1526,39 @@ pub struct SimpleAggregateOperator {
     growing: GrowingStates,
 }
 
+/// Adds one row to the states of an aggregate without grouping, each
+/// aggregate's value read from the row's column `value_at` gives: a
+/// `count(*)` reads none, a null or missing value is skipped, and the binary
+/// set functions read two. [`SimpleAggregateOperator`] and the range fold
+/// ([`RangeFoldOperator`](super::RangeFoldOperator)) both add their rows here,
+/// so they reach the same states.
+pub(crate) fn update_row(
+    aggregates: &[AggregateExpr],
+    states: &mut [AggregateState],
+    mut value_at: impl FnMut(usize) -> Option<Value>,
+) {
+    for (state, agg) in states.iter_mut().zip(aggregates) {
+        // Binary set functions: read two column values
+        if agg.column2.is_some() {
+            let y_val = agg.column.and_then(&mut value_at);
+            let x_val = agg.column2.and_then(&mut value_at);
+            state.update_bivariate(y_val, x_val);
+            continue;
+        }
+        // COUNT(*) without DISTINCT needs no value; every other aggregate
+        // skips a null or missing one, but a `collect` that keeps nulls reads
+        // them too.
+        if let (AggregateFunction::Count, false) = (agg.function, agg.distinct) {
+            state.update_under(None, agg.temporal);
+            continue;
+        }
+        let value = agg.column.and_then(&mut value_at);
+        if agg.keep_nulls || (value.is_some() && !matches!(value, Some(Value::Null))) {
+            state.update_under(value, agg.temporal);
+        }
+    }
+}
+
 impl SimpleAggregateOperator {
     /// Creates a new simple aggregate operator.
     pub fn new(
@@ -1546,53 +1601,9 @@ impl Operator for SimpleAggregateOperator {
         while let Some(chunk) = self.child.next()? {
             crate::execution::deadline::check()?;
             for row in chunk.selected_indices() {
-                for (i, agg) in self.aggregates.iter().enumerate() {
-                    // Binary set functions: read two column values
-                    if agg.column2.is_some() {
-                        let y_val = agg
-                            .column
-                            .and_then(|col| chunk.column(col).and_then(|c| c.get_value(row)));
-                        let x_val = agg
-                            .column2
-                            .and_then(|col| chunk.column(col).and_then(|c| c.get_value(row)));
-                        self.states[i].update_bivariate(y_val, x_val);
-                        continue;
-                    }
-
-                    let value = match (agg.function, agg.distinct) {
-                        // COUNT(*) without DISTINCT doesn't need a value
-                        (AggregateFunction::Count, false) => None,
-                        // COUNT DISTINCT needs the actual value to track unique values
-                        (AggregateFunction::Count, true) => agg
-                            .column
-                            .and_then(|col| chunk.column(col).and_then(|c| c.get_value(row))),
-                        _ => agg
-                            .column
-                            .and_then(|col| chunk.column(col).and_then(|c| c.get_value(row))),
-                    };
-
-                    match (agg.function, agg.distinct) {
-                        (AggregateFunction::Count, false) => {
-                            self.states[i].update_under(None, agg.temporal);
-                        }
-                        (AggregateFunction::Count, true) => {
-                            // COUNT DISTINCT needs the value to track unique values
-                            if value.is_some() && !matches!(value, Some(Value::Null)) {
-                                self.states[i].update_under(value, agg.temporal);
-                            }
-                        }
-                        (AggregateFunction::CountNonNull, _) => {
-                            if value.is_some() && !matches!(value, Some(Value::Null)) {
-                                self.states[i].update_under(value, agg.temporal);
-                            }
-                        }
-                        _ => {
-                            if value.is_some() && !matches!(value, Some(Value::Null)) {
-                                self.states[i].update_under(value, agg.temporal);
-                            }
-                        }
-                    }
-                }
+                update_row(&self.aggregates, &mut self.states, |col| {
+                    chunk.column(col).and_then(|c| c.get_value(row))
+                });
             }
             // Its growing states, against the statement's memory: a chunk at
             // a time, a compare within the grant.
@@ -2085,6 +2096,23 @@ mod tests {
         assert!((stdev - 2.0).abs() < 0.01);
     }
 
+    /// A `collect` keeps a null operand as an item only when its expression
+    /// says so (a pattern comprehension's); a plain `collect` skips it.
+    #[test]
+    fn collect_keeps_nulls_only_when_asked() {
+        let mut keeping = AggregateExpr::collect(0);
+        keeping.keep_nulls = true;
+        for (expr, expected) in [
+            (AggregateExpr::collect(0), vec![Value::Int64(1)]),
+            (keeping, vec![Value::Int64(1), Value::Null]),
+        ] {
+            let mut state = AggregateState::for_expr(&expr);
+            state.update(Some(Value::Int64(1)));
+            state.update(Some(Value::Null));
+            assert_eq!(state.finalize().unwrap(), Value::List(expected.into()));
+        }
+    }
+
     #[test]
     fn test_percentile_disc() {
         let mock = MockOperator::new(vec![create_statistical_test_chunk()]);
@@ -2274,6 +2302,7 @@ mod tests {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         };
@@ -2298,6 +2327,7 @@ mod tests {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         };
@@ -2447,6 +2477,7 @@ mod tests {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         };
@@ -2475,6 +2506,7 @@ mod tests {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         };
@@ -2507,6 +2539,7 @@ mod tests {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         };

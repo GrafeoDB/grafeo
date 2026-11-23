@@ -25,10 +25,10 @@
 //! legal, not just which is faster. Each rewrite lives in the submodule
 //! that owns the corresponding logical operator.
 //!
-//! 1. **Factorized counts** (`aggregate::plan_factorized_aggregate`): a bare
+//! 1. **Factorized counts** (`aggregate::factorized_over`): a bare
 //!    `COUNT` over two or more consecutive `Expand`s counts the paths level
 //!    by level, without flattening them, unless the degree count
-//!    (`aggregate::plan_edge_count`) counts the last hop's edges of each row
+//!    (`aggregate::edge_count_over`) counts the last hop's edges of each row
 //!    from the adjacency, which is faster. Any other chain of expands streams
 //!    hop by hop, which stops early under a LIMIT and holds one chunk (a
 //!    flattened factorized chain built the whole product first). Disabled
@@ -93,7 +93,7 @@
 //! at every hop. See [`crate::transaction`] for the epoch/visibility rules.
 
 pub(crate) mod after_write;
-mod aggregate;
+pub(crate) mod aggregate;
 mod expand;
 mod expression;
 pub(crate) mod filter;
@@ -103,6 +103,8 @@ mod load;
 mod mutation;
 mod project;
 pub(crate) mod reachability;
+#[cfg(prepared_plans)]
+pub(crate) mod recipe;
 pub(crate) mod scan;
 pub(crate) mod seek;
 pub(crate) mod subquery;
@@ -155,14 +157,6 @@ use crate::query::planner::{
 };
 use crate::transaction::TransactionManager;
 
-/// Range bounds for property-based range queries.
-struct RangeBounds<'a> {
-    min: Option<&'a Value>,
-    max: Option<&'a Value>,
-    min_inclusive: bool,
-    max_inclusive: bool,
-}
-
 /// How the planned query's rows reach the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Delivery {
@@ -197,9 +191,9 @@ impl ColumnKinds {
 pub(super) enum StoreKind {
     /// The built-in store, with its vector and text indexes.
     BuiltIn,
-    /// A store of its own (`with_store`), which has none of the built-in
-    /// store's indexes: a text search is then the unsupported error rather
-    /// than a missing index.
+    /// A store of its own (`with_read_store` or `with_store`), which keeps
+    /// only the indexes it reports: a text search without one is then the
+    /// unsupported error, with no CREATE INDEX hint.
     External,
 }
 
@@ -222,8 +216,12 @@ pub struct Planner {
     pub(super) plan_names: std::cell::RefCell<std::collections::HashSet<String>>,
     /// Edge conditions a filter hands to the variable-length expand that
     /// binds their path, to check during its search (see
-    /// `try_plan_filter_into_variable_length_expand`).
+    /// `plan_filter_into_variable_length_expand`).
     pub(super) pending_edge_conditions: std::cell::RefCell<Vec<expand::PendingEdgeCondition>>,
+    /// The routes `plan_filter` builds and the builds that decline, in the order they run (see
+    /// [`FilterRoute::name`](filter::FilterRoute::name)), for a test to pin.
+    #[cfg(test)]
+    pub(crate) filter_routes_taken: std::cell::RefCell<Vec<String>>,
     /// Counter for the column names of subqueries planned per row.
     pub(super) subquery_counter: std::cell::Cell<u32>,
     /// Whether to use factorized execution for multi-hop queries.
@@ -332,6 +330,9 @@ pub struct Planner {
     /// one input row, or a shortest-path search for one (see
     /// [`Self::with_path_search_budget`]).
     path_search_budget: usize,
+    /// The path expansions the statement's path searches may still make,
+    /// shared by all of them (see [`Self::with_path_expansion_limit`]).
+    path_expansions: Arc<grafeo_core::execution::operators::PathExpansions>,
     /// The session's part of the planning of the statement being planned,
     /// so the body of a stored procedure it calls is planned as the same
     /// statement run directly (see `plan_user_procedure`); `None` for a
@@ -355,6 +356,8 @@ impl Planner {
             anon_edge_counter: std::cell::Cell::new(0),
             plan_names: std::cell::RefCell::new(std::collections::HashSet::new()),
             pending_edge_conditions: std::cell::RefCell::new(Vec::new()),
+            #[cfg(test)]
+            filter_routes_taken: std::cell::RefCell::new(Vec::new()),
             subquery_counter: std::cell::Cell::new(0),
             factorized_execution: true,
             rules: crate::query::optimizer::PlannerRules::all(),
@@ -387,6 +390,7 @@ impl Planner {
             limit_hint: std::cell::Cell::new(None),
             reachability_expands: std::cell::RefCell::new(Some(Vec::new())),
             path_search_budget: grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,
+            path_expansions: Arc::default(),
             #[cfg(stored_procedures)]
             session_planning: None,
         }
@@ -422,6 +426,8 @@ impl Planner {
             anon_edge_counter: std::cell::Cell::new(0),
             plan_names: std::cell::RefCell::new(std::collections::HashSet::new()),
             pending_edge_conditions: std::cell::RefCell::new(Vec::new()),
+            #[cfg(test)]
+            filter_routes_taken: std::cell::RefCell::new(Vec::new()),
             subquery_counter: std::cell::Cell::new(0),
             factorized_execution: true,
             rules: crate::query::optimizer::PlannerRules::all(),
@@ -454,6 +460,7 @@ impl Planner {
             limit_hint: std::cell::Cell::new(None),
             reachability_expands: std::cell::RefCell::new(Some(Vec::new())),
             path_search_budget: grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,
+            path_expansions: Arc::default(),
             #[cfg(stored_procedures)]
             session_planning: None,
         }
@@ -477,6 +484,40 @@ impl Planner {
     pub fn with_path_search_budget(mut self, bytes: usize) -> Self {
         self.path_search_budget = bytes;
         self
+    }
+
+    /// Sets the path expansions the statement's variable-length and
+    /// shortest-path searches may make together: each edge they read to
+    /// extend a path, and each node and edge id they copy out of a path into
+    /// a row. A search past it fails with `GRAFEO-Q009`. The default is
+    /// [`DEFAULT_PATH_EXPANSION_LIMIT`](grafeo_core::execution::operators::DEFAULT_PATH_EXPANSION_LIMIT).
+    #[must_use]
+    pub fn with_path_expansion_limit(mut self, expansions: u64) -> Self {
+        let limited = grafeo_core::execution::operators::PathExpansions::new(expansions);
+        // The planner's own count, not shared yet while it is built: set in place
+        match Arc::get_mut(&mut self.path_expansions) {
+            Some(count) => *count = limited,
+            None => self.path_expansions = Arc::new(limited),
+        }
+        self
+    }
+
+    /// Takes the expansions from `expansions` instead of a count of its own,
+    /// so the path searches of a stored procedure's body count for the
+    /// statement that calls it.
+    #[must_use]
+    pub fn with_path_expansions(
+        mut self,
+        expansions: Arc<grafeo_core::execution::operators::PathExpansions>,
+    ) -> Self {
+        self.path_expansions = expansions;
+        self
+    }
+
+    /// The path expansions the statement's path searches may still make.
+    #[must_use]
+    pub fn path_expansions(&self) -> Arc<grafeo_core::execution::operators::PathExpansions> {
+        Arc::clone(&self.path_expansions)
     }
 
     /// Returns the writable store, or `TransactionError::ReadOnly` if unavailable.
@@ -684,7 +725,7 @@ impl Planner {
 
     /// Checks, in a debug build, that a session's plan runs inside its
     /// statement's memory scope (see [`Self::in_session`]).
-    fn check_statement_scope(&self) {
+    pub(super) fn check_statement_scope(&self) {
         #[cfg(any(lpg_language, rdf_language))]
         debug_assert!(
             self.planned_for == super::PlannedFor::Standalone
@@ -705,7 +746,7 @@ impl Planner {
 
     /// The root operator, behind a shuffle when the option is on and the
     /// plan does not order its rows.
-    fn shuffled_root(
+    pub(super) fn shuffled_root(
         &self,
         logical_plan: &LogicalPlan,
         operator: Box<dyn Operator>,
@@ -948,6 +989,7 @@ impl Planner {
     /// or invalid expressions.
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
         let _span = grafeo_debug_span!("grafeo::query::plan");
+        grafeo_common::work::count(grafeo_common::work::Work::PlanBuilt, 1);
         self.check_statement_scope();
         self.take_plan_names(logical_plan);
         self.find_reachability_expands(&logical_plan.root);
@@ -973,6 +1015,7 @@ impl Planner {
         &self,
         logical_plan: &LogicalPlan,
     ) -> Result<(PhysicalPlan, Vec<crate::query::profile::ProfileEntry>)> {
+        grafeo_common::work::count(grafeo_common::work::Work::PlanBuilt, 1);
         self.profiling.set(true);
         self.profile_entries.borrow_mut().clear();
         self.check_statement_scope();
@@ -1094,7 +1137,7 @@ impl Planner {
             LogicalOperator::Project(project) => self.plan_project(project),
             LogicalOperator::Limit(limit) => self.plan_limit(limit),
             LogicalOperator::Skip(skip) => self.plan_skip(skip),
-            LogicalOperator::Sort(sort) => self.plan_sort(sort),
+            LogicalOperator::Sort(sort) => self.plan_sort(sort, None),
             LogicalOperator::Aggregate(agg) => self.plan_aggregate(agg),
             LogicalOperator::Join(join) => self.plan_join(join),
             LogicalOperator::Union(union) => self.plan_union(union),
@@ -1214,7 +1257,11 @@ impl Planner {
                 input_column_count,
                 self.read_view(),
             )
-            .with_aggregate_options(ha.distinct, ha.percentile, ha.separator.clone())
+            .with_aggregate_options(
+                ha.distinct,
+                self.constant_percentile(ha.function, ha.percentile.as_ref())?,
+                ha.separator.clone(),
+            )
             .with_temporal(self.session_context.temporal_comparison),
         );
 
@@ -2032,14 +2079,14 @@ mod tests {
     #[test]
     fn test_limit_pushdown_blocked_by_sort_in_between() {
         use grafeo_core::execution::operators::{
-            LimitOperator, ProjectOperator, RangeScanOperator, SortOperator,
+            LimitOperator, ProjectOperator, RangeScanOperator, TopKOperator,
         };
         let store = create_test_store();
         let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // LIMIT 5 over SORT BY n.name over WHERE n.age > 30 over Scan(n:Person)
-        // Sort needs full materialization; the LIMIT must NOT be pushed
-        // through it into the range scan.
+        // runs as one top-k of 5, which reads its whole input: the LIMIT must
+        // NOT be pushed through it into the range scan.
         let logical = LogicalPlan::new(LogicalOperator::Limit(LogicalLimitOp {
             count: 5.into(),
             input: Box::new(LogicalOperator::Sort(SortOp {
@@ -2073,28 +2120,23 @@ mod tests {
         let physical = planner.plan(&logical).unwrap();
         let root = physical.into_operator();
 
-        // Walk down: Limit → Sort → Project → RangeScan, asserting at each step.
-        let limit_op = root
+        // Walk down: TopK → Project → RangeScan, asserting at each step.
+        // The top-k also drops the sort-key column (`n_name`) it needed.
+        let top_k = root
             .into_any()
-            .downcast::<LimitOperator>()
-            .expect("top operator is LimitOperator");
-        let (after_limit, _cap) = limit_op.into_parts();
+            .downcast::<TopKOperator>()
+            .expect("LIMIT over ORDER BY runs as a top-k");
+        assert_eq!(top_k.output_width(), Some(1));
+        let (after_sort, _keys, limit) = top_k.into_parts();
+        assert_eq!(limit, 5);
 
-        // The Sort also drops the sort-key column (`n_name`) it needed.
-        let sort_op = after_limit
-            .into_any()
-            .downcast::<SortOperator>()
-            .expect("operator under Limit must be Sort (Sort blocks pushdown)");
-        assert_eq!(sort_op.output_width(), Some(1));
-        let (after_sort, _keys, _width) = sort_op.into_parts();
-
-        // Sort wraps its input in a Project that materializes the sort
-        // keys. The fold from Filter+NodeScan to RangeScan happens
+        // The top-k reads its input through a Project that materializes the
+        // sort keys. The fold from Filter+NodeScan to RangeScan happens
         // inside that Project.
         let project_op = after_sort
             .into_any()
             .downcast::<ProjectOperator>()
-            .expect("operator under Sort must be Project (Sort materializes sort keys)");
+            .expect("operator under the top-k must be Project (it materializes sort keys)");
         let (after_project, _projs, _types) = project_op.into_parts();
 
         let range_op = after_project
@@ -2102,14 +2144,14 @@ mod tests {
             .downcast::<RangeScanOperator>()
             .expect("operator under Project must be RangeScan (Filter folded into scan)");
 
-        // Core assertion of the test: with a Sort between the Limit and
-        // the range scan, LIMIT must NOT be pushed into the scan —
-        // doing so would let Sort observe a truncated input and lose
-        // the globally-smallest rows.
+        // Core assertion of the test: with a sort between the LIMIT and
+        // the range scan, LIMIT must NOT be pushed into the scan: doing so
+        // would let the top-k observe a truncated input and lose the
+        // globally-smallest rows.
         assert_eq!(
             range_op.limit(),
             None,
-            "Sort between Limit and RangeScan must block LIMIT pushdown"
+            "a sort between LIMIT and RangeScan must block LIMIT pushdown"
         );
 
         // Sanity: the planner cleared its scratch limit-hint after
@@ -2322,6 +2364,7 @@ mod tests {
                     alias: Some("cnt".to_string()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 }],
                 input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                     variable: "n".to_string(),
@@ -2355,6 +2398,7 @@ mod tests {
                 alias: Some("cnt".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "n".to_string(),
@@ -2387,6 +2431,7 @@ mod tests {
                 alias: Some("total".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "n".to_string(),
@@ -2419,6 +2464,7 @@ mod tests {
                 alias: Some("average".to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
                 variable: "n".to_string(),
@@ -2452,6 +2498,7 @@ mod tests {
                     alias: Some("youngest".to_string()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 },
                 LogicalAggregateExpr {
                     function: LogicalAggregateFunction::Max,
@@ -2464,6 +2511,7 @@ mod tests {
                     alias: Some("oldest".to_string()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 },
             ],
             input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
@@ -3609,6 +3657,7 @@ mod tests {
             edge_variable: Some("r".to_string()),
             quantified: true,
             edge_condition: None,
+            steps: Vec::new(),
         }));
         let physical = planner.plan(&logical).unwrap();
         // The length, the edge variable, then the path's nodes, edges and
@@ -3641,6 +3690,7 @@ mod tests {
             edge_variable: None,
             quantified: true,
             edge_condition: None,
+            steps: Vec::new(),
         }));
         let err = planner.plan(&logical).err().expect("plan should fail");
         assert!(format!("{err}").contains("Source variable"));

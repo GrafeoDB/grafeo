@@ -23,7 +23,7 @@ macro_rules! with_graph {
         }
         // SAFETY: Caller guarantees ptr from grafeo_graph and not yet freed.
         let graph = unsafe { &*$graph };
-        let db = graph.inner.read();
+        let db = or_fail!(graph.inner.read(), $err);
         let $handle = match db.graph_in(graph.schema.as_deref(), &graph.name) {
             Ok(handle) => handle,
             Err(e) => {
@@ -44,7 +44,7 @@ pub extern "C" fn grafeo_graph(db: *mut GrafeoDatabase, name: *const c_char) -> 
         return std::ptr::null_mut();
     };
     let schema = {
-        let guard = db.inner.read();
+        let guard = or_fail!(db.inner.read(), std::ptr::null_mut());
         let schema = guard.current_schema();
         if let Err(e) = guard.graph_in(schema.as_deref(), name) {
             set_error(&e);
@@ -53,7 +53,7 @@ pub extern "C" fn grafeo_graph(db: *mut GrafeoDatabase, name: *const c_char) -> 
         schema
     };
     Box::into_raw(Box::new(GrafeoGraph {
-        inner: std::sync::Arc::clone(&db.inner),
+        inner: or_fail!(db.inner.share(), std::ptr::null_mut()),
         schema,
         name: name.to_string(),
     }))

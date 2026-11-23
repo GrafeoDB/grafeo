@@ -14,9 +14,10 @@ import { afterAll, describe, it, expect, vi } from 'vitest'
 vi.setConfig({ testTimeout: 60_000 })
 import { readFileSync, readdirSync, statSync, existsSync } from 'fs'
 import { join, relative, resolve } from 'path'
-import { parseGtestFile, coerceParams } from '../node/parser.mjs'
-import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, describeError, assertGqlStatus, assertTerms } from '../node/comparator.mjs'
+import { parseGtestFile, coerceParams, paramValue } from '../node/parser.mjs'
+import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, describeError, assertGqlStatus, assertTerms , assertValueRows, assertSideEffects, observation} from '../node/comparator.mjs'
 import { SpecFailure, runMarkedSync, runProbe, specRoot, summary, summaryLine } from '../node/xfail.mjs'
+import { caseCellType, cellTypeAt, matches as matchCell, parse as parseCell, toNeutral } from '../node/tck_values.mjs'
 
 // ---------------------------------------------------------------------------
 // Import WASM bindings. A package that does not load fails the run: it must not
@@ -52,11 +53,16 @@ function wrapRawResult(rawResult) {
   const columns = [...rawResult.columns]
   const rows = rawResult.rows.map(row => [...row])
   const warnings = rawResult.warnings.map(w => ({ code: w.code, kind: w.kind, message: w.message }))
+  const cellTypes = structuredClone(rawResult.cellTypes ?? { columns: [], runs: [] })
 
   return {
     columns,
     warnings,
     length: rows.length,
+    /** The type the cell at `row`, `column` was built with (the result's `cellTypes`). */
+    cellType(row, column) {
+      return cellTypeAt(cellTypes, row, column)
+    },
     toArray() {
       const arr = []
       for (const row of rows) {
@@ -215,7 +221,7 @@ for (const filePath of gtestFiles) {
       if (tc.variants && Object.keys(tc.variants).length > 0) {
         for (const [lang, query] of Object.entries(tc.variants)) {
           it(`${tc.name}_${lang}`, (ctx) => {
-            if (tc.skip) {
+            if (tc.skip || tc.runnerGap?.runners.includes('wasm')) {
               summary.skipped++
               return ctx.skip()
             }
@@ -250,7 +256,8 @@ for (const filePath of gtestFiles) {
 
       it(tc.name, (ctx) => {
         // Skip by field
-        if (tc.skip) {
+        // A gap of this binding (`runner_gap:`) skips the case here, as `skip:` does
+        if (tc.skip || tc.runnerGap?.runners.includes('wasm')) {
           summary.skipped++
           return ctx.skip()
         }
@@ -295,10 +302,23 @@ for (const filePath of gtestFiles) {
   })
 }
 
+/** What the graph holds, as the openCypher TCK observes side effects. */
+function observeGraph(db) {
+  const values = (query) => {
+    const result = wrapRawResult(executeQueryRaw(db, 'gql', query))
+    return result.toArray().map((row, i) => [Object.values(row)[0], result.cellType(i, 0)])
+  }
+  return observation(values('MATCH (n) RETURN n'), values('MATCH ()-[r]->() RETURN r'))
+}
+
 /** Execute a single test case and assert the expected result. */
 function runTestCase(db, tc, language, setupLanguage) {
   runProbe(tc)
-  // Run setup queries in the file's declared language (not the variant language)
+  // GQL statements first (the TCK's test procedures), then the setup queries in the file's
+  // declared language (not the variant language)
+  for (const statement of tc.setupGql) {
+    executeQuery(db, 'gql', statement)
+  }
   for (const setupQ of tc.setup) {
     executeQuery(db, setupLanguage || language, setupQ)
   }
@@ -311,6 +331,9 @@ function runTestCase(db, tc, language, setupLanguage) {
 
   // Params apply to every statement of the test, as in the other runners
   const params = coerceParams(tc.params)
+
+  // The graph before the statements, when their side effects are checked
+  const before = exp.sideEffects ? observeGraph(db) : null
 
   // Error case: execute all-but-last normally, only last should fail
   if (exp.error != null || exp.gqlStatus != null) {
@@ -328,6 +351,7 @@ function runTestCase(db, tc, language, setupLanguage) {
     }
     if (exp.error != null) expect(failure.message || String(failure)).toContain(exp.error)
     if (exp.gqlStatus != null) assertGqlStatus(failure, exp.gqlStatus)
+    if (before) assertSideEffects(before, observeGraph(db), exp.sideEffects)
     return
   }
 
@@ -341,8 +365,18 @@ function runTestCase(db, tc, language, setupLanguage) {
   const result = wrapRawResult(rawResult)
   rawResult = null
 
+  if (before) assertSideEffects(before, observeGraph(db), exp.sideEffects)
+
   // The warnings, also when none are expected
   expect(result.warnings.map(w => w.code)).toEqual(exp.warnings)
+
+  // Typed rows in the TCK's value notation. WASM returns a temporal as plain text, so a TCK
+  // file's temporal cases carry a runner_gap for this runner and never get here.
+  if (exp.values != null) {
+    const values = result.toArray().map((row) => result.columns.map((column) => row[column]))
+    assertValueRows(result.columns, values, exp.values, exp.ordered, exp.unorderedLists, (r, c) => result.cellType(r, c))
+    return
+  }
 
   // Column assertion (checked before value assertions)
   if (exp.columns && exp.columns.length > 0) {
@@ -385,3 +419,84 @@ function runTestCase(db, tc, language, setupLanguage) {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// The shared value cases (tests/spec/runners/values_cases.json): this runner's
+// `values:` comparison, temporal round trips and parameter typing agree with
+// every other runner's, a gap of this binding giving the opposite verdict.
+// ---------------------------------------------------------------------------
+
+const CASE_FILE = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'values_cases.json'), 'utf-8'))
+
+/** A neutral value as the WASM binding returns it. */
+function nativeValue(db, actual) {
+  if (actual === null || typeof actual === 'boolean') return actual
+  if (Array.isArray(actual)) return actual.map((a) => nativeValue(db, a))
+  const [[kind, inner]] = Object.entries(actual)
+  const props = (p) => Object.fromEntries(Object.entries(p).map(([k, v]) => [k, nativeValue(db, v)]))
+  switch (kind) {
+    case 'int': { const n = BigInt(inner); return n >= -(2n ** 53n) && n <= 2n ** 53n ? Number(n) : n }
+    case 'float': return { NaN, Inf: Infinity, '-Inf': -Infinity }[inner] ?? Number(inner)
+    case 'string': return inner
+    case 'map': return props(inner)
+    case 'node': return { _id: inner.id, _labels: inner.labels, ...props(inner.properties) }
+    case 'relationship':
+      return { _id: inner.id, _type: inner.type, _source: inner.source, _target: inner.target, ...props(inner.properties) }
+    case 'path':
+      return {
+        nodes: inner.nodes.map((n) => nativeValue(db, { node: n })),
+        edges: inner.relationships.map((r) => nativeValue(db, { relationship: r })),
+        _type: 'path',
+      }
+    case 'cypher': return wrapRawResult(executeQueryRaw(db, 'cypher', `RETURN ${inner} AS v`)).toArray()[0].v
+    default: throw new Error(`unknown neutral kind ${kind}`)
+  }
+}
+
+/** The Cypher `toString()` of `value` passed back as a parameter. */
+function toStringOf(db, value) {
+  return wrapRawResult(executeQueryRaw(db, 'cypher', 'RETURN toString($v) AS s', { v: value })).toArray()[0].s
+}
+
+// A case builds its value, or reads a temporal back, through Cypher: the edge and rdf
+// builds have none, so there such a case is skipped like a gtest that requires cypher
+const HAS_CYPHER = (() => {
+  const db = new Database()
+  try { return isAvailable(db, 'cypher') } finally { release(db) }
+})()
+const needsCypher = (c) => c.dialect === 'tck' || JSON.stringify(c.actual).includes('"cypher"')
+
+describe('values_cases.json', () => {
+  for (const c of CASE_FILE.cases) {
+    it.skipIf(!HAS_CYPHER && needsCypher(c))(`${c.cell} vs ${JSON.stringify(c.actual)}`, async () => {
+      const db = new Database()
+      try {
+        const value = nativeValue(db, c.actual)
+        const ty = await caseCellType(c.actual, (text) =>
+          wrapRawResult(executeQueryRaw(db, 'cypher', `RETURN ${text} AS v`)).cellType(0, 0))
+        const verdict = matchCell(parseCell(c.cell), toNeutral(value, ty), { unorderedLists: !!c.unordered_lists })
+        // A gap of this binding gives the opposite verdict until fixed
+        const gap = 'wasm' in (c.runner_gaps ?? {})
+        expect(verdict).toBe(c.match !== gap)
+      } finally {
+        release(db)
+      }
+    })
+  }
+  for (const trip of CASE_FILE.round_trips) {
+    it.skipIf(!HAS_CYPHER)(`round trip ${trip.cypher}`, () => {
+      const db = new Database()
+      try {
+        const text = toStringOf(db, nativeValue(db, { cypher: trip.cypher }))
+        expect(text === trip.text).toBe(!('wasm' in trip.runner_gaps))
+      } finally {
+        release(db)
+      }
+    })
+  }
+  for (const p of CASE_FILE.params) {
+    it(`param ${p.param}`, () => {
+      expect(paramValue(p.param)).toEqual(p.value === null ? null : p.value.string)
+    })
+  }
+})

@@ -106,6 +106,21 @@ db.execute("RETURN 0.1 + 0.2 AS x");      // [{ x: { $decimal: '0.3' } }]
 db.executeWithParams("RETURN $p * 3 AS x", { p: { $decimal: '0.10' } });  // { $decimal: '0.30' }
 ```
 
+## Dates, Times and Durations
+
+A date, time, datetime or duration comes back as its ISO text
+(`'2024-01-15'`, `'12:31:14.645876123'`, `'P1Y2M10D'`), exact to the
+nanosecond and with its offset. Passed back as a parameter that text is a
+string. To pass the typed value, wrap the text in its tag:
+`{ $date: '...' }`, `{ $time: '...' }`, `{ $duration: '...' }`,
+`{ $zoned_datetime: '...' }`, or `{ $timestamp_us: n }` (microseconds since
+the Unix epoch). A JavaScript `Date` is a timestamp to the millisecond.
+
+```javascript
+const [{ d }] = db.execute("RETURN duration('P1Y2M10D') AS d");    // 'P1Y2M10D'
+db.executeWithParams("RETURN $d IS TYPED DURATION AS t", { d: { $duration: d } });  // [{ t: true }]
+```
+
 ## RDF Terms
 
 A SPARQL result holds each IRI, blank node and literal as an RDF/JS term

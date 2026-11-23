@@ -92,12 +92,14 @@ export type RdfTerm = NamedNode | BlankNode | Literal
 
 /**
  * A value in a result row: `null`, a boolean, a number (a `bigint` past
- * 2^53), a string, a `Date` (a timestamp), a `Buffer` (bytes), a
- * `Float32Array` (a vector), an RDF term, a list or an object (a map, or a
- * tagged value: `{ $decimal: '1.50' }`, `{ $date: '2024-01-15' }`,
- * `{ $time: '12:30:00+02:00' }`, `{ $duration: 'P1DT2H' }` or
- * `{ $zoned_datetime: '2024-01-15T12:30:00+02:00' }`, which a parameter takes
- * back as the same type).
+ * 2^53), a string, a `Date` (a timestamp in whole milliseconds), a `Buffer`
+ * (bytes), a `Float32Array` (a vector), an RDF term, a list or an object (a
+ * map, or a tagged value: `{ $decimal: '1.50' }`, `{ $date: '2024-01-15' }`,
+ * `{ $time: '12:30:00+02:00' }`, `{ $duration: 'P1DT2H' }`,
+ * `{ $zoned_datetime: '2024-01-15T12:30:00+02:00' }` or
+ * `{ $timestamp_us: 1705321800000001 }` (a timestamp with microseconds, which
+ * a `Date` cannot hold; a `bigint` before 1685 and after 2255), which a
+ * parameter takes back as the same type).
  */
 export type GrafeoValue =
   | null
@@ -494,9 +496,17 @@ export declare class GrafeoDB {
    * the checkpoint fails, or after `close()`.
    */
   compact(): any
-  /** Enable CDC for all future sessions. */
+  /**
+   * Enable CDC for all future sessions, and store the setting with the
+   * database: a reopen has it on. An in-memory database keeps it while it
+   * is open. Throws when the setting cannot be stored (a read-only open,
+   * a failed checkpoint); it stays as it was.
+   */
   enableCdc(): void
-  /** Disable CDC for all future sessions. */
+  /**
+   * Disable CDC for all future sessions, and store the setting with the
+   * database: a reopen has it off. Throws as `enableCdc` does.
+   */
   disableCdc(): void
   /** Returns whether CDC is currently enabled for new sessions. */
   get isCdcEnabled(): boolean
@@ -682,6 +692,18 @@ export declare class JsNode {
 export declare class QueryResult {
   /** Get column names. */
   get columns(): Array<string>
+  /**
+   * The type the value in `row` and `column` was built with: `"node"`,
+   * `"edge"` or `"path"`; `{list: t}`, `{tuple: [t, ...]}`,
+   * `{struct: {key: t}}` or `{map: t}` for what an array or an object
+   * holds; `"any"`; or the name of another type (`"int64"`). An object is
+   * a node or an edge exactly where its type says so: `{_id: 1,
+   * _labels: []}` returned as a map is a map.
+   *
+   * Experimental, new in 0.6.4: it may change or be removed in any
+   * release.
+   */
+  cellType(row: number, column: number): any
   /**
    * The warnings the statement raised, ordered by code: a deprecated form
    * it wrote or ran, or a notice; empty when there were none.
@@ -972,14 +994,56 @@ export interface CreateOptions {
    */
   queryMemoryLimit?: number
   /**
-   * How many bytes one path search may hold: the paths a variable-length
-   * or shortest-path search keeps at once, or what an RDF property path
-   * search visits (the nodes an `ANY SHORTEST` or `shortestPath` search
-   * visits are not counted yet). By default a quarter of `memoryLimit`, at
+   * How many bytes the in-memory change log may hold: past it the oldest
+   * commits go. By default a sixteenth of `memoryLimit`, and never more
+   * than `memoryLimit`. For this open only.
+   */
+  cdcMemoryLimit?: number
+  /**
+   * How many bytes one path search may hold: everything a variable-length,
+   * shortest-path or RDF property path search holds at once (the nodes it
+   * visits, its queues and the paths it keeps), which counts against
+   * `queryMemoryLimit` too. By default a quarter of `memoryLimit`, at
    * most 256 MiB, and never more than `memoryLimit`. A search over it
    * throws `GRAFEO-S001`. For this open only.
    */
   pathSearchBudget?: number
+  /**
+   * How many path expansions one statement's variable-length and
+   * shortest-path searches may make together: each edge they read to extend
+   * a path, and each node and edge they copy out of a path into a row. 100
+   * million by default; a statement over it throws `GRAFEO-Q009`. For this
+   * open only.
+   */
+  pathExpansionLimit?: number
+  /**
+   * How many bytes a statement's text may have; the values passed as
+   * parameters do not count. 16 MiB by default; a longer statement throws
+   * `GRAFEO-Q002`. For this open only.
+   */
+  maxQueryLength?: number
+  /**
+   * How many bytes one name in a statement may have, as written between its
+   * delimiters (string literals and IRIs are not names). 16 KiB by default; a
+   * statement with a longer name throws `GRAFEO-Q002`. For this open only.
+   */
+  maxIdentifierLength?: number
+  /**
+   * How many bytes of replaced data an open transaction's snapshot may
+   * keep: what the commits since it began replaced that it can still read. By
+   * default a quarter of `memoryLimit`, at least 1 MiB; below 1 MiB the open
+   * throws. Past it the transaction's next call throws the retryable
+   * `GRAFEO-T012` and rolls it back. For this open only.
+   */
+  snapshotRetentionLimit?: number
+  /**
+   * How many bytes of replaced data the history window may keep: once the
+   * commits since its start replaced more, the start moves forward,
+   * whichever of time or bytes comes first, and a read before it is
+   * refused. No limit by default; zero throws at the open. Not stored with
+   * the database: pass it at every open.
+   */
+  historyRetentionLimit?: number
   /**
    * How many bytes may spill to disk (0: nothing spills), half the spill
    * volume's free space by default. An in-memory database spills
@@ -991,6 +1055,15 @@ export interface CreateOptions {
    * For this open only.
    */
   unlimitedSpill?: boolean
+  /**
+   * How many bytes of plans the database keeps for repeated statements,
+   * by a deep estimate of what each plan holds; 0 keeps none, so every
+   * statement plans. By default a sixty-fourth of `memoryLimit`, from
+   * 4 MiB to 64 MiB; never more than `memoryLimit`.
+   * `memoryUsage().caches.planCacheLimitBytes` reads it back. For this
+   * open only.
+   */
+  planCacheLimit?: number
 }
 
 /** Options for CSV import. */

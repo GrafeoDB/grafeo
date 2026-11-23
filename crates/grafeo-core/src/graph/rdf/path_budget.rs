@@ -1,282 +1,16 @@
-//! Query-local accounting and deadline checks for native RDF paths.
+//! The retained bytes of RDF terms, which the path searches charge; the budget
+//! itself is [`PathBudget`](crate::execution::path_budget::PathBudget), shared
+//! by every path search.
 
-use std::collections::VecDeque;
-use std::hash::Hash;
-use std::mem::{align_of, size_of};
+use std::mem::size_of;
 use std::time::Duration;
 
 use grafeo_common::clock::Instant;
-use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use parking_lot::{RecursiveRwLock, RecursiveRwLockReadGuard, RwLock, RwLockReadGuard};
 
-use crate::execution::deadline::Ticker;
 use crate::execution::operators::OperatorError;
 
-/// Local only: charging never calls an allocator manager or evicts a store.
-///
-/// A deadline is read two ways, through a [`Ticker`]. A wait or a retry (a lock wait, an
-/// overlay's poll) reads the clock every time ([`check`](Self::check)). Small work (a visited
-/// state, a scanned candidate, an origin, a row, a charge) counts a unit and reads it on the first
-/// and every [`CLOCK_EVERY`](crate::execution::deadline::CLOCK_EVERY)th ([`tick`](Self::tick)),
-/// so a search that emits nothing still meets its deadline.
-pub(crate) struct PathBudget {
-    limit: usize,
-    used: usize,
-    ticker: Ticker,
-}
-
-impl PathBudget {
-    pub(crate) fn new(limit: usize, deadline: Option<Instant>) -> Self {
-        Self {
-            limit,
-            used: 0,
-            ticker: Ticker::with_deadline(deadline),
-        }
-    }
-
-    /// Reads the clock: for a wait or a retry, which may take any time.
-    pub(crate) fn check(&mut self) -> Result<(), OperatorError> {
-        self.ticker.check()
-    }
-
-    /// Counts a unit of small work and reads the clock on the first and every
-    /// [`CLOCK_EVERY`](crate::execution::deadline::CLOCK_EVERY)th.
-    pub(crate) fn tick(&mut self) -> Result<(), OperatorError> {
-        self.ticker.tick()
-    }
-
-    /// The refusal of `requested` more bytes over what the path holds: the LPG path
-    /// searches' (#492), `GRAFEO-S001` naming the budget and its setting.
-    fn exceeded(&self, requested: usize) -> OperatorError {
-        crate::execution::operators::path_search_refused(
-            format!(
-                "An RDF property path would hold more than the {} of memory a path search may \
-                 use: bound the path's repetition, or start it from fewer terms",
-                crate::execution::operators::budget_text(self.limit)
-            ),
-            requested,
-            self.used,
-            self.limit,
-        )
-    }
-
-    pub(crate) fn charge(&mut self, bytes: usize) -> Result<(), OperatorError> {
-        self.tick()?;
-        let used = self
-            .used
-            .checked_add(bytes)
-            .ok_or_else(|| self.exceeded(bytes))?;
-        if used > self.limit {
-            return Err(self.exceeded(bytes));
-        }
-        self.used = used;
-        Ok(())
-    }
-
-    pub(crate) fn release(&mut self, bytes: usize) {
-        debug_assert!(bytes <= self.used, "RDF path charge released twice");
-        self.used = self.used.saturating_sub(bytes);
-    }
-
-    /// Wait in bounded intervals, including when the lock is contended.
-    pub(crate) fn lock_wait(&mut self) -> Result<Duration, OperatorError> {
-        self.check()?;
-        let interval = Duration::from_millis(10);
-        Ok(self.ticker.deadline().map_or(interval, |deadline| {
-            deadline
-                .saturating_duration_since(Instant::now())
-                .min(interval)
-        }))
-    }
-
-    /// Wait in bounded intervals, including when the lock is contended.
-    pub(crate) fn read<'a, T>(
-        &mut self,
-        lock: &'a RwLock<T>,
-    ) -> Result<RwLockReadGuard<'a, T>, OperatorError> {
-        loop {
-            let wait = self.lock_wait()?;
-            if let Some(guard) = lock.try_read_for(wait) {
-                self.check()?;
-                return Ok(guard);
-            }
-        }
-    }
-
-    /// The shared side of a dataset's apply guard, waited for in bounded
-    /// intervals as [`read`](Self::read) waits: a path search behind a long
-    /// commit meets its deadline. A free guard, the common case (no commit
-    /// applies), is taken at once, with no clock read: the search polls its
-    /// deadline at every node anyway.
-    pub(crate) fn read_guard<'a>(
-        &mut self,
-        guard: &'a RecursiveRwLock<()>,
-    ) -> Result<RecursiveRwLockReadGuard<'a, ()>, OperatorError> {
-        if let Some(held) = guard.try_read() {
-            return Ok(held);
-        }
-        loop {
-            let wait = self.lock_wait()?;
-            if let Some(held) = guard.try_read_for(wait) {
-                self.check()?;
-                return Ok(held);
-            }
-        }
-    }
-
-    fn growth(
-        &self,
-        len: usize,
-        capacity: usize,
-        additional: usize,
-    ) -> Result<usize, OperatorError> {
-        let needed = len
-            .checked_add(additional)
-            .ok_or_else(|| self.exceeded(usize::MAX))?;
-        let doubled = capacity
-            .checked_mul(2)
-            .ok_or_else(|| self.exceeded(usize::MAX))?;
-        Ok(needed.max(doubled).max(4))
-    }
-
-    // Hashbrown 0.17 keeps at least one/eighth of the buckets empty and
-    // pads its control array. Reserve a conservative layout before it can
-    // allocate, including the old table during a reallocation; afterwards
-    // keep only the actual allocation_size charge.
-    fn table_reservation<T>(&self, target: usize) -> Result<usize, OperatorError> {
-        let buckets = (target
-            .checked_mul(8)
-            .ok_or_else(|| self.exceeded(usize::MAX))?
-            / 7)
-        .checked_next_power_of_two()
-        .ok_or_else(|| self.exceeded(usize::MAX))?
-        .max(16);
-        buckets
-            .checked_mul(size_of::<T>())
-            .and_then(|data| data.checked_add(buckets))
-            .and_then(|data| data.checked_add(align_of::<T>().max(16) + 16))
-            .ok_or_else(|| self.exceeded(usize::MAX))
-    }
-
-    fn reconcile(
-        &mut self,
-        reserved: usize,
-        old: usize,
-        actual: usize,
-    ) -> Result<(), OperatorError> {
-        if actual > reserved {
-            return Err(self.exceeded(actual - reserved));
-        }
-        self.release(reserved - actual + old);
-        Ok(())
-    }
-
-    pub(crate) fn reserve_map<K: Eq + Hash, V>(
-        &mut self,
-        values: &mut FxHashMap<K, V>,
-        additional: usize,
-    ) -> Result<(), OperatorError> {
-        self.tick()?;
-        if additional <= values.capacity().saturating_sub(values.len()) {
-            return Ok(());
-        }
-        let target = self.growth(values.len(), values.capacity(), additional)?;
-        let reservation = self.table_reservation::<(K, V)>(target)?;
-        let old = values.allocation_size();
-        self.charge(reservation)?;
-        if values.try_reserve(target - values.len()).is_err() {
-            self.release(reservation);
-            return Err(self.exceeded(reservation));
-        }
-        self.reconcile(reservation, old, values.allocation_size())
-    }
-
-    pub(crate) fn reserve_set<T: Eq + Hash>(
-        &mut self,
-        values: &mut FxHashSet<T>,
-        additional: usize,
-    ) -> Result<(), OperatorError> {
-        self.tick()?;
-        if additional <= values.capacity().saturating_sub(values.len()) {
-            return Ok(());
-        }
-        let target = self.growth(values.len(), values.capacity(), additional)?;
-        let reservation = self.table_reservation::<T>(target)?;
-        let old = values.allocation_size();
-        self.charge(reservation)?;
-        if values.try_reserve(target - values.len()).is_err() {
-            self.release(reservation);
-            return Err(self.exceeded(reservation));
-        }
-        self.reconcile(reservation, old, values.allocation_size())
-    }
-
-    pub(crate) fn reserve_vec<T>(
-        &mut self,
-        values: &mut Vec<T>,
-        additional: usize,
-    ) -> Result<(), OperatorError> {
-        self.tick()?;
-        if additional <= values.capacity().saturating_sub(values.len()) {
-            return Ok(());
-        }
-        let target = self.growth(values.len(), values.capacity(), additional)?;
-        let reservation = target
-            .checked_add(16)
-            .and_then(|n| n.checked_mul(size_of::<T>()))
-            .ok_or_else(|| self.exceeded(usize::MAX))?;
-        let old = values.capacity().saturating_mul(size_of::<T>());
-        self.charge(reservation)?;
-        if values.try_reserve_exact(target - values.len()).is_err() {
-            self.release(reservation);
-            return Err(self.exceeded(reservation));
-        }
-        self.reconcile(
-            reservation,
-            old,
-            values.capacity().saturating_mul(size_of::<T>()),
-        )
-    }
-
-    pub(crate) fn reserve_queue<T>(
-        &mut self,
-        values: &mut VecDeque<T>,
-        additional: usize,
-    ) -> Result<(), OperatorError> {
-        self.tick()?;
-        if additional <= values.capacity().saturating_sub(values.len()) {
-            return Ok(());
-        }
-        let target = self.growth(values.len(), values.capacity(), additional)?;
-        let reservation = target
-            .checked_add(16)
-            .and_then(|n| n.checked_mul(size_of::<T>()))
-            .ok_or_else(|| self.exceeded(usize::MAX))?;
-        let old = values.capacity().saturating_mul(size_of::<T>());
-        self.charge(reservation)?;
-        if values.try_reserve_exact(target - values.len()).is_err() {
-            self.release(reservation);
-            return Err(self.exceeded(reservation));
-        }
-        self.reconcile(
-            reservation,
-            old,
-            values.capacity().saturating_mul(size_of::<T>()),
-        )
-    }
-
-    /// Lets the deadline pass after `polls` reads of the clock (see
-    /// [`Ticker::expire_after_polls`]).
-    #[cfg(test)]
-    pub(crate) fn expire_after_polls(&mut self, polls: u32) {
-        self.ticker.expire_after_polls(polls);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn used(&self) -> usize {
-        self.used
-    }
-}
+pub(crate) use crate::execution::path_budget::PathBudget;
 
 /// Counts retained Arc payloads conservatively, including their headers.
 ///
@@ -298,18 +32,59 @@ pub(crate) fn term_payload(
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rejected_growth_does_not_allocate_or_charge_a_hash_table() {
-        let mut budget = PathBudget::new(0, None);
-        let mut values = grafeo_common::utils::hash::FxHashSet::<usize>::default();
-        assert!(budget.reserve_set(&mut values, 1).is_err_and(|error| {
-            crate::execution::operators::path_budget_message(&error).is_some()
-        }));
-        assert_eq!(values.allocation_size(), 0);
-        assert_eq!(budget.used(), 0);
+/// The waits of the RDF path searches, which read under the dataset's locks.
+impl PathBudget {
+    /// Reads the clock: for a wait or a retry, which may take any time.
+    pub(crate) fn check(&mut self) -> Result<(), OperatorError> {
+        self.ticker.check()
+    }
+    /// Wait in bounded intervals, including when the lock is contended.
+    pub(crate) fn lock_wait(&mut self) -> Result<Duration, OperatorError> {
+        self.check()?;
+        let interval = Duration::from_millis(10);
+        Ok(self.ticker.deadline().map_or(interval, |deadline| {
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(interval)
+        }))
+    }
+    /// Wait in bounded intervals, including when the lock is contended.
+    pub(crate) fn read<'a, T>(
+        &mut self,
+        lock: &'a RwLock<T>,
+    ) -> Result<RwLockReadGuard<'a, T>, OperatorError> {
+        loop {
+            let wait = self.lock_wait()?;
+            if let Some(guard) = lock.try_read_for(wait) {
+                self.check()?;
+                return Ok(guard);
+            }
+        }
+    }
+    /// The shared side of a dataset's apply guard, waited for in bounded
+    /// intervals as [`read`](Self::read) waits: a path search behind a long
+    /// commit meets its deadline. A free guard, the common case (no commit
+    /// applies), is taken at once, with no clock read: the search polls its
+    /// deadline at every node anyway.
+    pub(crate) fn read_guard<'a>(
+        &mut self,
+        guard: &'a RecursiveRwLock<()>,
+    ) -> Result<RecursiveRwLockReadGuard<'a, ()>, OperatorError> {
+        if let Some(held) = guard.try_read() {
+            return Ok(held);
+        }
+        loop {
+            let wait = self.lock_wait()?;
+            if let Some(held) = guard.try_read_for(wait) {
+                self.check()?;
+                return Ok(held);
+            }
+        }
+    }
+    /// Lets the deadline pass after `polls` reads of the clock (see
+    /// [`Ticker::expire_after_polls`]).
+    #[cfg(test)]
+    pub(crate) fn expire_after_polls(&mut self, polls: u32) {
+        self.ticker.expire_after_polls(polls);
     }
 }

@@ -2,11 +2,7 @@
 //! statement run through it, its auto-commit statements, its transactions and its lazy results
 //! alike.
 
-use std::sync::Arc;
-
 use grafeo_engine::auth::{Identity, Role};
-use grafeo_engine::database::GrafeoDB;
-use parking_lot::RwLock;
 use pyo3::prelude::*;
 
 use crate::database::{PyTransaction, extract_isolation_level};
@@ -26,7 +22,7 @@ use crate::query::PyQueryResult;
 ///         session.execute("MATCH (p:Person) RETURN p.name")
 #[pyclass(name = "Session")]
 pub struct PySession {
-    db: Arc<RwLock<GrafeoDB>>,
+    db: crate::database::SharedDb,
     /// What the session may do: each transaction it begins gets the same.
     identity: Identity,
     /// The session's statements run here; `None` once closed.
@@ -35,7 +31,11 @@ pub struct PySession {
 
 impl PySession {
     /// A session on `db` with the given limits.
-    pub(crate) fn open(db: Arc<RwLock<GrafeoDB>>, read_only: bool, external_access: bool) -> Self {
+    pub(crate) fn open(
+        db: crate::database::SharedDb,
+        read_only: bool,
+        external_access: bool,
+    ) -> PyResult<Self> {
         // Explicit, so the arguments decide, not the role's default.
         let identity = if read_only {
             Identity::new("anonymous", [Role::ReadOnly])
@@ -43,12 +43,12 @@ impl PySession {
             Identity::anonymous()
         }
         .with_external_access(external_access);
-        let session = db.read().session_with_identity(identity.clone());
-        Self {
+        let session = db.read()?.session_with_identity(identity.clone());
+        Ok(Self {
             db,
             identity,
             session: parking_lot::Mutex::new(Some(session)),
-        }
+        })
     }
 
     fn closed() -> PyGrafeoError {
@@ -166,7 +166,7 @@ impl PySession {
             Some(session) => Ok(session.execute_streaming_owned(query)?),
             None => Err(Self::closed()),
         })?;
-        let mut stream = crate::stream::PyResultStream::new(Arc::clone(&self.db), stream);
+        let mut stream = crate::stream::PyResultStream::new(self.db.share()?, stream);
         stream.warn_new(py)?;
         Ok(stream)
     }
@@ -182,8 +182,8 @@ impl PySession {
             return Err(Self::closed().into());
         }
         let level = extract_isolation_level(isolation_level)?;
-        let session = self.db.read().session_with_identity(self.identity.clone());
-        PyTransaction::begin(Arc::clone(&self.db), session, level.as_deref())
+        let session = self.db.read()?.session_with_identity(self.identity.clone());
+        PyTransaction::begin(self.db.share()?, session, level.as_deref())
     }
 
     /// Closes the session: its statements raise from now on; the database and other sessions are

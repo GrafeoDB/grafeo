@@ -314,10 +314,10 @@ SELECT * FROM GRAPH_TABLE (
 
 - **[grafeo-server](https://github.com/GrafeoDB/grafeo-server)** - HTTP server with REST API and web UI
 - **[grafeo-web](https://github.com/GrafeoDB/grafeo-web)** - Browser-based Grafeo via WebAssembly
+- **[grafeo-memory](https://github.com/GrafeoDB/grafeo-memory)** - AI memory layer for LLM applications
+- **[grafeo-mcp](https://github.com/GrafeoDB/grafeo-mcp)** - Model Context Protocol server
 - **[grafeo-langchain](https://github.com/GrafeoDB/grafeo-langchain)** - LangChain integration
 - **[grafeo-llamaindex](https://github.com/GrafeoDB/grafeo-llamaindex)** - LlamaIndex integration
-- **[grafeo-mcp](https://github.com/GrafeoDB/grafeo-mcp)** - Model Context Protocol server
-- **[grafeo-memory](https://github.com/GrafeoDB/grafeo-memory)** - AI memory layer for LLM applications
 - **[graph-bench](https://github.com/GrafeoDB/graph-bench)** - Benchmark suite
 - **[anywidget-graph](https://github.com/GrafeoDB/anywidget-graph)** - Interactive graph visualization widget
 - **[anywidget-vector](https://github.com/GrafeoDB/anywidget-vector)** - Interactive vector visualization widget

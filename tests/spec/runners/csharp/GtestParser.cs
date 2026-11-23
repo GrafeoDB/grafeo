@@ -79,6 +79,7 @@ public static class GtestParser
             {
                 case "spec": xfail.Spec = Unquote(kv.Value.Value); break;
                 case "issue": xfail.Issue = Unquote(kv.Value.Value); break;
+                case "passes_in": xfail.PassesIn = KnownRunners(ParseYamlList(kv.Value.Value)); break;
                 default: throw new FormatException($"unknown xfail key at line {ctx.Idx + 1}: '{trimmed}'");
             }
             ctx.Idx++;
@@ -130,6 +131,11 @@ public static class GtestParser
                 case "dataset": meta.Dataset = value; break;
                 case "requires": meta.Requires = ParseYamlList(value); break;
                 case "tags": meta.Tags = ParseYamlList(value); break;
+                case "values_dialect":
+                    meta.ValuesDialect = Unquote(value);
+                    if (meta.ValuesDialect is not ("strict" or "tck"))
+                        throw new FormatException($"unknown values_dialect '{meta.ValuesDialect}' (known: strict, tck)");
+                    break;
             }
             ctx.Idx++;
         }
@@ -209,6 +215,10 @@ public static class GtestParser
                     tc.Dataset = Unquote(value); ctx.Idx++; break;
                 case "setup":
                     ctx.Idx++; tc.Setup = ParseStringList(ctx); break;
+                case "setup_gql":
+                    ctx.Idx++; tc.SetupGql = ParseStringList(ctx); break;
+                case "runner_gap":
+                    tc.RunnerGap = ParseRunnerGap(ctx); break;
                 case "statements":
                     ctx.Idx++; tc.Statements = ParseStringList(ctx); break;
                 case "tags":
@@ -283,13 +293,92 @@ public static class GtestParser
                     ctx.Idx++; expect.Rows = ParseRows(ctx); break;
                 case "terms":
                     ctx.Idx++; expect.Terms = ParseRows(ctx); break;
+                case "values":
+                    if (value != "|") throw new FormatException("`values:` is a block scalar (`|`)");
+                    expect.Values = ParseBlockScalar(ctx).Trim(); break;
+                case "unordered_lists":
+                    expect.UnorderedLists = value == "true"; ctx.Idx++; break;
+                case "side_effects":
+                    expect.SideEffects = ParseSideEffects(ctx, value); break;
                 default:
                     expect.UnknownKey ??= key;
                     ctx.Idx++; break;
             }
         }
 
+        var others = expect.Rows.Count > 0 || expect.Terms.Count > 0 || expect.Count != null || expect.Empty;
+        if (expect.Values != null && (others || expect.Error != null || expect.GqlStatus != null))
+            throw new FormatException("`values:` excludes `rows`, `terms`, `count`, `empty`, `error` and `gql_status`");
         return expect;
+    }
+
+    /// <summary>The runners a <c>runner_gap:</c> or <c>passes_in:</c> may name.</summary>
+    private static readonly HashSet<string> Runners = ["rust", "python", "node", "wasm", "go", "csharp", "dart"];
+
+    /// <summary>The keys of <c>side_effects:</c>, as the openCypher TCK names them.</summary>
+    private static readonly HashSet<string> SideEffectKeys =
+        ["+nodes", "-nodes", "+relationships", "-relationships", "+labels", "-labels", "+properties", "-properties"];
+
+    private static List<string> KnownRunners(List<string> runners)
+    {
+        foreach (var runner in runners)
+            if (!Runners.Contains(runner)) throw new FormatException($"unknown runner '{runner}'");
+        return runners;
+    }
+
+    /// <summary>The <c>key: value</c> lines indented under the key at the current line.</summary>
+    private static List<(string Key, string Value)> NestedPairs(ParseContext ctx)
+    {
+        static int Indent(string line) => line.Length - line.TrimStart().Length;
+        var own = Indent(ctx.Lines[ctx.Idx]);
+        ctx.Idx++;
+        var pairs = new List<(string Key, string Value)>();
+        while (!ctx.AtEnd)
+        {
+            var line = ctx.Lines[ctx.Idx];
+            var trimmed = line.Trim();
+            if (trimmed.Length == 0 || trimmed.StartsWith('#')) { ctx.Idx++; continue; }
+            if (Indent(line) <= own) break;
+            var kv = ParseKV(trimmed) ?? throw new FormatException($"not a key at line {ctx.Idx + 1}: '{trimmed}'");
+            pairs.Add(kv);
+            ctx.Idx++;
+        }
+        return pairs;
+    }
+
+    /// <summary>A <c>runner_gap:</c> at the current line: its runners, issue and reason, all required.</summary>
+    private static RunnerGap ParseRunnerGap(ParseContext ctx)
+    {
+        var gap = new RunnerGap();
+        foreach (var (key, value) in NestedPairs(ctx))
+        {
+            switch (key)
+            {
+                case "runners": gap.Runners = KnownRunners(ParseYamlList(value)); break;
+                case "issue": gap.Issue = Unquote(value); break;
+                case "reason": gap.Reason = Unquote(value); break;
+                default: throw new FormatException($"unknown runner_gap key '{key}'");
+            }
+        }
+        if (gap.Runners.Count == 0 || gap.Issue.Trim().Length == 0 || gap.Reason.Trim().Length == 0)
+            throw new FormatException("a runner_gap names its `runners:`, `issue:` and `reason:`");
+        return gap;
+    }
+
+    /// <summary>The counts of a <c>side_effects:</c> key whose value is <paramref name="value"/>:
+    /// <c>{}</c>, or one key per line below it.</summary>
+    private static Dictionary<string, int> ParseSideEffects(ParseContext ctx, string value)
+    {
+        if (value == "{}") { ctx.Idx++; return new Dictionary<string, int>(); }
+        if (value.Length > 0) throw new FormatException($"`side_effects:` is `{{}}` or one key per line, not '{value}'");
+        var counts = new Dictionary<string, int>();
+        foreach (var (key, count) in NestedPairs(ctx))
+        {
+            if (!SideEffectKeys.Contains(key) || !int.TryParse(count, out var n))
+                throw new FormatException($"bad side effect '{key}: {count}'");
+            counts[key] = n;
+        }
+        return counts;
     }
 
     private static List<List<string>> ParseRows(ParseContext ctx)

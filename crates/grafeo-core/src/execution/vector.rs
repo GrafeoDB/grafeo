@@ -364,7 +364,10 @@ impl ValueVector {
             VectorData::Bool(vec) => vec.get(index).map(|&v| Value::Bool(v)),
             VectorData::Int64(vec) => vec.get(index).map(|&v| Value::Int64(v)),
             VectorData::Float64(vec) => vec.get(index).map(|&v| Value::Float64(v)),
-            VectorData::String(vec) => vec.get(index).map(|v| Value::String(v.clone())),
+            VectorData::String(vec) => vec.get(index).map(|v| {
+                grafeo_common::work::count(grafeo_common::work::Work::StringClone, 1);
+                Value::String(v.clone())
+            }),
             // reason: entity IDs stored as i64, standard encoding
             VectorData::NodeId(vec) => vec.get(index).map(|&v| {
                 // reason: entity IDs are sequential counters, well within i64::MAX
@@ -380,7 +383,12 @@ impl ValueVector {
                 let val = Value::Int64(v.as_u64() as i64);
                 val
             }),
-            VectorData::Generic(vec) => vec.get(index).cloned(),
+            VectorData::Generic(vec) => vec.get(index).map(|value| {
+                if matches!(value, Value::String(_)) {
+                    grafeo_common::work::count(grafeo_common::work::Work::StringClone, 1);
+                }
+                value.clone()
+            }),
         }
     }
 

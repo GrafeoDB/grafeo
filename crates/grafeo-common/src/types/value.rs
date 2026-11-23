@@ -1198,6 +1198,7 @@ impl HashableValue {
     /// Creates a new hashable value from a value.
     #[must_use]
     pub fn new(value: Value) -> Self {
+        crate::work::count(crate::work::Work::ValueHash, 1);
         Self(value)
     }
 

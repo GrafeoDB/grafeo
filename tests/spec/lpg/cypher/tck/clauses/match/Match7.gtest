@@ -1,0 +1,619 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/match/Match7.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Match7"
+  title: "Match7 - Optional match"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Simple OPTIONAL MATCH on empty graph
+  - name: s1_simple_optional_match_on_empty_graph
+    query: |
+      OPTIONAL MATCH (n)
+      RETURN n
+    expect:
+      values: |
+        | n |
+        | null |
+      side_effects: {}
+
+  # [2] OPTIONAL MATCH with previously bound nodes
+  - name: s2_optional_match_with_previously_bound_nodes
+    setup:
+      - |
+        CREATE ()
+    query: |
+      MATCH (n)
+      OPTIONAL MATCH (n)-[:NOT_EXIST]->(x)
+      RETURN n, x
+    expect:
+      values: |
+        | n | x |
+        | () | null |
+      side_effects: {}
+
+  # [3] OPTIONAL MATCH and bound nodes
+  - name: s3_optional_match_and_bound_nodes
+    setup:
+      - |
+        CREATE (s:Single), (a:A {num: 42}),
+               (b:B {num: 46}), (c:C)
+        CREATE (s)-[:REL]->(a),
+               (s)-[:REL]->(b),
+               (a)-[:REL]->(c),
+               (b)-[:LOOP]->(b)
+    query: |
+      MATCH (a:A), (b:C)
+      OPTIONAL MATCH (x)-->(b)
+      RETURN x
+    expect:
+      values: |
+        | x |
+        | (:A {num: 42}) |
+      side_effects: {}
+
+  # [4] Optionally matching relationship with bound nodes in reverse direction
+  - name: s4_optionally_matching_relationship_with_bound_nodes_in_reverse_direction
+    setup:
+      - |
+        CREATE (:A)-[:T]->(:B)
+    query: |
+      MATCH (a1)-[r]->()
+      WITH r, a1
+        LIMIT 1
+      OPTIONAL MATCH (a1)<-[r]-(b2)
+      RETURN a1, r, b2
+    expect:
+      values: |
+        | a1 | r | b2 |
+        | (:A) | [:T] | null |
+      side_effects: {}
+
+  # [5] Optionally matching relationship with a relationship that is already bound
+  - name: s5_optionally_matching_relationship_with_a_relationship_that_is_already_bound
+    setup:
+      - |
+        CREATE (:A)-[:T]->(:B)
+    query: |
+      MATCH ()-[r]->()
+      WITH r
+        LIMIT 1
+      OPTIONAL MATCH (a2)-[r]->(b2)
+      RETURN a2, r, b2
+    expect:
+      values: |
+        | a2 | r | b2 |
+        | (:A) | [:T] | (:B) |
+      side_effects: {}
+
+  # [6] Optionally matching relationship with a relationship and node that are both already bound
+  - name: s6_optionally_matching_relationship_with_a_relationship_and_node_that_are_both_already_bound
+    setup:
+      - |
+        CREATE (:A)-[:T]->(:B)
+    query: |
+      MATCH (a1)-[r]->()
+      WITH r, a1
+        LIMIT 1
+      OPTIONAL MATCH (a1)-[r]->(b2)
+      RETURN a1, r, b2
+    expect:
+      values: |
+        | a1 | r | b2 |
+        | (:A) | [:T] | (:B) |
+      side_effects: {}
+
+  # [7] MATCH with OPTIONAL MATCH in longer pattern
+  - name: s7_match_with_optional_match_in_longer_pattern
+    setup:
+      - |
+        CREATE (a {name: 'A'}), (b {name: 'B'}), (c {name: 'C'})
+        CREATE (a)-[:KNOWS]->(b),
+               (b)-[:KNOWS]->(c)
+    query: |
+      MATCH (a {name: 'A'})
+      OPTIONAL MATCH (a)-[:KNOWS]->()-[:KNOWS]->(foo)
+      RETURN foo
+    expect:
+      values: |
+        | foo |
+        | ({name: 'C'}) |
+      side_effects: {}
+
+  # [8] Longer pattern with bound nodes without matches
+  - name: s8_longer_pattern_with_bound_nodes_without_matches
+    setup:
+      - |
+        CREATE (s:Single), (a:A {num: 42}),
+               (b:B {num: 46}), (c:C)
+        CREATE (s)-[:REL]->(a),
+               (s)-[:REL]->(b),
+               (a)-[:REL]->(c),
+               (b)-[:LOOP]->(b)
+    query: |
+      MATCH (a:A), (c:C)
+      OPTIONAL MATCH (a)-->(b)-->(c)
+      RETURN b
+    expect:
+      values: |
+        | b |
+        | null |
+      side_effects: {}
+
+  # [9] Longer pattern with bound nodes
+  - name: s9_longer_pattern_with_bound_nodes
+    setup:
+      - |
+        CREATE (s:Single), (a:A {num: 42}),
+               (b:B {num: 46}), (c:C)
+        CREATE (s)-[:REL]->(a),
+               (s)-[:REL]->(b),
+               (a)-[:REL]->(c),
+               (b)-[:LOOP]->(b)
+    query: |
+      MATCH (a:Single), (c:C)
+      OPTIONAL MATCH (a)-->(b)-->(c)
+      RETURN b
+    expect:
+      values: |
+        | b |
+        | (:A {num: 42}) |
+      side_effects: {}
+
+  # [10] Optionally matching from null nodes should return null
+  - name: s10_optionally_matching_from_null_nodes_should_return_null
+    query: |
+      OPTIONAL MATCH (a)
+      WITH a
+      OPTIONAL MATCH (a)-->(b)
+      RETURN b
+    expect:
+      values: |
+        | b |
+        | null |
+      side_effects: {}
+
+  # [11] Return two subgraphs with bound undirected relationship and optional relationship
+  - name: s11_return_two_subgraphs_with_bound_undirected_relationship_and_optional_relationship
+    setup:
+      - |
+        CREATE (a:A {num: 1})-[:REL {name: 'r1'}]->(b:B {num: 2})-[:REL {name: 'r2'}]->(c:C {num: 3})
+    query: |
+      MATCH (a)-[r {name: 'r1'}]-(b)
+      OPTIONAL MATCH (b)-[r2]-(c)
+      WHERE r <> r2
+      RETURN a, b, c
+    expect:
+      values: |
+        | a | b | c |
+        | (:A {num: 1}) | (:B {num: 2}) | (:C {num: 3}) |
+        | (:B {num: 2}) | (:A {num: 1}) | null |
+      side_effects: {}
+
+  # [12] Variable length optional relationships
+  - name: s12_variable_length_optional_relationships
+    setup:
+      - |
+        CREATE (s:Single), (a:A {num: 42}),
+               (b:B {num: 46}), (c:C)
+        CREATE (s)-[:REL]->(a),
+               (s)-[:REL]->(b),
+               (a)-[:REL]->(c),
+               (b)-[:LOOP]->(b)
+    query: |
+      MATCH (a:Single)
+      OPTIONAL MATCH (a)-[*]->(b)
+      RETURN b
+    expect:
+      values: |
+        | b |
+        | (:A {num: 42}) |
+        | (:B {num: 46}) |
+        | (:B {num: 46}) |
+        | (:C) |
+      side_effects: {}
+
+  # [13] Variable length optional relationships with bound nodes
+  - name: s13_variable_length_optional_relationships_with_bound_nodes
+    setup:
+      - |
+        CREATE (s:Single), (a:A {num: 42}),
+               (b:B {num: 46}), (c:C)
+        CREATE (s)-[:REL]->(a),
+               (s)-[:REL]->(b),
+               (a)-[:REL]->(c),
+               (b)-[:LOOP]->(b)
+    query: |
+      MATCH (a:Single), (x:C)
+      OPTIONAL MATCH (a)-[*]->(x)
+      RETURN x
+    expect:
+      values: |
+        | x |
+        | (:C) |
+      side_effects: {}
+
+  # [14] Variable length optional relationships with length predicates
+  - name: s14_variable_length_optional_relationships_with_length_predicates
+    setup:
+      - |
+        CREATE (s:Single), (a:A {num: 42}),
+               (b:B {num: 46}), (c:C)
+        CREATE (s)-[:REL]->(a),
+               (s)-[:REL]->(b),
+               (a)-[:REL]->(c),
+               (b)-[:LOOP]->(b)
+    query: |
+      MATCH (a:Single)
+      OPTIONAL MATCH (a)-[*3..]-(b)
+      RETURN b
+    expect:
+      values: |
+        | b |
+        | null |
+      side_effects: {}
+
+  # [15] Variable length patterns and nulls
+  - name: s15_variable_length_patterns_and_nulls
+    setup:
+      - |
+        CREATE (a:A), (b:B)
+    query: |
+      MATCH (a:A)
+      OPTIONAL MATCH (a)-[:FOO]->(b:B)
+      OPTIONAL MATCH (b)<-[:BAR*]-(c:B)
+      RETURN a, b, c
+    expect:
+      values: |
+        | a | b | c |
+        | (:A) | null | null |
+      side_effects: {}
+
+  # [16] Optionally matching named paths - null result
+  - name: s16_optionally_matching_named_paths_null_result
+    setup:
+      - |
+        CREATE (s:Single), (a:A {num: 42}),
+               (b:B {num: 46}), (c:C)
+        CREATE (s)-[:REL]->(a),
+               (s)-[:REL]->(b),
+               (a)-[:REL]->(c),
+               (b)-[:LOOP]->(b)
+    query: |
+      MATCH (a:A)
+      OPTIONAL MATCH p = (a)-[:X]->(b)
+      RETURN p
+    expect:
+      values: |
+        | p |
+        | null |
+      side_effects: {}
+
+  # [17] Optionally matching named paths - existing result
+  - name: s17_optionally_matching_named_paths_existing_result
+    setup:
+      - |
+        CREATE (a {name: 'A'}), (b {name: 'B'}), (c {name: 'C'})
+        CREATE (a)-[:X]->(b)
+    query: |
+      MATCH (a {name: 'A'}), (x)
+      WHERE x.name IN ['B', 'C']
+      OPTIONAL MATCH p = (a)-->(x)
+      RETURN x, p
+    expect:
+      values: |
+        | x | p |
+        | ({name: 'B'}) | <({name: 'A'})-[:X]->({name: 'B'})> |
+        | ({name: 'C'}) | null |
+      side_effects: {}
+
+  # [18] Named paths inside optional matches with node predicates
+  - name: s18_named_paths_inside_optional_matches_with_node_predicates
+    setup:
+      - |
+        CREATE (s:Single), (a:A {num: 42}),
+               (b:B {num: 46}), (c:C)
+        CREATE (s)-[:REL]->(a),
+               (s)-[:REL]->(b),
+               (a)-[:REL]->(c),
+               (b)-[:LOOP]->(b)
+    query: |
+      MATCH (a:A), (b:B)
+      OPTIONAL MATCH p = (a)-[:X]->(b)
+      RETURN p
+    expect:
+      values: |
+        | p |
+        | null |
+      side_effects: {}
+
+  # [19] Optionally matching named paths with single and variable length patterns
+  - name: s19_optionally_matching_named_paths_with_single_and_variable_length_patterns
+    setup:
+      - |
+        CREATE (a {name: 'A'}), (b {name: 'B'})
+        CREATE (a)-[:X]->(b)
+    query: |
+      MATCH (a {name: 'A'})
+      OPTIONAL MATCH p = (a)-->(b)-[*]->(c)
+      RETURN p
+    expect:
+      values: |
+        | p |
+        | null |
+      side_effects: {}
+
+  # [20] Variable length optional relationships with bound nodes, no matches
+  - name: s20_variable_length_optional_relationships_with_bound_nodes_no_matches
+    setup:
+      - |
+        CREATE (s:Single), (a:A {num: 42}),
+               (b:B {num: 46}), (c:C)
+        CREATE (s)-[:REL]->(a),
+               (s)-[:REL]->(b),
+               (a)-[:REL]->(c),
+               (b)-[:LOOP]->(b)
+    query: |
+      MATCH (a:A), (b:B)
+      OPTIONAL MATCH p = (a)-[*]->(b)
+      RETURN p
+    expect:
+      values: |
+        | p |
+        | null |
+      side_effects: {}
+
+  # [21] Handling optional matches between nulls
+  - name: s21_handling_optional_matches_between_nulls
+    setup:
+      - |
+        CREATE (s:Single), (a:A {num: 42}),
+               (b:B {num: 46}), (c:C)
+        CREATE (s)-[:REL]->(a),
+               (s)-[:REL]->(b),
+               (a)-[:REL]->(c),
+               (b)-[:LOOP]->(b)
+    query: |
+      OPTIONAL MATCH (a:NotThere)
+      OPTIONAL MATCH (b:NotThere)
+      WITH a, b
+      OPTIONAL MATCH (b)-[r:NOR_THIS]->(a)
+      RETURN a, b, r
+    expect:
+      values: |
+        | a | b | r |
+        | null | null | null |
+      side_effects: {}
+
+  # [22] MATCH after OPTIONAL MATCH
+  - name: s22_match_after_optional_match
+    setup:
+      - |
+        CREATE (s:Single), (a:A {num: 42}),
+               (b:B {num: 46}), (c:C)
+        CREATE (s)-[:REL]->(a),
+               (s)-[:REL]->(b),
+               (a)-[:REL]->(c),
+               (b)-[:LOOP]->(b)
+    query: |
+      MATCH (a:Single)
+      OPTIONAL MATCH (a)-->(b:NonExistent)
+      OPTIONAL MATCH (a)-->(c:NonExistent)
+      WITH coalesce(b, c) AS x
+      MATCH (x)-->(d)
+      RETURN d
+    expect:
+      values: |
+        | d |
+      side_effects: {}
+
+  # [23] OPTIONAL MATCH with labels on the optional end node
+  - name: s23_optional_match_with_labels_on_the_optional_end_node
+    setup:
+      - |
+        CREATE (:X), (x:X), (y1:Y), (y2:Y:Z)
+        CREATE (x)-[:REL]->(y1),
+               (x)-[:REL]->(y2)
+    query: |
+      MATCH (a:X)
+      OPTIONAL MATCH (a)-->(b:Y)
+      RETURN b
+    expect:
+      values: |
+        | b |
+        | null |
+        | (:Y) |
+        | (:Y:Z) |
+      side_effects: {}
+
+  # [24] Optionally matching self-loops
+  - name: s24_optionally_matching_self_loops
+    setup:
+      - |
+        CREATE (s:Single), (a:A {num: 42}),
+               (b:B {num: 46}), (c:C)
+        CREATE (s)-[:REL]->(a),
+               (s)-[:REL]->(b),
+               (a)-[:REL]->(c),
+               (b)-[:LOOP]->(b)
+    query: |
+      MATCH (a:B)
+      OPTIONAL MATCH (a)-[r]-(a)
+      RETURN r
+    expect:
+      values: |
+        | r |
+        | [:LOOP] |
+      side_effects: {}
+
+  # [25] Optionally matching self-loops without matches
+  - name: s25_optionally_matching_self_loops_without_matches
+    setup:
+      - |
+        CREATE (s:Single), (a:A {num: 42}),
+               (b:B {num: 46}), (c:C)
+        CREATE (s)-[:REL]->(a),
+               (s)-[:REL]->(b),
+               (a)-[:REL]->(c),
+               (b)-[:LOOP]->(b)
+    query: |
+      MATCH (a)
+      WHERE NOT (a:B)
+      OPTIONAL MATCH (a)-[r]->(a)
+      RETURN r
+    expect:
+      values: |
+        | r |
+        | null |
+        | null |
+        | null |
+      side_effects: {}
+
+  # [26] Handling correlated optional matches; first does not match implies second does not match
+  - name: s26_handling_correlated_optional_matches_first_does_not_match_implies_second_does_not_match
+    setup:
+      - |
+        CREATE (s:Single), (a:A {num: 42}),
+               (b:B {num: 46}), (c:C)
+        CREATE (s)-[:REL]->(a),
+               (s)-[:REL]->(b),
+               (a)-[:REL]->(c),
+               (b)-[:LOOP]->(b)
+    query: |
+      MATCH (a:A), (b:B)
+      OPTIONAL MATCH (a)-->(x)
+      OPTIONAL MATCH (x)-[r]->(b)
+      RETURN x, r
+    expect:
+      values: |
+        | x | r |
+        | (:C) | null |
+      side_effects: {}
+
+  # [27] Handling optional matches between optionally matched entities
+  - name: s27_handling_optional_matches_between_optionally_matched_entities
+    setup:
+      - |
+        CREATE (s:Single), (a:A {num: 42}),
+               (b:B {num: 46}), (c:C)
+        CREATE (s)-[:REL]->(a),
+               (s)-[:REL]->(b),
+               (a)-[:REL]->(c),
+               (b)-[:LOOP]->(b)
+    query: |
+      OPTIONAL MATCH (a:NotThere)
+      WITH a
+      MATCH (b:B)
+      WITH a, b
+      OPTIONAL MATCH (b)-[r:NOR_THIS]->(a)
+      RETURN a, b, r
+    expect:
+      values: |
+        | a | b | r |
+        | null | (:B {num: 46}) | null |
+      side_effects: {}
+
+  # [28] Handling optional matches with inline label predicate
+  - name: s28_handling_optional_matches_with_inline_label_predicate
+    setup:
+      - |
+        CREATE (s:Single), (a:A {num: 42}),
+               (b:B {num: 46}), (c:C)
+        CREATE (s)-[:REL]->(a),
+               (s)-[:REL]->(b),
+               (a)-[:REL]->(c),
+               (b)-[:LOOP]->(b)
+    query: |
+      MATCH (n:Single)
+      OPTIONAL MATCH (n)-[r]-(m:NonExistent)
+      RETURN r
+    expect:
+      values: |
+        | r |
+        | null |
+      side_effects: {}
+
+  # [29] Satisfies the open world assumption, relationships between same nodes
+  - name: s29_satisfies_the_open_world_assumption_relationships_between_same_nodes
+    setup:
+      - |
+        CREATE (a:Player), (b:Team)
+        CREATE (a)-[:PLAYS_FOR]->(b),
+               (a)-[:SUPPORTS]->(b)
+    query: |
+      MATCH (p:Player)-[:PLAYS_FOR]->(team:Team)
+      OPTIONAL MATCH (p)-[s:SUPPORTS]->(team)
+      RETURN count(*) AS matches, s IS NULL AS optMatch
+    expect:
+      values: |
+        | matches | optMatch |
+        | 1 | false |
+      side_effects: {}
+
+  # [30] Satisfies the open world assumption, single relationship
+  - name: s30_satisfies_the_open_world_assumption_single_relationship
+    setup:
+      - |
+        CREATE (a:Player), (b:Team)
+        CREATE (a)-[:PLAYS_FOR]->(b)
+    query: |
+      MATCH (p:Player)-[:PLAYS_FOR]->(team:Team)
+      OPTIONAL MATCH (p)-[s:SUPPORTS]->(team)
+      RETURN count(*) AS matches, s IS NULL AS optMatch
+    expect:
+      values: |
+        | matches | optMatch |
+        | 1 | true |
+      side_effects: {}
+
+  # [31] Satisfies the open world assumption, relationships between different nodes
+  - name: s31_satisfies_the_open_world_assumption_relationships_between_different_nodes
+    setup:
+      - |
+        CREATE (a:Player), (b:Team), (c:Team)
+        CREATE (a)-[:PLAYS_FOR]->(b),
+               (a)-[:SUPPORTS]->(c)
+    query: |
+      MATCH (p:Player)-[:PLAYS_FOR]->(team:Team)
+      OPTIONAL MATCH (p)-[s:SUPPORTS]->(team)
+      RETURN count(*) AS matches, s IS NULL AS optMatch
+    expect:
+      values: |
+        | matches | optMatch |
+        | 1 | true |
+      side_effects: {}

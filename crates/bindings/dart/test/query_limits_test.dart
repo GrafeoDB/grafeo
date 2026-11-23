@@ -1,6 +1,7 @@
-/// The path search budget through Dart (#492): `GrafeoOptions(pathSearchBudget: ...)`. Zero
-/// fails at the open; the budget binds, with its error code and the setting named in the
-/// message.
+/// The query resource limits through Dart (#492): `GrafeoOptions` with `pathSearchBudget`,
+/// `pathExpansionLimit`, `maxQueryLength` and `maxIdentifierLength`. Zero fails at the open;
+/// each setting binds, with its error code and the setting named in the message. The snapshot retention limit, `GrafeoOptions(snapshotRetentionLimit: ...)`: below
+/// 1 MiB fails at the open; past it an open transaction throws `GRAFEO-T012`.
 library;
 
 import 'package:grafeo/grafeo.dart';
@@ -31,16 +32,97 @@ void _refused(GrafeoDB db, String query, String code, String setting) {
 void main() {
   group('query limits (#492)', () {
     test('zero is refused at the open', () {
+      for (final options in [
+        GrafeoOptions(pathSearchBudget: 0),
+        GrafeoOptions(pathExpansionLimit: 0),
+        GrafeoOptions(maxQueryLength: 0),
+        GrafeoOptions(maxIdentifierLength: 0),
+      ]) {
+        expect(
+          () => GrafeoDB.openWithOptions(null, options),
+          throwsA(isA<GrafeoException>()),
+        );
+      }
+    });
+
+    test('each setting binds', () {
+      var db = _opened(GrafeoOptions(pathExpansionLimit: 4));
+      _refused(db, _paths, 'GRAFEO-Q009', 'path_expansion_limit');
+      db.close();
+
+      db = _opened(GrafeoOptions(pathExpansionLimit: 5));
+      expect(db.execute(_paths).rows, hasLength(5));
+      db.close();
+
+      db = _opened(GrafeoOptions(pathSearchBudget: 1));
+      _refused(db, _paths, 'GRAFEO-S001', 'path_search_budget');
+      db.close();
+
+      db = _opened(GrafeoOptions(maxQueryLength: 200));
+      expect(db.execute(_paths).rows, hasLength(5));
+      _refused(db, _paths + ' ' * 200, 'GRAFEO-Q002', 'max_query_length');
+      db.close();
+
+      db = _opened(GrafeoOptions(maxIdentifierLength: 8));
       expect(
-        () => GrafeoDB.openWithOptions(null, GrafeoOptions(pathSearchBudget: 0)),
-        throwsA(isA<GrafeoException>()),
+        db.execute('MATCH (abcdefgh:Star) RETURN abcdefgh.n').rows,
+        hasLength(1),
+      );
+      _refused(
+        db,
+        'MATCH (abcdefghi:Star) RETURN 1',
+        'GRAFEO-Q002',
+        'max_identifier_length',
+      );
+      db.close();
+    });
+  });
+
+  group('snapshot retention limit', () {
+    test('below 1 MiB is refused at the open', () {
+      expect(
+        () => GrafeoDB.openWithOptions(
+            null, GrafeoOptions(snapshotRetentionLimit: 512 * 1024)),
+        throwsA(isA<GrafeoException>()
+            .having((e) => e.message, 'message', contains('at least 1 MiB'))),
       );
     });
 
-    test('the path search budget binds', () {
-      final db = _opened(GrafeoOptions(pathSearchBudget: 1));
-      _refused(db, _paths, 'GRAFEO-S001', 'path_search_budget');
+    // Past the limit (20 commits replace 64 KiB each, over 1 MiB) the open
+    // transaction that read Alix throws GRAFEO-T012, and rolls back.
+    test('binds an open transaction', () {
+      final db = GrafeoDB.openWithOptions(
+          null, GrafeoOptions(snapshotRetentionLimit: 1 << 20));
+      db.execute("INSERT (:Person {name: 'Alix', bio: 'Amsterdam'})");
+      const readBio = "MATCH (p:Person {name: 'Alix'}) RETURN p.bio AS bio";
+      final tx = db.beginTransaction();
+      tx.execute(readBio);
+      final text = 'Vincent ' * (8 * 1024);
+      for (var round = 0; round < 20; round++) {
+        db.execute(
+            "MATCH (p:Person {name: 'Alix'}) SET p.bio = '$round$text'");
+      }
+      expect(
+        () => tx.execute(readBio),
+        throwsA(isA<GrafeoException>()
+            .having((e) => e.message, 'message', contains('GRAFEO-T012'))),
+      );
+      tx.rollback();
       db.close();
+    });
+  });
+
+  group('history retention limit', () {
+    test('zero fails the open, a limit opens', () {
+      expect(
+        () => GrafeoDB.openWithOptions(
+            null, GrafeoOptions(historyRetentionLimit: 0)),
+        throwsA(isA<GrafeoException>().having((e) => e.message, 'message',
+            contains('history_retention_limit'))),
+      );
+      GrafeoDB.openWithOptions(
+              null, GrafeoOptions(historyRetentionLimit: 1 << 20))
+          .close();
     });
   });
 }

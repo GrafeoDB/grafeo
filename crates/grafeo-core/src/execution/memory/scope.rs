@@ -14,8 +14,8 @@ thread_local! {
 /// Sets the memory of the statement this thread plans and converts until the
 /// returned scope drops, which restores the one before (also on a panic).
 /// Operators built while the scope lives capture it at construction (see
-/// [`capture`](super::capture), and `current` in builds with spilling), so
-/// they count wherever they run.
+/// [`capture`](super::capture) and [`current`](super::current)), so they
+/// count wherever they run.
 pub fn enter(memory: StatementMemory) -> MemoryScope {
     let previous = STATEMENT_MEMORY.with(|cell| cell.replace(Some(memory)));
     MemoryScope {

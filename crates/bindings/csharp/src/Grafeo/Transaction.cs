@@ -21,10 +21,9 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
     private volatile bool _finished;
     private volatile bool _disposed;
 
-    internal Transaction(nint ptr)
+    internal Transaction(TransactionHandle handle)
     {
-        _handle = new TransactionHandle();
-        Marshal.InitHandle(_handle, ptr);
+        _handle = handle;
     }
 
     // =========================================================================
@@ -36,7 +35,7 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
     {
         ThrowIfFinished();
         var resultPtr = NativeMethods.grafeo_transaction_execute(Handle, query);
-        if (resultPtr == nint.Zero)
+        if (resultPtr.IsInvalid)
             throw GrafeoException.FromLastError(GrafeoStatus.Query);
         return BuildResult(resultPtr);
     }
@@ -50,7 +49,7 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
         {
             ct.ThrowIfCancellationRequested();
             var resultPtr = NativeMethods.grafeo_transaction_execute(h, query);
-            if (resultPtr == nint.Zero)
+            if (resultPtr.IsInvalid)
                 throw GrafeoException.FromLastError(GrafeoStatus.Query);
             return BuildResult(resultPtr);
         }, ct);
@@ -62,7 +61,7 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
         ThrowIfFinished();
         var paramsJson = ValueConverter.EncodeParams(parameters);
         var resultPtr = NativeMethods.grafeo_transaction_execute_with_params(Handle, query, paramsJson);
-        if (resultPtr == nint.Zero)
+        if (resultPtr.IsInvalid)
             throw GrafeoException.FromLastError(GrafeoStatus.Query);
         return BuildResult(resultPtr);
     }
@@ -80,7 +79,7 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
         {
             ct.ThrowIfCancellationRequested();
             var resultPtr = NativeMethods.grafeo_transaction_execute_with_params(h, query, paramsJson);
-            if (resultPtr == nint.Zero)
+            if (resultPtr.IsInvalid)
                 throw GrafeoException.FromLastError(GrafeoStatus.Query);
             return BuildResult(resultPtr);
         }, ct);
@@ -96,7 +95,7 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
     {
         ThrowIfFinished();
         var resultPtr = NativeMethods.grafeo_transaction_execute_language(Handle, language, query, paramsJson);
-        if (resultPtr == nint.Zero)
+        if (resultPtr.IsInvalid)
             throw GrafeoException.FromLastError(GrafeoStatus.Query);
         return BuildResult(resultPtr);
     }
@@ -120,7 +119,7 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
         {
             ct.ThrowIfCancellationRequested();
             var resultPtr = NativeMethods.grafeo_transaction_execute_language(h, language, query, paramsJson);
-            if (resultPtr == nint.Zero)
+            if (resultPtr.IsInvalid)
                 throw GrafeoException.FromLastError(GrafeoStatus.Query);
             return BuildResult(resultPtr);
         }, ct);
@@ -135,10 +134,10 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
     {
         ThrowIfFinished();
         var h = Handle;
-        _finished = true;
         var status = NativeMethods.grafeo_commit(h);
         if (status != (int)GrafeoStatus.Ok)
-            throw GrafeoException.FromLastError(GrafeoStatus.Transaction);
+            throw EndUnlessClosed(GrafeoException.FromLastError(GrafeoStatus.Transaction));
+        _finished = true;
         _handle.Committed = true;
     }
 
@@ -146,7 +145,8 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
     /// Roll back the transaction, discarding all changes. After a commit that
     /// succeeded it throws a <see cref="TransactionException"/>, as in every
     /// binding: there is nothing left to roll back. After a commit that failed
-    /// it does nothing, as that commit ended the transaction.
+    /// it does nothing, as that commit ended the transaction. After the
+    /// database closed it throws with GRAFEO-T007, as every call does.
     /// </summary>
     public void Rollback()
     {
@@ -156,10 +156,23 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
             throw new TransactionException("Transaction already committed");
         if (_finished) return;
         var h = Handle;
-        _finished = true;
         var status = NativeMethods.grafeo_rollback(h);
         if (status != (int)GrafeoStatus.Ok)
-            throw GrafeoException.FromLastError(GrafeoStatus.Transaction);
+            throw EndUnlessClosed(GrafeoException.FromLastError(GrafeoStatus.Transaction));
+        _finished = true;
+    }
+
+    /// <summary>
+    /// Ends the transaction after a failed commit or rollback, unless the
+    /// database was closed: the native layer then answers every later call
+    /// with GRAFEO-T007, so the transaction stays for it. Returns
+    /// <paramref name="error"/>.
+    /// </summary>
+    private GrafeoException EndUnlessClosed(GrafeoException error)
+    {
+        if (!error.Message.StartsWith("GRAFEO-T007", StringComparison.Ordinal))
+            _finished = true;
+        return error;
     }
 
     // =========================================================================
@@ -210,5 +223,5 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
             throw new TransactionException("Transaction is already committed or rolled back");
     }
 
-    private static QueryResult BuildResult(nint resultPtr) => GrafeoDB.BuildResult(resultPtr);
+    private static QueryResult BuildResult(ResultHandle resultPtr) => GrafeoDB.BuildResult(resultPtr);
 }

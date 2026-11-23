@@ -2,7 +2,15 @@
 
 #[cfg(all(feature = "sparql", feature = "triple-store"))]
 mod tests {
-    use grafeo_engine::query::translators::sparql::translate;
+    use grafeo_engine::query::plan::LogicalPlan;
+
+    /// The translator under the default parse limits.
+    fn translate(query: &str) -> grafeo_common::utils::error::Result<LogicalPlan> {
+        grafeo_engine::query::translators::sparql::translate(
+            query,
+            &grafeo_adapters::query::limits::ParseLimits::default(),
+        )
+    }
 
     #[test]
     fn test_translate_simple_select() {

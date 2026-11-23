@@ -284,3 +284,50 @@ mod sql_pgq {
         assert!(grouped.rows().iter().all(|row| row[1] == Value::Int64(1)));
     }
 }
+
+/// A `QueryProcessor` answers each language by that language's rule, as a session does: it plans
+/// SQL/PGQ with SQL/PGQ's `=` (raises across kinds) and Cypher with openCypher's comparisons, not
+/// every language with GQL's.
+#[test]
+fn a_query_processor_answers_each_language_as_a_session_does() {
+    use grafeo_engine::query::{QueryLanguage, QueryProcessor};
+
+    let db = graph();
+    let session = db.session();
+    let processor = QueryProcessor::for_lpg(db.store().unwrap());
+    let mut cases = vec![
+        (QueryLanguage::Gql, "MATCH (n:L) WHERE n.k < 5 RETURN n.row"),
+        (
+            QueryLanguage::Cypher,
+            "MATCH (n:L) WHERE n.k < 5 RETURN n.row",
+        ),
+        (
+            QueryLanguage::Cypher,
+            "MATCH (n:L) WHERE n.k <= 'b' RETURN n.row",
+        ),
+    ];
+    #[cfg(feature = "sql-pgq")]
+    cases.extend([
+        (
+            QueryLanguage::SqlPgq,
+            "SELECT * FROM GRAPH_TABLE (MATCH (n:L) WHERE n.k = 5 COLUMNS (n.row AS row))",
+        ),
+        (
+            QueryLanguage::SqlPgq,
+            "SELECT * FROM GRAPH_TABLE (MATCH (n:N) WHERE n.k < 5 COLUMNS (n.row AS row))",
+        ),
+    ]);
+    for (language, query) in cases {
+        let by_session = match language {
+            QueryLanguage::Cypher => rows(session.execute_cypher(query)),
+            #[cfg(feature = "sql-pgq")]
+            QueryLanguage::SqlPgq => rows(session.execute_sql(query)),
+            _ => rows(session.execute(query)),
+        };
+        assert_eq!(
+            rows(processor.process(query, language, None)),
+            by_session,
+            "{language:?} `{query}`"
+        );
+    }
+}

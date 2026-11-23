@@ -117,25 +117,23 @@ struct State {
 struct RdfReservation {
     /// The bytes the inserts recorded so far estimate.
     bytes: usize,
-    /// Their grant, grown a step at a time.
+    /// Their grant, grown to `BufferManager::grant_size` of them.
     grant: Option<MemoryGrant>,
 }
 
 #[cfg(feature = "triple-store")]
 impl RdfReservation {
     /// Reserves `bytes` more from `manager`: an atomic only when they pass
-    /// the grant's step; whether the memory limit had room.
+    /// the grant's rounding; whether the memory limit had room.
     fn reserve(&mut self, manager: &Arc<BufferManager>, bytes: usize) -> bool {
         let wanted = self.bytes.saturating_add(bytes);
         let held = self.grant.as_ref().map_or(0, MemoryGrant::size);
         if wanted > held {
-            let step = wanted
-                .checked_next_multiple_of(manager.grant_step())
-                .unwrap_or(usize::MAX);
+            let size = manager.grant_size(wanted);
             let grant = self
                 .grant
                 .get_or_insert_with(|| manager.empty_grant(MemoryRegion::GraphStorage));
-            if !grant.try_grow(step - held) {
+            if !grant.try_grow(size - held) {
                 return false;
             }
         }
@@ -151,7 +149,7 @@ impl RdfReservation {
 
 impl State {
     /// Brings the grant to what the set holds: a compare while it is within
-    /// two steps above it (see `BufferManager::settle_forced`).
+    /// its bounds (see `BufferManager::settle_forced`).
     fn settle(&mut self, memory: Option<&Arc<BufferManager>>) {
         if let Some(manager) = memory {
             let held = self.set.approx_bytes();
@@ -189,6 +187,13 @@ struct Bound {
 const SPARE_ENTRIES: usize = 4_096;
 
 impl TransactionChanges {
+    /// The bytes of committed state the transaction's changes replace (see
+    /// [`ChangeSet::superseded_bytes`]): what its commit adds to the ledger
+    /// the snapshot retention limit reads.
+    pub(crate) fn superseded_bytes(&self) -> usize {
+        self.state.lock().set.superseded_bytes()
+    }
+
     /// The changes of transaction `id`, which reads at `snapshot`: none yet.
     pub(crate) fn new(id: TransactionId, snapshot: EpochId) -> Self {
         let set = ChangeSet::new();
@@ -741,6 +746,21 @@ impl TransactionChanges {
             .map(|(graph, triple)| super::rdf::triple_conflict(graph, triple))
     }
 
+    /// The conflict of this transaction's RDF writes with those of the commits after `start`
+    /// that `committed` holds (see `CommittedTriples::conflict_with`), as the error a commit
+    /// fails with: one lookup per triple written.
+    #[cfg(feature = "triple-store")]
+    pub(crate) fn rdf_conflict_with_committed(
+        &self,
+        committed: &super::rdf::CommittedTriples,
+        start: u64,
+    ) -> Option<Error> {
+        let state = self.state.lock();
+        committed
+            .conflict_with(&state.triples, start)
+            .map(|(graph, triple)| super::rdf::triple_conflict(graph, triple))
+    }
+
     /// The heap bytes of the transaction's RDF writes, which its commit
     /// keeps while an older transaction is open: measured before the commit
     /// takes the manager's locks (it walks them).
@@ -774,12 +794,16 @@ impl TransactionChanges {
     ///
     /// When the set refuses an entry it held before (a broken invariant):
     /// the commit must not complete.
+    ///
+    /// Returns the bytes the overlay entry it published keeps for readers at an older
+    /// snapshot (0 when it published none): what the commit adds to the snapshot retention
+    /// ledger for RDF.
     #[cfg(feature = "triple-store")]
     pub(crate) fn apply_rdf(
         &self,
         store: &grafeo_core::graph::rdf::RdfStore,
         mode: grafeo_core::graph::rdf::ApplyMode,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         use grafeo_core::graph::rdf::{CommitChange, Triple};
 
         let mut state = self.state.lock();
@@ -789,7 +813,7 @@ impl TransactionChanges {
             store.adopt_grant(grant);
         }
         if !state.triples.applies() {
-            return Ok(());
+            return Ok(0);
         }
         // Each triple entry's position with its change's, and the commit's
         // changes in their order; the graph key is made once per run of one
@@ -834,7 +858,7 @@ impl TransactionChanges {
             .filter_map(|(at, change)| (!applied.changed[change]).then_some(at))
             .collect();
         if unchanged.is_empty() {
-            return Ok(());
+            return Ok(applied.kept);
         }
         // Take the entries out and put back those that changed the store.
         let start = state.start;
@@ -855,7 +879,7 @@ impl TransactionChanges {
                 Change::RdfGraph { graph, op } => state.set.push_rdf_graph(graph, op)?,
             }
         }
-        Ok(())
+        Ok(applied.kept)
     }
 
     /// The storage keys of the labeled property graphs the transaction
@@ -1254,9 +1278,9 @@ impl StreamingChanges<'_> {
     }
 
     /// Applies `op`, a create at an id of a range it reserved, as a pending
-    /// version of its transaction (see
-    /// [`GraphBackend::apply_bulk_row`]: an edge's endpoints are the
-    /// caller's to have created), and logs it.
+    /// version of its transaction (a chunk of one row, see
+    /// [`GraphBackend::apply_chunk`]: an edge's endpoints are the caller's to
+    /// have created), and logs it.
     ///
     /// # Errors
     ///
@@ -1270,7 +1294,7 @@ impl StreamingChanges<'_> {
         };
         bound
             .backend
-            .apply_bulk_row(&op, bound.transaction.writer())
+            .apply_chunk(std::slice::from_ref(&op), bound.transaction.writer())
             .map_err(|error| error.into_error(Error::Internal))?;
         #[cfg(feature = "wal")]
         if let Some(log) = &mut self.log {

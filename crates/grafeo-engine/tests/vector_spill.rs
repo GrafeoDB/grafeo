@@ -145,8 +145,8 @@ fn force_disk_spills_and_search_works() {
     db.buffer_manager().spill_all();
 
     // Check spill directory was created
-    let spill_dir = db
-        .buffer_manager()
+    let manager = db.buffer_manager();
+    let spill_dir = manager
         .config()
         .spill_path
         .as_ref()

@@ -8,7 +8,9 @@ use super::scheduler::MorselScheduler;
 use super::source::ParallelSource;
 use crate::execution::chunk::DataChunk;
 use crate::execution::operators::OperatorError;
-use crate::execution::pipeline::{ChunkCollector, DEFAULT_CHUNK_SIZE, PushOperator, Sink};
+use crate::execution::pipeline::{
+    DEFAULT_CHUNK_SIZE, PushOperator, Sink, finalize_chain, push_chain,
+};
 use grafeo_common::memory::buffer::PressureLevel;
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -294,7 +296,7 @@ impl ParallelPipeline {
 
         // Create per-worker operator chain
         let mut operators = factory.create_chain();
-        let mut local_sink = CollectorSink::new();
+        let mut local_sink: Box<dyn Sink> = Box::new(CollectorSink::new());
 
         // Process morsels
         while let Some(morsel) = handle.get_work() {
@@ -305,7 +307,7 @@ impl ParallelPipeline {
             while let Some(chunk) = partition.next_chunk(chunk_size)? {
                 crate::execution::deadline::check()?;
                 morsel_rows += chunk.len();
-                Self::push_through_chain(&mut operators, chunk, &mut local_sink)?;
+                push_chain(&mut operators, &mut *local_sink, chunk)?;
             }
 
             rows_processed.fetch_add(morsel_rows, Ordering::Relaxed);
@@ -313,110 +315,19 @@ impl ParallelPipeline {
         }
 
         // Finalize operators (important for pipeline breakers)
-        Self::finalize_chain(&mut operators, &mut local_sink)?;
+        finalize_chain(&mut operators, &mut local_sink)?;
 
         // Collect results
-        let chunks = local_sink.into_chunks();
+        let chunks = local_sink
+            .into_any()
+            .downcast::<CollectorSink>()
+            .expect("a worker's sink is its own CollectorSink")
+            .into_chunks();
         if !chunks.is_empty() {
             results.lock().extend(chunks);
         }
 
         Ok(())
-    }
-
-    /// Pushes a chunk through the operator chain.
-    fn push_through_chain(
-        operators: &mut [Box<dyn PushOperator>],
-        chunk: DataChunk,
-        sink: &mut dyn Sink,
-    ) -> Result<bool, OperatorError> {
-        if operators.is_empty() {
-            return sink.consume(chunk);
-        }
-
-        let num_operators = operators.len();
-        let mut current_chunk = chunk;
-
-        for i in 0..num_operators {
-            let is_last = i == num_operators - 1;
-
-            if is_last {
-                return operators[i].push(current_chunk, sink);
-            }
-
-            // Intermediate: collect output
-            let mut collector = ChunkCollector::new();
-            let continue_processing = operators[i].push(current_chunk, &mut collector)?;
-
-            if !continue_processing || collector.is_empty() {
-                return Ok(continue_processing);
-            }
-
-            current_chunk = collector.into_single_chunk();
-        }
-
-        Ok(true)
-    }
-
-    /// Finalizes all operators in the chain.
-    fn finalize_chain(
-        operators: &mut [Box<dyn PushOperator>],
-        sink: &mut dyn Sink,
-    ) -> Result<(), OperatorError> {
-        if operators.is_empty() {
-            return sink.finalize();
-        }
-
-        let num_operators = operators.len();
-
-        for i in 0..num_operators {
-            let is_last = i == num_operators - 1;
-
-            if is_last {
-                operators[i].finalize(sink)?;
-            } else {
-                // Collect finalize output and push through remaining operators
-                let mut collector = ChunkCollector::new();
-                operators[i].finalize(&mut collector)?;
-
-                // Push through remaining operators
-                for chunk in collector.into_chunks() {
-                    Self::push_through_from_index(operators, i + 1, chunk, sink)?;
-                }
-            }
-        }
-
-        sink.finalize()
-    }
-
-    /// Pushes a chunk through operators starting at index.
-    fn push_through_from_index(
-        operators: &mut [Box<dyn PushOperator>],
-        start: usize,
-        chunk: DataChunk,
-        sink: &mut dyn Sink,
-    ) -> Result<bool, OperatorError> {
-        let num_operators = operators.len();
-        let mut current_chunk = chunk;
-
-        for i in start..num_operators {
-            let is_last = i == num_operators - 1;
-
-            if is_last {
-                return operators[i].push(current_chunk, sink);
-            }
-
-            let mut collector = ChunkCollector::new();
-            let continue_processing = operators[i].push(current_chunk, &mut collector)?;
-
-            if !continue_processing || collector.is_empty() {
-                return Ok(continue_processing);
-            }
-
-            current_chunk = collector.into_single_chunk();
-        }
-
-        sink.consume(current_chunk)
     }
 }
 
@@ -653,5 +564,111 @@ mod tests {
         assert_eq!(config.num_workers, 8);
         assert_eq!(config.pressure_level, PressureLevel::Moderate);
         assert!(config.effective_morsel_size() < DEFAULT_MORSEL_SIZE);
+    }
+
+    /// A worker's finalize streams as the pull pipeline's does (see
+    /// `pipeline.rs`'s `streamed_finalize`): one worker, so one chain.
+    mod streamed_finalize {
+        use super::*;
+        use crate::execution::pipeline::finalize_stubs::{
+            Emitter, Hold, Log, Pass, StopAfter, count, finalizes, values,
+        };
+
+        type Make = Box<dyn Fn(&Log) -> Box<dyn PushOperator> + Send + Sync>;
+
+        /// Runs one row through the chain `make` builds, on one worker: the
+        /// rows it gives.
+        fn run(make: Vec<Make>, log: &Log) -> Vec<i64> {
+            let mut factory = CloneableOperatorFactory::new().with_pipeline_breakers();
+            for operator in make {
+                let log = Arc::clone(log);
+                factory = factory.with_operator(move || operator(&log));
+            }
+            let pipeline = ParallelPipeline::new(
+                Arc::new(RangeSource::new(1)),
+                Arc::new(factory),
+                ParallelPipelineConfig::for_testing().with_workers(1),
+            );
+            values(&pipeline.execute().unwrap().chunks)
+        }
+
+        fn emitter(honours: bool) -> Make {
+            Box::new(move |log| {
+                Box::new(Emitter {
+                    name: "A",
+                    chunks: 5,
+                    honours,
+                    log: Arc::clone(log),
+                })
+            })
+        }
+
+        fn stop_after_one() -> Make {
+            Box::new(|log| {
+                Box::new(StopAfter {
+                    name: "B",
+                    chunks: 1,
+                    seen: 0,
+                    log: Arc::clone(log),
+                })
+            })
+        }
+
+        fn pass() -> Make {
+            Box::new(|log| {
+                Box::new(Pass {
+                    name: "P",
+                    log: Arc::clone(log),
+                })
+            })
+        }
+
+        /// A stop from the next operator, or from one further on through a
+        /// pass, stops a breaker's finalize that honours the flag: one chunk
+        /// of its five.
+        #[test]
+        fn a_stop_after_a_breaker_stops_its_finalize() {
+            let log = Log::default();
+            assert_eq!(run(vec![emitter(true), stop_after_one()], &log), [0]);
+            assert_eq!(count(&log, "A emits"), 1, "from the next operator: {log:?}");
+
+            let log = Log::default();
+            assert_eq!(
+                run(vec![emitter(true), pass(), stop_after_one()], &log),
+                [0]
+            );
+            assert_eq!(count(&log, "A emits"), 1, "from two on: {log:?}");
+        }
+
+        /// Every operator after the stop is finalized once, in order, and a
+        /// later breaker still emits what it holds.
+        #[test]
+        fn every_operator_after_a_stop_is_finalized_once_in_order() {
+            let log = Log::default();
+            let hold: Make = Box::new(|log| {
+                Box::new(Hold {
+                    name: "H",
+                    held: Vec::new(),
+                    log: Arc::clone(log),
+                })
+            });
+            let rows = run(vec![emitter(true), stop_after_one(), hold], &log);
+            assert_eq!(rows, [0], "the later breaker emits what it holds");
+            assert_eq!(finalizes(&log), ["finalize A", "finalize B", "finalize H"]);
+        }
+
+        /// A breaker that ignores the flag keeps emitting, and nothing of it
+        /// is delivered after the stop: the limit gets one chunk.
+        #[test]
+        fn a_breaker_that_ignores_the_stop_delivers_nothing_after_it() {
+            let log = Log::default();
+            assert_eq!(run(vec![emitter(false), stop_after_one()], &log), [0]);
+            assert_eq!(count(&log, "A emits"), 5, "it ignores the flag");
+            assert_eq!(
+                count(&log, "B gets"),
+                1,
+                "delivered after the stop: {log:?}"
+            );
+        }
     }
 }

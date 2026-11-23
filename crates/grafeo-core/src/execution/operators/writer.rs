@@ -38,7 +38,7 @@ use super::{
     BulkRows, ChangeRecorder, ConstraintValidator, OperatorError, WriteClaim, WriteClaims,
     WriteInProgress,
 };
-use crate::graph::apply::{Applied, ApplyError, GraphBackend, Writer};
+use crate::graph::apply::{Applied, ApplyError, CHUNK_ROWS, GraphBackend, Writer};
 use crate::graph::lpg::{Edge, Node};
 use crate::graph::rowgroup::RowGroupStore;
 use crate::graph::{Direction, GraphStore};
@@ -141,11 +141,6 @@ pub struct NewEdge {
     /// Its properties; a null value is no property.
     pub properties: Vec<(String, Value)>,
 }
-
-/// The rows of a bulk create that run as one write in progress (see
-/// [`WriteClaims::write_in_progress`]): a checkpoint waits for at most this
-/// many rows.
-const BULK_RUN: usize = 1024;
 
 /// A bulk create's number of rows, as ids to reserve.
 fn row_count(rows: usize) -> Result<u64, OperatorError> {
@@ -499,18 +494,21 @@ impl GraphWriter {
     /// `assignments` are `(key, value)` pairs, where a `("*", map)` pair
     /// assigns every entry of the map and a null map entry removes the
     /// property. With `replace`, a map assignment also removes the
-    /// properties the map leaves out (`SET n = {...}`).
+    /// properties the map leaves out (`SET n = {...}`). A null map changes
+    /// nothing.
     ///
     /// # Errors
     ///
-    /// Returns an error for a node the transaction deleted, a write conflict
-    /// or the first constraint violated.
+    /// Returns an error for a map assignment of a value that is neither a
+    /// map nor null (invalid value type), a node the transaction deleted, a
+    /// write conflict or the first constraint violated.
     pub fn set_node_properties(
         &self,
         id: NodeId,
         assignments: &[(String, Value)],
         replace: bool,
     ) -> Result<(), OperatorError> {
+        refuse_non_map(assignments)?;
         refuse_too_deep(assigned_values(assignments))?;
         self.require_node(id)?;
         // A list that can change no property writes nothing, so it claims
@@ -839,6 +837,7 @@ impl GraphWriter {
         assignments: &[(String, Value)],
         replace: bool,
     ) -> Result<(), OperatorError> {
+        refuse_non_map(assignments)?;
         refuse_too_deep(assigned_values(assignments))?;
         self.require_edge(id)?;
         // As for a node: a list that can change no property claims nothing.
@@ -913,13 +912,16 @@ impl GraphWriter {
     /// ([`ChangeRecorder::bulk`]) the rows are one bulk write: their ids are
     /// one range reserved from the store and recorded as one entry before
     /// the first row is applied, which the commit stamps and a rollback
-    /// undoes as a range; each row is applied without a before-image, and
-    /// kept for the commit only when the recorder asks for the rows. Any
-    /// other writer creates row by row.
+    /// undoes as a range; the rows are checked one by one and applied in
+    /// chunks of up to [`CHUNK_ROWS`] ([`GraphBackend::apply_chunk`]), after
+    /// a check of the query's deadline each, without before-images, and kept
+    /// for the commit only when the recorder asks for the rows. Rows of a
+    /// label with a uniqueness constraint apply one at a time, so each is
+    /// checked against those before it. Any other writer creates row by row.
     ///
     /// # Errors
     ///
-    /// Returns the first row's error. The rows before it stay written, and
+    /// Returns the first row's error. The chunks before it stay written, and
     /// so do their records (the range, or one entry per row): the
     /// transaction's rollback, or the statement's, takes them back.
     pub fn create_nodes(
@@ -944,8 +946,13 @@ impl GraphWriter {
         let distinct = distinct_labels(labels);
         let mut kept = (keep == BulkRows::Keep).then(|| Vec::with_capacity(rows.len()));
         let mut created = Vec::with_capacity(rows.len());
-        let mut writing = None;
-        for (row, (properties, raw)) in rows.into_iter().zip(ids).enumerate() {
+        let mut chunk = Vec::with_capacity(rows.len().min(CHUNK_ROWS));
+        // A row checked against the rows before it needs them written first.
+        let row_by_row = self
+            .validator
+            .as_ref()
+            .is_some_and(|validator| validator.checks_unique_nodes(labels));
+        for (properties, raw) in rows.into_iter().zip(ids) {
             let properties = self.new_node_properties(labels, properties)?;
             if let Some(validator) = &self.validator {
                 validator.validate_node_properties_declared(labels, &properties)?;
@@ -953,27 +960,18 @@ impl GraphWriter {
                 validator.validate_node_complete(labels, &properties)?;
                 validator.check_unique_node(labels, &properties, None)?;
             }
-            if row % BULK_RUN == 0 {
-                // Released before it is asked for again: not reentrant.
-                drop(writing.take());
-                writing = self.write_in_progress();
-            }
             let id = NodeId::new(raw);
-            let op = DataOp::CreateNode {
+            chunk.push(DataOp::CreateNode {
                 id,
                 labels: distinct.clone(),
                 properties: present_values(&properties),
-            };
-            target.apply_bulk_row(&op, writer).map_err(store_refused)?;
-            self.count(|c| &c.nodes_created, 1);
-            self.count(|c| &c.labels_added, distinct.len());
-            self.count(|c| &c.properties_set, op_values(&op));
-            if let Some(kept) = &mut kept {
-                kept.push(op);
-            }
+            });
             created.push(id);
+            if row_by_row || chunk.len() == CHUNK_ROWS {
+                self.apply_bulk_chunk(target, writer, &mut chunk, &mut kept)?;
+            }
         }
-        drop(writing);
+        self.apply_bulk_chunk(target, writer, &mut chunk, &mut kept)?;
         if let Some(rows) = kept {
             recording.recorder.record_bulk_rows(rows)?;
         }
@@ -1016,8 +1014,8 @@ impl GraphWriter {
         // holds for the call, which deletes nothing.
         let mut endpoints: FxHashSet<NodeId> = FxHashSet::default();
         let mut edge_type: Option<ArcStr> = None;
-        let mut writing = None;
-        for (row, (edge, raw)) in edges.into_iter().zip(ids).enumerate() {
+        let mut chunk = Vec::with_capacity(edges.len().min(CHUNK_ROWS));
+        for (edge, raw) in edges.into_iter().zip(ids) {
             let NewEdge {
                 src,
                 dst,
@@ -1053,36 +1051,66 @@ impl GraphWriter {
                 endpoints.insert(src);
                 endpoints.insert(dst);
             }
-            if row % BULK_RUN == 0 {
-                drop(writing.take());
-                writing = self.write_in_progress();
-            }
             // One name per type, not one per edge.
             let edge_type = match &edge_type {
                 Some(shared) if shared.as_str() == name => shared.clone(),
                 _ => edge_type.insert(ArcStr::from(name.as_str())).clone(),
             };
             let id = EdgeId::new(raw);
-            let op = DataOp::CreateEdge {
+            chunk.push(DataOp::CreateEdge {
                 id,
                 src,
                 dst,
                 edge_type,
                 properties: present_values(&properties),
-            };
-            target.apply_bulk_row(&op, writer).map_err(store_refused)?;
-            self.count(|c| &c.edges_created, 1);
-            self.count(|c| &c.properties_set, op_values(&op));
-            if let Some(kept) = &mut kept {
-                kept.push(op);
-            }
+            });
             created.push(id);
+            if chunk.len() == CHUNK_ROWS {
+                self.apply_bulk_chunk(target, writer, &mut chunk, &mut kept)?;
+            }
         }
-        drop(writing);
+        self.apply_bulk_chunk(target, writer, &mut chunk, &mut kept)?;
         if let Some(rows) = kept {
             recording.recorder.record_bulk_rows(rows)?;
         }
         Ok(created)
+    }
+
+    /// Applies `chunk`, a bulk create's next rows (at most [`CHUNK_ROWS`]),
+    /// after a check of the query's deadline, as one write in progress (see
+    /// [`WriteClaims::write_in_progress`]: a checkpoint waits for at most one
+    /// chunk); counts its rows and moves them to `kept`, when the recorder
+    /// keeps them, leaving `chunk` empty. On `Err` the rows of the chunk are
+    /// not counted; the bulk range's rollback takes back what the store wrote.
+    fn apply_bulk_chunk(
+        &self,
+        target: &Arc<dyn GraphBackend>,
+        writer: Writer,
+        chunk: &mut Vec<DataOp>,
+        kept: &mut Option<Vec<DataOp>>,
+    ) -> Result<(), OperatorError> {
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        crate::execution::deadline::check()?;
+        let writing = self.write_in_progress();
+        target.apply_chunk(chunk, writer).map_err(store_refused)?;
+        drop(writing);
+        for op in chunk.iter() {
+            match op {
+                DataOp::CreateNode { labels, .. } => {
+                    self.count(|c| &c.nodes_created, 1);
+                    self.count(|c| &c.labels_added, labels.len());
+                }
+                _ => self.count(|c| &c.edges_created, 1),
+            }
+            self.count(|c| &c.properties_set, op_values(op));
+        }
+        match kept {
+            Some(kept) => kept.append(chunk),
+            None => chunk.clear(),
+        }
+        Ok(())
     }
 
     /// The recording, backend and row handling of a bulk write: `Some` when
@@ -1431,15 +1459,21 @@ impl GraphWriter {
     }
 }
 
-/// Whether a property set of `assignments` can change no property: without
-/// `replace`, every assignment merges an empty map (`SET n += {}`), which is
-/// so for none. A named property, a map with entries, a replace and a merge
-/// of a value that is not a map (which writes nothing, but is not decided
-/// here) can.
+/// Whether a property set of `assignments` can change no property: every
+/// assignment is a map assignment of null (`SET n = null`, `SET n += null`,
+/// which write nothing) or, without `replace`, merges an empty map
+/// (`SET n += {}`). A named property, a map with entries and a replace with
+/// a map can; a value that is neither a map nor null was refused before.
 fn changes_no_property(assignments: &[(String, Value)], replace: bool) -> bool {
-    !replace
+    // A replace without assignments keeps the conservative answer it had.
+    (!replace || !assignments.is_empty())
         && assignments.iter().all(|(name, value)| {
-            name == MAP_ASSIGNMENT && matches!(value, Value::Map(map) if map.is_empty())
+            name == MAP_ASSIGNMENT
+                && match value {
+                    Value::Null => true,
+                    Value::Map(map) => !replace && map.is_empty(),
+                    _ => false,
+                }
         })
 }
 
@@ -1647,6 +1681,21 @@ fn property_list(properties: &PropertyMap) -> Vec<(String, Value)> {
         .iter()
         .map(|(key, value)| (key.as_str().to_string(), value.clone()))
         .collect()
+}
+
+/// Refuses a map assignment of a value that is neither a map nor null
+/// (`SET n += 5`), before anything is claimed: invalid value type (22G12).
+fn refuse_non_map(assignments: &[(String, Value)]) -> Result<(), OperatorError> {
+    match assignments.iter().find(|(name, value)| {
+        name == MAP_ASSIGNMENT && !matches!(value, Value::Map(_) | Value::Null)
+    }) {
+        // The type alone says what is wrong; the value may be long.
+        Some((_, value)) => Err(OperatorError::wrong_kind(format!(
+            "SET of all properties takes a map or null, not a value of type {}",
+            value.type_name()
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// Refuses a property value nested deeper than a database can store

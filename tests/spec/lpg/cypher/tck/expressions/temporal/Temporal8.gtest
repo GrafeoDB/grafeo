@@ -1,0 +1,603 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/temporal/Temporal8.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Temporal8"
+  title: "Temporal8 - Compute Arithmetic Operations on Temporal Values"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Should add or subtract duration to or from date #1
+  - name: s1_should_add_or_subtract_duration_to_or_from_date_1
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration {dur: duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70, nanoseconds: 2})})
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS x
+      MATCH (d:Duration)
+      RETURN x + d.dur AS sum, x - d.dur AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | '1997-03-25' | '1972-04-27' |
+      side_effects: {}
+
+  # [1] Should add or subtract duration to or from date #2
+  - name: s1_should_add_or_subtract_duration_to_or_from_date_2
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration {dur: duration({months: 1, days: -14, hours: 16, minutes: -12, seconds: 70})})
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS x
+      MATCH (d:Duration)
+      RETURN x + d.dur AS sum, x - d.dur AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | '1984-10-28' | '1984-09-25' |
+      side_effects: {}
+
+  # [1] Should add or subtract duration to or from date #3
+  - name: s1_should_add_or_subtract_duration_to_or_from_date_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal8: [1] Should add or subtract duration to or from date #3"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration {dur: duration({years: 12.5, months: 5.5, days: 14.5, hours: 16.5, minutes: 12.5, seconds: 70.5, nanoseconds: 3})})
+    query: |
+      WITH date({year: 1984, month: 10, day: 11}) AS x
+      MATCH (d:Duration)
+      RETURN x + d.dur AS sum, x - d.dur AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | '1997-10-11' | '1971-10-12' |
+      side_effects: {}
+
+  # [2] Should add or subtract duration to or from local time #1
+  - name: s2_should_add_or_subtract_duration_to_or_from_local_time_1
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration {dur: duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70, nanoseconds: 2})})
+    query: |
+      WITH localtime({hour: 12, minute: 31, second: 14, nanosecond: 1}) AS x
+      MATCH (d:Duration)
+      RETURN x + d.dur AS sum, x - d.dur AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | '04:44:24.000000003' | '20:18:03.999999999' |
+      side_effects: {}
+
+  # [2] Should add or subtract duration to or from local time #2
+  - name: s2_should_add_or_subtract_duration_to_or_from_local_time_2
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration {dur: duration({months: 1, days: -14, hours: 16, minutes: -12, seconds: 70})})
+    query: |
+      WITH localtime({hour: 12, minute: 31, second: 14, nanosecond: 1}) AS x
+      MATCH (d:Duration)
+      RETURN x + d.dur AS sum, x - d.dur AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | '04:20:24.000000001' | '20:42:04.000000001' |
+      side_effects: {}
+
+  # [2] Should add or subtract duration to or from local time #3
+  - name: s2_should_add_or_subtract_duration_to_or_from_local_time_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal8: [2] Should add or subtract duration to or from local time #3"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration {dur: duration({years: 12.5, months: 5.5, days: 14.5, hours: 16.5, minutes: 12.5, seconds: 70.5, nanoseconds: 3})})
+    query: |
+      WITH localtime({hour: 12, minute: 31, second: 14, nanosecond: 1}) AS x
+      MATCH (d:Duration)
+      RETURN x + d.dur AS sum, x - d.dur AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | '22:29:27.500000004' | '02:33:00.499999998' |
+      side_effects: {}
+
+  # [3] Should add or subtract duration to or from time #1
+  - name: s3_should_add_or_subtract_duration_to_or_from_time_1
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration {dur: duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70, nanoseconds: 2})})
+    query: |
+      WITH time({hour: 12, minute: 31, second: 14, nanosecond: 1, timezone: '+01:00'}) AS x
+      MATCH (d:Duration)
+      RETURN x + d.dur AS sum, x - d.dur AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | '04:44:24.000000003+01:00' | '20:18:03.999999999+01:00' |
+      side_effects: {}
+
+  # [3] Should add or subtract duration to or from time #2
+  - name: s3_should_add_or_subtract_duration_to_or_from_time_2
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration {dur: duration({months: 1, days: -14, hours: 16, minutes: -12, seconds: 70})})
+    query: |
+      WITH time({hour: 12, minute: 31, second: 14, nanosecond: 1, timezone: '+01:00'}) AS x
+      MATCH (d:Duration)
+      RETURN x + d.dur AS sum, x - d.dur AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | '04:20:24.000000001+01:00' | '20:42:04.000000001+01:00' |
+      side_effects: {}
+
+  # [3] Should add or subtract duration to or from time #3
+  - name: s3_should_add_or_subtract_duration_to_or_from_time_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal8: [3] Should add or subtract duration to or from time #3"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration {dur: duration({years: 12.5, months: 5.5, days: 14.5, hours: 16.5, minutes: 12.5, seconds: 70.5, nanoseconds: 3})})
+    query: |
+      WITH time({hour: 12, minute: 31, second: 14, nanosecond: 1, timezone: '+01:00'}) AS x
+      MATCH (d:Duration)
+      RETURN x + d.dur AS sum, x - d.dur AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | '22:29:27.500000004+01:00' | '02:33:00.499999998+01:00' |
+      side_effects: {}
+
+  # [4] Should add or subtract duration to or from local date time #1
+  - name: s4_should_add_or_subtract_duration_to_or_from_local_date_time_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal8: [4] Should add or subtract duration to or from local date time #1"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration {dur: duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70, nanoseconds: 2})})
+    query: |
+      WITH localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 1}) AS x
+      MATCH (d:Duration)
+      RETURN x + d.dur AS sum, x - d.dur AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | '1997-03-26T04:44:24.000000003' | '1972-04-26T20:18:03.999999999' |
+      side_effects: {}
+
+  # [4] Should add or subtract duration to or from local date time #2
+  - name: s4_should_add_or_subtract_duration_to_or_from_local_date_time_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal8: [4] Should add or subtract duration to or from local date time #2"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration {dur: duration({months: 1, days: -14, hours: 16, minutes: -12, seconds: 70})})
+    query: |
+      WITH localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 1}) AS x
+      MATCH (d:Duration)
+      RETURN x + d.dur AS sum, x - d.dur AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | '1984-10-29T04:20:24.000000001' | '1984-09-24T20:42:04.000000001' |
+      side_effects: {}
+
+  # [4] Should add or subtract duration to or from local date time #3
+  - name: s4_should_add_or_subtract_duration_to_or_from_local_date_time_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal8: [4] Should add or subtract duration to or from local date time #3"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration {dur: duration({years: 12.5, months: 5.5, days: 14.5, hours: 16.5, minutes: 12.5, seconds: 70.5, nanoseconds: 3})})
+    query: |
+      WITH localdatetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 1}) AS x
+      MATCH (d:Duration)
+      RETURN x + d.dur AS sum, x - d.dur AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | '1997-10-11T22:29:27.500000004' | '1971-10-12T02:33:00.499999998' |
+      side_effects: {}
+
+  # [5] Should add or subtract duration to or from date time #1
+  - name: s5_should_add_or_subtract_duration_to_or_from_date_time_1
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal8: [5] Should add or subtract duration to or from date time #1"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration {dur: duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70, nanoseconds: 2})})
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 1, timezone: '+01:00'}) AS x
+      MATCH (d:Duration)
+      RETURN x + d.dur AS sum, x - d.dur AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | '1997-03-26T04:44:24.000000003+01:00' | '1972-04-26T20:18:03.999999999+01:00' |
+      side_effects: {}
+
+  # [5] Should add or subtract duration to or from date time #2
+  - name: s5_should_add_or_subtract_duration_to_or_from_date_time_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal8: [5] Should add or subtract duration to or from date time #2"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration {dur: duration({months: 1, days: -14, hours: 16, minutes: -12, seconds: 70})})
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 1, timezone: '+01:00'}) AS x
+      MATCH (d:Duration)
+      RETURN x + d.dur AS sum, x - d.dur AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | '1984-10-29T04:20:24.000000001+01:00' | '1984-09-24T20:42:04.000000001+01:00' |
+      side_effects: {}
+
+  # [5] Should add or subtract duration to or from date time #3
+  - name: s5_should_add_or_subtract_duration_to_or_from_date_time_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal8: [5] Should add or subtract duration to or from date time #3"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration {dur: duration({years: 12.5, months: 5.5, days: 14.5, hours: 16.5, minutes: 12.5, seconds: 70.5, nanoseconds: 3})})
+    query: |
+      WITH datetime({year: 1984, month: 10, day: 11, hour: 12, minute: 31, second: 14, nanosecond: 1, timezone: '+01:00'}) AS x
+      MATCH (d:Duration)
+      RETURN x + d.dur AS sum, x - d.dur AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | '1997-10-11T22:29:27.500000004+01:00' | '1971-10-12T02:33:00.499999998+01:00' |
+      side_effects: {}
+
+  # [6] Should add or subtract durations #1
+  - name: s6_should_add_or_subtract_durations_1
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration1 {date: duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70, nanoseconds: 1})})
+        CREATE (:Duration2 {date: duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70, nanoseconds: 1})})
+    query: |
+      MATCH (dur:Duration1), (dur2: Duration2)
+      RETURN dur.date + dur2.date AS sum, dur.date - dur2.date AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | 'P24Y10M28DT32H26M20.000000002S' | 'PT0S' |
+      side_effects: {}
+
+  # [6] Should add or subtract durations #2
+  - name: s6_should_add_or_subtract_durations_2
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration1 {date: duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70, nanoseconds: 1})})
+        CREATE (:Duration2 {date: duration({months: 1, days: -14, hours: 16, minutes: -12, seconds: 70})})
+    query: |
+      MATCH (dur:Duration1), (dur2: Duration2)
+      RETURN dur.date + dur2.date AS sum, dur.date - dur2.date AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | 'P12Y6MT32H2M20.000000001S' | 'P12Y4M28DT24M0.000000001S' |
+      side_effects: {}
+
+  # [6] Should add or subtract durations #3
+  - name: s6_should_add_or_subtract_durations_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal8: [6] Should add or subtract durations #3"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration1 {date: duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70, nanoseconds: 1})})
+        CREATE (:Duration2 {date: duration({years: 12.5, months: 5.5, days: 14.5, hours: 16.5, minutes: 12.5, seconds: 70.5, nanoseconds: 3})})
+    query: |
+      MATCH (dur:Duration1), (dur2: Duration2)
+      RETURN dur.date + dur2.date AS sum, dur.date - dur2.date AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | 'P25Y4M43DT50H11M23.500000004S' | 'P-6M-15DT-17H-45M-3.500000002S' |
+      side_effects: {}
+
+  # [6] Should add or subtract durations #4
+  - name: s6_should_add_or_subtract_durations_4
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal8: [6] Should add or subtract durations #4"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration1 {date: duration({months: 1, days: -14, hours: 16, minutes: -12, seconds: 70})})
+        CREATE (:Duration2 {date: duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70, nanoseconds: 1})})
+    query: |
+      MATCH (dur:Duration1), (dur2: Duration2)
+      RETURN dur.date + dur2.date AS sum, dur.date - dur2.date AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | 'P12Y6MT32H2M20.000000001S' | 'P-12Y-4M-28DT-24M-0.000000001S' |
+      side_effects: {}
+
+  # [6] Should add or subtract durations #5
+  - name: s6_should_add_or_subtract_durations_5
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration1 {date: duration({months: 1, days: -14, hours: 16, minutes: -12, seconds: 70})})
+        CREATE (:Duration2 {date: duration({months: 1, days: -14, hours: 16, minutes: -12, seconds: 70})})
+    query: |
+      MATCH (dur:Duration1), (dur2: Duration2)
+      RETURN dur.date + dur2.date AS sum, dur.date - dur2.date AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | 'P2M-28DT31H38M20S' | 'PT0S' |
+      side_effects: {}
+
+  # [6] Should add or subtract durations #6
+  - name: s6_should_add_or_subtract_durations_6
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal8: [6] Should add or subtract durations #6"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration1 {date: duration({months: 1, days: -14, hours: 16, minutes: -12, seconds: 70})})
+        CREATE (:Duration2 {date: duration({years: 12.5, months: 5.5, days: 14.5, hours: 16.5, minutes: 12.5, seconds: 70.5, nanoseconds: 3})})
+    query: |
+      MATCH (dur:Duration1), (dur2: Duration2)
+      RETURN dur.date + dur2.date AS sum, dur.date - dur2.date AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | 'P13Y15DT49H47M23.500000003S' | 'P-12Y-10M-43DT-18H-9M-3.500000003S' |
+      side_effects: {}
+
+  # [6] Should add or subtract durations #7
+  - name: s6_should_add_or_subtract_durations_7
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal8: [6] Should add or subtract durations #7"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration1 {date: duration({years: 12.5, months: 5.5, days: 14.5, hours: 16.5, minutes: 12.5, seconds: 70.5, nanoseconds: 3})})
+        CREATE (:Duration2 {date: duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70, nanoseconds: 1})})
+    query: |
+      MATCH (dur:Duration1), (dur2: Duration2)
+      RETURN dur.date + dur2.date AS sum, dur.date - dur2.date AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | 'P25Y4M43DT50H11M23.500000004S' | 'P6M15DT17H45M3.500000002S' |
+      side_effects: {}
+
+  # [6] Should add or subtract durations #8
+  - name: s6_should_add_or_subtract_durations_8
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal8: [6] Should add or subtract durations #8"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration1 {date: duration({years: 12.5, months: 5.5, days: 14.5, hours: 16.5, minutes: 12.5, seconds: 70.5, nanoseconds: 3})})
+        CREATE (:Duration2 {date: duration({months: 1, days: -14, hours: 16, minutes: -12, seconds: 70})})
+    query: |
+      MATCH (dur:Duration1), (dur2: Duration2)
+      RETURN dur.date + dur2.date AS sum, dur.date - dur2.date AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | 'P13Y15DT49H47M23.500000003S' | 'P12Y10M43DT18H9M3.500000003S' |
+      side_effects: {}
+
+  # [6] Should add or subtract durations #9
+  - name: s6_should_add_or_subtract_durations_9
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal8: [6] Should add or subtract durations #9"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration1 {date: duration({years: 12.5, months: 5.5, days: 14.5, hours: 16.5, minutes: 12.5, seconds: 70.5, nanoseconds: 3})})
+        CREATE (:Duration2 {date: duration({years: 12.5, months: 5.5, days: 14.5, hours: 16.5, minutes: 12.5, seconds: 70.5, nanoseconds: 3})})
+    query: |
+      MATCH (dur:Duration1), (dur2: Duration2)
+      RETURN dur.date + dur2.date AS sum, dur.date - dur2.date AS diff
+    expect:
+      values: |
+        | sum | diff |
+        | 'P25Y10M58DT67H56M27.000000006S' | 'PT0S' |
+      side_effects: {}
+
+  # [7] Should multiply or divide durations by numbers #1
+  - name: s7_should_multiply_or_divide_durations_by_numbers_1
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration {date: duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70, nanoseconds: 1})})
+    query: |
+      MATCH (d:Duration)
+      RETURN d.date * 1 AS prod, d.date / 1 AS div
+    expect:
+      values: |
+        | prod | div |
+        | 'P12Y5M14DT16H13M10.000000001S' | 'P12Y5M14DT16H13M10.000000001S' |
+      side_effects: {}
+
+  # [7] Should multiply or divide durations by numbers #2
+  - name: s7_should_multiply_or_divide_durations_by_numbers_2
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal8: [7] Should multiply or divide durations by numbers #2"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration {date: duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70, nanoseconds: 1})})
+    query: |
+      MATCH (d:Duration)
+      RETURN d.date * 2 AS prod, d.date / 2 AS div
+    expect:
+      values: |
+        | prod | div |
+        | 'P24Y10M28DT32H26M20.000000002S' | 'P6Y2M22DT13H21M8S' |
+      side_effects: {}
+
+  # [7] Should multiply or divide durations by numbers #3
+  - name: s7_should_multiply_or_divide_durations_by_numbers_3
+    xfail:
+      spec: "openCypher TCK 2024.3 Temporal8: [7] Should multiply or divide durations by numbers #3"
+      issue: "#801"
+    runner_gap:
+      runners: [wasm]
+      issue: "fix in 0.7.0"
+      reason: "temporals come back from this binding as text, which passed back is a string"
+    setup:
+      - |
+        CREATE (:Duration {date: duration({years: 12, months: 5, days: 14, hours: 16, minutes: 12, seconds: 70, nanoseconds: 1})})
+    query: |
+      MATCH (d:Duration)
+      RETURN d.date * 0.5 AS prod, d.date / 0.5 AS div
+    expect:
+      values: |
+        | prod | div |
+        | 'P6Y2M22DT13H21M8S' | 'P24Y10M28DT32H26M20.000000002S' |
+      side_effects: {}

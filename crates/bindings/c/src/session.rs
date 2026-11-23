@@ -8,11 +8,9 @@
 //! A flag bit this library does not know is refused at open, never ignored.
 
 use std::ffi::c_char;
-use std::sync::Arc;
 
 use grafeo_engine::auth::{Identity, Role};
-use grafeo_engine::database::GrafeoDB;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 
 use crate::database::{build_result, new_transaction};
 use crate::error::{GrafeoStatus, set_error, set_last_error, str_from_ptr};
@@ -30,7 +28,7 @@ const KNOWN_FLAGS: u32 = GRAFEO_SESSION_READ_ONLY | GRAFEO_SESSION_NO_EXTERNAL_A
 
 /// Opaque session handle. Created by [`grafeo_session_open`], freed by [`grafeo_free_session`].
 pub struct GrafeoSession {
-    database: Arc<RwLock<GrafeoDB>>,
+    database: crate::types::SharedDb,
     /// What the session may do: each transaction it begins gets the same.
     identity: Identity,
     /// The session's statements run here; `None` once closed.
@@ -89,9 +87,10 @@ pub extern "C" fn grafeo_session_open(db: *mut GrafeoDatabase, flags: u32) -> *m
         Identity::new("anonymous", [Role::ReadOnly])
     }
     .with_external_access(flags & GRAFEO_SESSION_NO_EXTERNAL_ACCESS == 0);
-    let session = db.inner.read().session_with_identity(identity.clone());
+    let session =
+        or_fail!(db.inner.read(), std::ptr::null_mut()).session_with_identity(identity.clone());
     Box::into_raw(Box::new(GrafeoSession {
-        database: Arc::clone(&db.inner),
+        database: or_fail!(db.inner.share(), std::ptr::null_mut()),
         identity,
         session: Mutex::new(Some(session)),
     }))
@@ -164,9 +163,7 @@ pub extern "C" fn grafeo_session_begin_transaction(
 ) -> *mut GrafeoTransaction {
     let session = session_ref_or_null!(session);
     session.with_open(|_| {
-        let mut transaction = session
-            .database
-            .read()
+        let mut transaction = or_fail!(session.database.read(), std::ptr::null_mut())
             .session_with_identity(session.identity.clone());
         match transaction.begin_transaction() {
             Ok(()) => Box::into_raw(Box::new(new_transaction(transaction))),
@@ -191,7 +188,10 @@ pub extern "C" fn grafeo_session_stream_open(
         return std::ptr::null_mut();
     };
     session.with_open(|open| match open.execute_streaming_owned(query) {
-        Ok(stream) => crate::stream::stream_handle(&session.database, stream),
+        Ok(stream) => crate::stream::stream_handle(
+            or_fail!(session.database.share(), std::ptr::null_mut()),
+            stream,
+        ),
         Err(error) => {
             set_error(&error);
             std::ptr::null_mut()

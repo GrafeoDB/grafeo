@@ -66,13 +66,15 @@ pub struct PreparedCommit<'a> {
 impl<'a> PreparedCommit<'a> {
     /// Creates a new prepared commit from a session with an active transaction.
     pub(crate) fn new(session: &'a mut Session) -> Result<Self> {
-        let transaction_id = session.current_transaction_id().ok_or_else(|| {
+        session.inner()?.check_failed()?;
+        let transaction_id = session.inner()?.current_transaction_id().ok_or_else(|| {
             Error::Transaction(TransactionError::InvalidState(
                 "No active transaction to prepare".to_string(),
             ))
         })?;
 
         let start_epoch = session
+            .inner()?
             .transaction_manager()
             .start_epoch(transaction_id)
             .unwrap_or(EpochId::new(0));
@@ -80,6 +82,7 @@ impl<'a> PreparedCommit<'a> {
         // The entities the transaction created, changed or deleted, from its
         // change set.
         let (nodes_written, edges_written) = session
+            .inner()?
             .current_changes()
             .map_or_default(|changes| changes.written_entities());
 
@@ -127,10 +130,10 @@ impl<'a> PreparedCommit<'a> {
     pub fn commit(mut self) -> Result<EpochId> {
         self.finalized = true;
         self.session.commit()?;
-        Ok(self
-            .session
+        let inner = self.session.inner()?;
+        Ok(inner
             .last_commit_epoch()
-            .unwrap_or_else(|| self.session.transaction_manager().current_epoch()))
+            .unwrap_or_else(|| inner.transaction_manager().current_epoch()))
     }
 
     /// Explicitly aborts the transaction, discarding all changes.

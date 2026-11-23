@@ -692,7 +692,8 @@ pub struct MetricsSnapshot {
     pub wal_flush_duration_mean_ms: f64,
 
     // -- Cache --
-    /// Total plan cache hits (parsed + optimized).
+    /// Total plan cache hits: the shared cache's (parsed + optimized) and the
+    /// sessions' own, a repeat a session answered from its map.
     pub cache_hits: u64,
     /// Total plan cache misses (parsed + optimized).
     pub cache_misses: u64,

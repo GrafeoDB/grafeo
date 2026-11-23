@@ -34,8 +34,11 @@ static QUERY_ID_COUNTER: AtomicU32 = AtomicU32::new(0);
 /// # Errors
 ///
 /// Returns an error if the query cannot be parsed or translated.
-pub fn translate(query: &str) -> Result<LogicalPlan> {
-    translate_with_bindings(query, &HashMap::new())
+pub fn translate(
+    query: &str,
+    limits: &grafeo_adapters::query::limits::ParseLimits,
+) -> Result<LogicalPlan> {
+    translate_with_bindings(query, &HashMap::new(), limits)
 }
 
 /// Translates a SPARQL query whose variables `bindings` binds before it is
@@ -50,7 +53,10 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
 pub fn translate_with_bindings(
     query: &str,
     bindings: &HashMap<String, Value>,
+    limits: &grafeo_adapters::query::limits::ParseLimits,
 ) -> Result<LogicalPlan> {
+    // The statement's length is its text's, the `EXPLAIN` included.
+    limits.check_query(query)?;
     // Check for EXPLAIN [ANALYZE] prefix (case-insensitive, non-standard extension).
     // EXPLAIN: show physical plan without executing.
     // EXPLAIN ANALYZE: execute with profiling, show actual vs estimated stats.
@@ -93,7 +99,7 @@ pub fn translate_with_bindings(
         (false, false, query)
     };
 
-    let sparql_query = sparql::parse(actual_query)?;
+    let sparql_query = sparql::parse_with(actual_query, limits)?;
     let mut translator = SparqlTranslator::new();
     let mut bound: Vec<(String, Value)> = bindings
         .iter()
@@ -730,6 +736,7 @@ impl SparqlTranslator {
                 alias: Some(SOLUTIONS.to_string()),
                 percentile: None,
                 separator: None,
+                keep_nulls: false,
             }],
             input: Box::new(plan),
             having: None,
@@ -2384,6 +2391,7 @@ impl SparqlTranslator {
                 alias: alias.clone(),
                 percentile: None, // SPARQL doesn't support percentile functions
                 separator,
+                keep_nulls: false,
             }))
         } else {
             Ok(None)
@@ -2413,7 +2421,7 @@ impl SparqlTranslator {
                             &aggregate.expression2,
                             aggregate.distinct,
                             &aggregate.separator,
-                            aggregate.percentile,
+                            &aggregate.percentile,
                         )
                     )
                 };
@@ -2981,6 +2989,14 @@ fn iri_term(iri: &str) -> Value {
 mod tests {
     use super::*;
     use crate::query::plan::{SkipOp, SortOp};
+
+    /// [`super::translate`] under the default parse limits.
+    fn translate(query: &str) -> Result<LogicalPlan> {
+        super::translate(
+            query,
+            &grafeo_adapters::query::limits::ParseLimits::default(),
+        )
+    }
 
     // === Basic SELECT Tests ===
 

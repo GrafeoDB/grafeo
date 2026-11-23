@@ -31,9 +31,12 @@ pub mod memory;
 pub mod operators;
 #[cfg(feature = "parallel")]
 pub mod parallel;
+pub(crate) mod path_budget;
+pub(crate) mod path_queue;
 pub mod pipeline;
 pub mod pipeline_convert;
 pub mod profile;
+pub(crate) mod segment_arena;
 pub mod selection;
 pub mod sink;
 pub mod source;
@@ -47,7 +50,6 @@ pub use collector::{
     Collector, CollectorStats, CountCollector, LimitCollector, MaterializeCollector,
     PartitionCollector, StatsCollector,
 };
-#[cfg(feature = "spill")]
 pub use memory::{
     ConsumerRegistration, OperatorGrant, OperatorMemoryContext, QueryMemory,
     current as current_operator_memory,
@@ -57,11 +59,28 @@ pub use memory::{
     MemoryScope, OperatorMemory, StatementMemory, enter as enter_operator_memory,
     in_scope as in_operator_memory_scope, statement as current_statement_memory,
 };
+pub use operators::PATH_QUEUE_ENTRY_BYTES;
+pub use operators::PATH_RESTRICTIVE_QUEUE_ENTRY_BYTES;
+/// The bytes one segment of a followed path holds, for capacity accounting
+/// and tests.
+pub use operators::PATH_SEGMENT_BYTES;
 #[cfg(feature = "parallel")]
 pub use parallel::{
     CloneableOperatorFactory, MorselScheduler, ParallelPipeline, ParallelPipelineConfig,
     ParallelSource, RangeSource,
 };
+/// The entries a path search's queue reservation counts beyond its doubled
+/// capacity, for capacity accounting and tests.
+pub use path_budget::RESERVE_SLACK_ENTRIES as PATH_RESERVE_SLACK_ENTRIES;
+/// The bytes of one block of a path search's queue, for capacity accounting
+/// and tests.
+pub use path_queue::BLOCK_BYTES as PATH_QUEUE_BLOCK_BYTES;
+/// The bytes of one slot of a path search queue's block index, for capacity
+/// accounting and tests.
+pub use path_queue::INDEX_SLOT_BYTES as PATH_QUEUE_INDEX_SLOT_BYTES;
+/// The path search budget from which every block of a path search's queue is
+/// full size, for capacity accounting and tests.
+pub use path_queue::SMALL_BUDGET_BYTES as PATH_QUEUE_SMALL_BUDGET_BYTES;
 pub use pipeline::{ChunkCollector, ChunkSizeHint, Pipeline, PushOperator, Sink, Source};
 pub use profile::{ProfileStats, ProfiledOperator, SharedProfileStats};
 pub use selection::SelectionVector;

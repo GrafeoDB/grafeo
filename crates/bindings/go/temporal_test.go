@@ -2,8 +2,10 @@ package grafeo
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
+	_ "time/tzdata" // Europe/Amsterdam on every machine
 )
 
 // typedBack runs RETURN $v IS TYPED <gqlType>, $v and returns whether the
@@ -333,22 +335,6 @@ func TestTemporalTexts(t *testing.T) {
 	}
 }
 
-// A time.Time in a location whose offset has seconds (a historic local mean
-// time) keeps its instant, at its offset's whole minutes.
-func TestOffsetWithSecondsKeepsTheInstant(t *testing.T) {
-	db, err := OpenInMemory()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	amsterdam1900 := time.Date(1900, 6, 1, 12, 0, 0, 0, time.FixedZone("AMT", 1172))
-	typed, back := typedBack(t, db, "ZONED DATETIME", amsterdam1900)
-	backTime, ok := back.(time.Time)
-	if _, offset := backTime.Zone(); !typed || !ok || !backTime.Equal(amsterdam1900) || offset != 1140 {
-		t.Errorf("came back typed %v as %#v", typed, back)
-	}
-}
-
 // A pointer parameter arrives as the type of the value it points to, and a
 // nil pointer as null: *time.Time is a TIMESTAMP or ZONED DATETIME, not the
 // STRING encoding/json writes, and *time.Duration a DURATION, not an INT64.
@@ -450,5 +436,85 @@ func TestDurationOverflowIsRefused(t *testing.T) {
 		if v, err := ParseDuration(text); err != nil || v != want {
 			t.Errorf("duration %q: %#v %v", text, v, err)
 		}
+	}
+}
+
+// An offset that is not whole minutes (Amsterdam's local mean time before
+// 1937, +00:19:32) is refused with GQLSTATUS 22009 as a FixedZone, and in
+// the named zone where the system's zone data gives Amsterdam that offset in
+// 1936 (some give it Brussels' +01:00, a whole-minute offset that is kept);
+// a whole-minute offset in a zone the caller chose is kept.
+func TestAnOffsetThatIsNotWholeMinutesIsRefused(t *testing.T) {
+	db, err := OpenInMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	refused := func(v time.Time) {
+		_, err := db.ExecuteParams("RETURN $v AS v", map[string]any{"v": v})
+		var grafeoErr *Error
+		if !errors.As(err, &grafeoErr) || grafeoErr.GQLStatus != "22009" {
+			t.Errorf("%v: got %v, want GQLSTATUS 22009", v, err)
+		}
+	}
+	refused(time.Date(1936, 5, 1, 12, 0, 0, 0, time.FixedZone("LMT", 19*60+32)))
+	amsterdam, err := time.LoadLocation("Europe/Amsterdam")
+	if err != nil {
+		t.Fatal(err)
+	}
+	named := time.Date(1936, 5, 1, 12, 0, 0, 0, amsterdam)
+	if _, offset := named.Zone(); offset%60 != 0 {
+		refused(named)
+	} else {
+		typed, back := typedBack(t, db, "ZONED DATETIME", named)
+		if backTime, ok := back.(time.Time); !typed || !ok || !backTime.Equal(named) {
+			t.Errorf("%v (whole minutes in this zone data) arrived typed %v, came back as %#v", named, typed, back)
+		}
+	}
+	// A whole-minute offset off the hour is kept. No European zone has one
+	// today, so the case is Kathmandu (+05:45).
+	kathmandu := time.Date(2024, 1, 15, 12, 0, 0, 0, time.FixedZone("NPT", 5*3600+45*60))
+	typed, back := typedBack(t, db, "ZONED DATETIME", kathmandu)
+	if backTime, ok := back.(time.Time); !typed || !ok || !backTime.Equal(kathmandu) {
+		t.Errorf("a +05:45 time arrived typed %v, came back as %#v", typed, back)
+	}
+}
+
+// A property write refuses an offset that is not whole minutes as a query
+// parameter does, with GQLSTATUS 22009.
+func TestAPropertyWriteRefusesAnOffsetThatIsNotWholeMinutes(t *testing.T) {
+	db, err := OpenInMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	node, err := db.CreateNode([]string{"Person"}, map[string]any{"name": "Alix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mean := time.Date(1936, 5, 1, 12, 0, 0, 0, time.FixedZone("LMT", 19*60+32))
+	err = db.SetNodeProperty(node.ID, "since", mean)
+	var grafeoErr *Error
+	if !errors.As(err, &grafeoErr) || grafeoErr.GQLStatus != "22009" {
+		t.Errorf("got %v, want GQLSTATUS 22009", err)
+	}
+}
+
+// A time in a daylight saving gap (02:30 on 2024-03-31 does not exist in
+// Amsterdam) is the instant Go gives it, and comes back as that instant.
+func TestATimeInADaylightSavingGapKeepsItsInstant(t *testing.T) {
+	db, err := OpenInMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	amsterdam, err := time.LoadLocation("Europe/Amsterdam")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gap := time.Date(2024, 3, 31, 2, 30, 0, 0, amsterdam)
+	typed, back := typedBack(t, db, "ZONED DATETIME", gap)
+	if backTime, ok := back.(time.Time); !typed || !ok || !backTime.Equal(gap) {
+		t.Errorf("%v arrived typed %v, came back as %#v", gap, typed, back)
 	}
 }

@@ -49,14 +49,15 @@ tests:
         - [Asher, Mamo, 524016000000, "213.55.93.153", Chrome, 1127, female, 1266720721912]
 
   # IS2. Recent messages of a person.
+  # The query text differs from LDBC's: ISO GQL 16.4 SR 14 refuses an unbounded pattern without a path mode or selector, and TRAIL gives the same rows on these acyclic graphs.
   - name: is2_recent_messages_of_a_person
     params:
       personId: 228
     query: |
       SELECT messageId, messageContent, messageCreationDate, postId, personId, personFirstName, personLastName
       FROM GRAPH_TABLE (
-          MATCH (:Person {id: $personId})<-[:HAS_CREATOR]-(message:Message)-[:REPLY_OF*0..]->(post:Post)
-                -[:HAS_CREATOR]->(person:Person)
+          MATCH TRAIL (:Person {id: $personId})<-[:HAS_CREATOR]-(message:Message)-[:REPLY_OF*0..]->(post:Post),
+                (post)-[:HAS_CREATOR]->(person:Person)
           COLUMNS (message.id AS messageId, COALESCE(message.imageFile, message.content) AS messageContent,
                    message.creationDate AS messageCreationDate, post.id AS postId, person.id AS personId,
                    person.firstName AS personFirstName, person.lastName AS personLastName)
@@ -144,14 +145,33 @@ tests:
         - [6597069766775, Jie, Yang]
 
   # IS6. Forum of a message.
+  # The query text differs from LDBC's: ISO GQL 16.4 SR 14 refuses an unbounded pattern without a path mode or selector, and TRAIL gives the same rows on these acyclic graphs.
   - name: is6_forum_of_a_message
     params:
       messageId: 343597393752
     query: |
       SELECT forumId, forumTitle, moderatorId, moderatorFirstName, moderatorLastName
       FROM GRAPH_TABLE (
-          MATCH (m:Message {id: $messageId})-[:REPLY_OF*0..]->(p:Post)<-[:CONTAINER_OF]-(f:Forum)
+          MATCH TRAIL (m:Message {id: $messageId})-[:REPLY_OF*0..]->(p:Post)<-[:CONTAINER_OF]-(f:Forum)
                 -[:HAS_MODERATOR]->(mod:Person)
+          COLUMNS (f.id AS forumId, f.title AS forumTitle, mod.id AS moderatorId,
+                   mod.firstName AS moderatorFirstName, mod.lastName AS moderatorLastName)
+      )
+    expect:
+      ordered: true
+      rows:
+        - [872, "Wall of Asher Mamo", 228, Asher, Mamo]
+
+  # IS6 as graph-bench writes it: ANY SHORTEST over the whole path, a quantified edge before two fixed ones (ISO GQL 16.6).
+  - name: is6_forum_of_a_message_any_shortest
+    params:
+      messageId: 343597393752
+    query: |
+      SELECT forumId, forumTitle, moderatorId, moderatorFirstName, moderatorLastName
+      FROM GRAPH_TABLE (
+          MATCH ANY SHORTEST (m:Post|Comment)-[r:REPLY_OF]->*(p:Post)
+                <-[co:CONTAINER_OF]-(f:Forum)-[hm:HAS_MODERATOR]->(mod:Person)
+          WHERE m.id = $messageId
           COLUMNS (f.id AS forumId, f.title AS forumTitle, mod.id AS moderatorId,
                    mod.firstName AS moderatorFirstName, mod.lastName AS moderatorLastName)
       )
@@ -507,6 +527,7 @@ tests:
         - [2199023255712, Aurora, Cruz, Filipinas_Orient_Airways, 2007]
 
   # IC12. Expert search.
+  # The query text differs from LDBC's: ISO GQL 16.4 SR 14 refuses an unbounded pattern without a path mode or selector, and TRAIL gives the same rows on these acyclic graphs.
   - name: ic12_expert_search_office_holder
     params:
       personId: 228
@@ -515,7 +536,7 @@ tests:
       SELECT personId, personFirstName, personLastName, COLLECT(DISTINCT tagName) AS tagNames,
              COUNT(DISTINCT commentId) AS replyCount
       FROM GRAPH_TABLE (
-          MATCH (:Person {id: $personId})-[:KNOWS]-(friend:Person)<-[:HAS_CREATOR]-(comment:Comment)-[:REPLY_OF]->(:Post)
+          MATCH TRAIL (:Person {id: $personId})-[:KNOWS]-(friend:Person)<-[:HAS_CREATOR]-(comment:Comment)-[:REPLY_OF]->(:Post)
                 -[:HAS_TAG]->(tag:Tag)-[:HAS_TYPE]->(:TagClass)-[:IS_SUBCLASS_OF*0..]->(baseTagClass:TagClass)
           WHERE baseTagClass.name = $tagClassName
           COLUMNS (friend.id AS personId, friend.firstName AS personFirstName, friend.lastName AS personLastName,
@@ -533,6 +554,7 @@ tests:
         - [2199023255712, Aurora, Cruz, "[William_Lyon_Mackenzie_King, Thomas_Jefferson]", 1]
 
   # IC12. Expert search.
+  # The query text differs from LDBC's: ISO GQL 16.4 SR 14 refuses an unbounded pattern without a path mode or selector, and TRAIL gives the same rows on these acyclic graphs.
   - name: ic12_expert_search_tennis_player
     params:
       personId: 228
@@ -541,7 +563,7 @@ tests:
       SELECT personId, personFirstName, personLastName, COLLECT(DISTINCT tagName) AS tagNames,
              COUNT(DISTINCT commentId) AS replyCount
       FROM GRAPH_TABLE (
-          MATCH (:Person {id: $personId})-[:KNOWS]-(friend:Person)<-[:HAS_CREATOR]-(comment:Comment)-[:REPLY_OF]->(:Post)
+          MATCH TRAIL (:Person {id: $personId})-[:KNOWS]-(friend:Person)<-[:HAS_CREATOR]-(comment:Comment)-[:REPLY_OF]->(:Post)
                 -[:HAS_TAG]->(tag:Tag)-[:HAS_TYPE]->(:TagClass)-[:IS_SUBCLASS_OF*0..]->(baseTagClass:TagClass)
           WHERE baseTagClass.name = $tagClassName
           COLUMNS (friend.id AS personId, friend.firstName AS personFirstName, friend.lastName AS personLastName,

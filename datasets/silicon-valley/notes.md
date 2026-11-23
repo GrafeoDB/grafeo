@@ -14,11 +14,11 @@ Where the series and the Grafeo AI memory demo (a replay of Richard founding and
 - **Peter Gregory's sesame seeds sit on his Pied Piper investment**: in the series his reasoning from sesame seeds on burger buns drives a commodity bet. The dataset has no commodity nodes, so the joke is a `note` on his seed round in Pied Piper.
 - **Erlich's ten percent is an investment**: his incubator stake, paid for with a room at the Hacker Hostel, is an `INVESTED_IN` edge with round `Incubator stake`.
 - **Later seasons are simplified**:
-  - Gavin Belson's `WORKS_AT` edge to Hooli has role `CEO` and no end date, although he is pushed out for a while and takes the job back later. Jack Barker runs Hooli in the meantime and gives the Hooli-Con keynote in 2017.
+  - Gavin Belson has two `CEO` edges to Hooli: until 2017-06, when he is pushed out, and from 2018-04, when he takes the job back. Jack Barker is Hooli's CEO in between and gives the Hooli-Con keynote in 2017. Gavin's second period has no end date; Hooli's later sale is not modelled.
   - Erlich's departure from the Hacker Hostel in the later seasons is not modelled.
   - Pied Piper's later offices are not modelled, so the Mountain View office is its base from 2014-09 on.
 - **Roles are condensed**: each person has the roles the story needs, not every title change in the series.
-  - Jack Barker's Hooli role is kept as `Executive`.
+  - Jack Barker's Hooli roles are `Executive` until 2017-06 and `CEO` from 2017-06 to 2018-04; the start of his time at Hooli is not dated.
   - The Box is first pitched at Pied Piper under Jack Barker and later sold by Hooli as the Signature Edition, so the `the-box` product has `first_pitched_at` set to `Pied Piper`.
 - **Some details are kept vague or invented**:
   - Fiona's maker is described only as a robotics startup.

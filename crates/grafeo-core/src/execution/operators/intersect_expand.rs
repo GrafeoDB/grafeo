@@ -16,7 +16,7 @@ use grafeo_common::types::{ArcStr, LogicalType, NodeId, ReadView};
 
 use super::{Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
-use crate::graph::traits::{CommonEdge, HopFrom};
+use crate::graph::traits::{CommonEdge, EdgeTypeFilter, FilteredHop};
 use crate::graph::{Direction, GraphStore};
 
 /// The most rows a chunk of the operator holds.
@@ -38,6 +38,9 @@ pub struct IntersectExpandOperator {
     input: Box<dyn Operator>,
     near: IntersectSide,
     far: IntersectSide,
+    /// The sides' edge types, prepared by the store once for every row's read.
+    near_types: EdgeTypeFilter,
+    far_types: EdgeTypeFilter,
     view: ReadView,
     reads: Option<Arc<ReadCounter>>,
     /// Whether the last column is the node they meet at, not the far side's own.
@@ -55,15 +58,20 @@ impl IntersectExpandOperator {
     pub fn new(
         store: Arc<dyn GraphStore>,
         input: Box<dyn Operator>,
-        near: IntersectSide,
-        far: IntersectSide,
+        mut near: IntersectSide,
+        mut far: IntersectSide,
         view: ReadView,
     ) -> Self {
+        // The filters keep the names; the sides need them no more.
+        let near_types = store.edge_type_filter(&std::mem::take(&mut near.edge_types));
+        let far_types = store.edge_type_filter(&std::mem::take(&mut far.edge_types));
         Self {
             store,
             input,
             near,
             far,
+            near_types,
+            far_types,
             view,
             reads: None,
             ends_at_common: false,
@@ -108,16 +116,16 @@ impl IntersectExpandOperator {
         ) else {
             return Ok(());
         };
-        let (common, read) = self.store.common_edges(
-            &HopFrom {
+        let (common, read) = self.store.common_edges_with_filter(
+            FilteredHop {
                 node: near,
                 direction: self.near.direction,
-                edge_types: &self.near.edge_types,
+                filter: &mut self.near_types,
             },
-            &HopFrom {
+            FilteredHop {
                 node: far,
                 direction: self.far.direction,
-                edge_types: &self.far.edge_types,
+                filter: &mut self.far_types,
             },
             self.view,
         )?;

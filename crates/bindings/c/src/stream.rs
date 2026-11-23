@@ -18,9 +18,8 @@ use std::ffi::CString;
 use std::os::raw::c_char;
 use std::sync::Arc;
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 
-use grafeo_engine::database::GrafeoDB;
 use grafeo_engine::{OwnedResultStream, OwnedRowIterator};
 
 use crate::error::{GrafeoStatus, set_error, set_last_error, str_from_ptr};
@@ -29,8 +28,9 @@ use crate::types::GrafeoDatabase;
 /// Opaque stream handle. Created by [`grafeo_stream_open`]; freed by
 /// [`grafeo_stream_free`].
 pub struct GrafeoStream {
-    /// Keepalive for the underlying stores.
-    _database: Arc<RwLock<GrafeoDB>>,
+    /// The database the stream reads; every call fails with `GRAFEO-T007` once it is
+    /// closed.
+    database: crate::types::SharedDb,
     columns: Vec<String>,
     /// Behind a `Mutex` because `OwnedRowIterator` is not `Sync`. Taking the
     /// mutex also lets `grafeo_stream_next_row_json` be called from different
@@ -45,6 +45,11 @@ pub struct GrafeoStream {
 }
 
 impl GrafeoStream {
+    /// `GRAFEO-T007` once the database the stream reads is closed.
+    pub(crate) fn check(&self) -> Result<(), grafeo_common::utils::error::Error> {
+        self.database.read().map(drop)
+    }
+
     /// Takes the warnings raised so far for the accessors; their number.
     pub(crate) fn take_warnings(&self) -> usize {
         let warnings =
@@ -79,26 +84,27 @@ pub extern "C" fn grafeo_stream_open(
     let Ok(query_str) = str_from_ptr(query) else {
         return std::ptr::null_mut();
     };
-    let stream: OwnedResultStream = match db.inner.read().execute_streaming(query_str) {
-        Ok(s) => s,
-        Err(e) => {
-            set_error(&e);
-            return std::ptr::null_mut();
-        }
-    };
-    stream_handle(&db.inner, stream)
+    let stream: OwnedResultStream =
+        match or_fail!(db.inner.read(), std::ptr::null_mut()).execute_streaming(query_str) {
+            Ok(s) => s,
+            Err(e) => {
+                set_error(&e);
+                return std::ptr::null_mut();
+            }
+        };
+    stream_handle(or_fail!(db.inner.share(), std::ptr::null_mut()), stream)
 }
 
 /// The handle of `stream`, which reads `database`: what `grafeo_stream_open` and
 /// `grafeo_session_stream_open` return.
 pub(crate) fn stream_handle(
-    database: &Arc<RwLock<GrafeoDB>>,
+    database: crate::types::SharedDb,
     stream: OwnedResultStream,
 ) -> *mut GrafeoStream {
     let columns = stream.columns().to_vec();
     let warnings = stream.warning_sink();
     let handle = Box::new(GrafeoStream {
-        _database: Arc::clone(database),
+        database,
         columns,
         iter: Mutex::new(Some(stream.into_row_iter())),
         warnings,
@@ -117,6 +123,7 @@ pub extern "C" fn grafeo_stream_columns_json(stream: *const GrafeoStream) -> *mu
     }
     // SAFETY: Caller guarantees stream was produced by grafeo_stream_open.
     let s = unsafe { &*stream };
+    or_fail!(s.check(), std::ptr::null_mut());
     let json = serde_json::to_string(&s.columns).unwrap_or_else(|_| "[]".to_string());
     CString::new(json).map_or(std::ptr::null_mut(), CString::into_raw)
 }
@@ -148,6 +155,7 @@ pub extern "C" fn grafeo_stream_next_row_json(
     }
     // SAFETY: Caller guarantees stream was produced by grafeo_stream_open.
     let s = unsafe { &*stream };
+    or_fail!(s.check());
 
     let mut guard = s.iter.lock();
     let Some(iter) = guard.as_mut() else {

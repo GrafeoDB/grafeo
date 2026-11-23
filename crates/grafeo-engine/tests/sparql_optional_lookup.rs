@@ -140,7 +140,7 @@ fn values_of_people(count: usize) -> String {
 }
 
 fn profile(db: &GrafeoDB, query: &str) -> String {
-    let processor = QueryProcessor::with_rdf(db.store().unwrap(), Arc::clone(db.rdf_store()));
+    let processor = QueryProcessor::with_rdf(db.store().unwrap(), Arc::clone(&db.rdf_store()));
     let result = processor
         .process(
             &format!("EXPLAIN ANALYZE {PREFIX} {query}"),

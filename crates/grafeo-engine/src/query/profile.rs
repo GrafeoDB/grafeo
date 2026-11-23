@@ -246,15 +246,29 @@ fn tree_of(
 
 /// Formats a `ProfileNode` tree into a human-readable text representation
 /// and wraps it in a `QueryResult` with a single "profile" column.
-pub fn profile_result(root: &ProfileNode, total_time_ms: f64) -> QueryResult {
+///
+/// In a build with `--cfg grafeo_work_counters` each operator's line names the
+/// work its own code counted, and `query_work`, the statement's work outside
+/// every operator, follows the total time (see `grafeo_common::work`).
+pub fn profile_result(
+    root: &ProfileNode,
+    total_time_ms: f64,
+    query_work: &grafeo_common::work::WorkCounts,
+) -> QueryResult {
     let mut output = String::new();
     format_node(&mut output, root, 0);
     let _ = writeln!(output);
     let _ = write!(output, "Total time: {total_time_ms:.2}ms");
+    // On the total's line, which every reader of the operator lines already skips.
+    let query_work = query_work.describe();
+    if !query_work.is_empty() {
+        let _ = write!(output, "  query work: {query_work}");
+    }
 
     QueryResult {
         columns: vec!["profile".to_string()],
         column_types: vec![LogicalType::String],
+        type_runs: Vec::new(),
         rows: vec![vec![Value::String(output.into())]],
         execution_time_ms: Some(total_time_ms),
         rows_scanned: None,
@@ -277,11 +291,19 @@ fn format_node(out: &mut String, node: &ProfileNode, depth: usize) {
     // Compute self-time before locking stats (self_time_ns also locks).
     let self_time_ms = nanos_to_ms(self_time_ns(node));
 
-    let rows_out = node.stats.lock().rows_out;
+    let (rows_out, work) = {
+        let stats = node.stats.lock();
+        (stats.rows_out, stats.work.describe())
+    };
+    let work = if work.is_empty() {
+        work
+    } else {
+        format!("  work: {work}")
+    };
 
     let _ = writeln!(
         out,
-        "{indent}{name} ({label})  rows={rows}  time={time:.2}ms",
+        "{indent}{name} ({label})  rows={rows}  time={time:.2}ms{work}",
         name = node.name,
         label = node.label,
         rows = rows_out,
@@ -451,7 +473,7 @@ mod tests {
         let root = build_profile_tree(&plan, vec![scan_entry, filter_entry]).unwrap();
         assert_eq!(self_time_ns(&root), 0);
 
-        let result = profile_result(&root, 1.23);
+        let result = profile_result(&root, 1.23, &grafeo_common::work::WorkCounts::empty());
         assert_eq!(result.columns, vec!["profile".to_string()]);
         let text = match &result.rows[0][0] {
             grafeo_common::types::Value::String(s) => s.to_string(),

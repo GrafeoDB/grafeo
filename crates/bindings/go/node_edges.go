@@ -30,6 +30,10 @@ type NodeEdge struct {
 // exist has none.
 func (db *Database) GetNodeEdges(nodeID uint64, direction Direction, edgeTypes ...string) ([]NodeEdge, error) {
 	defer runtime.KeepAlive(db)
+	if err := db.checkOpen(); err != nil {
+		var zero0 []NodeEdge
+		return zero0, err
+	}
 	return nodeEdgesCall(edgeTypes, func(types *C.char, neighbors, edges **C.uint64_t, count *C.size_t) C.GrafeoStatus {
 		return C.grafeo_get_node_edges(db.handle, C.uint64_t(nodeID), C.GrafeoDirection(direction), types, neighbors, edges, count)
 	})

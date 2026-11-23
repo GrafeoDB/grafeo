@@ -107,14 +107,19 @@ impl AsOfView {
 
     /// A [`Snapshot`](crate::Snapshot) of the graph the view reads, at the
     /// view's epoch, pinned on its own: it stays readable after the view is
-    /// dropped.
+    /// dropped. Holding it keeps the graph alive past `close()`, and the spill files it reads stay
+    /// until it drops.
     #[must_use]
     pub fn snapshot(&self) -> crate::Snapshot {
-        crate::Snapshot::pinned(
-            self.session.active_store(),
-            self.read_view(),
-            self._pin.again(),
-        )
+        // After `close()` the view reads an empty graph.
+        let store = self.session.inner().map_or_else(
+            |_| {
+                std::sync::Arc::new(grafeo_core::graph::rowgroup::RowGroupStore::new())
+                    as std::sync::Arc<dyn grafeo_core::graph::GraphStore>
+            },
+            |inner| inner.active_store(),
+        );
+        crate::Snapshot::pinned(store, self.read_view(), self._pin.again())
     }
 
     /// Runs a GQL query at the view's epoch.
@@ -169,16 +174,8 @@ impl AsOfView {
     }
 }
 
-impl super::GrafeoDB {
-    /// The epoch a read as of `point` reads at: the epoch itself (the
-    /// current one for a later one), or the last epoch committed at or
-    /// before a time, or before a duration ago.
-    ///
-    /// # Errors
-    ///
-    /// For a time while the database keeps no history, and for a time
-    /// before what it keeps: "history before ... is not retained".
-    pub fn epoch_as_of(&self, point: impl Into<TimePoint>) -> Result<EpochId> {
+impl super::Open {
+    pub(crate) fn epoch_as_of(&self, point: impl Into<TimePoint>) -> Result<EpochId> {
         match point.into() {
             TimePoint::Epoch(epoch) => Ok(self.transaction_manager.readable_epoch(epoch)),
             TimePoint::Timestamp(timestamp) => self.transaction_manager.epoch_at(timestamp),
@@ -192,6 +189,44 @@ impl super::GrafeoDB {
                     .epoch_at(Timestamp::from_millis(millis))
             }
         }
+    }
+
+    pub(crate) fn as_of(&self, point: impl Into<TimePoint>) -> Result<AsOfView> {
+        let epoch = self.epoch_as_of(point)?;
+        // Pinned first, then read: the floor cannot pass the epoch.
+        let pin = self.transaction_manager.pin_read_at(epoch)?;
+        let session = self.session_with_role(crate::auth::Role::ReadOnly);
+        session.set_viewing_epoch(epoch);
+        Ok(AsOfView {
+            session,
+            epoch,
+            _pin: pin,
+        })
+    }
+
+    #[cfg(feature = "gql")]
+    pub(crate) fn execute_as_of(
+        &self,
+        query: &str,
+        point: impl Into<TimePoint>,
+    ) -> Result<crate::database::QueryResult> {
+        let epoch = self.epoch_as_of(point)?;
+        self.execute_at_epoch(query, epoch)
+    }
+}
+
+// The database's public methods: each reaches the open state for its call (#712).
+impl super::GrafeoDB {
+    /// The epoch a read as of `point` reads at: the epoch itself (the
+    /// current one for a later one), or the last epoch committed at or
+    /// before a time, or before a duration ago.
+    ///
+    /// # Errors
+    ///
+    /// For a time while the database keeps no history, and for a time
+    /// before what it keeps: "history before ... is not retained".
+    pub fn epoch_as_of(&self, point: impl Into<TimePoint>) -> Result<EpochId> {
+        self.live()?.epoch_as_of(point)
     }
 
     /// A read-only view of the database as of `point`, an epoch, a time or
@@ -220,16 +255,7 @@ impl super::GrafeoDB {
     /// For a point before what the database keeps: "history before ... is
     /// not retained"; for a time while it keeps no history.
     pub fn as_of(&self, point: impl Into<TimePoint>) -> Result<AsOfView> {
-        let epoch = self.epoch_as_of(point)?;
-        // Pinned first, then read: the floor cannot pass the epoch.
-        let pin = self.transaction_manager.pin_read_at(epoch)?;
-        let session = self.session_with_role(crate::auth::Role::ReadOnly);
-        session.set_viewing_epoch(epoch);
-        Ok(AsOfView {
-            session,
-            epoch,
-            _pin: pin,
-        })
+        self.live()?.as_of(point)
     }
 
     /// Runs a GQL query as the database was as of `point` (see
@@ -247,7 +273,6 @@ impl super::GrafeoDB {
         query: &str,
         point: impl Into<TimePoint>,
     ) -> Result<crate::database::QueryResult> {
-        let epoch = self.epoch_as_of(point)?;
-        self.execute_at_epoch(query, epoch)
+        self.live()?.execute_as_of(query, point)
     }
 }

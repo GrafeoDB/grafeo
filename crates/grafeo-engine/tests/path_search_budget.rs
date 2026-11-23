@@ -354,6 +354,21 @@ fn assert_over_budget(db: &GrafeoDB, language: &str, query: &str) -> u64 {
     budget
 }
 
+/// `TRAIL ` in GQL, nothing in Cypher: GQL refuses an unbounded walk (`42001`,
+/// since 0.6.4), and a trail, Cypher's semantics, still passes the budget on
+/// this graph.
+fn trail_in_gql(language: &str) -> &'static str {
+    if language == "gql" { "TRAIL " } else { "" }
+}
+
+/// The reported query, bounded in GQL by its path mode (see [`trail_in_gql`]).
+fn reported(language: &str) -> String {
+    format!(
+        "MATCH {}(repo:Repository)-[*]->(f:File) WHERE repo.repoName = 'deriva' RETURN count(f)",
+        trail_in_gql(language)
+    )
+}
+
 #[test]
 fn an_unbounded_pattern_over_cycles_fails_with_an_error_not_an_abort() {
     let _turn = measuring();
@@ -363,10 +378,6 @@ fn an_unbounded_pattern_over_cycles_fails_with_an_error_not_an_abort() {
         // The reported query: walks of up to 101 edges, one row each
         (
             "cypher",
-            format!("MATCH (repo:Repository)-[*]->(f:File) {filter} RETURN count(f)"),
-        ),
-        (
-            "gql",
             format!("MATCH (repo:Repository)-[*]->(f:File) {filter} RETURN count(f)"),
         ),
         // A trail repeats no edge, and there are still too many
@@ -381,13 +392,26 @@ fn an_unbounded_pattern_over_cycles_fails_with_an_error_not_an_abort() {
         ),
         (
             "gql",
-            format!("MATCH p = (repo:Repository)-[*]->(f:File) {filter} RETURN count(p)"),
+            format!("MATCH p = TRAIL (repo:Repository)-[*]->(f:File) {filter} RETURN count(p)"),
         ),
     ] {
         assert_eq!(
             assert_over_budget(&db, language, &query),
             256 << 20,
             "{language}: {query}: the default budget"
+        );
+    }
+    // GQL refuses the walks before they run (`42001`, since 0.6.4): an
+    // unbounded quantifier needs a path mode or a selector.
+    for query in [
+        format!("MATCH (repo:Repository)-[*]->(f:File) {filter} RETURN count(f)"),
+        format!("MATCH p = (repo:Repository)-[*]->(f:File) {filter} RETURN count(p)"),
+    ] {
+        let error = run(&db, "gql", &query).expect_err(&query);
+        assert_eq!(
+            grafeo_common::utils::gqlstatus::GqlStatus::from(&error).as_str(),
+            "42001",
+            "{query}: {error}"
         );
     }
     // The database still answers
@@ -404,12 +428,15 @@ fn distinct_targets_and_exists_answer_on_the_same_graph() {
     let CodeGraph { db, .. } = code_graph();
     let filter = "WHERE repo.repoName = 'deriva'";
     for language in ["gql", "cypher"] {
+        let mode = trail_in_gql(language);
         // Every file is in the CONTAINS tree under the repository
         for query in [
-            format!("MATCH (repo:Repository)-[*]->(f:File) {filter} RETURN count(DISTINCT f)"),
+            format!(
+                "MATCH {mode}(repo:Repository)-[*]->(f:File) {filter} RETURN count(DISTINCT f)"
+            ),
             format!(
                 "MATCH (repo:Repository) {filter} MATCH (f:File) \
-                 WHERE EXISTS {{ MATCH (repo)-[*]->(f) }} RETURN count(f)"
+                 WHERE EXISTS {{ MATCH {mode}(repo)-[*]->(f) }} RETURN count(f)"
             ),
         ] {
             let (found, peak) = measure(|| count(&db, language, &query));
@@ -421,10 +448,11 @@ fn distinct_targets_and_exists_answer_on_the_same_graph() {
             );
         }
     }
-    let query = format!(
-        "MATCH (repo:Repository)-[*]->(f:File) {filter} RETURN DISTINCT f.filePath AS path"
-    );
     for language in ["gql", "cypher"] {
+        let mode = trail_in_gql(language);
+        let query = format!(
+            "MATCH {mode}(repo:Repository)-[*]->(f:File) {filter} RETURN DISTINCT f.filePath AS path"
+        );
         let rows = run(&db, language, &query).unwrap().rows().len();
         assert_eq!(rows, 500, "{language}: {query}");
     }
@@ -467,9 +495,8 @@ fn a_memory_limit_sets_the_path_search_budget() {
     let _turn = measuring();
     let config = Config::in_memory().with_memory_limit(64 * 1024 * 1024);
     let CodeGraph { db, .. } = code_graph_in(GrafeoDB::with_config(config).unwrap());
-    let query =
-        "MATCH (repo:Repository)-[*]->(f:File) WHERE repo.repoName = 'deriva' RETURN count(f)";
     for language in ["gql", "cypher"] {
+        let query = &reported(language);
         let (result, peak) = measure(|| run(&db, language, query));
         let message = match result {
             Ok(result) => panic!(
@@ -505,10 +532,8 @@ fn a_large_memory_limit_keeps_the_path_search_budget_bounded() {
     let _turn = measuring();
     let config = Config::in_memory().with_memory_limit(4 * 1024 * 1024 * 1024);
     let CodeGraph { db, .. } = code_graph_in(GrafeoDB::with_config(config).unwrap());
-    let query =
-        "MATCH (repo:Repository)-[*]->(f:File) WHERE repo.repoName = 'deriva' RETURN count(f)";
     for language in ["gql", "cypher"] {
-        assert_over_budget(&db, language, query);
+        assert_over_budget(&db, language, &reported(language));
     }
 }
 
@@ -519,11 +544,9 @@ fn an_explicit_path_search_budget_is_the_budget() {
     let _turn = measuring();
     let config = Config::in_memory().with_path_search_budget(8 * 1024 * 1024);
     let CodeGraph { db, .. } = code_graph_in(GrafeoDB::with_config(config).unwrap());
-    let query =
-        "MATCH (repo:Repository)-[*]->(f:File) WHERE repo.repoName = 'deriva' RETURN count(f)";
     for language in ["gql", "cypher"] {
         assert_eq!(
-            assert_over_budget(&db, language, query),
+            assert_over_budget(&db, language, &reported(language)),
             8 << 20,
             "{language}"
         );

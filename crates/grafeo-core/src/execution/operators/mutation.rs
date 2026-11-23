@@ -168,6 +168,15 @@ pub trait ConstraintValidator: Send + Sync {
         true
     }
 
+    /// Whether checking a new node of `labels` reads the nodes written
+    /// before it (a UNIQUE or NODE KEY constraint of one of the labels): a
+    /// bulk create then writes each row before it checks the next, so a value
+    /// repeated within the rows is refused.
+    fn checks_unique_nodes(&self, labels: &[String]) -> bool {
+        let _ = labels;
+        true
+    }
+
     /// Whether checking `value` for property `key` of an existing node needs
     /// the node's labels or its other properties. When no value a SET writes
     /// does, a writer checks each value on its own (with no labels) and does
@@ -590,6 +599,25 @@ fn id_at(
             expected: format!("Int64 ({id_kind} ID)"),
             found: format!("{other:?}"),
         }),
+    }
+}
+
+/// The id of the node or edge a SET, REMOVE or DELETE writes to in `row`, or
+/// `None` when it is null (a node an OPTIONAL MATCH did not find): such a write
+/// is a no-op for the row (ISO/IEC 39075 13.3 GR 8, 13.4 GR 4, 13.5 GR 4), which
+/// is passed on unchanged. CREATE and MERGE endpoints read [`id_at`], which
+/// refuses a null.
+fn target_at(
+    chunk: &DataChunk,
+    column: usize,
+    row: usize,
+    kind: &str,
+) -> Result<Option<u64>, OperatorError> {
+    match chunk.column(column).and_then(|c| c.get_value(row)) {
+        Some(Value::Null) => Ok(None),
+        Some(Value::Int64(id)) => Ok(Some(id.cast_unsigned())),
+        // Missing or another type: `id_at` names the error.
+        _ => id_at(chunk, column, row, kind, kind).map(Some),
     }
 }
 
@@ -1079,8 +1107,9 @@ impl Operator for DeleteNodeOperator {
         let mut builder = DataChunkBuilder::with_capacity(&types, chunk.row_count());
 
         for row in chunk.selected_indices() {
-            let node_id = NodeId(id_at(&chunk, self.node_column, row, "node", "node")?);
-            self.writer.delete_node(node_id, self.detach)?;
+            if let Some(node_id) = target_at(&chunk, self.node_column, row, "node")? {
+                self.writer.delete_node(NodeId(node_id), self.detach)?;
+            }
 
             // Pass through all input columns so downstream RETURN can
             // reference the variable (e.g., count(n) after DELETE n).
@@ -1142,8 +1171,9 @@ impl Operator for DeleteEdgeOperator {
         let mut builder = DataChunkBuilder::with_capacity(&types, chunk.row_count());
 
         for row in chunk.selected_indices() {
-            let edge_id = EdgeId(id_at(&chunk, self.edge_column, row, "edge", "edge")?);
-            self.writer.delete_edge(edge_id)?;
+            if let Some(edge_id) = target_at(&chunk, self.edge_column, row, "edge")? {
+                self.writer.delete_edge(EdgeId(edge_id))?;
+            }
             copy_columns(&chunk, row, &mut builder, chunk.column_count());
             builder.advance_row();
         }
@@ -1210,8 +1240,10 @@ impl Operator for AddLabelOperator {
         let mut builder = DataChunkBuilder::with_capacity(&types, chunk.row_count());
 
         for row in chunk.selected_indices() {
-            let node_id = NodeId(id_at(&chunk, self.node_column, row, "node", "node")?);
-            let added = self.writer.add_labels(node_id, &self.labels)?;
+            let added = match target_at(&chunk, self.node_column, row, "node")? {
+                Some(node_id) => self.writer.add_labels(NodeId(node_id), &self.labels)?,
+                None => 0,
+            };
 
             copy_columns(&chunk, row, &mut builder, chunk.column_count());
             if let Some(dst) = builder.column_mut(self.count_column) {
@@ -1282,8 +1314,10 @@ impl Operator for RemoveLabelOperator {
         let mut builder = DataChunkBuilder::with_capacity(&types, chunk.row_count());
 
         for row in chunk.selected_indices() {
-            let node_id = NodeId(id_at(&chunk, self.node_column, row, "node", "node")?);
-            let removed = self.writer.remove_labels(node_id, &self.labels)?;
+            let removed = match target_at(&chunk, self.node_column, row, "node")? {
+                Some(node_id) => self.writer.remove_labels(NodeId(node_id), &self.labels)?,
+                None => 0,
+            };
 
             copy_columns(&chunk, row, &mut builder, chunk.column_count());
             if let Some(dst) = builder.column_mut(self.count_column) {
@@ -1384,20 +1418,27 @@ impl Operator for SetPropertyOperator {
         let mut builder = DataChunkBuilder::with_capacity(&types, chunk.row_count());
 
         for row in chunk.selected_indices() {
-            let entity_id = id_at(&chunk, self.entity_column, row, "entity", "entity")?;
-            let assignments: Vec<(String, Value)> = self
-                .properties
-                .iter()
-                .map(|(name, source)| {
-                    Ok((name.clone(), source.resolve(&chunk, row, &self.writer)?))
-                })
-                .collect::<Result<_, OperatorError>>()?;
-            if self.is_edge {
-                self.writer
-                    .set_edge_properties(EdgeId(entity_id), &assignments, self.replace)?;
-            } else {
-                self.writer
-                    .set_node_properties(NodeId(entity_id), &assignments, self.replace)?;
+            if let Some(entity_id) = target_at(&chunk, self.entity_column, row, "entity")? {
+                let assignments: Vec<(String, Value)> = self
+                    .properties
+                    .iter()
+                    .map(|(name, source)| {
+                        Ok((name.clone(), source.resolve(&chunk, row, &self.writer)?))
+                    })
+                    .collect::<Result<_, OperatorError>>()?;
+                if self.is_edge {
+                    self.writer.set_edge_properties(
+                        EdgeId(entity_id),
+                        &assignments,
+                        self.replace,
+                    )?;
+                } else {
+                    self.writer.set_node_properties(
+                        NodeId(entity_id),
+                        &assignments,
+                        self.replace,
+                    )?;
+                }
             }
 
             copy_columns(&chunk, row, &mut builder, chunk.column_count());

@@ -117,50 +117,34 @@ List<Map<String, dynamic>> parseRows(String json) {
   }).toList();
 }
 
-/// Extract column names from the first row.
-List<String> extractColumns(List<Map<String, dynamic>> rows) {
-  if (rows.isEmpty) return [];
-  return rows.first.keys.toList();
-}
+/// The column names of a result from `grafeo_result_columns_json`, also for
+/// a result without rows.
+List<String> parseColumns(String json) =>
+    (jsonDecode(json) as List).cast<String>();
 
-/// Extract Node and Edge entities from query result rows.
-///
-/// Mirrors `grafeo-bindings-common::entity::extract_entities`.
-(List<Node>, List<Edge>) extractEntities(List<Map<String, dynamic>> rows) {
-  final nodeIds = <int>{};
-  final edgeIds = <int>{};
-  final nodes = <Node>[];
-  final edges = <Edge>[];
-
-  for (final row in rows) {
-    for (final value in row.values) {
-      if (value is! Map<String, dynamic>) continue;
-      final id = value['_id'];
-      if (id is! int) continue;
-
-      if (value.containsKey('_labels')) {
-        if (!nodeIds.add(id)) continue;
-        final labels =
-            (value['_labels'] as List?)?.whereType<String>().toList() ?? [];
-        nodes.add(Node(id, labels, _extractProperties(value, _nodeKeys)));
-      } else if (value.containsKey('_type')) {
-        if (!edgeIds.add(id)) continue;
-        final edgeType = value['_type'] as String? ?? '';
-        final sourceId = value['_source'] as int? ?? 0;
-        final targetId = value['_target'] as int? ?? 0;
-        edges.add(
-          Edge(
-            id,
-            edgeType,
-            sourceId,
-            targetId,
-            _extractProperties(value, _edgeKeys),
-          ),
-        );
-      }
-    }
-  }
-
+/// The nodes and edges of a result, from `grafeo_result_nodes_json` and
+/// `grafeo_result_edges_json`: the engine says by type which values are nodes
+/// and edges, so a map with the keys of a node (`{_id: 1, _labels: []}`) is a
+/// map.
+(List<Node>, List<Edge>) parseEntities(String nodesJson, String edgesJson) {
+  final nodes = [
+    for (final node in jsonDecode(nodesJson) as List)
+      Node(
+        node['id'] as int,
+        (node['labels'] as List).whereType<String>().toList(),
+        decodeObject(node['properties']),
+      ),
+  ];
+  final edges = [
+    for (final edge in jsonDecode(edgesJson) as List)
+      Edge(
+        edge['id'] as int,
+        edge['type'] as String,
+        edge['source_id'] as int,
+        edge['target_id'] as int,
+        decodeObject(edge['properties']),
+      ),
+  ];
   return (nodes, edges);
 }
 
@@ -256,23 +240,5 @@ dynamic _decodeMap(Map m) {
   return <String, dynamic>{
     for (final entry in m.entries)
       entry.key.toString(): _decodeValue(entry.value),
-  };
-}
-
-/// The structural keys of a node map: its id and labels.
-const _nodeKeys = {'_id', '_labels'};
-
-/// The structural keys of an edge map: its id, type and ends.
-const _edgeKeys = {'_id', '_type', '_source', '_target'};
-
-/// The user properties of a node or edge map: every key but its [structural]
-/// ones, also a property whose name starts with `_` (#254).
-Map<String, dynamic> _extractProperties(
-  Map<String, dynamic> map,
-  Set<String> structural,
-) {
-  return {
-    for (final entry in map.entries)
-      if (!structural.contains(entry.key)) entry.key: entry.value,
   };
 }

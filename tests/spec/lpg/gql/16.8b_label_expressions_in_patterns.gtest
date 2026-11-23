@@ -2976,39 +2976,39 @@ tests:
       empty: true
 
   - name: variable_length_3_colon_a
-    query: "MATCH (x:A)-[:R]->+(t:T) RETURN x.name"
+    query: "MATCH TRAIL (x:A)-[:R]->+(t:T) RETURN x.name"
     expect:
       rows:
         - [Alix]
         - [Vincent]
 
   - name: variable_length_3_colon_a_colon_b
-    query: "MATCH (x:A:B)-[:R]->+(t:T) RETURN x.name"
+    query: "MATCH TRAIL (x:A:B)-[:R]->+(t:T) RETURN x.name"
     expect:
       rows:
         - [Vincent]
 
   - name: variable_length_3_is_a
-    query: "MATCH (x IS A)-[:R]->+(t:T) RETURN x.name"
+    query: "MATCH TRAIL (x IS A)-[:R]->+(t:T) RETURN x.name"
     expect:
       rows:
         - [Alix]
         - [Vincent]
 
   - name: variable_length_3_is_a_and_b
-    query: "MATCH (x IS A&B)-[:R]->+(t:T) RETURN x.name"
+    query: "MATCH TRAIL (x IS A&B)-[:R]->+(t:T) RETURN x.name"
     expect:
       rows:
         - [Vincent]
 
   - name: variable_length_3_a_and_b
-    query: "MATCH (x:A&B)-[:R]->+(t:T) RETURN x.name"
+    query: "MATCH TRAIL (x:A&B)-[:R]->+(t:T) RETURN x.name"
     expect:
       rows:
         - [Vincent]
 
   - name: variable_length_3_a_or_b
-    query: "MATCH (x:A|B)-[:R]->+(t:T) RETURN x.name"
+    query: "MATCH TRAIL (x:A|B)-[:R]->+(t:T) RETURN x.name"
     expect:
       rows:
         - [Alix]
@@ -3016,7 +3016,7 @@ tests:
         - [Vincent]
 
   - name: variable_length_3_not_a
-    query: "MATCH (x:!A)-[:R]->+(t:T) RETURN x.name"
+    query: "MATCH TRAIL (x:!A)-[:R]->+(t:T) RETURN x.name"
     expect:
       rows:
         - [Gus]
@@ -3024,7 +3024,7 @@ tests:
         - [Mia]
 
   - name: variable_length_3_any_label
-    query: "MATCH (x:%)-[:R]->+(t:T) RETURN x.name"
+    query: "MATCH TRAIL (x:%)-[:R]->+(t:T) RETURN x.name"
     expect:
       rows:
         - [Alix]
@@ -3033,14 +3033,14 @@ tests:
         - [Vincent]
 
   - name: variable_length_3_paren_a
-    query: "MATCH (x:(A))-[:R]->+(t:T) RETURN x.name"
+    query: "MATCH TRAIL (x:(A))-[:R]->+(t:T) RETURN x.name"
     expect:
       rows:
         - [Alix]
         - [Vincent]
 
   - name: variable_length_3_nobody
-    query: "MATCH (x:Z&A)-[:R]->+(t:T) RETURN x.name"
+    query: "MATCH TRAIL (x:Z&A)-[:R]->+(t:T) RETURN x.name"
     expect:
       empty: true
 

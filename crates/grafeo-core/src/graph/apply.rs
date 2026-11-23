@@ -382,9 +382,48 @@ pub trait GraphBackend: GraphStore {
     ///
     /// [`ApplyError::Refused`] for an op that is no create or a writer that
     /// is no transaction; otherwise as [`apply`](Self::apply).
+    #[deprecated(since = "0.6.4", note = "use apply_chunk")]
     fn apply_bulk_row(&self, op: &DataOp, writer: Writer) -> Result<(), ApplyError> {
         check_bulk_row(op, writer)?;
         self.apply(op, writer).map(drop)
+    }
+
+    /// Applies `ops`, creates of one kind (all nodes or all edges), in
+    /// order, as `writer`: the rows of a bulk write (a transaction's, at ids
+    /// of a range it reserved and recorded as one change, see
+    /// [`apply_bulk_row`](Self::apply_bulk_row)), or the consecutive creates
+    /// replay meets in a logged group. Builds no before-image for a
+    /// transaction's rows. A bulk write passes at most
+    /// [`CHUNK_ROWS`] rows at a time.
+    ///
+    /// The row-group store checks every row of the chunk before it changes
+    /// anything, and admits the chunk's bytes against the memory limit at
+    /// once: on `Err` nothing of the chunk changed.
+    ///
+    /// The default applies the rows one at a time, a transaction's through
+    /// [`apply_bulk_row`](Self::apply_bulk_row) and any other writer's
+    /// through [`apply`](Self::apply). On `Err` the rows before the failing
+    /// one stay; the transaction's rollback of the range (or replay's failed
+    /// open) takes them back.
+    ///
+    /// # Errors
+    ///
+    /// [`ApplyError::Refused`] for an op that is no create, or creates of
+    /// both kinds; otherwise as [`apply`](Self::apply).
+    fn apply_chunk(&self, ops: &[DataOp], writer: Writer) -> Result<(), ApplyError> {
+        check_chunk(ops)?;
+        for op in ops {
+            if matches!(writer, Writer::Transaction { .. }) {
+                #[expect(
+                    deprecated,
+                    reason = "the default keeps an override of apply_bulk_row until 0.7.0 removes it"
+                )]
+                self.apply_bulk_row(op, writer)?;
+            } else {
+                self.apply(op, writer)?;
+            }
+        }
+        Ok(())
     }
 
     /// Commits `transaction` at `epoch`: its writes in this graph, whose
@@ -464,6 +503,35 @@ pub trait GraphBackend: GraphStore {
     /// When the backend cannot make the commits durable: the checkpoint
     /// fails, and the log keeps every commit.
     fn flush(&self, epoch: EpochId) -> Result<(), ApplyError>;
+}
+
+/// The most rows a bulk write passes to [`GraphBackend::apply_chunk`] at a
+/// time: one vector of rows.
+pub const CHUNK_ROWS: usize = 2_048;
+
+/// Checks the ops of [`GraphBackend::apply_chunk`]: creates, all of nodes or
+/// all of edges.
+///
+/// # Errors
+///
+/// [`ApplyError::Refused`], naming the first op that does not fit.
+pub(crate) fn check_chunk(ops: &[DataOp]) -> Result<(), ApplyError> {
+    let nodes = matches!(ops.first(), Some(DataOp::CreateNode { .. }));
+    for op in ops {
+        let fits = match op {
+            DataOp::CreateNode { .. } => nodes,
+            DataOp::CreateEdge { .. } => !nodes,
+            _ => false,
+        };
+        if !fits {
+            return Err(ApplyError::Refused(format!(
+                "a chunk holds creates of one kind, not an op of kind {} among creates of {}",
+                op.kind(),
+                if nodes { "nodes" } else { "edges" }
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Refuses what no bulk write applies as a row (see

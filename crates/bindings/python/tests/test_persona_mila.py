@@ -70,7 +70,7 @@ def test_persona_mila_the_cypher_quantifier_runs_in_gql(db):
     want = [("Alix",), ("Gus",), ("Vincent",)]
     for pattern in ["-[:KNOWS*1..3]->", "-[:KNOWS]->{1,3}", "-[:KNOWS*]->", "-[:KNOWS]->{1,}"]:
         result = db.execute(
-            f"MATCH (a:Person {{name: 'Alix'}}){pattern}(b) RETURN DISTINCT b.name AS b"
+            f"MATCH TRAIL (a:Person {{name: 'Alix'}}){pattern}(b) RETURN DISTINCT b.name AS b"
         )
         assert values(result) == want, pattern
 

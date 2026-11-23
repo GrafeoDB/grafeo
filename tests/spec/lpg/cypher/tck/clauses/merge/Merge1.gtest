@@ -1,0 +1,304 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/merge/Merge1.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Merge1"
+  title: "Merge1 - Merge node"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Merge node when no nodes exist
+  - name: s1_merge_node_when_no_nodes_exist
+    query: |
+      MERGE (a)
+      RETURN count(*) AS n
+    expect:
+      values: |
+        | n |
+        | 1 |
+      side_effects:
+        +nodes: 1
+
+  # [2] Merge node with label
+  - name: s2_merge_node_with_label
+    query: |
+      MERGE (a:TheLabel)
+      RETURN labels(a)
+    expect:
+      values: |
+        | labels(a) |
+        | ['TheLabel'] |
+      side_effects:
+        +nodes: 1
+        +labels: 1
+
+  # [3] Merge node with label when it exists
+  - name: s3_merge_node_with_label_when_it_exists
+    setup:
+      - |
+        CREATE (:TheLabel {id: 1})
+    query: |
+      MERGE (a:TheLabel)
+      RETURN a.id
+    expect:
+      values: |
+        | a.id |
+        | 1 |
+      side_effects: {}
+
+  # [4] Merge node should create when it doesn't match, properties
+  - name: s4_merge_node_should_create_when_it_doesn_t_match_properties
+    setup:
+      - |
+        CREATE ({num: 42})
+    query: |
+      MERGE (a {num: 43})
+      RETURN a.num
+    expect:
+      values: |
+        | a.num |
+        | 43 |
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [5] Merge node should create when it doesn't match, properties and label
+  - name: s5_merge_node_should_create_when_it_doesn_t_match_properties_and_label
+    setup:
+      - |
+        CREATE (:TheLabel {num: 42})
+    query: |
+      MERGE (a:TheLabel {num: 43})
+      RETURN a.num
+    expect:
+      values: |
+        | a.num |
+        | 43 |
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [6] Merge node with prop and label
+  - name: s6_merge_node_with_prop_and_label
+    setup:
+      - |
+        CREATE (:TheLabel {num: 42})
+    query: |
+      MERGE (a:TheLabel {num: 42})
+      RETURN a.num
+    expect:
+      values: |
+        | a.num |
+        | 42 |
+      side_effects: {}
+
+  # [7] Merge should work when finding multiple elements
+  - name: s7_merge_should_work_when_finding_multiple_elements
+    query: |
+      CREATE (:X)
+      CREATE (:X)
+      MERGE (:X)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 2
+        +labels: 1
+
+  # [8] Merge should handle argument properly
+  - name: s8_merge_should_handle_argument_properly
+    setup:
+      - |
+        CREATE ({var: 42}),
+          ({var: 'not42'})
+    query: |
+      WITH 42 AS var
+      MERGE (c:N {var: var})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +labels: 1
+        +properties: 1
+
+  # [9] Merge should support updates while merging
+  - name: s9_merge_should_support_updates_while_merging
+    setup:
+      - |
+        UNWIND [0, 1, 2] AS x
+        UNWIND [0, 1, 2] AS y
+        CREATE ({x: x, y: y})
+    query: |
+      MATCH (foo)
+      WITH foo.x AS x, foo.y AS y
+      MERGE (:N {x: x, y: y + 1})
+      MERGE (:N {x: x, y: y})
+      MERGE (:N {x: x + 1, y: y})
+      RETURN x, y
+    expect:
+      values: |
+        | x | y |
+        | 0 | 0 |
+        | 0 | 1 |
+        | 0 | 2 |
+        | 1 | 0 |
+        | 1 | 1 |
+        | 1 | 2 |
+        | 2 | 0 |
+        | 2 | 1 |
+        | 2 | 2 |
+      side_effects:
+        +nodes: 15
+        +labels: 1
+        +properties: 30
+
+  # [10] Merge must properly handle multiple labels
+  - name: s10_merge_must_properly_handle_multiple_labels
+    setup:
+      - |
+        CREATE (:L:A {num: 42})
+    query: |
+      MERGE (test:L:B {num: 42})
+      RETURN labels(test) AS labels
+    expect:
+      unordered_lists: true
+      values: |
+        | labels |
+        | ['L', 'B'] |
+      side_effects:
+        +nodes: 1
+        +labels: 1
+        +properties: 1
+
+  # [11] Merge should be able to merge using property of bound node
+  - name: s11_merge_should_be_able_to_merge_using_property_of_bound_node
+    setup:
+      - |
+        CREATE (:Person {name: 'A', bornIn: 'New York'})
+        CREATE (:Person {name: 'B', bornIn: 'Ohio'})
+        CREATE (:Person {name: 'C', bornIn: 'New Jersey'})
+        CREATE (:Person {name: 'D', bornIn: 'New York'})
+        CREATE (:Person {name: 'E', bornIn: 'Ohio'})
+        CREATE (:Person {name: 'F', bornIn: 'New Jersey'})
+    query: |
+      MATCH (person:Person)
+      MERGE (city:City {name: person.bornIn})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 3
+        +labels: 1
+        +properties: 3
+
+  # [12] Merge should be able to merge using property of freshly created node
+  - name: s12_merge_should_be_able_to_merge_using_property_of_freshly_created_node
+    query: |
+      CREATE (a {num: 1})
+      MERGE ({v: a.num})
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 2
+        +properties: 2
+
+  # [13] Merge should bind a path
+  - name: s13_merge_should_bind_a_path
+    query: |
+      MERGE p = (a {num: 1})
+      RETURN p
+    expect:
+      values: |
+        | p |
+        | <({num: 1})> |
+      side_effects:
+        +nodes: 1
+        +properties: 1
+
+  # [14] Merges should not be able to match on deleted nodes
+  - name: s14_merges_should_not_be_able_to_match_on_deleted_nodes
+    setup:
+      - |
+        CREATE (:A {num: 1}),
+          (:A {num: 2})
+    query: |
+      MATCH (a:A)
+      DELETE a
+      MERGE (a2:A)
+      RETURN a2.num
+    expect:
+      values: |
+        | a2.num |
+        | null |
+        | null |
+      side_effects:
+        +nodes: 1
+        -nodes: 2
+        -properties: 2
+
+  # [15] Fail when merge a node that is already bound
+  # TCK: SyntaxError at compile time: VariableAlreadyBound
+  - name: s15_fail_when_merge_a_node_that_is_already_bound
+    xfail:
+      spec: "openCypher TCK 2024.3 Merge1: [15] Fail when merge a node that is already bound"
+      issue: "#795"
+    query: |
+      MATCH (a)
+      MERGE (a)
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [16] Fail when using parameter as node predicate in MERGE
+  # TCK: SyntaxError at compile time: InvalidParameterUse
+  - name: s16_fail_when_using_parameter_as_node_predicate_in_merge
+    query: |
+      MERGE (n $param)
+      RETURN n
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [17] Fail on merging node with null property
+  # TCK: SemanticError at runtime: MergeReadOwnWrites
+  - name: s17_fail_on_merging_node_with_null_property
+    xfail:
+      spec: "openCypher TCK 2024.3 Merge1: [17] Fail on merging node with null property"
+      issue: "#797"
+    query: |
+      MERGE ({num: null})
+    expect:
+      gql_status: "42"
+      side_effects: {}

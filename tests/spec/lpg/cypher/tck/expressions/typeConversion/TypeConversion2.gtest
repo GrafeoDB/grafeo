@@ -1,0 +1,205 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/typeConversion/TypeConversion2.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.TypeConversion2"
+  title: "TypeConversion2 - To Integer"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] `toInteger()` on float
+  - name: s1_tointeger_on_float
+    query: |
+      WITH 82.9 AS weight
+      RETURN toInteger(weight)
+    expect:
+      values: |
+        | toInteger(weight) |
+        | 82 |
+      side_effects: {}
+
+  # [2] `toInteger()` returning null on non-numerical string
+  - name: s2_tointeger_returning_null_on_non_numerical_string
+    query: |
+      WITH 'foo' AS foo_string, '' AS empty_string
+      RETURN toInteger(foo_string) AS foo, toInteger(empty_string) AS empty
+    expect:
+      values: |
+        | foo | empty |
+        | null | null |
+      side_effects: {}
+
+  # [3] `toInteger()` handling mixed number types
+  - name: s3_tointeger_handling_mixed_number_types
+    query: |
+      WITH [2, 2.9] AS numbers
+      RETURN [n IN numbers | toInteger(n)] AS int_numbers
+    expect:
+      values: |
+        | int_numbers |
+        | [2, 2] |
+      side_effects: {}
+
+  # [4] `toInteger()` handling Any type
+  - name: s4_tointeger_handling_any_type
+    query: |
+      WITH [2, 2.9, '1.7'] AS things
+      RETURN [n IN things | toInteger(n)] AS int_numbers
+    expect:
+      values: |
+        | int_numbers |
+        | [2, 2, 1] |
+      side_effects: {}
+
+  # [5] `toInteger()` on a list of strings
+  - name: s5_tointeger_on_a_list_of_strings
+    query: |
+      WITH ['2', '2.9', 'foo'] AS numbers
+      RETURN [n IN numbers | toInteger(n)] AS int_numbers
+    expect:
+      values: |
+        | int_numbers |
+        | [2, 2, null] |
+      side_effects: {}
+
+  # [6] `toInteger()` on a complex-typed expression
+  - name: s6_tointeger_on_a_complex_typed_expression
+    params:
+      param: 1
+    query: |
+      RETURN toInteger(1 - $param) AS result
+    expect:
+      values: |
+        | result |
+        | 0 |
+      side_effects: {}
+
+  # [7] `toInteger()` on node property
+  - name: s7_tointeger_on_node_property
+    setup:
+      - |
+        CREATE (:Person {name: '42'})
+    query: |
+      MATCH (p:Person { name: '42' })
+      WITH *
+      MATCH (n)
+      RETURN toInteger(n.name) AS name
+    expect:
+      values: |
+        | name |
+        | 42 |
+      side_effects: {}
+
+  # [8] Fail `toInteger()` on invalid types #Example: list #1
+  # TCK: TypeError at runtime: InvalidArgumentValue
+  - name: s8_fail_tointeger_on_invalid_types_example_list_1
+    xfail:
+      spec: "openCypher TCK 2024.3 TypeConversion2: [8] Fail `toInteger()` on invalid types #Example: list #1"
+      issue: "fix in 0.7.0"
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH p = (n)-[r:T]->()
+      RETURN [x IN [1, []] | toInteger(x) ] AS list
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [8] Fail `toInteger()` on invalid types #Example: map #2
+  # TCK: TypeError at runtime: InvalidArgumentValue
+  - name: s8_fail_tointeger_on_invalid_types_example_map_2
+    xfail:
+      spec: "openCypher TCK 2024.3 TypeConversion2: [8] Fail `toInteger()` on invalid types #Example: map #2"
+      issue: "fix in 0.7.0"
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH p = (n)-[r:T]->()
+      RETURN [x IN [1, {}] | toInteger(x) ] AS list
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [8] Fail `toInteger()` on invalid types #Example: node #3
+  # TCK: TypeError at runtime: InvalidArgumentValue
+  - name: s8_fail_tointeger_on_invalid_types_example_node_3
+    xfail:
+      spec: "openCypher TCK 2024.3 TypeConversion2: [8] Fail `toInteger()` on invalid types #Example: node #3"
+      issue: "fix in 0.7.0"
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH p = (n)-[r:T]->()
+      RETURN [x IN [1, n] | toInteger(x) ] AS list
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [8] Fail `toInteger()` on invalid types #Example: relationship #4
+  # TCK: TypeError at runtime: InvalidArgumentValue
+  - name: s8_fail_tointeger_on_invalid_types_example_relationship_4
+    xfail:
+      spec: "openCypher TCK 2024.3 TypeConversion2: [8] Fail `toInteger()` on invalid types #Example: relationship #4"
+      issue: "fix in 0.7.0"
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH p = (n)-[r:T]->()
+      RETURN [x IN [1, r] | toInteger(x) ] AS list
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [8] Fail `toInteger()` on invalid types #Example: path #5
+  # TCK: TypeError at runtime: InvalidArgumentValue
+  - name: s8_fail_tointeger_on_invalid_types_example_path_5
+    xfail:
+      spec: "openCypher TCK 2024.3 TypeConversion2: [8] Fail `toInteger()` on invalid types #Example: path #5"
+      issue: "fix in 0.7.0"
+    setup:
+      - |
+        CREATE ()-[:T]->()
+    query: |
+      MATCH p = (n)-[r:T]->()
+      RETURN [x IN [1, p] | toInteger(x) ] AS list
+    expect:
+      gql_status: "22"
+      side_effects: {}

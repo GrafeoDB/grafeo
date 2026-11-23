@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 )
 
 // ErrDatabase is the base error for all Grafeo database errors.
@@ -44,6 +45,18 @@ func (e *Error) Error() string {
 // Unwrap returns ErrDatabase, so errors.Is(err, ErrDatabase) holds.
 func (e *Error) Unwrap() error {
 	return ErrDatabase
+}
+
+// closedError is the error of every call on a Database after its Close:
+// GRAFEO-T007, with the GQLSTATUS the C layer gives it (25000).
+func closedError() error {
+	return &Error{Message: "GRAFEO-T007: the database is closed: open it again", GQLStatus: "25000"}
+}
+
+// isClosed tells whether err is the GRAFEO-T007 error of a closed database.
+func isClosed(err error) bool {
+	var grafeoErr *Error
+	return errors.As(err, &grafeoErr) && strings.HasPrefix(grafeoErr.Message, "GRAFEO-T007")
 }
 
 // lastError reads the thread-local error from the C layer.

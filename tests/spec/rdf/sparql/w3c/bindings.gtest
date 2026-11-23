@@ -1,0 +1,641 @@
+# W3C SPARQL 1.1 Test Suite: Bindings
+# Generated from the W3C manifest by scripts/convert_w3c_sparql.py
+# Source: https://github.com/w3c/rdf-tests at 7b5afb91857a9c282c03d2e45d3f76485797c901
+# Copyright W3C (MIT, ERCIM, Keio, Beihang), used under the W3C test suite
+# licences: https://www.w3.org/Consortium/Legal/2008/04-testsuite-copyright.html
+# Not converted:
+#   graph: named graphs (qt:graphData)
+#   graph-no-var: named graphs (qt:graphData)
+#   values-construct: .ttl result (a graph, not a result set)
+#   values-construct-group-by: .ttl result (a graph, not a result set)
+#   values-construct-limit: .ttl result (a graph, not a result set)
+
+meta:
+  language: sparql
+  model: rdf
+  section: "w3c.bindings"
+  title: W3C Bindings
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # Post-query VALUES with subj-var, 1 row
+  - name: values1
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/book/book1> <http://example.org/ns#price> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/book/book1> <http://purl.org/dc/elements/1.1/title> "SPARQL Tutorial" .
+          <http://example.org/book/book2> <http://example.org/ns#price> "23"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/book/book2> <http://purl.org/dc/elements/1.1/title> "The Semantic Web" .
+        }
+    query: |
+      PREFIX dc:   <http://purl.org/dc/elements/1.1/>
+      PREFIX :     <http://example.org/book/>
+      PREFIX ns:   <http://example.org/ns#>
+
+      SELECT ?book ?title ?price
+      {
+         ?book dc:title ?title ;
+               ns:price ?price .
+      }
+      VALUES ?book {
+       :book1
+      }
+    expect:
+      terms:
+        - ['<http://example.org/book/book1>', '"SPARQL Tutorial"', '"42"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # Post-query VALUES with obj-var, 1 row
+  - name: values2
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/knows> <http://example.org/b> .
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/mbox> "alan@example.org" .
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/name> "Alan" .
+          <http://example.org/b> <http://xmlns.com/foaf/0.1/mbox> "bob@example.org" .
+          <http://example.org/b> <http://xmlns.com/foaf/0.1/name> "Bob" .
+        }
+    query: |
+      # bindings with one element and one value in the object variable
+
+      PREFIX : <http://example.org/>
+
+      SELECT ?s ?o
+      {
+        ?s ?p ?o .
+      } VALUES ?o {
+       :b
+      }
+    expect:
+      terms:
+        - ['<http://example.org/a>', '<http://example.org/b>']
+
+  # Post-query VALUES with 2 obj-vars, 1 row
+  - name: values3
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/knows> <http://example.org/b> .
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/mbox> "alan@example.org" .
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/name> "Alan" .
+          <http://example.org/b> <http://xmlns.com/foaf/0.1/mbox> "bob@example.org" .
+          <http://example.org/b> <http://xmlns.com/foaf/0.1/name> "Bob" .
+        }
+    query: |
+      # bindings with two variables and one set of values
+
+      PREFIX : <http://example.org/>
+
+      SELECT ?s ?o1 ?o2
+      {
+        ?s ?p1 ?o1 .
+        ?s ?p2 ?o2 .
+      } VALUES (?o1 ?o2) {
+       ("Alan" "alan@example.org")
+      }
+    expect:
+      terms:
+        - ['<http://example.org/a>', '"Alan"', '"alan@example.org"']
+
+  # Post-query VALUES with 2 obj-vars, 1 row with UNDEF
+  - name: values4
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/knows> <http://example.org/b> .
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/mbox> "alan@example.org" .
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/name> "Alan" .
+          <http://example.org/b> <http://xmlns.com/foaf/0.1/mbox> "bob@example.org" .
+          <http://example.org/b> <http://xmlns.com/foaf/0.1/name> "Bob" .
+        }
+    query: |
+      # bindings with one element UNDEF
+
+      PREFIX : <http://example.org/>
+
+      SELECT ?s ?o1 ?o2
+      {
+        ?s ?p1 ?o1 .
+        ?s ?p2 ?o2 .
+      } VALUES (?o1 ?o2) {
+       ("Alan" UNDEF)
+      }
+    expect:
+      terms:
+        - ['<http://example.org/a>', '"Alan"', '<http://example.org/b>']
+        - ['<http://example.org/a>', '"Alan"', '"alan@example.org"']
+        - ['<http://example.org/a>', '"Alan"', '"Alan"']
+
+  # Post-query VALUES with 2 obj-vars, 2 rows with UNDEF
+  - name: values5
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/knows> <http://example.org/b> .
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/mbox> "alan@example.org" .
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/name> "Alan" .
+          <http://example.org/b> <http://xmlns.com/foaf/0.1/mbox> "bob@example.org" .
+          <http://example.org/b> <http://xmlns.com/foaf/0.1/name> "Bob" .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT ?s ?o1 ?o2
+      {
+        ?s ?p1 ?o1 .
+        ?s ?p2 ?o2 .
+      } VALUES (?o1 ?o2) {
+       (UNDEF "Alan")
+       (:b UNDEF)
+      }
+    expect:
+      terms:
+        - ['<http://example.org/a>', '<http://example.org/b>', '"Alan"']
+        - ['<http://example.org/a>', '"alan@example.org"', '"Alan"']
+        - ['<http://example.org/a>', '"Alan"', '"Alan"']
+        - ['<http://example.org/a>', '<http://example.org/b>', '<http://example.org/b>']
+        - ['<http://example.org/a>', '<http://example.org/b>', '"alan@example.org"']
+        - ['<http://example.org/a>', '<http://example.org/b>', '"Alan"']
+
+  # Post-query VALUES with pred-var, 1 row
+  - name: values6
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/knows> <http://example.org/b> .
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/mbox> "alan@example.org" .
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/name> "Alan" .
+          <http://example.org/b> <http://xmlns.com/foaf/0.1/mbox> "bob@example.org" .
+          <http://example.org/b> <http://xmlns.com/foaf/0.1/name> "Bob" .
+        }
+    query: |
+      # bindings with two variables and two sets of values
+
+      PREFIX : <http://example.org/>
+      PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+      SELECT ?s ?p1 ?o1
+      {
+        ?s ?p1 ?o1 .
+      } VALUES ?p1 {
+       foaf:knows
+      }
+    expect:
+      terms:
+        - ['<http://example.org/a>', '<http://xmlns.com/foaf/0.1/knows>', '<http://example.org/b>']
+
+  # Post-query VALUES with (OPTIONAL) obj-var, 1 row
+  - name: values7
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/knows> <http://example.org/b> .
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/mbox> "alan@example.org" .
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/name> "Alan" .
+          <http://example.org/b> <http://xmlns.com/foaf/0.1/knows> <http://example.org/c> .
+          <http://example.org/b> <http://xmlns.com/foaf/0.1/mbox> "bob@example.org" .
+          <http://example.org/b> <http://xmlns.com/foaf/0.1/name> "Bob" .
+          <http://example.org/c> <http://xmlns.com/foaf/0.1/mbox> "alice@example.org" .
+          <http://example.org/c> <http://xmlns.com/foaf/0.1/name> "Alice" .
+        }
+    query: |
+      # bindings with two variables and two sets of values
+
+      PREFIX : <http://example.org/>
+      PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+      SELECT ?s ?o1 ?o2
+      {
+        ?s ?p1 ?o1
+        OPTIONAL { ?s foaf:knows ?o2 }
+      } VALUES (?o2) {
+       (:b)
+      }
+    expect:
+      terms:
+        - ['<http://example.org/a>', '<http://example.org/b>', '<http://example.org/b>']
+        - ['<http://example.org/a>', '"alan@example.org"', '<http://example.org/b>']
+        - ['<http://example.org/a>', '"Alan"', '<http://example.org/b>']
+        - ['<http://example.org/c>', '"alice@example.org"', '<http://example.org/b>']
+        - ['<http://example.org/c>', '"Alice"', '<http://example.org/b>']
+
+  # Post-query VALUES with subj/obj-vars, 2 rows with UNDEF
+  - name: values8
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/book/book1> <http://example.org/ns#price> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/book/book1> <http://purl.org/dc/elements/1.1/title> "SPARQL Tutorial" .
+          <http://example.org/book/book2> <http://example.org/ns#price> "23"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/book/book2> <http://purl.org/dc/elements/1.1/title> "The Semantic Web" .
+        }
+    query: |
+      PREFIX dc:   <http://purl.org/dc/elements/1.1/>
+      PREFIX :     <http://example.org/book/>
+      PREFIX ns:   <http://example.org/ns#>
+
+      SELECT ?book ?title ?price
+      {
+         ?book dc:title ?title ;
+               ns:price ?price .
+      }
+      VALUES (?book ?title) {
+       (UNDEF "SPARQL Tutorial")
+       (:book2 UNDEF)
+      }
+    expect:
+      terms:
+        - ['<http://example.org/book/book1>', '"SPARQL Tutorial"', '"42"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/book/book2>', '"The Semantic Web"', '"23"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # Inline VALUES graph pattern
+  - name: inline1
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/book/book1> <http://example.org/ns#price> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/book/book1> <http://purl.org/dc/elements/1.1/title> "SPARQL Tutorial" .
+          <http://example.org/book/book2> <http://example.org/ns#price> "23"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/book/book2> <http://purl.org/dc/elements/1.1/title> "The Semantic Web" .
+        }
+    query: |
+      PREFIX dc:   <http://purl.org/dc/elements/1.1/>
+      PREFIX :     <http://example.org/book/>
+      PREFIX ns:   <http://example.org/ns#>
+
+      SELECT ?book ?title ?price
+      {
+         VALUES ?book { :book1 }
+         ?book dc:title ?title ;
+               ns:price ?price .
+      }
+    expect:
+      terms:
+        - ['<http://example.org/book/book1>', '"SPARQL Tutorial"', '"42"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # Post-subquery VALUES
+  - name: inline2
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/knows> <http://example.org/b> .
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/mbox> "alan@example.org" .
+          <http://example.org/a> <http://xmlns.com/foaf/0.1/name> "Alan" .
+          <http://example.org/b> <http://xmlns.com/foaf/0.1/mbox> "bob@example.org" .
+          <http://example.org/b> <http://xmlns.com/foaf/0.1/name> "Bob" .
+        }
+    query: |
+      # bindings with one element and one value in the object variable
+
+      PREFIX : <http://example.org/>
+
+      SELECT ?s ?o {
+          {
+              SELECT * WHERE {
+                  ?s ?p ?o .
+              }
+              VALUES (?o) { (:b) }
+          }
+      }
+    expect:
+      terms:
+        - ['<http://example.org/a>', '<http://example.org/b>']
+
+  # VALUES inside GRAPH binding the graph name variable, with FROM NAMED
+  - name: graph_from_named_1
+    query: |
+      PREFIX ex: <http://example.org/>
+
+      SELECT ?g ?x
+      FROM NAMED ex:g1
+      WHERE {
+          GRAPH ?g {
+              VALUES (?g ?x) { (UNDEF 1) (ex:g1 2) (ex:g2 3) (ex:unknown 4) }
+          }
+      }
+    expect:
+      terms:
+        - ['<http://example.org/g1>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/g1>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # Graph name variable bound outside GRAPH to graphs outside the dataset, with FROM NAMED
+  - name: graph_from_named_2
+    query: |
+      PREFIX ex: <http://example.org/>
+
+      SELECT ?g ?x
+      FROM NAMED ex:g1
+      WHERE {
+          VALUES ?g { ex:g1 ex:g2 ex:unknown }
+          GRAPH ?g {
+              VALUES ?x { 1 }
+          }
+      }
+    expect:
+      terms:
+        - ['<http://example.org/g1>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # GRAPH with a fixed IRI outside the dataset around VALUES, with FROM NAMED
+  - name: graph_from_named_3
+    query: |
+      PREFIX ex: <http://example.org/>
+
+      SELECT ?x
+      FROM NAMED ex:g1
+      WHERE {
+          { GRAPH ex:g1 { VALUES ?x { 1 } } }
+          UNION
+          { GRAPH ex:g2 { VALUES ?x { 2 } } }
+          UNION
+          { GRAPH ex:unknown { VALUES ?x { 3 } } }
+      }
+    expect:
+      terms:
+        - ['"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # Post-query VALUES with ORDER BY
+  - name: values_order_by
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/a> <http://example.org/q> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/b> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/c> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT ?s ?rank {
+        ?s :p ?o
+      }
+      ORDER BY ?rank
+      VALUES (?s ?rank) { (:a 3) (:b 1) (:c 2) }
+    expect:
+      terms:
+        - ['<http://example.org/b>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/c>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/a>', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # Post-query VALUES with OFFSET and LIMIT
+  - name: values_offset_limit
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/a> <http://example.org/q> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/b> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/c> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT ?s {
+        ?s :p ?o
+      }
+      ORDER BY ?s
+      OFFSET 1
+      LIMIT 1
+      VALUES ?s { :b :c }
+    expect:
+      terms:
+        - ['<http://example.org/c>']
+
+  # Post-query VALUES with DISTINCT
+  - name: values_distinct
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/a> <http://example.org/q> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/b> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/c> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT DISTINCT ?s {
+        ?s :p ?o
+      }
+      VALUES ?x { 1 2 }
+    expect:
+      terms:
+        - ['<http://example.org/c>']
+        - ['<http://example.org/b>']
+        - ['<http://example.org/a>']
+
+  # Post-query VALUES with GROUP BY and ORDER BY
+  - name: values_group_order_by
+    xfail:
+      spec: "W3C SPARQL 1.1 bindings/values-group-order-by"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/a> <http://example.org/q> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/b> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/c> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT ?s (COUNT(*) AS ?count) {
+        ?s ?p ?o
+      }
+      GROUP BY ?s
+      ORDER BY LCASE(?name)
+      VALUES (?s ?name) { (:a "beta") (:b "Gamma") (:c "Alpha") }
+    expect:
+      terms:
+        - ['<http://example.org/c>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/a>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/b>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # Post-query VALUES with SELECT *
+  - name: values_select_star
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/a> <http://example.org/q> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/b> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/c> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT * {
+        ?s :p ?o
+      }
+      VALUES (?s ?x) { (:a 10) (:b 20) }
+    expect:
+      terms:
+        - ['<http://example.org/a>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"10"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/b>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>', '"20"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # Post-query VALUES without variables and without rows
+  - name: values_no_vars_no_rows
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/a> <http://example.org/q> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/b> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/c> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT ?s {
+        ?s :p ?o
+      }
+      VALUES () { }
+    expect:
+      empty: true
+
+  # Post-query VALUES without variables and with two rows
+  - name: values_no_vars_two_rows
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/a> <http://example.org/q> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/b> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/c> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT ?s {
+        ?s :p ?o
+      }
+      VALUES () { () () }
+    expect:
+      terms:
+        - ['<http://example.org/c>']
+        - ['<http://example.org/c>']
+        - ['<http://example.org/b>']
+        - ['<http://example.org/b>']
+        - ['<http://example.org/a>']
+        - ['<http://example.org/a>']
+
+  # Post-subquery VALUES with OFFSET and LIMIT
+  - name: values_subquery_offset_limit
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/a> <http://example.org/q> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/b> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/c> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT ?s {
+        {
+          SELECT ?s {
+            ?s :p ?o
+          }
+          ORDER BY ?s
+          OFFSET 1
+          LIMIT 1
+          VALUES ?s { :b :c }
+        }
+      }
+    expect:
+      terms:
+        - ['<http://example.org/c>']
+
+  # Post-query VALUES with ASK
+  - name: values_ask
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/a> <http://example.org/q> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/b> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/c> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      ASK {
+        ?s :p ?o
+      }
+      VALUES ?o { 42 }
+    expect:
+      rows:
+        - [false]
+
+  # Post-query VALUES with GROUP BY and projected VALUES variable
+  - name: values_group_by_projection
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/a> <http://example.org/q> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/b> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/c> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT ?s ?v {
+        ?s :p ?o
+      }
+      GROUP BY ?s
+      VALUES ?v { 1 }
+    expect:
+      terms:
+        - ['<http://example.org/a>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/b>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/c>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # Post-query VALUES with GROUP BY and VALUES variable in SELECT expression
+  - name: values_group_by_select_expression
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/a> <http://example.org/q> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/b> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/c> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT ?s (STR(?v) AS ?w) {
+        ?s :p ?o
+      }
+      GROUP BY ?s
+      VALUES ?v { 1 }
+    expect:
+      terms:
+        - ['<http://example.org/a>', '"1"']
+        - ['<http://example.org/b>', '"1"']
+        - ['<http://example.org/c>', '"1"']
+
+  # Post-query VALUES with GROUP BY joined on the grouping variable
+  - name: values_group_by_join
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/a> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/a> <http://example.org/q> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/b> <http://example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/c> <http://example.org/p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+
+      SELECT ?s (COUNT(*) AS ?c) {
+        ?s ?p ?o
+      }
+      GROUP BY ?s
+      VALUES ?s { :a :d }
+    expect:
+      terms:
+        - ['<http://example.org/a>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']

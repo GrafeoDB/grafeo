@@ -13,6 +13,9 @@ public sealed class Meta
     public string Dataset { get; set; } = "empty";
     public List<string> Requires { get; set; } = [];
     public List<string> Tags { get; set; } = [];
+    /// <summary>How <c>values:</c> cells read: <c>strict</c>, or <c>tck</c>, where a quoted cell also
+    /// matches a temporal by its Cypher toString().</summary>
+    public string ValuesDialect { get; set; } = "strict";
 }
 
 /// <summary>Expected result block for a single test case.</summary>
@@ -37,6 +40,16 @@ public sealed class Expect
     /// <summary>Rows of RDF terms in N-Triples form, each cell compared as the exact term.</summary>
     public List<List<string>> Terms { get; set; } = [];
 
+    /// <summary>A <c>values:</c> table in the TCK's value notation, its first row the columns.</summary>
+    public string? Values { get; set; }
+
+    /// <summary>Whether every list in <see cref="Values"/> compares as a bag.</summary>
+    public bool UnorderedLists { get; set; }
+
+    /// <summary>The statement's side effects (<c>side_effects:</c>), null when not checked; a key not
+    /// named is 0.</summary>
+    public Dictionary<string, int>? SideEffects { get; set; }
+
     /// <summary>An expect key no runner reads: the test fails on it, as it would otherwise check nothing.</summary>
     public string? UnknownKey { get; set; }
 }
@@ -48,6 +61,8 @@ public sealed class TestCase
     public string? Query { get; set; }
     public List<string> Statements { get; set; } = [];
     public List<string> Setup { get; set; } = [];
+    /// <summary>GQL statements run before <see cref="Setup"/>, whatever the file's language.</summary>
+    public List<string> SetupGql { get; set; } = [];
     /// <summary>
     /// Each parameter value as the file writes it, quotes included: whether it
     /// was quoted decides its type (see <c>SpecTests.ParamValue</c>).
@@ -58,6 +73,8 @@ public sealed class TestCase
     public string? Skip { get; set; }
     /// <summary>The spec and the issue of a case expected to fail (<c>xfail:</c>), null otherwise.</summary>
     public Xfail? Xfail { get; set; }
+    /// <summary>Runners that skip the case for a gap of their binding (<c>runner_gap:</c>).</summary>
+    public RunnerGap? RunnerGap { get; set; }
     /// <summary>A runner probe (<c>probe:</c>), only in a file under a spec-probes directory.</summary>
     public string? Probe { get; set; }
     public string? Language { get; set; }
@@ -74,6 +91,17 @@ public sealed class Xfail
 {
     public string Spec { get; set; } = "";
     public string Issue { get; set; } = "";
+    /// <summary>The runners where the case passes all the same and must (<c>passes_in:</c>).</summary>
+    public List<string> PassesIn { get; set; } = [];
+}
+
+/// <summary>A gap of some runners' bindings: those runners skip the case, naming the reason and
+/// the issue that closes the gap.</summary>
+public sealed class RunnerGap
+{
+    public List<string> Runners { get; set; } = [];
+    public string Issue { get; set; } = "";
+    public string Reason { get; set; } = "";
 }
 
 /// <summary>Top-level structure of a parsed .gtest file.</summary>

@@ -73,6 +73,7 @@ pub fn current() -> Option<Instant> {
 /// [`OperatorError::Timeout`] when the deadline has passed.
 #[inline]
 pub fn check() -> Result<(), OperatorError> {
+    grafeo_common::work::count(grafeo_common::work::Work::DeadlineCheck, 1);
     match DEADLINE.with(Cell::get) {
         Some(deadline) if Instant::now() >= deadline => Err(OperatorError::Timeout),
         _ => Ok(()),
@@ -193,6 +194,7 @@ impl Ticker {
     ///
     /// [`OperatorError::Timeout`] once the deadline has passed.
     pub fn check(&mut self) -> Result<(), OperatorError> {
+        grafeo_common::work::count(grafeo_common::work::Work::DeadlineCheck, 1);
         #[cfg(any(test, feature = "testing-deadline-probe"))]
         if let Some(left) = &mut self.polls_left {
             if *left == 0 {

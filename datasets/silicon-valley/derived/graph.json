@@ -1322,6 +1322,12 @@
       "props": {}
     },
     {
+      "type": "TRAINED_ON",
+      "source": "son-of-anton",
+      "target": "anton",
+      "props": {}
+    },
+    {
       "type": "USES",
       "source": "pied-piper-app",
       "target": "middle-out",
@@ -1391,7 +1397,17 @@
       "source": "gavin-belson",
       "target": "hooli",
       "props": {
+        "from": "2018-04",
         "role": "CEO"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "gavin-belson",
+      "target": "hooli",
+      "props": {
+        "role": "CEO",
+        "to": "2017-06"
       }
     },
     {
@@ -1407,7 +1423,18 @@
       "source": "jack-barker",
       "target": "hooli",
       "props": {
-        "role": "Executive"
+        "from": "2017-06",
+        "role": "CEO",
+        "to": "2018-04"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "jack-barker",
+      "target": "hooli",
+      "props": {
+        "role": "Executive",
+        "to": "2017-06"
       }
     },
     {

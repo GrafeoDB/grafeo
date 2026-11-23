@@ -454,7 +454,7 @@ mod durability {
             )
             .expect("open with synchronous WAL durability");
             #[cfg(feature = "cdc")]
-            db.set_cdc_enabled(true);
+            db.set_cdc(true).unwrap();
             db
         }
 

@@ -50,6 +50,9 @@ pub enum ErrorCode {
     /// The statement reaches outside the database (a file, a URL, a model)
     /// and the session has no external access.
     QueryExternalAccessDenied,
+    /// The statement passed a limit on the work it may do: the path expansion limit. Not
+    /// retryable: the same statement passes it again.
+    QueryLimit,
 
     // Transaction errors (T)
     /// Write-write conflict (retry possible).
@@ -64,10 +67,11 @@ pub enum ErrorCode {
     TransactionSerialization,
     /// Deadlock detected.
     TransactionDeadlock,
-    /// The database is closed: it takes no more writes.
+    /// The database is closed: it takes no more calls.
     DatabaseClosed,
-    /// A commit did not complete: nothing commits, checkpoints or saves until
-    /// the database is reopened.
+    /// A commit or a restore did not complete: nothing commits until the
+    /// database is reopened (after a commit, nothing checkpoints or saves
+    /// either).
     IncompleteCommit,
     /// A commit could not be written to the write-ahead log and was rolled
     /// back (retry possible).
@@ -78,6 +82,10 @@ pub enum ErrorCode {
     /// The write-ahead log takes no more writes until the database is
     /// reopened.
     LogUnavailable,
+    /// The transaction's snapshot expired: commits since it began replaced
+    /// more data it could still read than the snapshot retention limit
+    /// allows (retry possible: a new transaction reads a new snapshot).
+    SnapshotExpired,
 
     // Storage errors (S)
     /// Memory or disk limit reached.
@@ -92,6 +100,16 @@ pub enum ErrorCode {
     /// An incremental backup cannot continue its chain: the log it starts
     /// from was removed. A new full backup starts a new chain.
     BackupChainBroken,
+    /// The durable change feed cannot go on from its cursor: a checkpoint
+    /// removed the log there (the retention limit cut it).
+    CdcFeedTruncated,
+    /// The change data capture setting is stored, but its cursor step
+    /// failed: the next open, or the same call again, completes it.
+    CdcCursorPending,
+    /// A checkpoint failed between writing its header and syncing it: the
+    /// next open finds the new image or the previous one, and until then
+    /// nothing more is checkpointed. Reopen the database.
+    CheckpointOutcomeUnknown,
 
     // Validation errors (V)
     /// Request validation failed.
@@ -129,6 +147,7 @@ impl ErrorCode {
             Self::QueryExecution => "GRAFEO-Q006",
             Self::QueryPermissionDenied => "GRAFEO-Q007",
             Self::QueryExternalAccessDenied => "GRAFEO-Q008",
+            Self::QueryLimit => "GRAFEO-Q009",
 
             Self::TransactionConflict => "GRAFEO-T001",
             Self::TransactionTimeout => "GRAFEO-T002",
@@ -141,12 +160,16 @@ impl ErrorCode {
             Self::LogWriteFailed => "GRAFEO-T009",
             Self::CommitOutcomeUnknown => "GRAFEO-T010",
             Self::LogUnavailable => "GRAFEO-T011",
+            Self::SnapshotExpired => "GRAFEO-T012",
 
             Self::StorageFull => "GRAFEO-S001",
             Self::StorageCorrupted => "GRAFEO-S002",
             Self::StorageRecoveryFailed => "GRAFEO-S003",
             Self::DatabaseLocked => "GRAFEO-S004",
             Self::BackupChainBroken => "GRAFEO-S005",
+            Self::CdcFeedTruncated => "GRAFEO-S006",
+            Self::CdcCursorPending => "GRAFEO-S007",
+            Self::CheckpointOutcomeUnknown => "GRAFEO-S008",
 
             Self::InvalidInput => "GRAFEO-V001",
             Self::NodeNotFound => "GRAFEO-V002",
@@ -170,6 +193,7 @@ impl ErrorCode {
                 | Self::TransactionTimeout
                 | Self::TransactionDeadlock
                 | Self::LogWriteFailed
+                | Self::SnapshotExpired
                 | Self::QueryTimeout
         )
     }
@@ -524,15 +548,17 @@ pub enum TransactionError {
     /// transaction goes on.
     ActiveTransaction(String),
 
-    /// The database is closed: `close()` of a persistent database started,
-    /// so it takes no more writes. Open it again to write.
+    /// The database is closed: `close()` started, so it takes no more calls,
+    /// reads included. Open it again.
     DatabaseClosed,
 
-    /// An earlier commit did not complete (it panicked between its commit
-    /// epoch and its completion), so the store may hold part of it: no
-    /// transaction commits and nothing is checkpointed, saved or copied
-    /// until the database is reopened. Reads still see every commit
-    /// published before it.
+    /// An earlier commit or restore did not complete, and no transaction
+    /// commits until the database is reopened. A commit that panicked between
+    /// its commit epoch and its completion may have left part of it in the
+    /// store, so nothing is checkpointed, saved or copied either; reads still
+    /// see every commit published before it. A restore whose checkpoint
+    /// failed holds the restored state in memory, which a commit on top
+    /// would replay onto the previous image; checkpoints and copies go on.
     IncompleteCommit,
 
     /// The commit could not be written to the write-ahead log (the reason
@@ -550,7 +576,27 @@ pub enum TransactionError {
     /// earlier write or sync of it failed. Nothing of this commit was
     /// written, and nothing commits until the database is reopened.
     LogUnavailable(String),
+
+    /// The transaction's snapshot expired: the commits since it began replaced
+    /// [`kept`](ExpiredSnapshot::kept) bytes of data it could still read, past the snapshot
+    /// retention limit, so the database stopped holding them for it. Roll it back and run it
+    /// again: a new transaction reads a new snapshot.
+    SnapshotExpired(Box<ExpiredSnapshot>),
 }
+
+/// What an expired snapshot held (see [`TransactionError::SnapshotExpired`]), boxed so that
+/// error stays as small as the others on 32-bit targets such as WebAssembly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpiredSnapshot {
+    /// The bytes the commits since the snapshot replaced when it expired.
+    pub kept: u64,
+    /// The snapshot retention limit, in bytes.
+    pub limit: u64,
+}
+
+// Every `Result` of the engine carries an `Error`, and so a `TransactionError`: a variant larger
+// than a `String` makes every error path copy more on 32-bit targets (the WebAssembly build).
+const _: () = assert!(size_of::<TransactionError>() <= size_of::<String>() + size_of::<usize>());
 
 impl TransactionError {
     /// Returns the machine-readable error code for this transaction error.
@@ -572,6 +618,7 @@ impl TransactionError {
             Self::LogWriteFailed(_) => ErrorCode::LogWriteFailed,
             Self::CommitOutcomeUnknown(_) => ErrorCode::CommitOutcomeUnknown,
             Self::LogUnavailable(_) => ErrorCode::LogUnavailable,
+            Self::SnapshotExpired(_) => ErrorCode::SnapshotExpired,
         }
     }
 }
@@ -592,15 +639,12 @@ impl fmt::Display for TransactionError {
             TransactionError::ActiveTransaction(msg) => {
                 write!(f, "Invalid in an active transaction: {msg}")
             }
-            TransactionError::DatabaseClosed => write!(
-                f,
-                "the database is closed, so it takes no more writes: open it again to write"
-            ),
+            TransactionError::DatabaseClosed => write!(f, "the database is closed: open it again"),
             TransactionError::IncompleteCommit => write!(
                 f,
-                "an earlier commit did not complete, so no transaction can commit and nothing \
-                 can be checkpointed, saved or copied: reopen the database (reads still see \
-                 every commit published before it)"
+                "an earlier commit or restore did not complete, so no transaction can commit \
+                 (after a commit, nothing can be checkpointed, saved or copied either): reopen \
+                 the database (reads still work)"
             ),
             TransactionError::LogWriteFailed(reason) => write!(
                 f,
@@ -617,6 +661,13 @@ impl fmt::Display for TransactionError {
                 f,
                 "the write-ahead log takes no more writes, so nothing was written and nothing \
                  commits until the database is reopened: {reason}"
+            ),
+            TransactionError::SnapshotExpired(expired) => write!(
+                f,
+                "the transaction's snapshot expired: commits since it began replaced {} \
+                 bytes it could still read, past the snapshot retention limit of {} bytes; \
+                 roll it back and run it again",
+                expired.kept, expired.limit
             ),
         }
     }
@@ -655,6 +706,25 @@ pub enum StorageError {
     /// follows): only a new full backup helps, not a retry.
     BackupChainBroken(String),
 
+    /// The durable change feed's cursor is behind the log that is left: a
+    /// checkpoint removed the log below `first_available`, the first log
+    /// position still there, because it passed the retention limit.
+    CdcFeedTruncated {
+        /// The first log position the feed can still read.
+        first_available: u64,
+    },
+
+    /// The change data capture setting is stored off, but the cursor of its
+    /// feed could not be removed (the cause follows): the next open, or
+    /// `set_cdc(false)` again, removes it. Until then it keeps no log.
+    CdcCursorPending(String),
+
+    /// A checkpoint failed between writing its header and syncing it (the
+    /// cause follows), or a call is refused after one that did: the next open
+    /// finds the new image or the previous one, whole. Until then the
+    /// database takes no more checkpoints. Only a reopen helps, not a retry.
+    CheckpointOutcomeUnknown(String),
+
     /// One of the database's bounds refused memory or spill space; nothing changed.
     LimitReached(Box<LimitRefusal>),
 }
@@ -669,6 +739,9 @@ impl StorageError {
             Self::RecoveryFailed(_) => ErrorCode::StorageRecoveryFailed,
             Self::Locked(_) => ErrorCode::DatabaseLocked,
             Self::BackupChainBroken(_) => ErrorCode::BackupChainBroken,
+            Self::CdcFeedTruncated { .. } => ErrorCode::CdcFeedTruncated,
+            Self::CdcCursorPending(_) => ErrorCode::CdcCursorPending,
+            Self::CheckpointOutcomeUnknown(_) => ErrorCode::CheckpointOutcomeUnknown,
         }
     }
 }
@@ -682,6 +755,20 @@ impl fmt::Display for StorageError {
             StorageError::CheckpointFailed(msg) => write!(f, "Checkpoint failed: {msg}"),
             StorageError::Locked(msg) => write!(f, "Database locked: {msg}"),
             StorageError::BackupChainBroken(msg) => write!(f, "Backup chain broken: {msg}"),
+            StorageError::CdcFeedTruncated { first_available } => write!(
+                f,
+                "The change feed's cursor is behind the log that is left: a checkpoint removed \
+                 the log below position {first_available}, past the retention limit \
+                 (Config::with_wal_retention_limit)"
+            ),
+            StorageError::CdcCursorPending(msg) => write!(
+                f,
+                "Change data capture is stored off, but its cursor could not be removed \
+                 ({msg}): the next open, or set_cdc(false) again, removes it"
+            ),
+            StorageError::CheckpointOutcomeUnknown(msg) => {
+                write!(f, "Checkpoint outcome unknown: {msg}")
+            }
             StorageError::LimitReached(refusal) => write!(f, "{refusal}"),
         }
     }
@@ -709,11 +796,18 @@ pub enum LimitBound {
     CheckpointRoom,
     /// The memory one path search may hold.
     PathSearchBudget,
+    /// The bytes of a statement's text.
+    QueryLength,
+    /// The bytes of one name in a statement, as written between its delimiters.
+    IdentifierLength,
+    /// The path expansions one statement may make.
+    PathExpansionLimit,
 }
 
 impl LimitBound {
     /// The bound's name in messages: "memory limit", "query memory limit", "spill limit",
-    /// "checkpoint room", "path search budget".
+    /// "checkpoint room", "path search budget", "query length limit", "identifier length
+    /// limit", "path expansion limit".
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -722,6 +816,9 @@ impl LimitBound {
             Self::SpillLimit => "spill limit",
             Self::CheckpointRoom => "checkpoint room",
             Self::PathSearchBudget => "path search budget",
+            Self::QueryLength => "query length limit",
+            Self::IdentifierLength => "identifier length limit",
+            Self::PathExpansionLimit => "path expansion limit",
         }
     }
 
@@ -739,6 +836,15 @@ impl LimitBound {
             Self::CheckpointRoom => "Config::with_spill_path",
             Self::PathSearchBudget => {
                 "Config::with_path_search_budget (Python path_search_budget, Node pathSearchBudget)"
+            }
+            Self::QueryLength => {
+                "Config::with_max_query_length (Python max_query_length, Node maxQueryLength)"
+            }
+            Self::IdentifierLength => {
+                "Config::with_max_identifier_length (Python max_identifier_length, Node maxIdentifierLength)"
+            }
+            Self::PathExpansionLimit => {
+                "Config::with_path_expansion_limit (Python path_expansion_limit, Node pathExpansionLimit)"
             }
         }
     }
@@ -972,6 +1078,7 @@ impl QueryError {
             QueryErrorKind::Unsupported => ErrorCode::QueryUnsupported,
             QueryErrorKind::PermissionDenied => ErrorCode::QueryPermissionDenied,
             QueryErrorKind::ExternalAccessDenied => ErrorCode::QueryExternalAccessDenied,
+            QueryErrorKind::Limit => ErrorCode::QueryLimit,
         }
     }
 
@@ -1010,13 +1117,14 @@ impl fmt::Display for QueryError {
                 write!(f, "\n {} | {}", span.line, line)?;
                 write!(f, "\n   | ")?;
 
-                // Add caret markers
-                for _ in 0..span.column.saturating_sub(1) {
-                    write!(f, " ")?;
-                }
-                for _ in span.start..span.end {
-                    write!(f, "^")?;
-                }
+                // Caret markers, never past the shown line: the span's offsets
+                // run over the whole query.
+                let width = line.chars().count();
+                let pad = usize::try_from(span.column.saturating_sub(1))
+                    .unwrap_or(usize::MAX)
+                    .min(width);
+                let carets = span.end.saturating_sub(span.start).min(width - pad);
+                write!(f, "{:pad$}{:^<carets$}", "", "")?;
             }
         }
 
@@ -1120,6 +1228,9 @@ pub enum QueryErrorKind {
     /// The statement reaches outside the database (a file, a URL, a model)
     /// on a session without external access (GQLSTATUS 42501).
     ExternalAccessDenied,
+    /// The statement passed a limit on the work one statement may do, such as the path
+    /// expansion limit (GQLSTATUS 22000: ISO/IEC 39075 has no class for a program limit).
+    Limit,
 }
 
 impl fmt::Display for QueryErrorKind {
@@ -1140,6 +1251,7 @@ impl fmt::Display for QueryErrorKind {
             }
             QueryErrorKind::DivisionByZero => write!(f, "division by zero"),
             QueryErrorKind::NegativeLimit => write!(f, "negative limit value"),
+            QueryErrorKind::Limit => write!(f, "query limit"),
             QueryErrorKind::InvalidValueType | QueryErrorKind::WrongKind => {
                 write!(f, "invalid value type")
             }
@@ -1187,6 +1299,54 @@ pub type Result<T> = std::result::Result<T, Error>;
 mod tests {
     use super::*;
 
+    /// The caret line under the shown query line, for `span` over `query`.
+    fn caret_line(query: &str, span: SourceSpan) -> String {
+        let rendered = QueryError::new(QueryErrorKind::Syntax, "bad IRI")
+            .with_span(span)
+            .with_source(query)
+            .to_string();
+        let lines: Vec<&str> = rendered.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| line.ends_with(query))
+            .expect("the query line is shown");
+        lines[at + 1].trim_start_matches("   | ").to_string()
+    }
+
+    #[test]
+    fn the_caret_line_stays_within_the_shown_line() {
+        let query = "SELECT ?s WHERE { <an> ?p ?s }";
+        // A span that runs past its line: the carets stop at the line's end.
+        assert_eq!(
+            caret_line(query, SourceSpan::new(18, 1_000_000, 1, 19)),
+            format!("{}{}", " ".repeat(18), "^".repeat(query.len() - 18))
+        );
+        // A column past the line: no carets, and the pad stops at the line's end.
+        assert_eq!(
+            caret_line(query, SourceSpan::new(18, 22, 1, u32::MAX)),
+            " ".repeat(query.len())
+        );
+        // A span inside the line is drawn as before.
+        assert_eq!(
+            caret_line(query, SourceSpan::new(18, 22, 1, 19)),
+            format!("{}^^^^", " ".repeat(18))
+        );
+    }
+
+    #[test]
+    fn a_query_error_with_the_widest_span_renders_in_bounded_size() {
+        let query = "SELECT ?s WHERE { <an> ?p ?s }";
+        let rendered = QueryError::new(QueryErrorKind::Syntax, "bad IRI")
+            .with_span(SourceSpan::new(18, usize::MAX, 1, u32::MAX))
+            .with_source(query)
+            .to_string();
+        assert!(
+            rendered.len() < 4 * query.len() + 200,
+            "{} bytes rendered",
+            rendered.len()
+        );
+    }
+
     #[test]
     fn test_error_display() {
         let err = Error::NodeNotFound(crate::types::NodeId::new(42));
@@ -1207,7 +1367,7 @@ mod tests {
         assert!(!err.error_code().is_retryable());
         assert_eq!(
             err.to_string(),
-            "GRAFEO-T007: the database is closed, so it takes no more writes: open it again to write"
+            "GRAFEO-T007: the database is closed: open it again"
         );
     }
 
@@ -1264,9 +1424,9 @@ mod tests {
         );
         assert_eq!(
             err.to_string(),
-            "GRAFEO-T008: an earlier commit did not complete, so no transaction can commit and \
-             nothing can be checkpointed, saved or copied: reopen the database (reads still see \
-             every commit published before it)"
+            "GRAFEO-T008: an earlier commit or restore did not complete, so no transaction can \
+             commit (after a commit, nothing can be checkpointed, saved or copied either): \
+             reopen the database (reads still work)"
         );
     }
 

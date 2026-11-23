@@ -112,6 +112,8 @@ pub struct SpillManager {
     active_files: Arc<ActiveFiles>,
     /// Total bytes currently spilled to disk.
     total_spilled_bytes: AtomicU64,
+    /// Rows the merges of its sorts' runs read back, every pass counted.
+    rows_read_back: AtomicU64,
     /// Whether `Drop` should remove `spill_dir` itself (non-recursive).
     owns_dir: bool,
     /// Whether `spill_dir` is known to exist (checked with the first spill
@@ -143,6 +145,7 @@ impl SpillManager {
             next_file_id: AtomicU64::new(0),
             active_files: Arc::new(ActiveFiles::default()),
             total_spilled_bytes: AtomicU64::new(0),
+            rows_read_back: AtomicU64::new(0),
             owns_dir: false,
             dir_ready: AtomicBool::new(false),
             dir_created: AtomicBool::new(false),
@@ -267,6 +270,20 @@ impl SpillManager {
     #[must_use]
     pub fn spilled_bytes(&self) -> u64 {
         self.total_spilled_bytes.load(Ordering::Relaxed)
+    }
+
+    /// The rows the merges of this manager's sorted runs have read back
+    /// from their files, every pass counted: how far a merge got before it
+    /// was stopped. It costs one relaxed add per row read back, on the
+    /// manager the open's queries share; only tests read it.
+    #[must_use]
+    pub fn rows_read_back(&self) -> u64 {
+        self.rows_read_back.load(Ordering::Relaxed)
+    }
+
+    /// Counts one row a merge read back.
+    pub(crate) fn note_row_read_back(&self) {
+        self.rows_read_back.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Returns the number of active spill files.

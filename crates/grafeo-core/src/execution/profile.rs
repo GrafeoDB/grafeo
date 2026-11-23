@@ -20,6 +20,9 @@ pub struct ProfileStats {
     pub time_ns: u64,
     /// Number of times `next()` was called on this operator.
     pub calls: u64,
+    /// The work its own code counted, without its children's (#794); empty in a build without
+    /// `--cfg grafeo_work_counters`.
+    pub work: grafeo_common::work::WorkCounts,
 }
 
 /// Shared handle to profile stats, written by `ProfiledOperator` during
@@ -43,6 +46,21 @@ impl ProfiledOperator {
     }
 }
 
+/// The outer operator's tally, held while a profiled operator runs. Dropping it, also when the
+/// operator unwinds, puts that tally back and adds what the operator counted to its stats, so a
+/// panic cannot leave the outer operator's work swapped out.
+struct OwnWork<'a> {
+    outer: grafeo_common::work::WorkCounts,
+    stats: &'a SharedProfileStats,
+}
+
+impl Drop for OwnWork<'_> {
+    fn drop(&mut self) {
+        let own = grafeo_common::work::swap(self.outer);
+        self.stats.lock().work.add(&own);
+    }
+}
+
 impl Operator for ProfiledOperator {
     fn next(&mut self) -> OperatorResult {
         {
@@ -50,16 +68,24 @@ impl Operator for ProfiledOperator {
             s.calls += 1;
         }
 
+        // The work counted while the operator runs is its own: a child's wrapper swaps in a
+        // tally of its own around the child (see `grafeo_common::work`).
+        let own_work = OwnWork {
+            outer: grafeo_common::work::take(),
+            stats: &self.stats,
+        };
         let start = grafeo_common::clock::Instant::now();
 
         let result = self.inner.next();
 
         let elapsed = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        self.stats.lock().time_ns += elapsed;
-
+        drop(own_work);
+        let mut stats = self.stats.lock();
+        stats.time_ns += elapsed;
         if let Ok(Some(ref chunk)) = result {
-            self.stats.lock().rows_out += chunk.row_count() as u64;
+            stats.rows_out += chunk.row_count() as u64;
         }
+        drop(stats);
 
         result
     }
@@ -168,6 +194,120 @@ mod tests {
 
         let _ = profiled.next();
         assert!(stats.lock().time_ns > 0);
+    }
+
+    /// An operator that counts `own` rows built per call, on top of its child's.
+    #[cfg(grafeo_work_counters)]
+    struct Counting {
+        child: Option<Box<dyn Operator>>,
+        own: u64,
+    }
+
+    #[cfg(grafeo_work_counters)]
+    impl Operator for Counting {
+        fn next(&mut self) -> OperatorResult {
+            grafeo_common::work::count(grafeo_common::work::Work::RowBuilt, self.own);
+            if let Some(child) = &mut self.child {
+                let _ = child.next()?;
+            }
+            Ok(None)
+        }
+        fn reset(&mut self) {}
+        fn name(&self) -> &'static str {
+            "Counting"
+        }
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+            self
+        }
+    }
+
+    /// Each profiled operator gets the work of its own code, not its child's, and the statement's
+    /// total is their sum; without `PROFILE` the thread's tally holds the total.
+    #[cfg(grafeo_work_counters)]
+    #[test]
+    fn each_operator_gets_its_own_work() {
+        use grafeo_common::work::{Work, take};
+
+        let _ = take();
+        let child_stats = Arc::new(Mutex::new(ProfileStats::default()));
+        let parent_stats = Arc::new(Mutex::new(ProfileStats::default()));
+        let child = ProfiledOperator::new(
+            Box::new(Counting {
+                child: None,
+                own: 3,
+            }),
+            Arc::clone(&child_stats),
+        );
+        let mut parent = ProfiledOperator::new(
+            Box::new(Counting {
+                child: Some(Box::new(child)),
+                own: 2,
+            }),
+            Arc::clone(&parent_stats),
+        );
+        grafeo_common::work::count(Work::Parse, 1);
+        let _ = parent.next().unwrap();
+        assert_eq!(parent_stats.lock().work.get(Work::RowBuilt), 2);
+        assert_eq!(child_stats.lock().work.get(Work::RowBuilt), 3);
+        let left = take();
+        assert_eq!(left.get(Work::RowBuilt), 0, "the wrappers took every row");
+        assert_eq!(left.get(Work::Parse), 1, "the work outside operators stays");
+
+        let mut plain = Counting {
+            child: Some(Box::new(Counting {
+                child: None,
+                own: 3,
+            })),
+            own: 2,
+        };
+        let _ = plain.next().unwrap();
+        assert_eq!(
+            take().get(Work::RowBuilt),
+            5,
+            "unprofiled, the thread holds the total"
+        );
+    }
+
+    /// An operator that counts `own` rows built, then panics.
+    #[cfg(grafeo_work_counters)]
+    struct Panicking {
+        own: u64,
+    }
+
+    #[cfg(grafeo_work_counters)]
+    impl Operator for Panicking {
+        fn next(&mut self) -> OperatorResult {
+            grafeo_common::work::count(grafeo_common::work::Work::RowBuilt, self.own);
+            panic!("an operator panics");
+        }
+        fn reset(&mut self) {}
+        fn name(&self) -> &'static str {
+            "Panicking"
+        }
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+            self
+        }
+    }
+
+    /// A child that panics gives the outer tally back as it unwinds: what was counted before it
+    /// ran stays where it was, and the child's own work goes to the child.
+    #[cfg(grafeo_work_counters)]
+    #[test]
+    fn a_panicking_child_leaves_the_outer_tally_intact() {
+        use grafeo_common::work::{Work, count, take};
+
+        let _ = take();
+        let stats = Arc::new(Mutex::new(ProfileStats::default()));
+        let mut child = ProfiledOperator::new(Box::new(Panicking { own: 4 }), Arc::clone(&stats));
+        count(Work::RowBuilt, 2);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| child.next()));
+        assert!(unwound.is_err());
+        assert_eq!(
+            take().get(Work::RowBuilt),
+            2,
+            "the outer tally is back, without the child's work"
+        );
+        assert_eq!(stats.lock().work.get(Work::RowBuilt), 4);
     }
 
     #[test]

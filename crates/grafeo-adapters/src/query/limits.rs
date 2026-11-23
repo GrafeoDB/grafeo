@@ -6,6 +6,21 @@
 //! stack allows used to overflow it: the process aborted, and a WebAssembly
 //! module trapped and stayed broken (#573). The parsers bound the nesting
 //! instead, so a deeper statement fails with an error that names the limit.
+//!
+//! They also bound the size of a statement and of each name in it
+//! ([`ParseLimits`]), so a statement of any size costs no more than its limit
+//! to read.
+
+#[cfg(any(
+    feature = "gql",
+    feature = "cypher",
+    feature = "sparql",
+    feature = "gremlin",
+    feature = "graphql",
+    feature = "sql-pgq"
+))]
+use grafeo_common::utils::error::{Error, SourceSpan};
+use grafeo_common::utils::error::{LimitBound, QueryError, QueryErrorKind, Result};
 
 /// How deep a statement may nest.
 ///
@@ -27,6 +42,207 @@
 /// less stack than that, as some hosts give by default, needs a larger one for
 /// statements this deep.
 pub const MAX_NESTING_DEPTH: u32 = 64;
+
+/// The most bytes a statement's text may have by default: 16 MiB, as a
+/// property value may, so any value that can be stored fits in a statement
+/// as a literal.
+pub const DEFAULT_MAX_QUERY_LENGTH: usize = 16 << 20;
+
+/// The most bytes one name may have by default, as written between its
+/// delimiters: 16 KiB.
+pub const DEFAULT_MAX_IDENTIFIER_LENGTH: usize = 16 << 10;
+
+/// The size limits a parser enforces on a statement's text: its length, and
+/// the length of each name in it.
+///
+/// The length of a statement is the UTF-8 byte length of its text as given,
+/// comments and whitespace included; the values passed as parameters do not
+/// count. A name is an identifier, a delimited identifier or a parameter
+/// name in GQL, Cypher and SQL/PGQ, a variable, a prefixed name or a blank
+/// node label in SPARQL, an identifier in Gremlin and a name in GraphQL; it
+/// is counted in bytes as written between its delimiters, escapes as
+/// written. String literals, SPARQL IRIs and numbers are not names: only the
+/// statement's length bounds them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseLimits {
+    /// The most bytes the statement may have.
+    pub max_query_length: usize,
+    /// The most bytes one name may have, as written between its delimiters.
+    pub max_identifier_length: usize,
+}
+
+impl Default for ParseLimits {
+    fn default() -> Self {
+        Self {
+            max_query_length: DEFAULT_MAX_QUERY_LENGTH,
+            max_identifier_length: DEFAULT_MAX_IDENTIFIER_LENGTH,
+        }
+    }
+}
+
+impl ParseLimits {
+    /// Refuses a statement longer than `max_query_length`, before any lexing.
+    ///
+    /// # Errors
+    ///
+    /// Returns a semantic query error (`GRAFEO-Q002`) naming both lengths and
+    /// the setting that moves the limit.
+    pub fn check_query(&self, query: &str) -> Result<()> {
+        if query.len() <= self.max_query_length {
+            return Ok(());
+        }
+        let bound = LimitBound::QueryLength;
+        Err(QueryError::new(
+            QueryErrorKind::Semantic,
+            format!(
+                "the statement is {} bytes long, more than the {} of {} bytes: pass large values as parameters, or raise it with {}",
+                query.len(),
+                bound.name(),
+                self.max_query_length,
+                bound.setting()
+            ),
+        )
+        .into())
+    }
+}
+
+#[cfg(any(
+    feature = "gql",
+    feature = "cypher",
+    feature = "sparql",
+    feature = "gremlin",
+    feature = "graphql",
+    feature = "sql-pgq"
+))]
+/// A name longer than the identifier length limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LongName {
+    /// Where the name is, its delimiters included.
+    pub(crate) span: SourceSpan,
+    /// Its bytes as written between its delimiters.
+    pub(crate) length: usize,
+}
+
+#[cfg(any(
+    feature = "gql",
+    feature = "cypher",
+    feature = "sparql",
+    feature = "gremlin",
+    feature = "graphql",
+    feature = "sql-pgq"
+))]
+/// The identifier length limit a lexer checks each name against, with the
+/// first name by position it found longer.
+///
+/// A parser that backtracks restores a copy of its lexer taken earlier, and
+/// with it this record; the lexer then reads the same names again, so a long
+/// one is recorded again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NameLimit {
+    /// The most bytes one name may have.
+    max: usize,
+    /// The first name by position longer than `max`.
+    first: Option<LongName>,
+}
+
+#[cfg(any(
+    feature = "gql",
+    feature = "cypher",
+    feature = "sparql",
+    feature = "gremlin",
+    feature = "graphql",
+    feature = "sql-pgq"
+))]
+impl Default for NameLimit {
+    fn default() -> Self {
+        Self::new(DEFAULT_MAX_IDENTIFIER_LENGTH)
+    }
+}
+
+#[cfg(any(
+    feature = "gql",
+    feature = "cypher",
+    feature = "sparql",
+    feature = "gremlin",
+    feature = "graphql",
+    feature = "sql-pgq"
+))]
+impl NameLimit {
+    /// A limit of `max` bytes per name, nothing recorded.
+    pub(crate) const fn new(max: usize) -> Self {
+        Self { max, first: None }
+    }
+
+    /// Notes the name at `span` of `length` bytes between its delimiters.
+    #[inline]
+    pub(crate) fn note(&mut self, span: SourceSpan, length: usize) {
+        if length > self.max && self.first.is_none_or(|first| span.start < first.span.start) {
+            self.first = Some(LongName { span, length });
+        }
+    }
+
+    /// The same limit, nothing recorded.
+    #[cfg(feature = "sql-pgq")]
+    pub(crate) const fn cleared(&self) -> Self {
+        Self::new(self.max)
+    }
+
+    /// Notes what `other`, a record of another part of the same statement,
+    /// holds.
+    #[cfg(feature = "gql")]
+    pub(crate) fn merge(&mut self, other: Self) {
+        if let Some(name) = other.first {
+            self.note(name.span, name.length);
+        }
+    }
+
+    /// The error for the first long name, with its span and the statement's
+    /// text, or `None` when no name was too long.
+    pub(crate) fn error(&self, source: &str) -> Option<Error> {
+        let name = self.first?;
+        let bound = LimitBound::IdentifierLength;
+        Some(
+            QueryError::new(
+                QueryErrorKind::Semantic,
+                format!(
+                    "a name of {} bytes, more than the {} of {} bytes; raise it with {}",
+                    name.length,
+                    bound.name(),
+                    self.max,
+                    bound.setting()
+                ),
+            )
+            .with_span(name.span)
+            .with_source(source.to_string())
+            .into(),
+        )
+    }
+}
+
+#[cfg(any(
+    feature = "gql",
+    feature = "cypher",
+    feature = "sparql",
+    feature = "sql-pgq"
+))]
+/// What `parse_with` returns: `result`, unless a name of the statement is too
+/// long, which is the error then, also over a syntax error it may have caused.
+///
+/// `names` is what the parser's lexer recorded. A parse that failed may have
+/// stopped before a long name, so then `scan` reads the whole statement for
+/// one: it is called only on that path.
+pub(crate) fn with_long_names<T>(
+    result: Result<T>,
+    names: NameLimit,
+    scan: impl FnOnce() -> NameLimit,
+    source: &str,
+) -> Result<T> {
+    let names = if result.is_ok() { names } else { scan() };
+    match names.error(source) {
+        Some(error) => Err(error),
+        None => result,
+    }
+}
 
 #[cfg(any(
     feature = "gql",

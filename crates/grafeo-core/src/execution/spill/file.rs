@@ -5,7 +5,7 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// Buffer size for spill file I/O (64 KB).
-const BUFFER_SIZE: usize = 64 * 1024;
+pub(super) const BUFFER_SIZE: usize = 64 * 1024;
 
 /// Handle for a single spill file.
 ///
@@ -167,8 +167,17 @@ impl SpillFile {
     ///
     /// Returns an error if the file cannot be opened for reading.
     pub fn reader(&self) -> std::io::Result<SpillFileReader> {
+        self.reader_with_buffer(BUFFER_SIZE)
+    }
+
+    /// Creates a reader for this file with a read buffer of `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened for reading.
+    pub fn reader_with_buffer(&self, bytes: usize) -> std::io::Result<SpillFileReader> {
         let file = File::open(&self.path)?;
-        let reader = BufReader::with_capacity(BUFFER_SIZE, file);
+        let reader = BufReader::with_capacity(bytes, file);
         Ok(SpillFileReader { reader })
     }
 

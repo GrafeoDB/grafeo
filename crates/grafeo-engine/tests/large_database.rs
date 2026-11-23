@@ -50,6 +50,7 @@ use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
 use grafeo_engine::{Config, GrafeoDB};
 use grafeo_storage::file::GrafeoFileManager;
 use grafeo_storage::file::v3::ImageReader;
+use grafeo_storage::file::v3::alloc::PageRun;
 
 const PEOPLE: [&str; 5] = ["Alix", "Gus", "Vincent", "Mia", "Jules"];
 const CITIES: [&str; 4] = ["Amsterdam", "Berlin", "Paris", "Prague"];
@@ -517,10 +518,27 @@ struct Placement {
     last: Option<u64>,
 }
 
+/// A run of pages: its first page and its number of pages.
+type Pages = (u64, u64);
+
+/// A stored chunk of an image: its offset, length and CRC-32, its pages, and
+/// the name of its section.
+type StoredChunk = (u64, u64, u32, Pages, String);
+
+/// Where an image lies: its iteration, its chunks with bytes, sorted by
+/// offset, its directory blocks, and every page it uses (both), sorted.
+struct ImagePages {
+    iteration: u64,
+    chunks: Vec<StoredChunk>,
+    directory: Vec<Pages>,
+    used: Vec<Pages>,
+}
+
 /// Reads the directory of the active image of the file at `path` and every
 /// chunk it lists, each against its checksum (#392 failed here, with a CRC
-/// mismatch), and returns where each section's chunks lie, by section name.
-fn image_layout(path: &Path, what: &str) -> BTreeMap<String, Placement> {
+/// mismatch), and returns where each section's chunks lie, by section name,
+/// and the pages the image uses.
+fn image_layout(path: &Path, what: &str) -> (BTreeMap<String, Placement>, ImagePages) {
     let manager = GrafeoFileManager::open_read_only(path, None)
         .unwrap_or_else(|error| panic!("{what}: the file opens: {error}"));
     let stats = manager.image_stats().unwrap();
@@ -531,6 +549,7 @@ fn image_layout(path: &Path, what: &str) -> BTreeMap<String, Placement> {
         .unwrap_or_else(|error| panic!("{what}: the directory reads: {error}"));
 
     let mut layout: BTreeMap<String, Placement> = BTreeMap::new();
+    let mut chunks = Vec::new();
     let mut section_types = Vec::new();
     for entry in reader.entries() {
         let placement = layout
@@ -539,6 +558,14 @@ fn image_layout(path: &Path, what: &str) -> BTreeMap<String, Placement> {
         placement.chunks += 1;
         placement.bytes += entry.length;
         if entry.length > 0 {
+            let run = entry.run();
+            chunks.push((
+                entry.offset,
+                entry.length,
+                entry.crc,
+                (run.first, run.count),
+                format!("{:?}", entry.section_type),
+            ));
             placement.first = Some(
                 placement
                     .first
@@ -577,7 +604,68 @@ fn image_layout(path: &Path, what: &str) -> BTreeMap<String, Placement> {
             at(placement.last)
         );
     }
-    layout
+    chunks.sort_unstable();
+    let pages = |runs: &[PageRun]| -> Vec<Pages> {
+        runs.iter().map(|run| (run.first, run.count)).collect()
+    };
+    let mut used = pages(&reader.used_runs());
+    used.sort_unstable();
+    let directory = pages(reader.directory_runs());
+    (
+        layout,
+        ImagePages {
+            iteration: manager.active_header().iteration,
+            chunks,
+            directory,
+            used,
+        },
+    )
+}
+
+/// Asserts copy-on-write between two images: every chunk of `second` is
+/// either a chunk of `first` kept in place (same offset, length and CRC) or
+/// lies in pages `first` does not use, every directory block of `second`
+/// lies in pages `first` does not use, and at least one LPG chunk is new.
+/// `second` is the image right after `first` (an image between them could
+/// reuse pages `first` used), and the pages one image uses never overlap
+/// each other.
+fn assert_copy_on_write(first: &ImagePages, second: &ImagePages) {
+    assert_eq!(
+        second.iteration,
+        first.iteration + 1,
+        "the second image is the one right after the first"
+    );
+    let new: Vec<&StoredChunk> = second
+        .chunks
+        .iter()
+        .filter(|chunk| first.chunks.binary_search(chunk).is_err())
+        .collect();
+    assert!(
+        new.iter().any(|chunk| chunk.4 == "LpgStore"),
+        "the second checkpoint wrote the changed LPG chunks anew"
+    );
+    let new_pages = new.iter().map(|chunk| chunk.3);
+    for (page, count) in new_pages.chain(second.directory.iter().copied()) {
+        let end = page + count;
+        // The run of `first` that starts last before `end` is the only one
+        // that can reach into these pages.
+        let before = first.used.partition_point(|&(at, _)| at < end);
+        if let Some(&(at, held)) = before.checked_sub(1).map(|index| &first.used[index]) {
+            assert!(
+                at + held <= page,
+                "the second image writes pages {page}..{end} over the first image's pages \
+                 {at}..{}",
+                at + held
+            );
+        }
+    }
+    println!(
+        "[large_database] second image: {} chunks kept in place, {} written anew, {} \
+         directory blocks",
+        second.chunks.len() - new.len(),
+        new.len(),
+        second.directory.len()
+    );
 }
 
 /// Asserts that the LPG section alone holds more than 4 GiB and has chunks
@@ -708,12 +796,79 @@ fn report(started: Instant, path: &Path, step: &str) {
     );
 }
 
+/// Image `iteration` of 4 KiB pages from its LPG chunks (offset, length,
+/// CRC) and its directory blocks.
+fn image_pages(iteration: u64, chunks: &[(u64, u64, u32)], directory: &[Pages]) -> ImagePages {
+    let chunks: Vec<StoredChunk> = chunks
+        .iter()
+        .map(|&(offset, length, crc)| {
+            let pages = (offset / 4096, length.div_ceil(4096));
+            (offset, length, crc, pages, "LpgStore".to_string())
+        })
+        .collect();
+    let mut used: Vec<Pages> = chunks.iter().map(|chunk| chunk.3).collect();
+    used.extend(directory);
+    used.sort_unstable();
+    ImagePages {
+        iteration,
+        chunks,
+        directory: directory.to_vec(),
+        used,
+    }
+}
+
+/// The copy-on-write check passes chunks kept in place and chunks and
+/// directory blocks in free pages, and refuses: a chunk over a chunk of the
+/// first image (reaching into it from below or above, starting inside it and
+/// running past its end, covering it whole, or rewritten in place); a chunk
+/// or a directory block over the first image's directory block or chunks; a
+/// second image with no new chunk; and a second image that is not the next.
+#[test]
+fn the_copy_on_write_check_refuses_an_overwrite() {
+    // Page 1 holds one chunk, pages 2 and 3 another, page 5 the directory.
+    let first = image_pages(7, &[(4096, 100, 1), (8192, 5000, 2)], &[(5, 1)]);
+    let kept = [(4096, 100, 1), (8192, 5000, 2)];
+    assert_copy_on_write(
+        &first,
+        &image_pages(8, &[kept[0], (24576, 10, 3)], &[(7, 1)]),
+    );
+    assert_copy_on_write(
+        &first,
+        &image_pages(8, &[kept[0], kept[1], (16384, 10, 4)], &[(6, 1)]),
+    );
+    for (iteration, chunks, directory) in [
+        // Into pages 2 and 3 from above, from below, from inside past the
+        // end, over all of them, and the same pages rewritten.
+        (8, vec![kept[0], (12288, 10, 3)], vec![(7, 1)]),
+        (8, vec![(0, 8192, 3)], vec![(7, 1)]),
+        (8, vec![(12288, 8192, 3)], vec![(7, 1)]),
+        (8, vec![(4096, 16384, 3)], vec![(7, 1)]),
+        (8, vec![(8192, 5000, 9)], vec![(7, 1)]),
+        // Over the first image's directory block, and a directory block
+        // over a chunk and over the first image's directory block.
+        (8, vec![(20480, 10, 3)], vec![(7, 1)]),
+        (8, vec![(24576, 10, 3)], vec![(2, 1)]),
+        (8, vec![(24576, 10, 3)], vec![(5, 1)]),
+        // Nothing new, and an image between the two.
+        (8, kept.to_vec(), vec![(7, 1)]),
+        (9, vec![kept[0], (24576, 10, 3)], vec![(7, 1)]),
+    ] {
+        let second = image_pages(iteration, &chunks, &directory);
+        let refused = std::panic::catch_unwind(|| assert_copy_on_write(&first, &second));
+        assert!(
+            refused.is_err(),
+            "refused: image {iteration}, {chunks:?} with {directory:?}"
+        );
+    }
+}
+
 // --- The test -----------------------------------------------------------------------
 
 /// A database whose LPG section alone holds more than 4 GiB is written with
 /// `close()`, every chunk reads back against its checksum, and a reopen holds
-/// every node, edge and index as written; a second checkpoint puts its image
-/// after the first, and a read-only reopen holds the changes.
+/// every node, edge and index as written; a second checkpoint writes its
+/// changed chunks into pages the first image does not hold and keeps the
+/// others in place, and a read-only reopen holds the changes.
 #[test]
 #[ignore = "writes more than 4 GiB; run before releases with --release"]
 fn a_database_over_4_gib_round_trips_through_checkpoints_and_reopens() {
@@ -759,7 +914,7 @@ fn a_database_over_4_gib_round_trips_through_checkpoints_and_reopens() {
         !dir.path().join("large.grafeo.wal").exists(),
         "the checkpoint removed the sidecar WAL: the reopen reads the file"
     );
-    let first = image_layout(&path, "first image");
+    let (first, first_pages) = image_layout(&path, "first image");
     assert_past_4_gib(&first, "first image");
     step("first image read back");
 
@@ -781,13 +936,9 @@ fn a_database_over_4_gib_round_trips_through_checkpoints_and_reopens() {
         db.close().expect("the second checkpoint succeeds");
         step("closed again");
     }
-    let second = image_layout(&path, "second image");
+    let (second, second_pages) = image_layout(&path, "second image");
     assert_past_4_gib(&second, "second image");
-    let first_end = first.values().filter_map(|placement| placement.last).max();
-    assert!(
-        second["LpgStore"].last > first_end,
-        "the second image goes after the first: {first:?} then {second:?}"
-    );
+    assert_copy_on_write(&first_pages, &second_pages);
     step("second image read back");
 
     let db = GrafeoDB::open_read_only(&path).unwrap_or_else(|error| {

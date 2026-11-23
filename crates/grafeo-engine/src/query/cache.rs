@@ -11,6 +11,9 @@
 //!   large move of the counts the planner reads. The cache empties once it
 //!   sees a newer one, and a plan planned under an older one is not stored,
 //!   so a plan made before such a change never outlives it.
+//! - **A cache per session:** in front of the shared one, a session keeps a
+//!   hash and a weak reference per plan it ran, so a repeat takes no shared
+//!   lock, and the session keeps no plan alive.
 //!
 //! ## Usage
 //!
@@ -35,10 +38,13 @@
 //! # let _ = plan.plan();
 //! ```
 
+use grafeo_common::utils::hash::{FxBuildHasher, FxHashMap};
 use parking_lot::Mutex;
+use std::borrow::Borrow;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::hash::BuildHasher;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 
 use crate::query::plan::LogicalPlan;
 use crate::query::processor::QueryLanguage;
@@ -141,6 +147,12 @@ impl CacheKey {
     pub fn language(&self) -> QueryLanguage {
         self.language
     }
+
+    /// The planner rules the plan is made with.
+    #[must_use]
+    pub fn rules(&self) -> crate::query::optimizer::PlannerRules {
+        self.rules
+    }
 }
 
 /// The text a statement is cached by: the whole text but the whitespace
@@ -178,12 +190,37 @@ impl Stage {
 
 /// A plan the cache holds, shared by every statement that hits it: a hit
 /// hands out the same plan, never a copy.
-#[derive(Debug)]
 pub struct CachedPlan {
     plan: LogicalPlan,
+    /// The physical shape a prepared plan's calls open, made on its first call.
+    #[cfg(prepared_plans)]
+    recipe: std::sync::OnceLock<
+        std::result::Result<
+            crate::query::planner::lpg::recipe::Recipe,
+            crate::query::planner::lpg::recipe::Uncovered,
+        >,
+    >,
     /// What the entry is charged: the plan's deep estimate, its key's text
     /// and the cache's bookkeeping.
     bytes: usize,
+    /// The key and stage the plan is cached under: a session's cache, which
+    /// holds only a hash of them, compares them at a hit.
+    key: CacheKey,
+    stage: Stage,
+    /// Whether a session's own cache hit the plan since the shared cache
+    /// last passed over it: such an entry gets a second chance at eviction,
+    /// as a session hit does not touch the shared recency order.
+    used: AtomicBool,
+}
+
+impl std::fmt::Debug for CachedPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedPlan")
+            .field("plan", &self.plan)
+            .field("bytes", &self.bytes)
+            .field("stage", &self.stage)
+            .finish_non_exhaustive()
+    }
 }
 
 impl std::ops::Deref for CachedPlan {
@@ -201,20 +238,48 @@ impl CachedPlan {
         &self.plan
     }
 
+    /// The recipe the calls of this prepared plan open, or the kind it holds that no recipe
+    /// covers: made on first use from `inputs`, which every call of one cache key and database
+    /// gives alike (read only then), then shared by every call and session.
+    #[cfg(prepared_plans)]
+    pub(crate) fn recipe(
+        &self,
+        inputs: impl FnOnce() -> crate::query::planner::lpg::aggregate::RouteInputs,
+    ) -> &std::result::Result<
+        crate::query::planner::lpg::recipe::Recipe,
+        crate::query::planner::lpg::recipe::Uncovered,
+    > {
+        self.recipe
+            .get_or_init(|| crate::query::planner::lpg::recipe::recipe_of(&self.plan, inputs()))
+    }
+
     /// What the cache charges the entry, in bytes.
     #[must_use]
     pub fn bytes(&self) -> usize {
         self.bytes
+    }
+
+    /// Whether the plan is the one cached for `key` at `stage`.
+    fn is_for(&self, key: &CacheKey, stage: Stage) -> bool {
+        self.stage == stage && self.key == *key
+    }
+
+    /// Marks the plan used by a session hit. It writes only when the flag is
+    /// clear, so sessions hitting one plan do not keep writing its line; the
+    /// flag only steers eviction, so `Relaxed` is enough.
+    fn mark_used(&self) {
+        if !self.used.load(Ordering::Relaxed) {
+            self.used.store(true, Ordering::Relaxed);
+        }
     }
 }
 
 /// No slot: the end of the recency list.
 const NONE: usize = usize::MAX;
 
-/// One cached entry, linked in the recency order.
-struct Slot<K> {
-    key: K,
-    stage: Stage,
+/// One cached entry, linked in the recency order; its key and stage are the
+/// plan's.
+struct Slot {
     plan: Arc<CachedPlan>,
     /// The next newer slot, `NONE` for the newest.
     newer: usize,
@@ -227,12 +292,12 @@ struct Slot<K> {
 /// newest to the oldest, so a hit, a put and an eviction are each O(1), and a
 /// lookup borrows its key.
 ///
-/// Generic over its key, which is a [`CacheKey`]: a build without a query
-/// language has no key value (its [`QueryLanguage`] has no variant), and a
-/// generic body is not linted as unreachable there.
+/// Generic over its map's key, which is a [`CacheKey`]: a build without a
+/// query language has no key value (its [`QueryLanguage`] has no variant),
+/// and a generic body is not linted as unreachable there.
 struct Lru<K> {
     index: HashMap<K, [usize; 2]>,
-    slots: Vec<Option<Slot<K>>>,
+    slots: Vec<Option<Slot>>,
     free: Vec<usize>,
     newest: Option<usize>,
     oldest: Option<usize>,
@@ -253,12 +318,24 @@ impl<K> Default for Lru<K> {
     }
 }
 
-impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
-    fn slot(&self, at: usize) -> &Slot<K> {
+/// The map key an entry is found by, made from its plan's key (generic, as
+/// [`Lru`] is).
+trait KeyOf {
+    fn key_of(key: &CacheKey) -> Self;
+}
+
+impl KeyOf for CacheKey {
+    fn key_of(key: &CacheKey) -> Self {
+        key.clone()
+    }
+}
+
+impl<K: std::hash::Hash + Eq + Borrow<CacheKey> + KeyOf> Lru<K> {
+    fn slot(&self, at: usize) -> &Slot {
         self.slots[at].as_ref().expect("a linked slot is filled")
     }
 
-    fn slot_mut(&mut self, at: usize) -> &mut Slot<K> {
+    fn slot_mut(&mut self, at: usize) -> &mut Slot {
         self.slots[at].as_mut().expect("a linked slot is filled")
     }
 
@@ -295,12 +372,12 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
         }
     }
 
-    fn find(&self, key: &K, stage: Stage) -> Option<usize> {
+    fn find(&self, key: &CacheKey, stage: Stage) -> Option<usize> {
         let at = self.index.get(key)?[stage.at()];
         (at != NONE).then_some(at)
     }
 
-    fn get(&mut self, key: &K, stage: Stage) -> Option<Arc<CachedPlan>> {
+    fn get(&mut self, key: &CacheKey, stage: Stage) -> Option<Arc<CachedPlan>> {
         let at = self.find(key, stage)?;
         if self.newest != Some(at) {
             self.unlink(at);
@@ -313,10 +390,11 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
     fn remove_at(&mut self, at: usize) -> Arc<CachedPlan> {
         self.unlink(at);
         let slot = self.slots[at].take().expect("a linked slot is filled");
-        if let Some(pair) = self.index.get_mut(&slot.key) {
-            pair[slot.stage.at()] = NONE;
+        let key = &slot.plan.key;
+        if let Some(pair) = self.index.get_mut(key) {
+            pair[slot.plan.stage.at()] = NONE;
             if *pair == [NONE; 2] {
-                self.index.remove(&slot.key);
+                self.index.remove(key);
             }
         }
         self.free.push(at);
@@ -324,25 +402,36 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
         slot.plan
     }
 
-    fn remove(&mut self, key: &K, stage: Stage) -> Option<Arc<CachedPlan>> {
+    fn remove(&mut self, key: &CacheKey, stage: Stage) -> Option<Arc<CachedPlan>> {
         let at = self.find(key, stage)?;
         Some(self.remove_at(at))
     }
 
-    /// Stores `plan` under `key` as the newest entry, evicting the oldest
-    /// until it fits in `limit`. The caller checked that it fits alone.
-    fn put(&mut self, key: K, stage: Stage, plan: Arc<CachedPlan>, limit: usize) {
+    /// Stores `plan` under its key and stage as the newest entry, evicting
+    /// the oldest until it fits in `limit`. The caller checked that it fits
+    /// alone. An oldest entry a session hit since the last pass (its `used`
+    /// flag) has the flag cleared and moves to the newest end instead, at
+    /// most once per entry in one put, so the put ends even when every entry
+    /// is flagged.
+    fn put(&mut self, plan: Arc<CachedPlan>, limit: usize) {
+        let stage = plan.stage;
         // An entry the key held goes first: its bytes do not count twice.
-        self.remove(&key, stage);
+        self.remove(&plan.key, stage);
+        let mut second_chances = self.len();
         while self.held_bytes + plan.bytes > limit
             && let Some(oldest) = self.oldest
         {
-            self.remove_at(oldest);
+            if second_chances > 0 && self.slot(oldest).plan.used.swap(false, Ordering::Relaxed) {
+                second_chances -= 1;
+                self.unlink(oldest);
+                self.link_newest(oldest);
+            } else {
+                self.remove_at(oldest);
+            }
         }
         self.held_bytes += plan.bytes;
+        let key = K::key_of(&plan.key);
         let slot = Slot {
-            key: key.clone(),
-            stage,
             plan,
             newer: NONE,
             older: NONE,
@@ -374,7 +463,7 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
         let mut parsed = 0;
         let mut optimized = 0;
         for slot in self.slots.iter().flatten() {
-            match slot.stage {
+            match slot.plan.stage {
                 Stage::Parsed => parsed += slot.plan.bytes,
                 Stage::Optimized => optimized += slot.plan.bytes,
             }
@@ -385,12 +474,13 @@ impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
 
 /// What the cache's bookkeeping takes per entry besides the plan and the
 /// key's text: its slot, the map's entry and the key's own value.
-const ENTRY_OVERHEAD: usize = std::mem::size_of::<Option<Slot<CacheKey>>>()
+const ENTRY_OVERHEAD: usize = std::mem::size_of::<Option<Slot>>()
     + std::mem::size_of::<(CacheKey, [usize; 2])>()
     + std::mem::size_of::<CachedPlan>();
 
 impl CacheKey {
-    /// The bytes the key's text takes (a map key holds it once, a slot once).
+    /// The bytes the key's text takes (a map key holds it once, the plan
+    /// once).
     fn text_bytes(&self) -> usize {
         2 * (self.query.capacity()
             + self.schema.as_ref().map_or(0, String::capacity)
@@ -422,6 +512,12 @@ pub struct QueryCache {
     invalidations: AtomicU64,
     /// How many plans were not stored because they exceed the whole limit.
     oversized: AtomicU64,
+    /// How many lookups a session's own cache answered.
+    session_hits: AtomicU64,
+    /// The bytes of the open sessions' maps together.
+    session_bytes: AtomicUsize,
+    /// Hashes a key and stage for a session's map: one seed per database.
+    session_keys: FxBuildHasher,
     /// The pause before each put a test can hold (`hold_puts`).
     #[cfg(feature = "testing-plan-cache")]
     put_hold: Arc<PutHold>,
@@ -443,6 +539,9 @@ impl QueryCache {
             optimized_misses: AtomicU64::new(0),
             invalidations: AtomicU64::new(0),
             oversized: AtomicU64::new(0),
+            session_hits: AtomicU64::new(0),
+            session_bytes: AtomicUsize::new(0),
+            session_keys: FxBuildHasher::default(),
             #[cfg(feature = "testing-plan-cache")]
             put_hold: Arc::default(),
         }
@@ -511,8 +610,10 @@ impl QueryCache {
         };
         if found.is_some() {
             hits.fetch_add(1, Ordering::Relaxed);
+            grafeo_common::work::count(grafeo_common::work::Work::PlanCacheHit, 1);
         } else {
             misses.fetch_add(1, Ordering::Relaxed);
+            grafeo_common::work::count(grafeo_common::work::Work::PlanCacheMiss, 1);
         }
         found
     }
@@ -538,7 +639,15 @@ impl QueryCache {
         } else {
             0
         };
-        let cached = Arc::new(CachedPlan { plan, bytes });
+        let cached = Arc::new(CachedPlan {
+            plan,
+            #[cfg(prepared_plans)]
+            recipe: std::sync::OnceLock::new(),
+            bytes,
+            key,
+            stage,
+            used: AtomicBool::new(false),
+        });
         if !self.is_enabled() {
             return cached;
         }
@@ -558,7 +667,7 @@ impl QueryCache {
         if generation < self.source.load(Ordering::Acquire) {
             return cached;
         }
-        lru.put(key, stage, Arc::clone(&cached), self.limit);
+        lru.put(Arc::clone(&cached), self.limit);
         cached
     }
 
@@ -611,7 +720,7 @@ impl QueryCache {
             optimized_misses: self.optimized_misses.load(Ordering::Relaxed),
             invalidations: self.invalidations.load(Ordering::Relaxed),
             generation: self.generation.load(Ordering::Acquire),
-            session_hits: 0,
+            session_hits: self.session_hits.load(Ordering::Relaxed),
             oversized: self.oversized.load(Ordering::Relaxed),
         }
     }
@@ -622,6 +731,23 @@ impl QueryCache {
     #[must_use]
     pub fn heap_memory_bytes(&self) -> (usize, usize, usize) {
         self.lru.lock().by_stage()
+    }
+
+    /// The bytes the open sessions' own caches take: their maps, which hold
+    /// a hash and a weak reference per plan, never a plan (each plan is
+    /// counted once, in the shared entries).
+    #[must_use]
+    pub fn session_bytes(&self) -> usize {
+        self.session_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Moves a session's counted table bytes from `from` to `to`.
+    fn move_session_bytes(&self, from: usize, to: usize) {
+        if to > from {
+            self.session_bytes.fetch_add(to - from, Ordering::Relaxed);
+        } else {
+            self.session_bytes.fetch_sub(from - to, Ordering::Relaxed);
+        }
     }
 
     /// Holds every put from now on until the returned guard drops: a
@@ -636,8 +762,10 @@ impl QueryCache {
         }
     }
 
-    /// Resets the hit, miss, invalidation and oversized counters.
+    /// Resets the hit (the sessions' too), miss, invalidation and oversized
+    /// counters.
     pub fn reset_stats(&self) {
+        self.session_hits.store(0, Ordering::Relaxed);
         self.parsed_hits.store(0, Ordering::Relaxed);
         self.parsed_misses.store(0, Ordering::Relaxed);
         self.optimized_hits.store(0, Ordering::Relaxed);
@@ -652,6 +780,169 @@ impl Default for QueryCache {
     /// database (which sizes its own from the memory budget).
     fn default() -> Self {
         Self::with_limit(DEFAULT_LIMIT)
+    }
+}
+
+/// The share of the plan cache's limit that a session's own cache, and a
+/// transaction's private cache, may take: a sixteenth. It moves with the one
+/// setting, and a limit of 0 turns both off.
+pub(crate) const SESSION_SHARE: usize = 16;
+
+/// A session's own cache, in front of the shared one: a repeat in the
+/// session takes no shared lock.
+///
+/// It maps a hash of each key and stage the session ran to a weak reference
+/// to the shared cache's plan, so it keeps neither a plan nor a statement's
+/// text alive: once the shared cache evicts or clears a plan, the plan is
+/// freed, and the session's next lookup of it misses. A hit compares the
+/// plan's own key and stage, so a hash that collides is a miss. The map
+/// empties at its next lookup once the planning generation moved, and its
+/// table stays within a sixteenth of the shared limit.
+pub struct SessionPlans {
+    shared: Arc<QueryCache>,
+    /// The bytes the map may take; 0 turns it off.
+    bound: usize,
+    map: Mutex<SessionMap>,
+}
+
+/// A session's entries, all found or stored under one planning generation.
+#[derive(Default)]
+struct SessionMap {
+    generation: u64,
+    entries: FxHashMap<u64, Weak<CachedPlan>>,
+    /// The table's bytes, as the shared cache counts them for the session.
+    bytes: usize,
+}
+
+impl SessionPlans {
+    /// An empty cache in front of `shared`.
+    #[must_use]
+    pub fn new(shared: Arc<QueryCache>) -> Self {
+        Self {
+            bound: shared.limit / SESSION_SHARE,
+            shared,
+            map: Mutex::new(SessionMap::default()),
+        }
+    }
+
+    /// Turns the cache off: a session of one call would drop its entries
+    /// unused.
+    pub(crate) fn turn_off(&mut self) {
+        self.bound = 0;
+    }
+
+    /// The shared cache it stands in front of.
+    #[must_use]
+    pub fn shared(&self) -> &QueryCache {
+        &self.shared
+    }
+
+    /// The hash the map keeps for `key` at `stage`.
+    fn hash(&self, key: &CacheKey, stage: Stage) -> u64 {
+        self.shared.session_keys.hash_one((key, stage))
+    }
+
+    /// The plan cached for `key` at `stage`: the session's own entry while
+    /// its plan is cached, else the shared cache's, remembered for the next
+    /// lookup.
+    pub fn get(&self, key: &CacheKey, stage: Stage) -> Option<Arc<CachedPlan>> {
+        if self.bound == 0 {
+            return self.shared.get(key, stage);
+        }
+        let hash = self.hash(key, stage);
+        let now = self.shared.generation();
+        {
+            let mut map = self.map.lock();
+            if map.generation != now {
+                map.entries.clear();
+                map.generation = now;
+            }
+            if let Some(weak) = map.entries.get(&hash) {
+                match weak.upgrade() {
+                    Some(plan) if plan.is_for(key, stage) => {
+                        plan.mark_used();
+                        self.shared.session_hits.fetch_add(1, Ordering::Relaxed);
+                        // A hit as the shared cache counts one: each lookup counts once.
+                        grafeo_common::work::count(grafeo_common::work::Work::PlanCacheHit, 1);
+                        return Some(plan);
+                    }
+                    // Evicted, cleared, or another key's plan: a miss.
+                    _ => {
+                        map.entries.remove(&hash);
+                    }
+                }
+            }
+        }
+        let found = self.shared.get(key, stage)?;
+        self.remember(hash, &found, now);
+        Some(found)
+    }
+
+    /// Stores `plan`, planned under `generation`, in the shared cache (see
+    /// [`QueryCache::put`]), and remembers it for the session.
+    pub fn put(
+        &self,
+        key: CacheKey,
+        stage: Stage,
+        plan: LogicalPlan,
+        generation: u64,
+    ) -> Arc<CachedPlan> {
+        if self.bound == 0 {
+            return self.shared.put(key, stage, plan, generation);
+        }
+        let hash = self.hash(&key, stage);
+        let cached = self.shared.put(key, stage, plan, generation);
+        self.remember(hash, &cached, generation);
+        cached
+    }
+
+    /// Remembers `plan`, found or planned under `generation`, under `hash`,
+    /// while the map is at that generation: no plan of an older one enters
+    /// it. A colliding entry is replaced. An insert that grows the table past
+    /// the bound makes room in the table it had instead (see [`make_room`]).
+    fn remember(&self, hash: u64, plan: &Arc<CachedPlan>, generation: u64) {
+        let mut map = self.map.lock();
+        if map.generation != generation {
+            return;
+        }
+        let capacity = map.entries.capacity();
+        map.entries.insert(hash, Arc::downgrade(plan));
+        if map.entries.allocation_size() > self.bound {
+            make_room(&mut map.entries, hash, capacity);
+        }
+        let bytes = map.entries.allocation_size();
+        self.shared.move_session_bytes(map.bytes, bytes);
+        map.bytes = bytes;
+    }
+}
+
+/// Takes `entries`, which the insert of `kept` grew past its bound, back to
+/// the table of `capacity` entries it had: the entries whose plans are gone
+/// go first, then others, in the table's order, until an eighth of it is
+/// free, so the next inserts fit without another pass (one pass per eighth of
+/// the table's inserts). `kept` stays. With a capacity of 0, not even the
+/// smallest table fits, and nothing is kept.
+fn make_room(entries: &mut FxHashMap<u64, Weak<CachedPlan>>, kept: u64, capacity: usize) {
+    if capacity == 0 {
+        *entries = FxHashMap::default();
+        return;
+    }
+    entries.retain(|_, weak| weak.strong_count() > 0);
+    let mut evict = entries.len().saturating_sub(capacity - capacity / 8);
+    entries.retain(|hash, _| {
+        if evict == 0 || *hash == kept {
+            return true;
+        }
+        evict -= 1;
+        false
+    });
+    entries.shrink_to(capacity);
+}
+
+impl Drop for SessionPlans {
+    fn drop(&mut self) {
+        let map = self.map.get_mut();
+        self.shared.move_session_bytes(map.bytes, 0);
     }
 }
 
@@ -958,6 +1249,132 @@ mod tests {
         cache.put(key.clone(), Stage::Optimized, plan(), 0);
         assert_eq!(cache.held_bytes(), once);
         assert_eq!(cache.stats().optimized_size, 1);
+    }
+
+    /// A session's map keeps only a hash per key: a plan found under a hash
+    /// that collides is another key's, so the lookup misses, and a put under
+    /// that hash replaces the entry.
+    #[test]
+    fn a_colliding_session_entry_is_a_miss() {
+        let shared = Arc::new(QueryCache::with_limit(1 << 20));
+        let session = SessionPlans::new(Arc::clone(&shared));
+        let gus = CacheKey::new("QUERY gus", test_language());
+        let mia = CacheKey::new("QUERY mia", test_language());
+        let generation = shared.generation();
+        let gus_plan = session.put(gus.clone(), Stage::Optimized, plan(), generation);
+        // Mia's hash leads to Gus's plan, as a collision would.
+        let hash = session.hash(&mia, Stage::Optimized);
+        session
+            .map
+            .lock()
+            .entries
+            .insert(hash, Arc::downgrade(&gus_plan));
+        assert!(session.get(&mia, Stage::Optimized).is_none());
+        assert_eq!(shared.stats().session_hits, 0);
+
+        let mia_plan = session.put(mia.clone(), Stage::Optimized, plan(), generation);
+        let found = session.get(&mia, Stage::Optimized).expect("Mia's plan");
+        assert!(Arc::ptr_eq(&found, &mia_plan), "the put replaced the entry");
+        assert_eq!(shared.stats().session_hits, 1);
+        let found = session.get(&gus, Stage::Optimized).expect("Gus's plan");
+        assert!(Arc::ptr_eq(&found, &gus_plan));
+    }
+
+    /// The bytes the table of a session's map allocates once it holds
+    /// `capacity` entries.
+    fn table_bytes(capacity: usize) -> usize {
+        let mut entries: FxHashMap<u64, Weak<CachedPlan>> = FxHashMap::default();
+        entries.reserve(capacity);
+        entries.allocation_size()
+    }
+
+    /// A session that runs more statements than its map's bound fits keeps
+    /// most of them: an insert that would grow the table past the bound
+    /// evicts an eighth of it instead, the newest entry kept, and the bytes
+    /// counted are the table's as allocated.
+    #[test]
+    fn a_session_map_past_its_bound_keeps_most_entries() {
+        let bound = table_bytes(28);
+        let shared = Arc::new(QueryCache::with_limit(bound * SESSION_SHARE));
+        let session = SessionPlans::new(Arc::clone(&shared));
+        // Held here, so every entry's plan stays alive whatever the shared
+        // cache evicts: the room is made by the bound alone.
+        let mut plans = Vec::new();
+        let mut most = 0;
+        for i in 0..200 {
+            let key = CacheKey::new(format!("QUERY {i}"), test_language());
+            plans.push(session.put(key.clone(), Stage::Optimized, plan(), shared.generation()));
+            {
+                let map = session.map.lock();
+                let allocated = map.entries.allocation_size();
+                assert_eq!(shared.session_bytes(), allocated, "put {i}: as allocated");
+                assert!(allocated <= bound, "put {i}: {allocated} over {bound}");
+                most = most.max(map.entries.len());
+                assert!(
+                    map.entries.len() >= most - most / 8,
+                    "put {i}: {} entries kept of {most}",
+                    map.entries.len()
+                );
+            }
+            let hits = shared.stats().session_hits;
+            assert!(session.get(&key, Stage::Optimized).is_some());
+            assert_eq!(shared.stats().session_hits, hits + 1, "put {i} is kept");
+        }
+        assert!(most >= 28, "the table filled up to the bound: {most}");
+        drop(session);
+        assert_eq!(shared.session_bytes(), 0, "the session's bytes go with it");
+    }
+
+    /// A bound below the smallest table keeps nothing: every lookup goes to
+    /// the shared cache, and no byte is counted.
+    #[test]
+    fn a_bound_below_the_smallest_table_keeps_nothing() {
+        let bound = table_bytes(1) - 1;
+        let shared = Arc::new(QueryCache::with_limit(bound * SESSION_SHARE));
+        let session = SessionPlans::new(Arc::clone(&shared));
+        let key = CacheKey::new("QUERY gus", test_language());
+        let _plan = session.put(key.clone(), Stage::Optimized, plan(), shared.generation());
+        assert!(
+            session.get(&key, Stage::Optimized).is_some(),
+            "a shared hit"
+        );
+        let stats = shared.stats();
+        assert_eq!((stats.session_hits, stats.optimized_hits), (0, 1));
+        assert_eq!(shared.session_bytes(), 0);
+        assert_eq!(session.map.lock().entries.allocation_size(), 0);
+    }
+
+    /// Every entry marked used by a session hit, then a put: each gets its
+    /// second chance once, and the put still evicts (the oldest, as without
+    /// the marks) and keeps the bound.
+    #[test]
+    fn a_put_over_entries_all_marked_used_still_evicts() {
+        let key = |text: &str| CacheKey::new(text, test_language());
+        let entry = QueryCache::with_limit(1 << 20)
+            .put(key("query-a"), Stage::Optimized, plan(), 0)
+            .bytes();
+        let cache = Arc::new(QueryCache::with_limit(3 * entry));
+        for text in ["query-a", "query-b", "query-c"] {
+            cache
+                .put(key(text), Stage::Optimized, plan(), 0)
+                .mark_used();
+        }
+        let (done, ended) = std::sync::mpsc::channel();
+        let putting = Arc::clone(&cache);
+        std::thread::spawn(move || {
+            putting.put(key("query-d"), Stage::Optimized, plan(), 0);
+            done.send(()).expect("the test waits");
+        });
+        ended
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the put ends");
+        assert!(cache.held_bytes() <= 3 * entry);
+        let holds = |text: &str| cache.get(&key(text), Stage::Optimized).is_some();
+        assert!(
+            !holds("query-a"),
+            "the oldest goes once each had its chance"
+        );
+        assert!(holds("query-b") && holds("query-c") && holds("query-d"));
     }
 
     /// The deep estimate grows with what a plan owns: a long literal costs

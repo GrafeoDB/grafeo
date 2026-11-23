@@ -1,0 +1,179 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/with/With6.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.With6"
+  title: "With6 - Implicit grouping with aggregates"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Implicit grouping with single expression as grouping key and single aggregation
+  - name: s1_implicit_grouping_with_single_expression_as_grouping_key_and_single_aggregation
+    setup:
+      - |
+        CREATE ({name: 'A'}),
+               ({name: 'A'}),
+               ({name: 'B'})
+    query: |
+      MATCH (a)
+      WITH a.name AS name, count(*) AS relCount
+      RETURN name, relCount
+    expect:
+      values: |
+        | name | relCount |
+        | 'A' | 2 |
+        | 'B' | 1 |
+      side_effects: {}
+
+  # [2] Implicit grouping with single relationship variable as grouping key and single aggregation
+  - name: s2_implicit_grouping_with_single_relationship_variable_as_grouping_key_and_single_aggregation
+    setup:
+      - |
+        CREATE ()-[:T1]->(:X),
+               ()-[:T2]->(:X),
+               ()-[:T3]->()
+    query: |
+      MATCH ()-[r1]->(:X)
+      WITH r1 AS r2, count(*) AS c
+      MATCH ()-[r2]->()
+      RETURN r2 AS rel
+    expect:
+      values: |
+        | rel |
+        | [:T1] |
+        | [:T2] |
+      side_effects: {}
+
+  # [3] Implicit grouping with multiple node and relationship variables as grouping key and single aggregation
+  - name: s3_implicit_grouping_with_multiple_node_and_relationship_variables_as_grouping_key_and_single_aggregation
+    setup:
+      - |
+        CREATE ()-[:T1]->(:X),
+               ()-[:T2]->(:X),
+               ()-[:T3]->()
+    query: |
+      MATCH (a)-[r1]->(b:X)
+      WITH a, r1 AS r2, b, count(*) AS c
+      MATCH (a)-[r2]->(b)
+      RETURN r2 AS rel
+    expect:
+      values: |
+        | rel |
+        | [:T1] |
+        | [:T2] |
+      side_effects: {}
+
+  # [4] Implicit grouping with single path variable as grouping key and single aggregation
+  - name: s4_implicit_grouping_with_single_path_variable_as_grouping_key_and_single_aggregation
+    setup:
+      - |
+        CREATE (n1 {num: 1}), (n2 {num: 2}),
+               (n3 {num: 3}), (n4 {num: 4})
+        CREATE (n1)-[:T]->(n2),
+               (n3)-[:T]->(n4)
+    query: |
+      MATCH p = ()-[*]->()
+      WITH count(*) AS count, p AS p
+      RETURN nodes(p) AS nodes
+    expect:
+      values: |
+        | nodes |
+        | [({num: 1}), ({num: 2})] |
+        | [({num: 3}), ({num: 4})] |
+      side_effects: {}
+
+  # [5] Handle constants and parameters inside an expression which contains an aggregation expression
+  - name: s5_handle_constants_and_parameters_inside_an_expression_which_contains_an_aggregation_expression
+    params:
+      age: 38
+    query: |
+      MATCH (person)
+      WITH $age + avg(person.age) - 1000 AS agg
+      RETURN *
+    expect:
+      values: |
+        | agg |
+        | null |
+      side_effects: {}
+
+  # [6] Handle projected variables inside an expression which contains an aggregation expression
+  - name: s6_handle_projected_variables_inside_an_expression_which_contains_an_aggregation_expression
+    query: |
+      MATCH (me: Person)--(you: Person)
+      WITH me.age AS age, you
+      WITH age, age + count(you.age) AS agg
+      RETURN *
+    expect:
+      values: |
+        | age | agg |
+      side_effects: {}
+
+  # [7] Handle projected property accesses inside an expression which contains an aggregation expression
+  - name: s7_handle_projected_property_accesses_inside_an_expression_which_contains_an_aggregation_expression
+    query: |
+      MATCH (me: Person)--(you: Person)
+      WITH me.age AS age, me.age + count(you.age) AS agg
+      RETURN *
+    expect:
+      values: |
+        | age | agg |
+      side_effects: {}
+
+  # [8] Fail if not projected variables are used inside an expression which contains an aggregation expression
+  # TCK: SyntaxError at compile time: AmbiguousAggregationExpression
+  - name: s8_fail_if_not_projected_variables_are_used_inside_an_expression_which_contains_an_aggregation_expression
+    query: |
+      MATCH (me: Person)--(you: Person)
+      WITH me.age + count(you.age) AS agg
+      RETURN *
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [9] Fail if more complex expression, even if projected, are used inside expression which contains an aggregation expression
+  # TCK: SyntaxError at compile time: AmbiguousAggregationExpression
+  - name: s9_fail_if_more_complex_expression_even_if_projected_are_used_inside_expression_which_contains_an_aggregation_expression
+    xfail:
+      spec: "openCypher TCK 2024.3 With6: [9] Fail if more complex expression, even if projected, are used inside expression which contains an aggregation expression"
+      issue: "#798"
+    query: |
+      MATCH (me: Person)--(you: Person)
+      WITH me.age + you.age AS grp, me.age + you.age + count(*) AS agg
+      RETURN *
+    expect:
+      gql_status: "42"
+      side_effects: {}

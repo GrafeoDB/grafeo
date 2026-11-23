@@ -1014,7 +1014,7 @@ fn a_bulk_create_claims_each_endpoint_once_and_no_new_edge() {
 
 /// A bulk create stops at the first row a check refuses (an endpoint the
 /// transaction does not see, a constraint, a claim another transaction
-/// holds), as one create of that row would: the rows before it stay
+/// holds), as one create of that row would: the chunks before it stay
 /// written, and the range recorded before the first row undoes them.
 #[test]
 fn a_refused_row_stops_a_bulk_create_and_its_range_undoes_the_rows_before_it() {
@@ -1097,4 +1097,37 @@ fn a_recorder_without_bulk_writes_gets_one_create_per_row() {
             .all(|kind| kind.starts_with("Create"))
     );
     assert_eq!(recorder.kinds().len(), 8);
+}
+
+/// A bulk create checks the query's deadline before each chunk it applies:
+/// past it, the call fails with the timeout, and the range recorded before
+/// the first row undoes what it wrote.
+#[test]
+fn a_bulk_create_stops_at_the_deadline() {
+    use crate::execution::deadline;
+    use crate::graph::apply::CHUNK_ROWS;
+
+    let (store, people) = people_store();
+    let recorder = Recorder::with_bulk(&store, Some(BulkRows::Drop));
+    let writer = recording_writer(&store, &recorder);
+    let before = dump(&store, &writer);
+    let edges: Vec<NewEdge> = (0..=2 * CHUNK_ROWS)
+        .map(|_| NewEdge {
+            src: people.alix,
+            dst: people.gus,
+            edge_type: "KNOWS".to_string(),
+            properties: Vec::new(),
+        })
+        .collect();
+    let scope = deadline::enter(Some(grafeo_common::clock::Instant::now()));
+    let stopped = writer.create_edges(edges);
+    drop(scope);
+    assert!(
+        matches!(stopped, Err(OperatorError::Timeout)),
+        "{stopped:?}"
+    );
+    store
+        .rollback(transaction(), &mut recorder.entries().iter())
+        .unwrap();
+    assert_eq!(dump(&store, &writer), before, "the range undoes it");
 }

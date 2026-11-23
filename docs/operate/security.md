@@ -364,6 +364,30 @@ ssn = decrypt_value(node.properties["ssn_encrypted"])
 
 ---
 
+## Deleting Data
+
+What Grafeo removes when data is deleted (`DELETE`, `DETACH DELETE`, `REMOVE`, an overwritten property, a SPARQL `DELETE`), and when.
+
+### On Disk
+
+- After `compact()`, the database file and its WAL hold no deleted value that history retention no longer keeps. With the default (`HistoryRetention::Off`) that is every deleted value. With history retention, the file keeps past states, deleted values included, for as long as the retention keeps them; a reopen loads them. See [History Retention](temporal.md#history-retention).
+- Spill files (`<file>.spill/`, or a read-only open's directory in the system temp directory) go when the database closes. After a crash they stay until the next read-write open of the database cleans its spill directory or, for a read-only open's directory, until the next read-only open by the same user removes it (directories made by 0.6.3 and earlier, or on a file system without file locks, stay until you delete them).
+- Backups and exports you made, and the copies a format migration keeps (such as `<file>.pre-0.6`), are yours to manage: deleting data does not change them.
+
+### In Memory
+
+- After `close()`, or once the database object is dropped, the memory Grafeo allocated holds no deleted value. This holds in every binding and for in-memory databases too. In Rust, until 0.7.0, a `Snapshot` or a node or edge iterator taken before `close()` keeps the graph in memory until it is dropped (see [After `close()`](persistence/persistent.md#after-close)).
+- While the database is open, some structures keep deleted values by design:
+    - history retention, as on disk;
+    - the change feed (CDC), which keeps every change event; it is not written to the file;
+    - the RDF term dictionary, which keeps a deleted literal until `close()`;
+    - the query plan cache, which keeps the literals of the statements it planned until `close()`.
+
+### Outside Grafeo
+
+- The host language's own objects: a Python or JavaScript string you passed as a parameter, or a value a query returned to you, lives until that language frees it.
+- Freed memory: Grafeo frees what it no longer needs, but the memory allocator does not overwrite a freed block until it reuses it, so a scan of the process can still find deleted values there. Grafeo does not claim that the process memory is clean. To keep freed memory free of values, run with an allocator that overwrites what it frees (on Linux with glibc, `MALLOC_PERTURB_`), or end the process.
+
 ## Network Security
 
 If exposing Grafeo through an API:

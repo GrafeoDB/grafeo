@@ -599,6 +599,17 @@ impl<T> Updates<T> {
             .filter_map(move |node| Some((node.stamp, node.get(at)?)))
     }
 
+    /// Every kept entry: its row, the stamp of the write over it, and what the row held before.
+    pub(super) fn stamped(&self) -> impl Iterator<Item = (usize, u64, &T)> + '_ {
+        self.each().flat_map(|(vector, chain)| {
+            chain.nodes.iter().flat_map(move |node| {
+                node.rows.iter().map(move |(at, kept)| {
+                    (vector * VECTOR_ROWS + usize::from(*at), node.stamp, kept)
+                })
+            })
+        })
+    }
+
     /// Adds the chains a load restores from a file's history: `kept` holds,
     /// per row, the epoch of each committed write a reader at an earlier
     /// epoch must not see, with what the row held before it (one entry per

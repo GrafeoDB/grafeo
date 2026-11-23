@@ -1,0 +1,384 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/create/Create2.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Create2"
+  title: "Create2 - Creating relationships"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Create two nodes and a single relationship in a single pattern
+  - name: s1_create_two_nodes_and_a_single_relationship_in_a_single_pattern
+    query: |
+      CREATE ()-[:R]->()
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 2
+        +relationships: 1
+
+  # [2] Create two nodes and a single relationship in separate patterns
+  - name: s2_create_two_nodes_and_a_single_relationship_in_separate_patterns
+    query: |
+      CREATE (a), (b),
+             (a)-[:R]->(b)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 2
+        +relationships: 1
+
+  # [3] Create two nodes and a single relationship in separate clauses
+  - name: s3_create_two_nodes_and_a_single_relationship_in_separate_clauses
+    query: |
+      CREATE (a)
+      CREATE (b)
+      CREATE (a)-[:R]->(b)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 2
+        +relationships: 1
+
+  # [4] Create two nodes and a single relationship in the reverse direction
+  - name: s4_create_two_nodes_and_a_single_relationship_in_the_reverse_direction
+    query: |
+      CREATE (:A)<-[:R]-(:B)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 2
+        +relationships: 1
+        +labels: 2
+
+  # [4] Create two nodes and a single relationship in the reverse direction (control query)
+  - name: s4_create_two_nodes_and_a_single_relationship_in_the_reverse_direction_control
+    setup:
+      - |
+        CREATE (:A)<-[:R]-(:B)
+    query: |
+      MATCH (a:A)<-[:R]-(b:B)
+      RETURN a, b
+    expect:
+      values: |
+        | a | b |
+        | (:A) | (:B) |
+
+  # [5] Create a single relationship between two existing nodes
+  - name: s5_create_a_single_relationship_between_two_existing_nodes
+    setup:
+      - |
+        CREATE (:X)
+        CREATE (:Y)
+    query: |
+      MATCH (x:X), (y:Y)
+      CREATE (x)-[:R]->(y)
+    expect:
+      empty: true
+      side_effects:
+        +relationships: 1
+
+  # [6] Create a single relationship between two existing nodes in the reverse direction
+  - name: s6_create_a_single_relationship_between_two_existing_nodes_in_the_reverse_direction
+    setup:
+      - |
+        CREATE (:X)
+        CREATE (:Y)
+    query: |
+      MATCH (x:X), (y:Y)
+      CREATE (x)<-[:R]-(y)
+    expect:
+      empty: true
+      side_effects:
+        +relationships: 1
+
+  # [6] Create a single relationship between two existing nodes in the reverse direction (control query)
+  - name: s6_create_a_single_relationship_between_two_existing_nodes_in_the_reverse_direction_control
+    setup:
+      - |
+        CREATE (:X)
+        CREATE (:Y)
+      - |
+        MATCH (x:X), (y:Y)
+        CREATE (x)<-[:R]-(y)
+    query: |
+      MATCH (x:X)<-[:R]-(y:Y)
+      RETURN x, y
+    expect:
+      values: |
+        | x | y |
+        | (:X) | (:Y) |
+
+  # [7] Create a single node and a single self loop in a single pattern
+  - name: s7_create_a_single_node_and_a_single_self_loop_in_a_single_pattern
+    query: |
+      CREATE (root)-[:LINK]->(root)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +relationships: 1
+
+  # [8] Create a single node and a single self loop in separate patterns
+  - name: s8_create_a_single_node_and_a_single_self_loop_in_separate_patterns
+    query: |
+      CREATE (root),
+             (root)-[:LINK]->(root)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +relationships: 1
+
+  # [9] Create a single node and a single self loop in separate clauses
+  - name: s9_create_a_single_node_and_a_single_self_loop_in_separate_clauses
+    query: |
+      CREATE (root)
+      CREATE (root)-[:LINK]->(root)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +relationships: 1
+
+  # [10] Create a single self loop on an existing node
+  - name: s10_create_a_single_self_loop_on_an_existing_node
+    setup:
+      - |
+        CREATE (:Root)
+    query: |
+      MATCH (root:Root)
+      CREATE (root)-[:LINK]->(root)
+    expect:
+      empty: true
+      side_effects:
+        +relationships: 1
+
+  # [11] Create a single relationship and an end node on an existing starting node
+  - name: s11_create_a_single_relationship_and_an_end_node_on_an_existing_starting_node
+    setup:
+      - |
+        CREATE (:Begin)
+    query: |
+      MATCH (x:Begin)
+      CREATE (x)-[:TYPE]->(:End)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +relationships: 1
+        +labels: 1
+
+  # [11] Create a single relationship and an end node on an existing starting node (control query)
+  - name: s11_create_a_single_relationship_and_an_end_node_on_an_existing_starting_node_control
+    setup:
+      - |
+        CREATE (:Begin)
+      - |
+        MATCH (x:Begin)
+        CREATE (x)-[:TYPE]->(:End)
+    query: |
+      MATCH (x:Begin)-[:TYPE]->(y:End)
+      RETURN x, y
+    expect:
+      values: |
+        | x | y |
+        | (:Begin) | (:End) |
+
+  # [12] Create a single relationship and a starting node on an existing end node
+  - name: s12_create_a_single_relationship_and_a_starting_node_on_an_existing_end_node
+    setup:
+      - |
+        CREATE (:End)
+    query: |
+      MATCH (x:End)
+      CREATE (:Begin)-[:TYPE]->(x)
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 1
+        +relationships: 1
+        +labels: 1
+
+  # [12] Create a single relationship and a starting node on an existing end node (control query)
+  - name: s12_create_a_single_relationship_and_a_starting_node_on_an_existing_end_node_control
+    setup:
+      - |
+        CREATE (:End)
+      - |
+        MATCH (x:End)
+        CREATE (:Begin)-[:TYPE]->(x)
+    query: |
+      MATCH (x:Begin)-[:TYPE]->(y:End)
+      RETURN x, y
+    expect:
+      values: |
+        | x | y |
+        | (:Begin) | (:End) |
+
+  # [13] Create a single relationship with a property
+  - name: s13_create_a_single_relationship_with_a_property
+    query: |
+      CREATE ()-[:R {num: 42}]->()
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 2
+        +relationships: 1
+        +properties: 1
+
+  # [14] Create a single relationship with a property and return it
+  - name: s14_create_a_single_relationship_with_a_property_and_return_it
+    query: |
+      CREATE ()-[r:R {num: 42}]->()
+      RETURN r.num AS num
+    expect:
+      values: |
+        | num |
+        | 42 |
+      side_effects:
+        +nodes: 2
+        +relationships: 1
+        +properties: 1
+
+  # [15] Create a single relationship with two properties
+  - name: s15_create_a_single_relationship_with_two_properties
+    query: |
+      CREATE ()-[:R {id: 12, name: 'foo'}]->()
+    expect:
+      empty: true
+      side_effects:
+        +nodes: 2
+        +relationships: 1
+        +properties: 2
+
+  # [16] Create a single relationship with two properties and return them
+  - name: s16_create_a_single_relationship_with_two_properties_and_return_them
+    query: |
+      CREATE ()-[r:R {id: 12, name: 'foo'}]->()
+      RETURN r.id AS id, r.name AS name
+    expect:
+      values: |
+        | id | name |
+        | 12 | 'foo' |
+      side_effects:
+        +nodes: 2
+        +relationships: 1
+        +properties: 2
+
+  # [17] Create a single relationship with null properties should not return those properties
+  - name: s17_create_a_single_relationship_with_null_properties_should_not_return_those_properties
+    query: |
+      CREATE ()-[r:X {id: 12, name: null}]->()
+      RETURN r.id, r.name AS name
+    expect:
+      values: |
+        | r.id | name |
+        | 12 | null |
+      side_effects:
+        +nodes: 2
+        +relationships: 1
+        +properties: 1
+
+  # [18] Fail when creating a relationship without a type
+  # TCK: SyntaxError at compile time: NoSingleRelationshipType
+  - name: s18_fail_when_creating_a_relationship_without_a_type
+    query: |
+      CREATE ()-->()
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [19] Fail when creating a relationship without a direction
+  # TCK: SyntaxError at compile time: RequiresDirectedRelationship
+  - name: s19_fail_when_creating_a_relationship_without_a_direction
+    query: |
+      CREATE (a)-[:FOO]-(b)
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [20] Fail when creating a relationship with two directions
+  # TCK: SyntaxError at compile time: RequiresDirectedRelationship
+  - name: s20_fail_when_creating_a_relationship_with_two_directions
+    query: |
+      CREATE (a)<-[:FOO]->(b)
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [21] Fail when creating a relationship with more than one type
+  # TCK: SyntaxError at compile time: NoSingleRelationshipType
+  - name: s21_fail_when_creating_a_relationship_with_more_than_one_type
+    query: |
+      CREATE ()-[:A|:B]->()
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [22] Fail when creating a variable-length relationship
+  # TCK: SyntaxError at compile time: CreatingVarLength
+  - name: s22_fail_when_creating_a_variable_length_relationship
+    xfail:
+      spec: "openCypher TCK 2024.3 Create2: [22] Fail when creating a variable-length relationship"
+      issue: "#795"
+    query: |
+      CREATE ()-[:FOO*2]->()
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [23] Fail when creating a relationship that is already bound
+  # TCK: SyntaxError at compile time: VariableAlreadyBound
+  - name: s23_fail_when_creating_a_relationship_that_is_already_bound
+    query: |
+      MATCH ()-[r]->()
+      CREATE ()-[r]->()
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [24] Fail when creating a relationship using undefined variable in pattern
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s24_fail_when_creating_a_relationship_using_undefined_variable_in_pattern
+    query: |
+      MATCH (a)
+      CREATE (a)-[:KNOWS]->(b {name: missing})
+      RETURN b
+    expect:
+      gql_status: "42"
+      side_effects: {}

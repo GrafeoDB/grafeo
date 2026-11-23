@@ -5,7 +5,9 @@
 #[allow(clippy::wildcard_imports)]
 use super::ast::*;
 use super::lexer::{Lexer, Token, TokenKind};
-use crate::query::limits::{Chain, Nesting, nesting_error_message};
+use crate::query::limits::{
+    Chain, DEFAULT_MAX_IDENTIFIER_LENGTH, NameLimit, Nesting, nesting_error_message,
+};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 
 /// SPARQL Parser.
@@ -50,7 +52,19 @@ pub const PREDEFINED_PREFIXES: [(&str, &str); 5] = [
 impl<'a> Parser<'a> {
     /// Creates a new parser for the given query string.
     pub fn new(source: &'a str) -> Self {
-        let mut lexer = Lexer::new(source);
+        Self::with_max_identifier_length(source, DEFAULT_MAX_IDENTIFIER_LENGTH)
+    }
+
+    /// The identifier length limit, with the first name the parser read over
+    /// it.
+    pub(crate) fn names(&self) -> NameLimit {
+        self.lexer.names()
+    }
+
+    /// A parser for `source` that records the first name longer than `max`
+    /// bytes (see [`Self::names`]).
+    pub(crate) fn with_max_identifier_length(source: &'a str, max: usize) -> Self {
+        let mut lexer = Lexer::new(source).with_max_identifier_length(max);
         let current = lexer.next_token();
         Self {
             lexer,
@@ -1785,6 +1799,25 @@ impl<'a> Parser<'a> {
             let operator = match self.current.kind {
                 TokenKind::Plus => BinaryOperator::Add,
                 TokenKind::MinusOp => BinaryOperator::Subtract,
+                // An operand followed by a signed number is a sum or a difference (grammar
+                // [116]): the sign is the operator, and the number without it starts the right
+                // operand, with any product or quotient after it.
+                TokenKind::Integer | TokenKind::Decimal | TokenKind::Double => {
+                    let operator = match self.current.text.as_bytes().first() {
+                        Some(b'+') => BinaryOperator::Add,
+                        Some(b'-') => BinaryOperator::Subtract,
+                        _ => break,
+                    };
+                    self.current.text.remove(0);
+                    let right = self.parse_multiplicative_expression()?;
+                    self.link_chain()?;
+                    expr = Expression::Binary {
+                        left: Box::new(expr),
+                        operator,
+                        right: Box::new(right),
+                    };
+                    continue;
+                }
                 _ => break,
             };
             self.advance();
@@ -2366,23 +2399,26 @@ impl<'a> Parser<'a> {
 
     /// A numeric literal with an optional sign (`-1`, `+2.5`), as a VALUES
     /// entry and a triple term may write one (SPARQL 1.1 grammar:
-    /// `NumericLiteralNegative`, `NumericLiteralPositive`). The lexer gives the
-    /// sign as its own token; there it can only start a number.
+    /// `NumericLiteralNegative`, `NumericLiteralPositive`). The lexer gives a
+    /// sign written directly before the number as part of the number, which
+    /// keeps it in its lexical form; a sign with white space after it comes as
+    /// its own token, which there can only start a number.
     fn parse_signed_numeric_literal(&mut self) -> Result<Literal> {
-        let negative = match self.current.kind {
-            TokenKind::MinusOp => {
-                self.advance();
-                true
-            }
-            TokenKind::Plus => {
-                self.advance();
-                false
-            }
-            _ => false,
+        let sign = match self.current.kind {
+            TokenKind::MinusOp => Some('-'),
+            TokenKind::Plus => Some('+'),
+            _ => None,
         };
+        if sign.is_some() {
+            self.advance();
+            // One sign to a number: `- -1` and `- +1` name no number.
+            if self.current.text.starts_with(['+', '-']) {
+                return Err(self.error("expected a number without a sign after a sign"));
+            }
+        }
         let mut literal = self.parse_numeric_literal()?;
-        if negative {
-            literal.value.insert(0, '-');
+        if let Some(sign) = sign {
+            literal.value.insert(0, sign);
         }
         Ok(literal)
     }
@@ -2522,9 +2558,13 @@ impl<'a> Parser<'a> {
         Ok(text[1..].to_string())
     }
 
+    /// The unsigned integer of a LIMIT or an OFFSET (grammar [26], [27]).
     fn expect_integer(&mut self) -> Result<u64> {
         if self.current.kind != TokenKind::Integer {
             return Err(self.error("expected integer"));
+        }
+        if self.current.text.starts_with(['+', '-']) {
+            return Err(self.error("expected an integer without a sign"));
         }
         let text = self.current.text.clone();
         self.advance();
@@ -2711,6 +2751,181 @@ mod tests {
             pattern.predicate.clone(),
             pattern.object.clone(),
         )
+    }
+
+    /// The expression of the first projected item of `query`, a SELECT.
+    fn projected(query: &str) -> Expression {
+        let query = parse(query).unwrap();
+        let QueryForm::Select(select) = query.query_form else {
+            panic!("expected SELECT query");
+        };
+        let Projection::Variables(items) = select.projection else {
+            panic!("expected projected expressions");
+        };
+        items[0].expression.clone()
+    }
+
+    fn number(text: &str, datatype: &str) -> Literal {
+        Literal::typed(
+            text,
+            Iri::new(format!("http://www.w3.org/2001/XMLSchema#{datatype}")),
+        )
+    }
+
+    /// A sign directly before a number is part of it (SPARQL 1.1 grammar [148] to [154],
+    /// tokens by longest match, section 19.8): the object is one signed number, after a plain
+    /// predicate.
+    #[test]
+    fn a_sign_directly_before_a_number_is_part_of_it() {
+        for (object, datatype) in [
+            ("+1", "integer"),
+            ("-1", "integer"),
+            ("+05", "integer"),
+            ("+.5", "decimal"),
+            ("-1.5", "decimal"),
+            ("-1e3", "double"),
+            ("+1E-2", "double"),
+        ] {
+            for spacing in [" ", ""] {
+                let (_, predicate, term) = the_pattern(&format!(
+                    "SELECT ?s WHERE {{ ?s <urn:p>{spacing}{object} }}"
+                ));
+                assert_eq!(
+                    predicate,
+                    PropertyPath::Predicate(Iri::new("urn:p")),
+                    "<urn:p>{spacing}{object}"
+                );
+                assert_eq!(
+                    term,
+                    TripleTerm::Literal(number(object, datatype)),
+                    "<urn:p>{spacing}{object}"
+                );
+            }
+        }
+    }
+
+    /// A `+` after a predicate, with white space before the number, is the one-or-more path
+    /// modifier.
+    #[test]
+    fn a_spaced_plus_after_a_predicate_is_a_path_modifier() {
+        let (_, predicate, term) = the_pattern("SELECT ?s WHERE { ?s <urn:p>+ 1 }");
+        assert_eq!(
+            predicate,
+            PropertyPath::OneOrMore(Box::new(PropertyPath::Predicate(Iri::new("urn:p"))))
+        );
+        assert_eq!(term, TripleTerm::Literal(number("1", "integer")));
+    }
+
+    /// An operand followed by a signed number is a sum or a difference (grammar [116]), with or
+    /// without white space, and a product or quotient after the number binds to it.
+    #[test]
+    fn a_signed_number_after_an_operand_is_a_sum_or_a_difference() {
+        let variable = || Box::new(Expression::Variable("a".to_string()));
+        let literal = |text: &str| Box::new(Expression::Literal(number(text, "integer")));
+        let binary = |left, operator, right| Expression::Binary {
+            left,
+            operator,
+            right,
+        };
+        for (text, expected) in [
+            (
+                "?a -1",
+                binary(variable(), BinaryOperator::Subtract, literal("1")),
+            ),
+            (
+                "?a - 1",
+                binary(variable(), BinaryOperator::Subtract, literal("1")),
+            ),
+            (
+                "?a +1",
+                binary(variable(), BinaryOperator::Add, literal("1")),
+            ),
+            (
+                "?a+1",
+                binary(variable(), BinaryOperator::Add, literal("1")),
+            ),
+            (
+                "?a-1",
+                binary(variable(), BinaryOperator::Subtract, literal("1")),
+            ),
+            (
+                "1-2",
+                binary(literal("1"), BinaryOperator::Subtract, literal("2")),
+            ),
+            (
+                "?a -2 * 3",
+                binary(
+                    variable(),
+                    BinaryOperator::Subtract,
+                    Box::new(binary(literal("2"), BinaryOperator::Multiply, literal("3"))),
+                ),
+            ),
+        ] {
+            assert_eq!(
+                projected(&format!("SELECT ({text} AS ?z) WHERE {{}}")),
+                expected,
+                "{text}"
+            );
+        }
+    }
+
+    /// A signed number standing alone keeps its sign in its lexical form.
+    #[test]
+    fn a_signed_number_alone_keeps_its_sign() {
+        for text in ["+05", "-1", "+1"] {
+            assert_eq!(
+                projected(&format!("SELECT ({text} AS ?z) WHERE {{}}")),
+                Expression::Literal(number(text, "integer")),
+                "{text}"
+            );
+        }
+    }
+
+    /// A `-` with white space after it, before a number, signs that number in a term (a `+`
+    /// there is the path modifier); a number that already has a sign takes no second one.
+    #[test]
+    fn a_spaced_sign_signs_a_number_once() {
+        let (_, _, term) = the_pattern("SELECT ?s WHERE { ?s <urn:p> - 1 }");
+        assert_eq!(term, TripleTerm::Literal(number("-1", "integer")));
+        for query in [
+            "SELECT ?s WHERE { ?s <urn:p> - -1 }",
+            "SELECT ?s WHERE { ?s <urn:p> - +1 }",
+            "SELECT ?x WHERE { VALUES ?x { - -1 } }",
+            "SELECT ?x WHERE { VALUES ?x { + -1 } }",
+            "INSERT DATA { <urn:a> <urn:p> - +1 }",
+        ] {
+            assert!(parse(query).is_err(), "{query}");
+        }
+    }
+
+    /// A `-` inside a language tag, a prefixed name or a blank node label stays part of it.
+    #[test]
+    fn a_dash_inside_a_name_is_part_of_it() {
+        let (_, _, term) = the_pattern("SELECT ?s WHERE { ?s <urn:p> \"x\"@es-419 }");
+        assert_eq!(
+            term,
+            TripleTerm::Literal(Literal::with_language("x", "es-419"))
+        );
+        let (_, _, term) =
+            the_pattern("PREFIX ex: <urn:ex:> SELECT ?s WHERE { ?s <urn:p> ex:a-1 }");
+        assert_eq!(term, TripleTerm::Iri(Iri::new("ex:a-1")));
+        let (subject, _, _) = the_pattern("SELECT ?o WHERE { _:b-1 <urn:p> ?o }");
+        assert_eq!(
+            subject,
+            TripleTerm::BlankNode(BlankNode::Labeled("b-1".to_string()))
+        );
+    }
+
+    /// LIMIT and OFFSET take an unsigned integer (grammar [26], [27]).
+    #[test]
+    fn limit_and_offset_take_an_unsigned_integer() {
+        for clause in ["LIMIT +1", "LIMIT -1", "OFFSET -2", "OFFSET +0"] {
+            assert!(
+                parse(&format!("SELECT ?s WHERE {{ ?s ?p ?o }} {clause}")).is_err(),
+                "{clause}"
+            );
+        }
+        assert!(parse("SELECT ?s WHERE { ?s ?p ?o } LIMIT 1 OFFSET 0").is_ok());
     }
 
     /// A `\u` or `\U` escape in an IRI stands for its code point (SPARQL

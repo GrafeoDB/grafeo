@@ -160,9 +160,9 @@ cargo add grafeo --features embed                            # ONNX embeddings (
 | `ai` | Vector, text and hybrid search, change data capture | RAG, semantic search, agent memory |
 | `edge` | GQL, lightweight regex | WebAssembly, resource-constrained |
 | `enterprise` | Metrics, tracing, async storage (deprecated) | Platform operators, observability |
-| `embedded` | GQL, vector, text and hybrid search, change data capture, algorithms, parallel execution, database file, Arrow export | The default; deprecated, removed in 0.7.0 |
+| `embedded` | GQL, vector, text and hybrid search, change data capture, algorithms, parallel execution, storage (write-ahead log, database file, spill, mmap), Arrow export | The default; deprecated, removed in 0.7.0 |
 
-The default build has no write-ahead log: commits reach the file at a checkpoint (`close()` or `wal_checkpoint()`). Add `wal` or `lpg` for commits that survive a crash; the Python, Node.js, C, C#, Dart and Go packages include it. See [Installation](https://docs.grafeo.dev/get-started/install/).
+The default build includes the write-ahead log (since 0.6.4), so a commit survives a crash, as in the Python, Node.js, C, C#, Dart and Go packages. See [Installation](https://docs.grafeo.dev/get-started/install/).
 
 ### Node.js / TypeScript
 

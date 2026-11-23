@@ -1,0 +1,203 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/match-where/MatchWhere6.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.MatchWhere6"
+  title: "MatchWhere6 - Filter optional matches"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Filter node with node label predicate on multi variables with multiple bindings after MATCH and OPTIONAL MATCH
+  - name: s1_filter_node_with_node_label_predicate_on_multi_variables_with_multiple_bindings_after_match_and_optional_match
+    setup:
+      - |
+        CREATE (a {name: 'A'}), (b:B {name: 'B'}), (c:C {name: 'C'}), (d:D {name: 'C'})
+        CREATE (a)-[:T]->(b),
+               (a)-[:T]->(c),
+               (a)-[:T]->(d)
+    query: |
+      MATCH (a)-->(b)
+      WHERE b:B
+      OPTIONAL MATCH (a)-->(c)
+      WHERE c:C
+      RETURN a.name
+    expect:
+      values: |
+        | a.name |
+        | 'A' |
+      side_effects: {}
+
+  # [2] Filter node with false node label predicate after OPTIONAL MATCH
+  - name: s2_filter_node_with_false_node_label_predicate_after_optional_match
+    setup:
+      - |
+        CREATE (s:Single), (a:A {num: 42}),
+               (b:B {num: 46}), (c:C)
+        CREATE (s)-[:REL]->(a),
+               (s)-[:REL]->(b),
+               (a)-[:REL]->(c),
+               (b)-[:LOOP]->(b)
+    query: |
+      MATCH (n:Single)
+      OPTIONAL MATCH (n)-[r]-(m)
+      WHERE m:NonExistent
+      RETURN r
+    expect:
+      values: |
+        | r |
+        | null |
+      side_effects: {}
+
+  # [3] Filter node with property predicate on multi variables with multiple bindings after OPTIONAL MATCH
+  - name: s3_filter_node_with_property_predicate_on_multi_variables_with_multiple_bindings_after_optional_match
+    setup:
+      - |
+        CREATE (s:Single), (a:A {num: 42}),
+               (b:B {num: 46}), (c:C)
+        CREATE (s)-[:REL]->(a),
+               (s)-[:REL]->(b),
+               (a)-[:REL]->(c),
+               (b)-[:LOOP]->(b)
+    query: |
+      MATCH (n:Single)
+      OPTIONAL MATCH (n)-[r]-(m)
+      WHERE m.num = 42
+      RETURN m
+    expect:
+      values: |
+        | m |
+        | (:A {num: 42}) |
+      side_effects: {}
+
+  # [4] Do not fail when predicates on optionally matched and missed nodes are invalid
+  - name: s4_do_not_fail_when_predicates_on_optionally_matched_and_missed_nodes_are_invalid
+    setup:
+      - |
+        CREATE (a), (b {name: 'Mark'})
+        CREATE (a)-[:T]->(b)
+    query: |
+      MATCH (n)-->(x0)
+      OPTIONAL MATCH (x0)-->(x1)
+      WHERE x1.name = 'bar'
+      RETURN x0.name
+    expect:
+      values: |
+        | x0.name |
+        | 'Mark' |
+      side_effects: {}
+
+  # [5] Matching and optionally matching with unbound nodes and equality predicate in reverse direction
+  - name: s5_matching_and_optionally_matching_with_unbound_nodes_and_equality_predicate_in_reverse_direction
+    setup:
+      - |
+        CREATE (:A)-[:T]->(:B)
+    query: |
+      MATCH (a1)-[r]->()
+      WITH r, a1
+        LIMIT 1
+      OPTIONAL MATCH (a2)<-[r]-(b2)
+      WHERE a1 = a2
+      RETURN a1, r, b2, a2
+    expect:
+      values: |
+        | a1 | r | b2 | a2 |
+        | (:A) | [:T] | null | null |
+      side_effects: {}
+
+  # [6] Join nodes on non-equality of properties – OPTIONAL MATCH and WHERE
+  - name: s6_join_nodes_on_non_equality_of_properties_optional_match_and_where
+    setup:
+      - |
+        CREATE
+          (:X {val: 1})-[:E1]->(:Y {val: 2})-[:E2]->(:Z {val: 3}),
+          (:X {val: 4})-[:E1]->(:Y {val: 5}),
+          (:X {val: 6})
+    query: |
+      MATCH (x:X)
+      OPTIONAL MATCH (x)-[:E1]->(y:Y)
+      WHERE x.val < y.val
+      RETURN x, y
+    expect:
+      values: |
+        | x | y |
+        | (:X {val: 1}) | (:Y {val: 2}) |
+        | (:X {val: 4}) | (:Y {val: 5}) |
+        | (:X {val: 6}) | null |
+      side_effects: {}
+
+  # [7] Join nodes on non-equality of properties – OPTIONAL MATCH on two relationships and WHERE
+  - name: s7_join_nodes_on_non_equality_of_properties_optional_match_on_two_relationships_and_where
+    setup:
+      - |
+        CREATE
+          (:X {val: 1})-[:E1]->(:Y {val: 2})-[:E2]->(:Z {val: 3}),
+          (:X {val: 4})-[:E1]->(:Y {val: 5}),
+          (:X {val: 6})
+    query: |
+      MATCH (x:X)
+      OPTIONAL MATCH (x)-[:E1]->(y:Y)-[:E2]->(z:Z)
+      WHERE x.val < z.val
+      RETURN x, y, z
+    expect:
+      values: |
+        | x | y | z |
+        | (:X {val: 1}) | (:Y {val: 2}) | (:Z {val: 3}) |
+        | (:X {val: 4}) | null | null |
+        | (:X {val: 6}) | null | null |
+      side_effects: {}
+
+  # [8] Join nodes on non-equality of properties – Two OPTIONAL MATCH clauses and WHERE
+  - name: s8_join_nodes_on_non_equality_of_properties_two_optional_match_clauses_and_where
+    setup:
+      - |
+        CREATE
+          (:X {val: 1})-[:E1]->(:Y {val: 2})-[:E2]->(:Z {val: 3}),
+          (:X {val: 4})-[:E1]->(:Y {val: 5}),
+          (:X {val: 6})
+    query: |
+      MATCH (x:X)
+      OPTIONAL MATCH (x)-[:E1]->(y:Y)
+      OPTIONAL MATCH (y)-[:E2]->(z:Z)
+      WHERE x.val < z.val
+      RETURN x, y, z
+    expect:
+      values: |
+        | x | y | z |
+        | (:X {val: 1}) | (:Y {val: 2}) | (:Z {val: 3}) |
+        | (:X {val: 4}) | (:Y {val: 5}) | null |
+        | (:X {val: 6}) | null | null |
+      side_effects: {}

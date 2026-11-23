@@ -129,10 +129,12 @@ Node kind values: `sh:BlankNode`, `sh:IRI`, `sh:Literal`, `sh:BlankNodeOrIRI`, `
 
 | Constraint | SHACL Property | Description |
 |-----------|---------------|-------------|
-| Not | `sh:not` | Focus node must NOT conform to the given shape |
-| And | `sh:and` | Focus node must conform to ALL shapes in the list |
-| Or | `sh:or` | Focus node must conform to at least one shape |
-| Xone | `sh:xone` | Focus node must conform to exactly one shape |
+| Not | `sh:not` | Each value node must NOT conform to the given shape |
+| And | `sh:and` | Each value node must conform to ALL shapes in the list |
+| Or | `sh:or` | Each value node must conform to at least one shape |
+| Xone | `sh:xone` | Each value node must conform to exactly one shape |
+
+In a node shape the value node is the focus node; in a property shape, each value its path reaches. A result names the failing value node as its `sh:value`.
 
 ### Shape-Based Constraints
 

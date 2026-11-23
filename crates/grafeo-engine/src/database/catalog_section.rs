@@ -12,8 +12,9 @@
 //!   cap): the framed records, one per entry, in this order: schemas, node
 //!   types, edge types, graph types, graph type bindings, named
 //!   constraints, index definitions, index names, procedures, the stored
-//!   configuration, then the indexes on one label (kind 11, by graph, label
-//!   and key), which a release without the kind skips.
+//!   configuration and the change data capture setting (kind 14, which a
+//!   release without the kind skips), then the indexes on one label (kind
+//!   11, by graph, label and key), which a release without the kind skips.
 //!
 //! The records of each kind come in increasing order of their names (a
 //! binding by its graph; index definitions by graph, the default graph
@@ -668,6 +669,9 @@ impl<S: CatalogStore> CatalogSection<S> {
             CatalogRecord::StoredConfig(record) => {
                 self.catalog.set_stored_config(Some(record));
             }
+            CatalogRecord::CdcConfig(record) => {
+                self.catalog.set_cdc_config(Some(record));
+            }
         }
         Ok(())
     }
@@ -739,6 +743,7 @@ struct Loading {
     index_name: Option<(String, String, String, u8)>,
     procedure: Option<String>,
     stored_config: Option<()>,
+    cdc_config: Option<()>,
     label_index: Option<(Option<String>, String, String)>,
     constraints: Vec<ConstraintDefinition>,
     indexes: Vec<IndexRecord>,
@@ -794,6 +799,7 @@ impl Loading {
                 follow(&mut self.procedure, record.name.clone(), name)
             }
             CatalogRecord::StoredConfig(_) => follow(&mut self.stored_config, (), name),
+            CatalogRecord::CdcConfig(_) => follow(&mut self.cdc_config, (), name),
             CatalogRecord::LabelIndex(record) => follow(
                 &mut self.label_index,
                 (
@@ -945,6 +951,9 @@ pub(crate) fn catalog_records(
     }
     if with_config && let Some(config) = catalog.stored_config() {
         records.push(CatalogRecord::StoredConfig(config));
+    }
+    if with_config && let Some(config) = catalog.cdc_config() {
+        records.push(CatalogRecord::CdcConfig(config));
     }
     Ok(records)
 }
@@ -2042,7 +2051,7 @@ mod tests {
             section.store.add_vector_index(
                 "Doc",
                 "emb",
-                Arc::new(crate::GrafeoDB::build_vector_index(
+                Arc::new(crate::database::Open::build_vector_index(
                     3,
                     DistanceMetric::Cosine,
                     Some(19),
@@ -2054,7 +2063,7 @@ mod tests {
             model.add_vector_index(
                 "Page",
                 "emb",
-                Arc::new(crate::GrafeoDB::build_vector_index(
+                Arc::new(crate::database::Open::build_vector_index(
                     16,
                     DistanceMetric::Euclidean,
                     None,
@@ -2370,7 +2379,7 @@ mod tests {
         )
         .unwrap();
         let section = CatalogSection::new(
-            Arc::clone(&db.catalog),
+            Arc::clone(&db.live().unwrap().catalog),
             Arc::new(RowGroupStore::new()),
             || 0,
         );

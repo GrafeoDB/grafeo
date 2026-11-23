@@ -571,7 +571,7 @@ fn rebuild_index<S: RootStore>(
         })
         .collect();
     accessor.check()?;
-    let index = super::GrafeoDB::build_vector_index(
+    let index = super::Open::build_vector_index(
         config.dimensions,
         config.metric,
         Some(config.m),
@@ -707,7 +707,7 @@ fn every_vector_index<S: RootStore>(store: &S) -> BTreeSet<(String, String)> {
         .collect()
 }
 
-impl super::GrafeoDB {
+impl super::Open {
     /// Folds the embeddings an older build spilled to `directories` back into
     /// their columns (see the module docs; the caller passes a configured
     /// spill path only when it reads a 0.5.x database, and sets
@@ -1016,7 +1016,7 @@ mod tests {
             .unwrap();
         db.create_vector_index("Item", "embedding", Some(2), None, None, None, None)
             .unwrap();
-        let store = db.lpg_store().unwrap();
+        let store = db.live().unwrap().lpg_store().unwrap();
 
         for dimensions in [0, 3] {
             let vector: Vec<f32> = [3.0, 19.0, 88.0].into_iter().take(dimensions).collect();
@@ -1072,7 +1072,10 @@ mod tests {
             ],
         );
 
-        let folded = fold_in(&*db.lpg_store().unwrap(), &find(dir.path(), true));
+        let folded = fold_in(
+            &*db.live().unwrap().lpg_store().unwrap(),
+            &find(dir.path(), true),
+        );
         assert_eq!(folded.filled, 1, "Alix");
         assert!(folded.files.is_empty(), "not deleted");
         assert_eq!(folded.kept.len(), 1);
@@ -1088,7 +1091,9 @@ mod tests {
         );
         let key = PropertyKey::new("embedding");
         assert_eq!(
-            db.lpg_store()
+            db.live()
+                .unwrap()
+                .lpg_store()
                 .unwrap()
                 .node_property(butch, key.as_str(), ReadView::latest())
                 .unwrap(),
@@ -1136,7 +1141,7 @@ mod tests {
         let found = find(dir.path(), true);
         std::fs::remove_file(&path).unwrap();
 
-        let folded = fold_in(&*db.lpg_store().unwrap(), &found);
+        let folded = fold_in(&*db.live().unwrap().lpg_store().unwrap(), &found);
         assert!(folded.files.is_empty(), "not deleted");
         assert!(folded.kept.is_empty(), "not kept: {:?}", folded.kept);
         assert!(
@@ -1204,7 +1209,10 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
 
         assert!(read(&path).is_err(), "longer than its header says");
-        let folded = fold_in(&*db.lpg_store().unwrap(), &find(dir.path(), true));
+        let folded = fold_in(
+            &*db.live().unwrap().lpg_store().unwrap(),
+            &find(dir.path(), true),
+        );
         assert!(folded.files.is_empty(), "the file is to be deleted");
         assert_eq!(folded.kept.len(), 1);
         assert!(
@@ -1232,7 +1240,11 @@ mod tests {
             &records,
         );
 
-        let folded = fold_in_batches(&*db.lpg_store().unwrap(), &find(dir.path(), true), 40);
+        let folded = fold_in_batches(
+            &*db.live().unwrap().lpg_store().unwrap(),
+            &find(dir.path(), true),
+            40,
+        );
         assert_eq!((folded.batches, folded.filled), (3, 5));
         assert_eq!(folded.files.len(), 1);
     }
@@ -1258,7 +1270,12 @@ mod tests {
             .unwrap()
             .set_len(HEADER_BYTES as u64 + 16 * 319)
             .unwrap();
-        let read = fill_from(&*db.lpg_store().unwrap(), &file, &mut old, 16);
+        let read = fill_from(
+            &*db.live().unwrap().lpg_store().unwrap(),
+            &file,
+            &mut old,
+            16,
+        );
         assert!(read.stopped.is_some(), "the read stops");
         assert!(
             read.filled > 0 && read.filled < 1988,
@@ -1289,7 +1306,7 @@ mod tests {
             db.create_vector_index("Item", property, Some(2), None, None, None, None)
                 .unwrap();
         }
-        let store = db.lpg_store().unwrap();
+        let store = db.live().unwrap().lpg_store().unwrap();
 
         let folded = fold_in(&*store, &find(dir.path(), true));
         let paths: Vec<&PathBuf> = folded.files.iter().map(|file| &file.path).collect();

@@ -298,11 +298,16 @@ fn gql_and_cypher_keep_their_range_scans() {
 const AFTER_WRITES: [&str; 2] = ["n.k >= 5 AND n.k < 7", "n.k > 100"];
 
 /// Writes that change the kinds a column holds: a number set to a string, the one string
-/// deleted, the one string set to a number. Hot and reopened, the planner's plan answers each
-/// range as the plain scan does, its 22G04 included.
+/// deleted, the one string set to a number; and a write that keeps one kind but replaces the
+/// greatest value, which leaves the hot column's bound stale (#712). Hot and reopened, the
+/// planner's plan answers each range as the plain scan does, its 22G04 included.
 #[test]
 fn ranges_answer_alike_after_writes_that_change_a_columns_kinds() {
-    let cases: [(&str, &[&str]); 3] = [
+    let cases: [(&str, &[&str]); 4] = [
+        (
+            "the greatest number set to a smaller one",
+            &[NUMBERS, "MATCH (n:L {row: 1}) SET n.k = 3"],
+        ),
         (
             "a number set to a string",
             &[NUMBERS, "MATCH (n:L {row: 1}) SET n.k = 'x'"],

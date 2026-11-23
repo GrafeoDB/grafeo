@@ -31,7 +31,12 @@ use std::collections::HashMap;
 /// # Errors
 ///
 /// Returns an error if the query cannot be parsed or translated.
-pub fn translate(query: &str) -> Result<LogicalPlan> {
+pub fn translate(
+    query: &str,
+    limits: &grafeo_adapters::query::limits::ParseLimits,
+) -> Result<LogicalPlan> {
+    // The statement's length is its text's, the `EXPLAIN` included.
+    limits.check_query(query)?;
     let trimmed = query.trim_start();
     let (explain, profile, actual_query) = if trimmed
         .get(..7)
@@ -55,7 +60,7 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
         (false, false, query)
     };
 
-    let doc = graphql::parse(actual_query)?;
+    let doc = graphql::parse_with(actual_query, limits)?;
     let translator = GraphQLTranslator::new();
     let plan = translator.translate_document(&doc)?;
     let mut plan = crate::query::limits::check_plan_depth(plan)?;
@@ -513,6 +518,7 @@ impl GraphQLTranslator {
                     alias: Some(alias.clone()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 }],
                 input: Box::new(scan),
                 having: None,
@@ -568,6 +574,7 @@ impl GraphQLTranslator {
                             alias: Some(alias.clone()),
                             percentile: None,
                             separator: None,
+                            keep_nulls: false,
                         });
                         return_items.push(ReturnItem {
                             expression: LogicalExpression::Variable(alias.clone()),
@@ -627,6 +634,7 @@ impl GraphQLTranslator {
                     alias: Some(alias.clone()),
                     percentile: None,
                     separator: None,
+                    keep_nulls: false,
                 });
                 return_items.push(ReturnItem {
                     expression: LogicalExpression::Variable(alias.clone()),
@@ -1089,6 +1097,14 @@ fn parse_aggregate_field(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`super::translate`] under the default parse limits.
+    fn translate(query: &str) -> Result<LogicalPlan> {
+        super::translate(
+            query,
+            &grafeo_adapters::query::limits::ParseLimits::default(),
+        )
+    }
 
     #[test]
     fn test_translate_simple_query() {
@@ -1829,21 +1845,21 @@ mod tests {
 
     #[test]
     fn test_explain_prefix_sets_explain_flag() {
-        let plan = super::translate("EXPLAIN { person { name } }").unwrap();
+        let plan = translate("EXPLAIN { person { name } }").unwrap();
         assert!(plan.explain, "EXPLAIN prefix should set explain flag");
         assert!(!plan.profile, "EXPLAIN should not set profile flag");
     }
 
     #[test]
     fn test_explain_analyze_sets_profile_flag() {
-        let plan = super::translate("EXPLAIN ANALYZE { person { name } }").unwrap();
+        let plan = translate("EXPLAIN ANALYZE { person { name } }").unwrap();
         assert!(!plan.explain, "EXPLAIN ANALYZE should not set explain flag");
         assert!(plan.profile, "EXPLAIN ANALYZE should set profile flag");
     }
 
     #[test]
     fn test_no_explain_prefix_normal_query() {
-        let plan = super::translate("{ person { name } }").unwrap();
+        let plan = translate("{ person { name } }").unwrap();
         assert!(!plan.explain);
         assert!(!plan.profile);
     }

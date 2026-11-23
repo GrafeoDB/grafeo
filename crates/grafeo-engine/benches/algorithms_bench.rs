@@ -8,6 +8,8 @@
     reason = "criterion_group! from codspeed-criterion-compat generates wrapper functions without doc comments"
 )]
 
+mod support;
+
 use std::hint::black_box;
 use std::time::Duration;
 
@@ -30,13 +32,8 @@ fn graph(nodes: usize, degree: usize) -> GrafeoDB {
     db.execute("CREATE INDEX v_i FOR (n:V) ON (n.i)")
         .expect("an index on the node number");
     let number = |index: usize| Value::Int64(i64::try_from(index).expect("a small index"));
-    let mut state: u64 = 0x5EED_0A16_0B1E;
-    let mut next = |bound: usize| {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        usize::try_from(state % bound as u64).expect("below the bound")
-    };
+    let mut random = support::Xorshift::new(0x5EED_0A16_0B1E);
+    let mut next = |bound: usize| random.below(bound);
     let mut edges = Vec::with_capacity(nodes * degree);
     for index in 0..nodes {
         for hop in 0..degree {
@@ -60,11 +57,9 @@ fn graph(nodes: usize, degree: usize) -> GrafeoDB {
 /// `count` documents with a seeded vector of `dimensions` values, indexed.
 fn documents(count: usize, dimensions: usize) -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
-    let mut state: u64 = 0xD0C5_5EED_0001;
+    let mut random = support::Xorshift::new(0xD0C5_5EED_0001);
     let mut unit = || {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
+        let state = random.next_u64();
         #[allow(
             clippy::cast_precision_loss,
             reason = "the top 24 bits of the state are below 2^24, exact in an f32"

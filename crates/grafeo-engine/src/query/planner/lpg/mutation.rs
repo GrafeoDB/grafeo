@@ -12,13 +12,13 @@ use super::{
 };
 use super::{CallProcedureOp, StaticResultOperator};
 use crate::query::plan::PatternClaim;
-use crate::query::plan::{Callee, PathMode, PathSelection};
+use crate::query::plan::{Callee, PathMode, PathSelection, ShortestPathCondition};
 use grafeo_common::utils::error::{QueryError, QueryErrorKind};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::merge_claim::{ClaimDirection, ClaimSource};
 use grafeo_core::execution::operators::{BuiltinFunction, FilterExpression, Volatility};
 use grafeo_core::execution::operators::{
-    ExecutionPathMode, ExecutionPathSelection, JoinCondition, JoinedRowCondition,
+    ExecutionPathMode, ExecutionPathSelection, ExecutionPathStep, JoinCondition, JoinedRowCondition,
 };
 
 impl super::Planner {
@@ -866,11 +866,12 @@ impl super::Planner {
         };
 
         // Convert direction
-        let direction = match sp.direction {
+        let direction_of = |direction: ExpandDirection| match direction {
             ExpandDirection::Outgoing => Direction::Outgoing,
             ExpandDirection::Incoming => Direction::Incoming,
             ExpandDirection::Both => Direction::Both,
         };
+        let direction = direction_of(sp.direction);
         // ANY k keeps the k shortest paths, which are k paths of the pair
         let selection = match sp.selection {
             PathSelection::Any(count) | PathSelection::Shortest(count) => {
@@ -912,17 +913,19 @@ impl super::Planner {
             .with_hop_bounds(sp.min_hops, sp.max_hops)
             .with_read_counter(self.read_counter())
             .with_memory_budget(self.path_search_budget)
+            .with_path_expansions(self.path_expansions())
             .with_path_output();
 
-        // The edge condition reads a row of the input columns and the
-        // candidate edge after them
-        if let Some(condition) = &sp.edge_condition {
+        // A condition reads a row of the input columns, the candidate edge
+        // after them, then the candidate node of a node check
+        let input_columns = columns.len();
+        let predicate = |condition: &ShortestPathCondition, column: usize| -> Result<_> {
             let mut variable_columns: HashMap<String, usize> = columns
                 .iter()
                 .enumerate()
                 .map(|(i, name)| (name.clone(), i))
                 .collect();
-            variable_columns.insert(condition.variable.clone(), columns.len());
+            variable_columns.insert(condition.variable.clone(), column);
             let predicate = ExpressionPredicate::new(
                 self.convert_expression(&condition.predicate)?,
                 variable_columns,
@@ -930,7 +933,25 @@ impl super::Planner {
                 self.read_view(),
             )
             .with_session_context(self.session_context.clone());
-            operator = operator.with_edge_condition(Box::new(predicate));
+            Ok(Box::new(predicate))
+        };
+        if let Some(condition) = &sp.edge_condition {
+            operator = operator.with_edge_condition(predicate(condition, input_columns)?);
+        }
+        let mut steps = Vec::with_capacity(sp.steps.len());
+        for step in &sp.steps {
+            let mut planned = ExecutionPathStep::new(
+                self.stored_edge_types(&step.edge_types)?,
+                direction_of(step.direction),
+            )
+            .with_hop_bounds(step.min_hops, step.max_hops);
+            if let Some(condition) = &step.node_condition {
+                planned = planned.with_node_check(predicate(condition, input_columns + 1)?);
+            }
+            if let Some(condition) = &step.edge_condition {
+                planned = planned.with_edge_condition(predicate(condition, input_columns)?);
+            }
+            steps.push(planned);
         }
 
         // The target the search binds comes before the length
@@ -949,10 +970,9 @@ impl super::Planner {
         // The edge variable: the list of the path's edges for a quantified
         // edge pattern (a group variable, as a variable-length expand binds
         // it), the path's one edge otherwise
-        if let Some(edge_variable) = &sp.edge_variable {
-            operator = operator.with_edge_output(sp.quantified);
+        let edge_column = |edge_variable: &String, quantified: bool| {
             let edge_column = self.register_edge_column(&Some(edge_variable.clone()));
-            if sp.quantified {
+            if quantified {
                 self.edge_columns.borrow_mut().remove(&edge_column);
                 self.entity_list_columns
                     .borrow_mut()
@@ -961,7 +981,25 @@ impl super::Planner {
                     .borrow_mut()
                     .insert(edge_column.clone());
             }
-            columns.push(edge_column);
+            edge_column
+        };
+        if let Some(edge_variable) = &sp.edge_variable {
+            operator = operator.with_edge_output(sp.quantified);
+            columns.push(edge_column(edge_variable, sp.quantified));
+        }
+        // The edge patterns after the first: the node each starts at, then its
+        // edges, for those with a variable
+        for (step, mut planned) in sp.steps.iter().zip(steps) {
+            if let Some(node_variable) = &step.node_variable {
+                planned = planned.with_node_output();
+                self.set_column_entity(node_variable, Some(EntityValue::Node));
+                columns.push(node_variable.clone());
+            }
+            if let Some(edge_variable) = &step.edge_variable {
+                planned = planned.with_edge_output(step.quantified);
+                columns.push(edge_column(edge_variable, step.quantified));
+            }
+            operator = operator.with_step(planned);
         }
 
         // The path's nodes, edges and the path itself, as a variable-length
@@ -998,16 +1036,10 @@ impl super::Planner {
 
         // Check user-defined procedures first (requires GQL for body re-parsing)
         #[cfg(stored_procedures)]
-        if let Some(catalog) = &self.catalog {
-            let proc_name = if call.name.len() == 1 {
-                &call.name[0]
-            } else {
-                // For dotted names, try the last segment as procedure name
-                call.name.last().expect("name has at least one segment")
-            };
-            if let Some(proc_def) = catalog.get_procedure(proc_name) {
-                return self.plan_user_procedure(call, &proc_def);
-            }
+        if let Some(catalog) = &self.catalog
+            && let Some(proc_def) = catalog.get_procedure(&call.stored_name())
+        {
+            return self.plan_user_procedure(call, &proc_def);
         }
 
         // Look up the procedure
@@ -1242,6 +1274,20 @@ impl super::Planner {
         Ok((operator, output_columns))
     }
 
+    /// Whether `plan` calls a stored procedure that returns nothing
+    /// (`RETURNS ()`): called in a query, it keeps each row once.
+    pub(super) fn calls_a_void_procedure(&self, plan: &LogicalOperator) -> bool {
+        #[cfg(stored_procedures)]
+        if let LogicalOperator::CallProcedure(call) = plan
+            && let Some(catalog) = &self.catalog
+            && let Some(procedure) = catalog.get_procedure(&call.stored_name())
+        {
+            return procedure.returns.is_empty();
+        }
+        let _ = plan;
+        false
+    }
+
     /// Plans a user-defined procedure call.
     #[cfg(stored_procedures)]
     fn plan_user_procedure(
@@ -1269,6 +1315,7 @@ impl super::Planner {
         let mut param_map = std::collections::HashMap::new();
         for (param, argument) in proc_def.params.iter().zip(&call.arguments) {
             let value = self.constant_argument(&proc_def.name, &param.0, argument)?;
+            let value = bind_argument(&proc_def.name, &param.0, &param.1, value)?;
             param_map.insert(param.0.clone(), value);
         }
 
@@ -1295,27 +1342,30 @@ impl super::Planner {
                 .collect::<Vec<_>>()
         });
 
-        let plan = bind_body(&proc_def.name, &proc_def.body, &param_map)?;
+        let session = self.session_planning.as_ref().ok_or_else(|| {
+            Error::from(grafeo_common::utils::error::QueryError::unsupported(
+                format!(
+                    "a stored procedure call needs a session (procedure '{}')",
+                    proc_def.name
+                ),
+            ))
+        })?;
+        // The body is parsed under the limits of the session that calls it.
+        let plan = bind_body(
+            &proc_def.name,
+            &proc_def.body,
+            &param_map,
+            &session.parse_limits(),
+        )?;
         // The body runs as the same statement run directly: on the graph its
         // `USE` names, checked here before anything runs, else on the
         // calling statement's, in its transaction.
-        let planning = self
-            .session_planning
-            .as_ref()
-            .ok_or_else(|| {
-                Error::from(grafeo_common::utils::error::QueryError::unsupported(
-                    format!(
-                        "a stored procedure call needs a session (procedure '{}')",
-                        proc_def.name
-                    ),
-                ))
-            })?
-            .for_body(
-                &proc_def.name,
-                &self.session_context,
-                plan.graph.as_deref(),
-                plan.root.has_mutations(),
-            )?;
+        let planning = session.for_body(
+            &proc_def.name,
+            &self.session_context,
+            plan.graph.as_deref(),
+            plan.root.has_mutations(),
+        )?;
         let operator = Box::new(UserProcedureOperator::new(
             plan,
             return_columns,
@@ -1324,6 +1374,7 @@ impl super::Planner {
                 planning,
                 write_counter: self.write_counter(),
                 read_counter: self.read_counter(),
+                path_expansions: self.path_expansions(),
             },
         ));
 
@@ -1438,6 +1489,20 @@ impl super::Planner {
         let mut needs_projection = false;
 
         for (name, expr) in &set_prop.properties {
+            // `SET x = e` and `SET x += e` with a node or relationship `e`
+            // set `e`'s properties: `e` reaches the write as its id.
+            let properties_of;
+            let expr = if name == grafeo_core::execution::operators::MAP_ASSIGNMENT
+                && matches!(
+                    self.held_entity(expr),
+                    Some(EntityValue::Node | EntityValue::Edge)
+                ) {
+                properties_of =
+                    LogicalExpression::builtin(BuiltinFunction::Properties, vec![expr.clone()]);
+                &properties_of
+            } else {
+                expr
+            };
             let source = match self.expression_to_property_source(expr, &columns) {
                 Ok(s) => s,
                 Err(_) => {
@@ -1762,6 +1827,34 @@ impl super::Planner {
             _ => None,
         }
     }
+}
+
+/// The argument `value` bound to the parameter `parameter` of the type
+/// `type_name` of `procedure`, as a property of that type stores it
+/// ([`PropertyDataType::convert`](grafeo_common::types::PropertyDataType::convert),
+/// ISO's store assignment): a null or a value of that type as it is, an
+/// integer for a `FLOAT` when the float is exact, a number for a `DECIMAL`, a
+/// zoned datetime for a `DATETIME` as its instant. A type name the catalog
+/// does not know takes any value.
+///
+/// # Errors
+///
+/// A semantic error (42) for a value the type does not take.
+#[cfg(stored_procedures)]
+fn bind_argument(procedure: &str, parameter: &str, type_name: &str, value: Value) -> Result<Value> {
+    let Some(declared) = grafeo_common::types::PropertyDataType::from_known_type_name(type_name)
+    else {
+        return Ok(value);
+    };
+    if declared.matches(&value) {
+        return Ok(value);
+    }
+    declared.convert(&value).ok_or_else(|| {
+        Error::from(QueryError::semantic(format!(
+            "argument '{parameter}' of procedure '{procedure}' is {}, not {type_name}",
+            value.type_name()
+        )))
+    })
 }
 
 /// Whether any property value must be computed per input row.

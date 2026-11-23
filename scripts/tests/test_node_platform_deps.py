@@ -1,7 +1,8 @@
 """Tests for scripts/node-platform-deps.sh: a mistake here ships a package with no native binaries.
 
-A release is the only other place its `add` and `published` run. The registry is a stub `npm` on
-the PATH for `published`, and `sleep` is one too, so the retries take no time.
+A release is the only other place its `add` and `published` run. The registry is a stub `curl` on
+the PATH for `published`, so no test reaches the network, and `sleep` is one too, so the retries
+take no time.
 
 Run: uv run --with pytest python -m pytest scripts/tests/test_node_platform_deps.py
 """
@@ -76,7 +77,11 @@ def listed(root: Path) -> dict:
 
 
 def stubs(tmp_path: Path, answers: list[str]) -> dict:
-    """A PATH on which `npm view` gives `answers` in turn, and `sleep` does nothing."""
+    """A PATH on which `curl` serves `answers` in turn as npm's version document, and `sleep` does nothing.
+
+    An answer is the document's `optionalDependencies`; an empty one is a 404, which `curl -f`
+    reports with exit code 22. No test reaches the network.
+    """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (tmp_path / "answers.json").write_text(json.dumps(answers), encoding="utf-8")
@@ -85,13 +90,15 @@ def stubs(tmp_path: Path, answers: list[str]) -> dict:
     script = f"""#!/usr/bin/env bash
 count=$(cat '{counter.as_posix()}')
 echo $((count + 1)) > '{counter.as_posix()}'
-node -e 'const a = require("{(tmp_path / "answers.json").as_posix()}"); process.stdout.write(a[Math.min('$count', a.length - 1)])'
+answer=$(node -e 'const a = require("{(tmp_path / "answers.json").as_posix()}"); process.stdout.write(a[Math.min('$count', a.length - 1)])')
+[ -n "$answer" ] || exit 22
+printf '{{"optionalDependencies": %s}}' "$answer"
 """
-    (bin_dir / "npm").write_text(script, encoding="utf-8", newline="\n")
+    (bin_dir / "curl").write_text(script, encoding="utf-8", newline="\n")
     (bin_dir / "sleep").write_text(
         "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8", newline="\n"
     )
-    for tool in ("npm", "sleep"):
+    for tool in ("curl", "sleep"):
         (bin_dir / tool).chmod(0o755)
     return {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
 
@@ -232,8 +239,9 @@ def test_published_gives_up_when_it_never_shows_up(tmp_path: Path) -> None:
     root = package(tmp_path)
     result = run(root, "published", "1.2.3", env=stubs(tmp_path, [""]))
     assert result.returncode == 1
-    assert "lists no optional dependencies on npm" in result.stderr
-    assert (tmp_path / "calls.txt").read_text(encoding="utf-8").strip() == "6"
+    # Waits of 10, 20, 40 and then 60 seconds until 600 have passed: 13 tries.
+    assert "lists no optional dependencies on npm after 610s" in result.stderr
+    assert (tmp_path / "calls.txt").read_text(encoding="utf-8").strip() == "13"
 
 
 @pytest.mark.parametrize(

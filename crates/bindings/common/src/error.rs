@@ -16,7 +16,7 @@ pub enum ErrorCategory {
     Query,
     /// Transaction conflict, timeout, or invalid state.
     Transaction,
-    /// The database is closed and takes no more writes.
+    /// The database is closed and takes no more calls.
     DatabaseClosed,
     /// Storage-layer error (disk, memory limit).
     Storage,
@@ -64,7 +64,7 @@ pub fn error_message(err: &Error) -> String {
 #[cfg(test)]
 mod tests {
     use grafeo_common::utils::error::{
-        Error, QueryError, QueryErrorKind, StorageError, TransactionError,
+        Error, ExpiredSnapshot, QueryError, QueryErrorKind, StorageError, TransactionError,
     };
 
     use super::*;
@@ -101,6 +101,24 @@ mod tests {
     /// A commit whose log write failed was rolled back: a transaction error,
     /// which a retry can fix. An unknown outcome and a log that takes no more
     /// writes need a reopen: database errors.
+    /// An expired snapshot is a transaction error a retry fixes, with its own code.
+    #[test]
+    fn classifies_an_expired_snapshot_as_a_retryable_transaction_error() {
+        let err = Error::Transaction(TransactionError::SnapshotExpired(Box::new(
+            ExpiredSnapshot {
+                kept: 2 << 20,
+                limit: 1 << 20,
+            },
+        )));
+        assert_eq!(classify_error(&err), ErrorCategory::Transaction);
+        assert_eq!(err.error_code().as_str(), "GRAFEO-T012");
+        assert!(err.error_code().is_retryable());
+        assert!(
+            err.to_string().contains("2097152 bytes") && err.to_string().contains("1048576 bytes"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn classifies_the_commit_log_errors_by_what_helps() {
         let err = Error::Transaction(TransactionError::LogWriteFailed("disk full".into()));
@@ -140,6 +158,34 @@ mod tests {
         assert_eq!(classify_error(&err), ErrorCategory::Storage);
     }
 
+    /// The storage errors of the change feed and of a checkpoint whose outcome is unknown have
+    /// codes of their own and are not retryable; no binding can reach them without injected
+    /// failures, so they are checked here.
+    #[test]
+    fn classifies_the_change_feed_and_checkpoint_errors_as_storage_errors() {
+        for (err, code) in [
+            (
+                StorageError::CdcFeedTruncated {
+                    first_available: 4_242,
+                },
+                "GRAFEO-S006",
+            ),
+            (
+                StorageError::CdcCursorPending("access denied".into()),
+                "GRAFEO-S007",
+            ),
+            (
+                StorageError::CheckpointOutcomeUnknown("injected".into()),
+                "GRAFEO-S008",
+            ),
+        ] {
+            let err = Error::from(err);
+            assert_eq!(classify_error(&err), ErrorCategory::Storage, "{err}");
+            assert_eq!(err.error_code().as_str(), code);
+            assert!(!err.error_code().is_retryable(), "{err}");
+        }
+    }
+
     #[test]
     fn classifies_io_error() {
         let err = Error::Io(std::io::Error::new(
@@ -155,6 +201,58 @@ mod tests {
         assert_eq!(classify_error(&err), ErrorCategory::Serialization);
         let err = Error::corruption("chunk checksum mismatch");
         assert_eq!(classify_error(&err), ErrorCategory::Corruption);
+    }
+
+    /// The refusals of a stored change feed a database cannot keep classify as every other
+    /// configuration conflict does: GRAFEO-V001, the category of a refused setting, and a message
+    /// that names the remedy. No binding opens a database without a WAL or on a store of its own,
+    /// so they are reached here, through the engine.
+    #[cfg(feature = "cdc")]
+    #[test]
+    fn the_cdc_configuration_conflicts_classify_as_the_others() {
+        use grafeo_engine::{Config, GrafeoDB};
+
+        let other = GrafeoDB::with_config(Config::in_memory().with_memory_limit(0))
+            .map(drop)
+            .unwrap_err();
+        let check = |err: &Error, remedy: &str| {
+            assert_eq!(err.error_code(), other.error_code(), "{err}");
+            assert_eq!(err.error_code().as_str(), "GRAFEO-V001");
+            assert_eq!(classify_error(err), classify_error(&other), "{err}");
+            assert!(error_message(err).contains(remedy), "{err}");
+        };
+
+        let base = GrafeoDB::new_in_memory();
+        // This crate has no `grafeo-core` to build a backend from: it borrows the in-memory
+        // database's store, and nothing writes through it.
+        #[expect(
+            deprecated,
+            reason = "the only backend this crate can reach; the test writes nothing through it"
+        )]
+        let store = base.store().unwrap();
+        let on_its_own_store = GrafeoDB::with_store(store, Config::in_memory()).unwrap();
+        check(
+            &on_its_own_store.set_cdc(true).unwrap_err(),
+            "Config::with_cdc()",
+        );
+
+        #[cfg(feature = "storage")]
+        {
+            let dir =
+                std::env::temp_dir().join(format!("grafeo-common-cdc-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("db.grafeo");
+            let db = GrafeoDB::open(&path).unwrap();
+            db.set_cdc(true).unwrap();
+            db.close().unwrap();
+            drop(db);
+            let refused = GrafeoDB::with_config(Config::persistent(&path).without_wal())
+                .map(drop)
+                .unwrap_err();
+            check(&refused, "open it with the WAL");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]

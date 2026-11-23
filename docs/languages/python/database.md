@@ -338,3 +338,5 @@ memory_db = db.to_memory()
 # Load database as in-memory
 db = grafeo.GrafeoDB.open_in_memory("my_graph.db")
 ```
+
+`compact()` removes deleted values from the database file, and `close()` releases them from the memory Grafeo allocated. What stays, and what is outside Grafeo (Python's own strings, freed memory), is in [Deleting Data](../../operate/security.md#deleting-data).

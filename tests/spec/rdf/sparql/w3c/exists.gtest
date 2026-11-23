@@ -1,0 +1,108 @@
+# W3C SPARQL 1.1 Test Suite: Exists
+# Generated from the W3C manifest by scripts/convert_w3c_sparql.py
+# Source: https://github.com/w3c/rdf-tests at 7b5afb91857a9c282c03d2e45d3f76485797c901
+# Copyright W3C (MIT, ERCIM, Keio, Beihang), used under the W3C test suite
+# licences: https://www.w3.org/Consortium/Legal/2008/04-testsuite-copyright.html
+# Not converted:
+#   exists03: named graphs (qt:graphData)
+#   exists-graph-variable: named graphs (qt:graphData)
+
+meta:
+  language: sparql
+  model: rdf
+  section: "w3c.exists"
+  title: W3C Exists
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # Exists with one constant
+  - name: exists01
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/s> <http://www.example.org/p> <http://www.example.org/o1> .
+          <http://www.example.org/s> <http://www.example.org/p> <http://www.example.org/o2> .
+          <http://www.example.org/s> <http://www.example.org/p> <http://www.example.org/o> .
+          <http://www.example.org/t> <http://www.example.org/p> <http://www.example.org/o1> .
+          <http://www.example.org/t> <http://www.example.org/p> <http://www.example.org/o2> .
+        }
+    query: |
+      prefix ex: <http://www.example.org/>
+
+      select * where {
+      ?s ?p ?o
+      filter exists {?s ?p ex:o}
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/s>', '<http://www.example.org/p>', '<http://www.example.org/o>']
+        - ['<http://www.example.org/s>', '<http://www.example.org/p>', '<http://www.example.org/o1>']
+        - ['<http://www.example.org/s>', '<http://www.example.org/p>', '<http://www.example.org/o2>']
+
+  # Exists with ground triple
+  - name: exists02
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/s> <http://www.example.org/p> <http://www.example.org/o1> .
+          <http://www.example.org/s> <http://www.example.org/p> <http://www.example.org/o2> .
+          <http://www.example.org/s> <http://www.example.org/p> <http://www.example.org/o> .
+          <http://www.example.org/t> <http://www.example.org/p> <http://www.example.org/o1> .
+          <http://www.example.org/t> <http://www.example.org/p> <http://www.example.org/o2> .
+        }
+    query: |
+      prefix ex: <http://www.example.org/>
+
+      select * where {
+      ?s ?p ex:o2
+      filter exists {ex:s ex:p ex:o}
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/s>', '<http://www.example.org/p>']
+        - ['<http://www.example.org/t>', '<http://www.example.org/p>']
+
+  # Nested positive exists
+  - name: exists04
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/s> <http://www.example.org/p> <http://www.example.org/o1> .
+          <http://www.example.org/s> <http://www.example.org/p> <http://www.example.org/o2> .
+          <http://www.example.org/s> <http://www.example.org/p> <http://www.example.org/o> .
+          <http://www.example.org/t> <http://www.example.org/p> <http://www.example.org/o1> .
+          <http://www.example.org/t> <http://www.example.org/p> <http://www.example.org/o2> .
+        }
+    query: |
+      prefix ex: <http://www.example.org/>
+
+      select * where {
+        ?s ?p ex:o
+        filter exists { ?s ?p ex:o1  filter exists { ?s ?p ex:o2 } }
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/s>', '<http://www.example.org/p>']
+
+  # Nested negative exists in positive exists
+  - name: exists05
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/s> <http://www.example.org/p> <http://www.example.org/o1> .
+          <http://www.example.org/s> <http://www.example.org/p> <http://www.example.org/o2> .
+          <http://www.example.org/s> <http://www.example.org/p> <http://www.example.org/o> .
+          <http://www.example.org/t> <http://www.example.org/p> <http://www.example.org/o1> .
+          <http://www.example.org/t> <http://www.example.org/p> <http://www.example.org/o2> .
+        }
+    query: |
+      prefix ex: <http://www.example.org/>
+
+      select * where {
+        ?s ?p ex:o
+        filter exists { ?s ?p ex:o1  filter not exists { ?s ?p ex:o2 } }
+      }
+    expect:
+      empty: true

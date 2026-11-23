@@ -124,7 +124,6 @@ use grafeo_common::utils::error::StorageError;
 use grafeo_storage::file::GrafeoFileManager;
 use grafeo_storage::lock::{DirectoryLock, LOCK_FILE_NAME};
 
-use super::GrafeoDB;
 use super::encryption::DatabaseKeys;
 use crate::config::Config;
 
@@ -290,7 +289,8 @@ pub(super) fn migrate(path: &Path, config: &Config) -> Result<()> {
     if let Some(spill_path) = config.spill_path() {
         old_config = old_config.with_spill_path(spill_path);
     }
-    let old = GrafeoDB::with_config_and_spill(old_config, !keys.is_encrypted()).map_err(failed)?;
+    let old =
+        super::Open::with_config_and_spill(old_config, !keys.is_encrypted()).map_err(failed)?;
     old.write_image_with(&migrating, &keys).map_err(failed)?;
     // Tests change the written image here, before it is checked.
     maybe_pause("migrate:image_written");
@@ -450,7 +450,7 @@ struct Contents {
 }
 
 impl Contents {
-    fn of(db: &GrafeoDB) -> Result<Self> {
+    fn of(db: &super::Open) -> Result<Self> {
         use grafeo_common::types::ReadView;
         use grafeo_core::graph::GraphStore;
 
@@ -490,7 +490,7 @@ fn check_image(image: &Path, config: &Config, expected: &Contents) -> Result<()>
     if let Some(limit) = config.memory_limit() {
         image_config = image_config.with_memory_limit(limit);
     }
-    let found = Contents::of(&GrafeoDB::with_config(image_config)?)?;
+    let found = Contents::of(&super::Open::with_config(image_config)?)?;
     if found == *expected {
         return Ok(());
     }
@@ -569,7 +569,7 @@ pub(super) fn check_read_only(path: &Path) -> Result<()> {
 /// inspected.
 pub(super) fn refuse_unreplayable_wal(path: &Path, can_replay: bool) -> Result<()> {
     let wal = sidecar_wal_path(path);
-    if can_replay || !GrafeoDB::holds_files(&wal)? {
+    if can_replay || !super::Open::holds_files(&wal)? {
         return Ok(());
     }
     Err(Error::Internal(format!(

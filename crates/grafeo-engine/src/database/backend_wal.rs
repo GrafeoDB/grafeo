@@ -9,9 +9,9 @@ use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::graph::GraphBackend;
 use grafeo_storage::file::v3::header::new_database_id;
 
-use super::{GrafeoDB, backup, catalog_section, encryption, replay, wal_log};
+use super::{Open, backup, catalog_section, encryption, replay, wal_log};
 
-impl GrafeoDB {
+impl Open {
     /// Opens the WAL of a database on a backend of its own with a path: the
     /// sidecar directory `<path>.wal`, held by this process, after its
     /// groups were replayed (the catalog, and the backend's commits after its

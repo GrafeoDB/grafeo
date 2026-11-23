@@ -289,3 +289,120 @@ fn off_the_collect_horizon_is_the_read_horizon() {
     manager.abort(reader).unwrap();
     assert_eq!(manager.collect_horizon(), EpochId::new(2));
 }
+
+/// Commits epochs `epochs`, one each `step` milliseconds, each replacing `bytes` of the labeled
+/// property graph's committed state.
+fn commit_replacing(
+    history: &History,
+    now: &AtomicU64,
+    epochs: std::ops::RangeInclusive<u64>,
+    step: u64,
+    bytes: u64,
+) {
+    for epoch in epochs {
+        now.fetch_add(step, Ordering::SeqCst);
+        let time = history.commit_time().expect("history is on");
+        history.record_replacing(EpochId::new(epoch), time, bytes);
+    }
+}
+
+/// Without a limit the bytes move nothing: `Forever` stays at the floor.
+#[test]
+fn without_a_limit_the_bytes_move_nothing() {
+    let (history, now) = history_at(0);
+    history.set_retention(HistoryRetention::Forever, 0);
+    commit_replacing(&history, &now, 1..=5, 100, 1 << 30);
+    assert_eq!(history.retention_horizon(), Some(0));
+}
+
+/// With a limit the window starts at the oldest epoch whose commits since replaced at most
+/// the limit: 400 bytes a commit, 1,000 allowed, so a reader at epoch 3 still has 800 bytes
+/// of replaced versions kept for it, and one at epoch 2 would need 1,200.
+#[test]
+fn a_limit_moves_the_start_of_the_window_forward() {
+    let (history, now) = history_at(0);
+    history.set_retention(HistoryRetention::Forever, 0);
+    history.set_retention_limit(Some(1_000));
+    commit_replacing(&history, &now, 1..=5, 100, 400);
+    assert_eq!(history.retention_horizon(), Some(3));
+    commit_replacing(&history, &now, 6..=6, 100, 400);
+    assert_eq!(history.retention_horizon(), Some(4), "it moves on");
+    history.set_retention_limit(None);
+    assert_eq!(
+        history.retention_horizon(),
+        Some(0),
+        "lifted, the floor again"
+    );
+}
+
+/// Of a time window and a byte limit, whichever starts later wins.
+#[test]
+fn of_time_and_bytes_the_later_start_wins() {
+    // Time first: 250 ms back from 800 is after epoch 5; the bytes allow every epoch.
+    let (history, now) = history_at(0);
+    history.set_retention(HistoryRetention::Duration(Duration::from_millis(250)), 0);
+    history.set_retention_limit(Some(1 << 20));
+    commit_replacing(&history, &now, 1..=8, 100, 10);
+    assert_eq!(history.retention_horizon(), Some(5));
+    // Bytes first: an hour holds every epoch; 1,000 bytes only the last two commits' worth.
+    let (history, now) = history_at(0);
+    history.set_retention(HistoryRetention::Duration(Duration::from_secs(3_600)), 0);
+    history.set_retention_limit(Some(1_000));
+    commit_replacing(&history, &now, 1..=8, 100, 500);
+    assert_eq!(history.retention_horizon(), Some(6));
+}
+
+/// A checkpoint writes epochs and times only; what a load restores carries no bytes, so the
+/// bytes count from the open on.
+#[test]
+fn the_image_keeps_epochs_and_times_only() {
+    let (history, now) = history_at(0);
+    history.set_retention(HistoryRetention::Forever, 0);
+    commit_replacing(&history, &now, 1..=2, 100, 400);
+    assert_eq!(
+        history.image().unwrap().times,
+        [(0, 0), (1, 100), (2, 200)],
+        "{:?}",
+        history.times()
+    );
+}
+
+/// What an open counts in are the bytes per replacing epoch, in any order: each commit's total
+/// grows by what the epochs up to it replaced, and the history's total by all of it, epochs
+/// after the newest commit included.
+#[test]
+fn the_kept_bytes_count_into_the_commits_at_or_after_their_epochs_in_any_order() {
+    let (history, now) = history_at(0);
+    history.set_retention(HistoryRetention::Forever, 0);
+    for epoch in [2, 4, 6] {
+        commit(&history, &now, epoch..=epoch, 100);
+    }
+    let before = history.totals();
+    let kept = vec![
+        (5, 10),
+        (1, 1),
+        (7, 100),
+        (4, 3),
+        (2, 20),
+        (6, 1_000),
+        (0, 7),
+    ];
+    // The oracle: the bytes of the epochs up to each commit, summed.
+    let expected: Vec<(u64, u64)> = before
+        .iter()
+        .map(|&(epoch, replaced)| {
+            let up_to = kept.iter().filter(|(at, _)| *at <= epoch);
+            (
+                epoch,
+                replaced + up_to.map(|(_, bytes)| *bytes as u64).sum::<u64>(),
+            )
+        })
+        .collect();
+    let total = before.last().map_or(0, |(_, replaced)| *replaced) + 1_141;
+    history.count_kept(kept);
+    assert_eq!(history.totals(), expected);
+    now.fetch_add(100, Ordering::SeqCst);
+    let time = history.commit_time().expect("history is on");
+    history.record_replacing(EpochId::new(8), time, 0);
+    assert_eq!(history.totals().last(), Some(&(8, total)));
+}

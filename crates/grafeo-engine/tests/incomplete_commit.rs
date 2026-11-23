@@ -475,7 +475,7 @@ fn an_import_waiting_for_a_commit_that_fails_refuses() {
 #[test]
 fn change_events_of_a_commit_are_seen_only_once_it_is_complete() {
     let db = Arc::new(GrafeoDB::new_in_memory());
-    db.set_cdc_enabled(true);
+    db.set_cdc(true).unwrap();
     let alix = db
         .create_node_with_props(&["Person"], [("name", Value::from("Alix"))])
         .unwrap();
@@ -559,8 +559,43 @@ fn a_commit_failing_after_its_wal_records_is_replayed_whole_on_reopen() {
     let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.commit()));
     assert!(unwound.is_err(), "the commit panicked");
     assert_eq!(people(&db), [Value::from("Alix")], "not published");
-    drop(session);
     assert!(db.close().is_err(), "close reports the failed commit");
+    // That close released the database: it is complete, and every call fails (#712).
+    assert!(
+        db.is_closed(),
+        "the close that reported the commit is complete"
+    );
+    for (what, result) in [
+        (
+            "a read",
+            db.execute("MATCH (p:Person) RETURN p.name").map(|_| ()),
+        ),
+        (
+            "a write",
+            db.execute("INSERT (:Person {name: 'Mia'})").map(|_| ()),
+        ),
+        (
+            "a session's read",
+            db.session()
+                .execute("MATCH (p:Person) RETURN p.name")
+                .map(|_| ()),
+        ),
+        (
+            "the session from before",
+            session
+                .execute("MATCH (p:Person) RETURN p.name")
+                .map(|_| ()),
+        ),
+    ] {
+        let error = result.expect_err(what);
+        assert_eq!(
+            error.error_code().as_str(),
+            "GRAFEO-T007",
+            "{what}: {error}"
+        );
+    }
+    assert!(db.close().is_ok(), "a second close() does nothing");
+    drop(session);
     drop(db);
 
     let db = GrafeoDB::open(&path).unwrap();

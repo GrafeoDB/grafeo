@@ -87,6 +87,73 @@ pub struct HopFrom<'a> {
     pub edge_types: &'a [ArcStr],
 }
 
+/// The edge types a traversal follows, prepared by the store it reads
+/// ([`GraphStore::edge_type_filter`]). An operator builds one when it opens and
+/// passes it on every read, so a store turns the names into its own ids once
+/// rather than on every row. It holds the names and, from a store that
+/// prepares them, that store's resolved form, which the store checks on each
+/// read: a type created since, or another store, resolves again.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct EdgeTypeFilter {
+    names: Vec<ArcStr>,
+    /// The row-group store's ids of the names, `None` until a read resolves them.
+    pub(crate) resolved: Option<ResolvedEdgeTypes>,
+}
+
+impl EdgeTypeFilter {
+    /// A filter of `names` that no store has resolved: what the default
+    /// [`GraphStore::edge_type_filter`] gives.
+    pub(crate) fn of_names(names: &[ArcStr]) -> Self {
+        Self {
+            names: names.to_vec(),
+            resolved: None,
+        }
+    }
+
+    /// The edge types it follows, as stored (every type when empty).
+    #[must_use]
+    pub fn names(&self) -> &[ArcStr] {
+        &self.names
+    }
+}
+
+/// The ids a row-group store resolved a filter's names to, valid for that store
+/// while its edge type dictionary keeps the stamp they were read at.
+#[derive(Debug)]
+pub(crate) struct ResolvedEdgeTypes {
+    /// The store that resolved them.
+    pub(crate) store: u64,
+    /// The stamp of its edge type dictionary when it did.
+    pub(crate) stamp: u64,
+    /// The ids of the names it has; empty when it has none of them.
+    pub(crate) ids: SmallVec<[u32; 4]>,
+}
+
+/// One side of [`GraphStore::common_edges_with_filter`]: [`HopFrom`] with its
+/// edge types prepared.
+#[derive(Debug)]
+pub struct FilteredHop<'a> {
+    /// The node.
+    pub node: NodeId,
+    /// The way the list goes.
+    pub direction: Direction,
+    /// The edge types it holds.
+    pub filter: &'a mut EdgeTypeFilter,
+}
+
+impl FilteredHop<'_> {
+    /// The same hop by its names.
+    #[must_use]
+    pub fn as_hop(&self) -> HopFrom<'_> {
+        HopFrom {
+            node: self.node,
+            direction: self.direction,
+            edge_types: self.filter.names(),
+        }
+    }
+}
+
 /// A node two lists reach, by one edge of each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CommonEdge {
@@ -145,6 +212,13 @@ pub struct KeyColumnGroup {
 /// - The defaults are exact by construction: each answers what the required
 ///   reads answer, only slower. A store overrides them to answer faster,
 ///   never differently. A default that cannot answer returns an error.
+/// - The reads that take an [`EdgeTypeFilter`] are the built-in store's fast
+///   path of a traversal: the engine's operators prepare their edge types once
+///   ([`edge_type_filter`](Self::edge_type_filter)) and read through them on
+///   every row. Only the built-in store resolves a filter; on any other store
+///   the filter forms default to the reads by name and give their results, so
+///   a store need not override either (it may, reading the filter's
+///   [`names`](EdgeTypeFilter::names)).
 ///
 /// # Object safety
 ///
@@ -441,6 +515,51 @@ pub trait GraphStore: Send + Sync {
             self.edges(near.node, near.direction, near.edge_types, view)?,
             self.edges(far.node, far.direction, far.edge_types, view)?,
         )
+    }
+
+    /// `names` prepared for the reads that take a filter
+    /// ([`edges_with_filter`](Self::edges_with_filter),
+    /// [`common_edges_with_filter`](Self::common_edges_with_filter)): an operator
+    /// builds it once and passes it on every read. The default keeps the names
+    /// only; the built-in store resolves them once, and checks on each read that
+    /// they still hold.
+    fn edge_type_filter(&self, names: &[ArcStr]) -> EdgeTypeFilter {
+        EdgeTypeFilter::of_names(names)
+    }
+
+    /// [`edges`](Self::edges) of the types of `filter`: the same edges in the
+    /// same order. The built-in store's fast path of a traversal, which reads
+    /// with the same types on every row; the name form answers alike. The
+    /// default reads [`edges`](Self::edges) with the filter's names.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn edges_with_filter(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        filter: &mut EdgeTypeFilter,
+        view: ReadView,
+    ) -> Result<Vec<(NodeId, EdgeId)>> {
+        self.edges(node, direction, filter.names(), view)
+    }
+
+    /// [`common_edges`](Self::common_edges) of the hops' filters: the same
+    /// answer, entries read included. The built-in store's fast path of an
+    /// intersection; the default reads [`common_edges`](Self::common_edges)
+    /// with the names.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn common_edges_with_filter(
+        &self,
+        near: FilteredHop<'_>,
+        far: FilteredHop<'_>,
+        view: ReadView,
+    ) -> Result<(Vec<CommonEdge>, usize)> {
+        self.common_edges(&near.as_hop(), &far.as_hop(), view)
     }
 
     /// The edges [`edges`](Self::edges) lists for `node` whose other end is
@@ -1005,6 +1124,53 @@ pub trait GraphStore: Send + Sync {
         Ok(found)
     }
 
+    /// The nodes `view` sees with `label` whose `property` lies within
+    /// `range`, by ascending id: [`find_nodes_in_range`](Self::find_nodes_in_range)
+    /// limited to the label's nodes. A store that walks only the label's rows
+    /// overrides it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn find_nodes_with_label_in_range(
+        &self,
+        label: &str,
+        property: &str,
+        range: &ValueRange,
+        view: ReadView,
+    ) -> Result<Vec<NodeId>> {
+        let mut found = Vec::new();
+        for id in self.nodes_by_label(label, view)? {
+            if let Some(value) = self.node_property(id, property, view)?
+                && range.contains(&value)
+            {
+                found.push(id);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Calls `visit` with the values of `read` (each `None` where the node has
+    /// none) of each node [`find_nodes_with_label_in_range`](Self::find_nodes_with_label_in_range)
+    /// finds, in its order, until `visit` breaks: what an aggregate over a
+    /// label's range reads, without a list of the nodes. A store that reads
+    /// the values beside the range's own overrides it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn visit_nodes_with_label_in_range(
+        &self,
+        label: &str,
+        property: &str,
+        range: &ValueRange,
+        read: &[&str],
+        view: ReadView,
+        visit: &mut dyn FnMut(&[Option<Value>]) -> std::ops::ControlFlow<()>,
+    ) -> Result<()> {
+        visit_label_range_by_id(self, label, property, range, read, view, visit)
+    }
+
     /// Whether a node's `property` may meet `op value` for some view: `false`
     /// lets the planner skip a scan that finds nothing. Not an answer: `true`
     /// is always correct.
@@ -1237,6 +1403,30 @@ fn unsupported(what: &str) -> grafeo_common::utils::error::Error {
     grafeo_common::utils::error::Error::from(grafeo_common::utils::error::QueryError::unsupported(
         format!("this store does not support {what}"),
     ))
+}
+
+/// [`GraphStore::visit_nodes_with_label_in_range`] for any store: the nodes
+/// its labelled range finds, each value of `read` read by the node's id.
+pub(crate) fn visit_label_range_by_id<S: GraphStore + ?Sized>(
+    store: &S,
+    label: &str,
+    property: &str,
+    range: &ValueRange,
+    read: &[&str],
+    view: ReadView,
+    visit: &mut dyn FnMut(&[Option<Value>]) -> std::ops::ControlFlow<()>,
+) -> Result<()> {
+    let mut values = Vec::with_capacity(read.len());
+    for id in store.find_nodes_with_label_in_range(label, property, range, view)? {
+        values.clear();
+        for key in read {
+            values.push(store.node_property(id, key, view)?);
+        }
+        if visit(&values).is_break() {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// The distance from `query` of each vector in `property` of the nodes

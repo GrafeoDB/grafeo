@@ -122,7 +122,7 @@ fn commit_on_another_thread(
 fn two_commits_share_one_fsync_and_publish_in_epoch_order() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir.path().join("amsterdam.grafeo"));
-    let wal = Arc::clone(db.wal().expect("a persistent database has a WAL"));
+    let wal = Arc::clone(&db.wal().expect("a persistent database has a WAL"));
     let before = wal.sync_count();
     let epoch_before = db.current_epoch();
 

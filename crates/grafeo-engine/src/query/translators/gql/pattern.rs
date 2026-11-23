@@ -625,7 +625,7 @@ impl GqlTranslator {
             {
                 self.group_list_variables
                     .borrow_mut()
-                    .insert(ev.clone(), pa.clone());
+                    .insert(ev.clone(), Some(pa.clone()));
             }
 
             // For questioned edges (->?), save the plan BEFORE the expand so the
@@ -1045,6 +1045,88 @@ pub(super) fn different_edges(patterns: &[&ast::Pattern]) -> Result<Option<Logic
     Ok(crate::query::translators::common::different_edges(
         &edges, &groups,
     ))
+}
+
+/// Refuses a path pattern of `match_clause` that can match without end: a
+/// quantifier without an upper bound (`*`, `+`, `{m,}`, `-[*]->`) must be in
+/// the scope of a selector (ANY, ANY k, ANY SHORTEST, ALL SHORTEST,
+/// SHORTEST k, SHORTEST k GROUPS, `shortestPath`, `allShortestPaths`), of a
+/// restrictor (TRAIL, ACYCLIC, SIMPLE) on the clause, the pattern or a
+/// parenthesized pattern around it, or of DIFFERENT EDGES (ISO/IEC
+/// 39075:2024 16.4, syntax rule 14: each quantified path primary is bounded,
+/// or inside a restrictive parenthesized path pattern, or in a selective
+/// path pattern, or the match mode is DIFFERENT EDGES). In WALK mode such a
+/// pattern has infinitely many matches on a cycle. `ALL` alone selects every path, and a restrictor inside the
+/// repeated part restricts each repetition, not their number: neither bounds
+/// it.
+///
+/// # Errors
+///
+/// `42001` naming the quantifier and the fixes.
+pub(super) fn check_bounded_patterns(match_clause: &ast::MatchClause) -> Result<()> {
+    fn restricts(mode: Option<ast::PathMode>) -> bool {
+        matches!(
+            mode,
+            Some(ast::PathMode::Trail | ast::PathMode::Acyclic | ast::PathMode::Simple)
+        )
+    }
+    fn unbounded(min: u32) -> Error {
+        Error::from(QueryError::new(
+            QueryErrorKind::Syntax,
+            format!(
+                "The quantifier {{{min},}} has no upper bound, so in WALK mode its path pattern \
+                 can match without end, which GQL does not allow: add a path mode (`MATCH TRAIL`, \
+                 `ACYCLIC` or `SIMPLE`), a selector (`MATCH ANY SHORTEST`, `ANY`, \
+                 `SHORTEST k`), or an upper bound (`{{{min},5}}`)"
+            ),
+        ))
+    }
+    fn check(pattern: &ast::Pattern, bounded: bool) -> Result<()> {
+        match pattern {
+            ast::Pattern::Node(_) => Ok(()),
+            ast::Pattern::Path(path) => {
+                for edge in &path.edges {
+                    if let (min, None) = edge_hop_bounds(edge)
+                        && !bounded
+                    {
+                        return Err(unbounded(min));
+                    }
+                }
+                Ok(())
+            }
+            ast::Pattern::Quantified {
+                pattern,
+                min,
+                max,
+                path_mode,
+                ..
+            } => {
+                if max.is_none() && !bounded {
+                    return Err(unbounded(*min));
+                }
+                check(pattern, bounded || restricts(*path_mode))
+            }
+            ast::Pattern::Union(alternatives) | ast::Pattern::MultisetUnion(alternatives) => {
+                alternatives
+                    .iter()
+                    .try_for_each(|alternative| check(alternative, bounded))
+            }
+        }
+    }
+    for aliased in &match_clause.patterns {
+        let selects = aliased.path_function.is_some()
+            || aliased
+                .search_prefix
+                .as_ref()
+                .or(match_clause.search_prefix.as_ref())
+                .is_some_and(|prefix| *prefix != ast::PathSearchPrefix::All);
+        let different_edges =
+            aliased.keep.or(match_clause.match_mode) == Some(ast::MatchMode::DifferentEdges);
+        let bounded =
+            selects || restricts(aliased.path_mode.or(match_clause.path_mode)) || different_edges;
+        check(&aliased.pattern, bounded)?;
+    }
+    Ok(())
 }
 
 /// The minimum and maximum number of hops (`None` = unbounded) an edge pattern

@@ -186,11 +186,16 @@ results = db.vector_search("Doc", "embedding", query, k=10,
 Filters are evaluated before the HNSW search, narrowing the candidate set for
 better relevance and performance.
 
-**NULL handling**: nodes that lack a filtered property are excluded from results.
-This applies to all filter operators including `$ne` and `$nin`. For example,
-`{"color": {"$ne": "red"}}` excludes nodes with no `color` property, not just
-those with `color = "red"`. This follows SQL three-valued NULL semantics where
-comparisons with NULL yield unknown (treated as non-matching).
+**Missing properties**: a node without the filtered property is kept by `$ne`
+and `$nin` (a node with no `color` is "not red"), and left out by equality and
+every other operator. A map of several operators keeps such a node only when
+all of them are `$ne` or `$nin`. Before 0.6.4, `$ne` and `$nin` left it out too.
+
+**Refused filters**: a null filter value (`{"color": None}`, null as an operand
+or inside an `$in` or `$nin` list) is an invalid-value error (`GRAFEO-V001`):
+no value equals null, and `$ne` keeps the nodes without the property. An unknown
+operator, `$in` or `$nin` without a list, and `$contains` without a string are
+refused the same way, before the search runs.
 
 ## Best Practices
 

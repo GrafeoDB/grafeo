@@ -267,7 +267,7 @@ MATCH p = ANY 2 ACYCLIC PATHS (a:Person {name: 'Alix'})-[:KNOWS]-{1,4}(b)
 RETURN b.name, length(p)
 ```
 
-A prefix after the path variable (`p = ANY SHORTEST (...)`), or before a later pattern of the MATCH, holds for that pattern; one right after `MATCH` holds for every pattern of the clause without its own. The conditions of the edge pattern (its property map and `WHERE`) hold for every edge before the selection, while a `WHERE` after the pattern is checked on the paths selected. A selective search runs over one edge pattern between two node patterns.
+A prefix after the path variable (`p = ANY SHORTEST (...)`), or before a later pattern of the MATCH, holds for that pattern; one right after `MATCH` holds for every pattern of the clause without its own. The conditions of the edge pattern (its property map and `WHERE`) hold for every edge before the selection, while a `WHERE` after the pattern is checked on the paths selected. A selective search runs over a chain of edge patterns, fixed and quantified, and selects whole paths per pair of endpoints. Not supported in a selective pattern: a parenthesized or alternated pattern, a questioned edge pattern (`->?`), a variable bound at two places of the pattern, and an element `WHERE` that reads another element of the same path.
 
 ## Path Modes
 
@@ -281,8 +281,8 @@ Path modes restrict which paths are valid during traversal. Place the mode keywo
 | `ACYCLIC` | No repeated nodes at all |
 
 ```sql
--- WALK (default): allow cycles
-MATCH WALK (a:Person)-[:KNOWS*]->(b:Person)
+-- WALK (default): allow cycles, with an upper bound on the length
+MATCH WALK (a:Person)-[:KNOWS*1..5]->(b:Person)
 WHERE a.name = 'Alix'
 RETURN b.name
 
@@ -303,6 +303,26 @@ RETURN b.name
 ```
 
 A path mode holds for the whole path of a pattern, over all of its edges: `MATCH TRAIL (a)-[:KNOWS]-(b)-[:KNOWS]-(c)` never goes back over the edge it came on.
+
+### Unbounded quantifiers need a mode or a selector
+
+A quantifier without an upper bound (`*`, `+`, `{m,}`, `-[*]->`, `-[*2..]->`, on an edge or on a parenthesized pattern) can match infinitely many walks on a graph with a cycle, so GQL and SQL/PGQ allow it only where the result is finite (ISO/IEC 39075:2024 16.4, syntax rule 14). It must be in the scope of one of these:
+
+- a path mode that restricts it: `TRAIL`, `ACYCLIC` or `SIMPLE`, after `MATCH`, after the path variable, or on a parenthesized pattern around it (`(TRAIL (a)-[:KNOWS]->+(b)){1}`);
+- a selector: `ANY`, `ANY k`, `ANY SHORTEST`, `ALL SHORTEST`, `SHORTEST k`, `SHORTEST k GROUPS`, or `shortestPath(...)` and `allShortestPaths(...)`;
+- the match mode `DIFFERENT EDGES` (or `KEEP DIFFERENT EDGES` on the pattern).
+
+Otherwise the statement fails with `42001` before it runs, naming the fixes. `ALL` alone keeps every path and `WALK` is no restriction, so neither bounds a quantifier, and a path mode inside the repeated part (`(TRAIL (a)-[]->(b))+`) restricts each repetition, not how many there are. A bounded quantifier (`{1,5}`, `{2}`, `?`, `*1..5`) needs nothing. Cypher's variable-length relationships are trails, so they end, and are not affected.
+
+```sql
+-- Refused: an unbounded walk
+MATCH (a:Person)-[:KNOWS*]->(b:Person) RETURN b.name
+
+-- Accepted: a trail, the shortest path, or an upper bound
+MATCH TRAIL (a:Person)-[:KNOWS*]->(b:Person) RETURN b.name
+MATCH p = ANY SHORTEST (a:Person)-[:KNOWS*]->(b:Person) RETURN length(p)
+MATCH (a:Person)-[:KNOWS*1..5]->(b:Person) RETURN b.name
+```
 
 ## Match Modes
 

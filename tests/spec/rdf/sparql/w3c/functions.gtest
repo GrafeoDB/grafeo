@@ -1,0 +1,2225 @@
+# W3C SPARQL 1.1 Test Suite: Functions
+# Generated from the W3C manifest by scripts/convert_w3c_sparql.py
+# Source: https://github.com/w3c/rdf-tests at 7b5afb91857a9c282c03d2e45d3f76485797c901
+# Copyright W3C (MIT, ERCIM, Keio, Beihang), used under the W3C test suite
+# licences: https://www.w3.org/Consortium/Legal/2008/04-testsuite-copyright.html
+# Not converted:
+#   plus-1-corrected: spec-disagreement: the result writes the computed decimal 3 in its XSD 1.0 canonical form 3.0; Grafeo writes the XSD 1.1 canonical form 3
+#   coalesce01: spec-disagreement: the result writes the computed decimal 2 in its XSD 1.0 canonical form 2.0; Grafeo writes the XSD 1.1 canonical form 2
+
+meta:
+  language: sparql
+  model: rdf
+  section: "w3c.functions"
+  title: W3C Functions
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # STRDT()
+  - name: strdt01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?s (STRDT(?str,xsd:string) AS ?str1) WHERE {
+          ?s :str ?str
+          FILTER(LANGMATCHES(LANG(?str), "en"))
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s2>', null]
+
+  # STRDT(STR())
+  - name: strdt02
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?s (STRDT(STR(?str),xsd:string) AS ?str1) WHERE {
+          ?s :str ?str
+          FILTER(LANGMATCHES(LANG(?str), "en"))
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s2>', '"bar"']
+
+  # STRDT() TypeErrors (updated for RDF 1.1)
+  - name: strdt03_rdf11
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?s (STRDT(?o,xsd:string) AS ?str1) WHERE {
+          ?s ?p ?o
+      }
+    expect:
+      terms:
+        - ['<http://example.org/n1>', null]
+        - ['<http://example.org/n2>', null]
+        - ['<http://example.org/n3>', null]
+        - ['<http://example.org/n4>', null]
+        - ['<http://example.org/n5>', null]
+        - ['<http://example.org/s1>', '"foo"']
+        - ['<http://example.org/s2>', null]
+        - ['<http://example.org/s3>', '"BAZ"']
+        - ['<http://example.org/s4>', '"食べ物"']
+        - ['<http://example.org/s5>', '"100%"']
+        - ['<http://example.org/s6>', '"abc"']
+        - ['<http://example.org/s7>', '"DEF"']
+        - ['<http://example.org/d1>', null]
+        - ['<http://example.org/d2>', null]
+        - ['<http://example.org/d3>', null]
+        - ['<http://example.org/d4>', null]
+
+  # STRLANG()
+  - name: strlang01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?s (STRLANG(?str,"en-US") AS ?s2) WHERE {
+          ?s :str ?str
+          FILTER(LANGMATCHES(LANG(?str), "en"))
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s2>', null]
+
+  # STRLANG(STR())
+  - name: strlang02
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?s (STRLANG(STR(?str),"en-US") AS ?s2) WHERE {
+          ?s :str ?str
+          FILTER(LANGMATCHES(LANG(?str), "en"))
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s2>', '"bar"@en-US']
+
+  # STRLANG() TypeErrors (updated for RDF 1.1)
+  - name: strlang03_rdf11
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?s (STRLANG(?o,"en-US") AS ?str1) WHERE {
+          ?s ?p ?o
+      }
+    expect:
+      terms:
+        - ['<http://example.org/n1>', null]
+        - ['<http://example.org/n2>', null]
+        - ['<http://example.org/n3>', null]
+        - ['<http://example.org/n4>', null]
+        - ['<http://example.org/n5>', null]
+        - ['<http://example.org/s1>', '"foo"@en-us']
+        - ['<http://example.org/s2>', null]
+        - ['<http://example.org/s3>', '"BAZ"@en-us']
+        - ['<http://example.org/s4>', '"食べ物"@en-us']
+        - ['<http://example.org/s5>', '"100%"@en-us']
+        - ['<http://example.org/s6>', '"abc"@en-us']
+        - ['<http://example.org/s7>', '"DEF"@en-us']
+        - ['<http://example.org/d1>', null]
+        - ['<http://example.org/d2>', null]
+        - ['<http://example.org/d3>', null]
+        - ['<http://example.org/d4>', null]
+
+  # STRLANG() with language tags differing in case
+  - name: strlang04
+    query: |
+      SELECT (STRLANG("abc", "en") = STRLANG("abc", "EN") AS ?res0) (STRLANG("abc", "EN") = "abc"@en AS ?res1) {}
+    expect:
+      terms:
+        - ['"true"^^<http://www.w3.org/2001/XMLSchema#boolean>', '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+
+  # isNumeric()
+  - name: isnumeric01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?s ?num WHERE {
+          ?s ?p ?num
+          FILTER isNumeric(?num)
+      }
+    expect:
+      terms:
+        - ['<http://example.org/n3>', '"1.1"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://example.org/n2>', '"-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://example.org/n1>', '"-1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/n5>', '"2.5"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://example.org/n4>', '"-2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # ABS()
+  - name: abs01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT * WHERE {
+          ?s :num ?num
+          FILTER(ABS(?num) >= 2)
+      }
+    expect:
+      terms:
+        - ['<http://example.org/n5>', '"2.5"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://example.org/n4>', '"-2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # CEIL()
+  - name: ceil01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?s ?num (CEIL(?num) AS ?ceil) WHERE {
+          ?s :num ?num
+      }
+    expect:
+      terms:
+        - ['<http://example.org/n1>', '"-1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"-1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/n5>', '"2.5"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"3"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://example.org/n4>', '"-2"^^<http://www.w3.org/2001/XMLSchema#integer>', '"-2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/n3>', '"1.1"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"2"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://example.org/n2>', '"-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"-1"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+
+  # FLOOR()
+  - name: floor01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?s ?num (FLOOR(?num) AS ?floor) WHERE {
+          ?s :num ?num
+      }
+    expect:
+      terms:
+        - ['<http://example.org/n1>', '"-1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"-1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/n5>', '"2.5"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"2"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://example.org/n4>', '"-2"^^<http://www.w3.org/2001/XMLSchema#integer>', '"-2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/n3>', '"1.1"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"1"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://example.org/n2>', '"-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"-2"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+
+  # ROUND()
+  - name: round01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?s ?num (ROUND(?num) AS ?round) WHERE {
+          ?s :num ?num
+      }
+    expect:
+      terms:
+        - ['<http://example.org/n1>', '"-1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"-1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/n5>', '"2.5"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"3"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://example.org/n4>', '"-2"^^<http://www.w3.org/2001/XMLSchema#integer>', '"-2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/n3>', '"1.1"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"1"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://example.org/n2>', '"-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"-2"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+
+  # CONCAT()
+  - name: concat01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT (CONCAT(?str1,?str2) AS ?str) WHERE {
+          :s6 :str ?str1 .
+          :s7 :str ?str2 .
+      }
+    expect:
+      terms:
+        - ['"abcDEF"']
+
+  # CONCAT() 2
+  - name: concat02
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/str> "123" .
+          <http://example.org/s2> <http://example.org/str> "日本語"@ja .
+          <http://example.org/s3> <http://example.org/str> "english"@en .
+          <http://example.org/s4> <http://example.org/str> "français"@fr .
+          <http://example.org/s5> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s6> <http://example.org/str> "def"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "7"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT (CONCAT(?str1,?str2) AS ?str) WHERE {
+          ?s1 :str ?str1 .
+          ?s2 :str ?str2 .
+      }
+    expect:
+      terms:
+        - ['"abcabc"']
+        - ['"abcdef"']
+        - ['"defabc"']
+        - ['"defdef"']
+        - ['"englishenglish"@en']
+        - ['"françaisfrançais"@fr']
+        - ['"日本語日本語"@ja']
+        - ['"123abc"']
+        - ['"123def"']
+        - ['"123english"']
+        - ['"123français"']
+        - ['"123日本語"']
+        - ['"123123"']
+        - ['"abc123"']
+        - ['"abcenglish"']
+        - ['"abcfrançais"']
+        - ['"abc日本語"']
+        - ['"def123"']
+        - ['"defenglish"']
+        - ['"deffrançais"']
+        - ['"def日本語"']
+        - ['"english123"']
+        - ['"englishabc"']
+        - ['"englishdef"']
+        - ['"englishfrançais"']
+        - ['"english日本語"']
+        - ['"français123"']
+        - ['"françaisabc"']
+        - ['"françaisdef"']
+        - ['"françaisenglish"']
+        - ['"français日本語"']
+        - ['"日本語123"']
+        - ['"日本語abc"']
+        - ['"日本語def"']
+        - ['"日本語english"']
+        - ['"日本語français"']
+        - [null]
+        - [null]
+        - [null]
+        - [null]
+        - [null]
+        - [null]
+        - [null]
+        - [null]
+        - [null]
+        - [null]
+        - [null]
+        - [null]
+        - [null]
+
+  # CONCAT() without parameter
+  - name: concat_empty
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      SELECT (CONCAT() AS ?str) WHERE {}
+    expect:
+      terms:
+        - ['""']
+
+  # CONCAT() with a single parameter
+  - name: concat_single
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT (CONCAT(?str1) AS ?str) WHERE {
+          :s6 :str ?str1 .
+      }
+    expect:
+      terms:
+        - ['"abc"']
+
+  # SUBSTR() (3-argument)
+  - name: substring01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?s ?str (SUBSTR(?str,1,1) AS ?substr) WHERE {
+          ?s :str ?str
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s2>', '"bar"@en', '"b"@en']
+        - ['<http://example.org/s4>', '"食べ物"', '"食"']
+        - ['<http://example.org/s7>', '"DEF"', '"D"']
+        - ['<http://example.org/s3>', '"BAZ"', '"B"']
+        - ['<http://example.org/s5>', '"100%"', '"1"']
+        - ['<http://example.org/s6>', '"abc"', '"a"']
+        - ['<http://example.org/s1>', '"foo"', '"f"']
+
+  # SUBSTR() (3-argument) on non-BMP unicode strings
+  - name: substring01_non_bmp
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s8> <http://example.org/str> "👪" .
+          <http://example.org/s9> <http://example.org/str> "👨‍👩‍👧‍👦" .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?s ?str (SUBSTR(?str,1,1) AS ?substr) WHERE {
+          ?s :str ?str
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s8>', '"👪"', '"👪"']
+        - ['<http://example.org/s9>', '"👨‍👩‍👧‍👦"', '"👨"']
+
+  # SUBSTR() (2-argument)
+  - name: substring02
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?s ?str (SUBSTR(?str,2) AS ?substr) WHERE {
+          ?s :str ?str
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s2>', '"bar"@en', '"ar"@en']
+        - ['<http://example.org/s4>', '"食べ物"', '"べ物"']
+        - ['<http://example.org/s7>', '"DEF"', '"EF"']
+        - ['<http://example.org/s3>', '"BAZ"', '"AZ"']
+        - ['<http://example.org/s5>', '"100%"', '"00%"']
+        - ['<http://example.org/s6>', '"abc"', '"bc"']
+        - ['<http://example.org/s1>', '"foo"', '"oo"']
+
+  # SUBSTR() (2-argument) on non-BMP unicode strings
+  - name: substring02_non_bmp
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s8> <http://example.org/str> "👪" .
+          <http://example.org/s9> <http://example.org/str> "👨‍👩‍👧‍👦" .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?s ?str (SUBSTR(?str,2) AS ?substr) WHERE {
+          ?s :str ?str
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s8>', '"👪"', '""']
+        - ['<http://example.org/s9>', '"👨‍👩‍👧‍👦"', '"‍👩‍👧‍👦"']
+
+  # STRLEN()
+  - name: length01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?str (STRLEN(?str) AS ?len) WHERE {
+          ?s :str ?str
+      }
+    expect:
+      terms:
+        - ['"bar"@en', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"食べ物"', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"DEF"', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"BAZ"', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"100%"', '"4"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"abc"', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"foo"', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # STRLEN() on non-BMP unicode strings
+  - name: length01_non_bmp
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s8> <http://example.org/str> "👪" .
+          <http://example.org/s9> <http://example.org/str> "👨‍👩‍👧‍👦" .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?str (STRLEN(?str) AS ?len) WHERE {
+          ?s :str ?str
+      }
+    expect:
+      terms:
+        - ['"👪"', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"👨‍👩‍👧‍👦"', '"7"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # UCASE()
+  - name: ucase01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?s (UCASE(?str) AS ?ustr) WHERE {
+          ?s :str ?str
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s2>', '"BAR"@en']
+        - ['<http://example.org/s4>', '"食べ物"']
+        - ['<http://example.org/s7>', '"DEF"']
+        - ['<http://example.org/s3>', '"BAZ"']
+        - ['<http://example.org/s5>', '"100%"']
+        - ['<http://example.org/s6>', '"ABC"']
+        - ['<http://example.org/s1>', '"FOO"']
+
+  # UCASE() on non-BMP unicode strings
+  - name: ucase01_non_bmp
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s8> <http://example.org/str> "👪" .
+          <http://example.org/s9> <http://example.org/str> "👨‍👩‍👧‍👦" .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?s (UCASE(?str) AS ?ustr) WHERE {
+          ?s :str ?str
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s8>', '"👪"']
+        - ['<http://example.org/s9>', '"👨‍👩‍👧‍👦"']
+
+  # LCASE()
+  - name: lcase01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?s (LCASE(?str) AS ?lstr) WHERE {
+          ?s :str ?str
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s2>', '"bar"@en']
+        - ['<http://example.org/s4>', '"食べ物"']
+        - ['<http://example.org/s7>', '"def"']
+        - ['<http://example.org/s3>', '"baz"']
+        - ['<http://example.org/s5>', '"100%"']
+        - ['<http://example.org/s6>', '"abc"']
+        - ['<http://example.org/s1>', '"foo"']
+
+  # LCASE() on non-BMP unicode strings
+  - name: lcase01_non_bmp
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s8> <http://example.org/str> "👪" .
+          <http://example.org/s9> <http://example.org/str> "👨‍👩‍👧‍👦" .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?s (LCASE(?str) AS ?lstr) WHERE {
+          ?s :str ?str
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s8>', '"👪"']
+        - ['<http://example.org/s9>', '"👨‍👩‍👧‍👦"']
+
+  # ENCODE_FOR_URI()
+  - name: encode01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?s ?str (ENCODE_FOR_URI(?str) AS ?encoded) WHERE {
+          ?s :str ?str
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s1>', '"foo"', '"foo"']
+        - ['<http://example.org/s2>', '"bar"@en', '"bar"']
+        - ['<http://example.org/s3>', '"BAZ"', '"BAZ"']
+        - ['<http://example.org/s4>', '"食べ物"', '"%E9%A3%9F%E3%81%B9%E7%89%A9"']
+        - ['<http://example.org/s5>', '"100%"', '"100%25"']
+        - ['<http://example.org/s6>', '"abc"', '"abc"']
+        - ['<http://example.org/s7>', '"DEF"', '"DEF"']
+
+  # ENCODE_FOR_URI() on non-BMP unicode strings
+  - name: encode01_non_bmp
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s8> <http://example.org/str> "👪" .
+          <http://example.org/s9> <http://example.org/str> "👨‍👩‍👧‍👦" .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?s ?str (ENCODE_FOR_URI(?str) AS ?encoded) WHERE {
+          ?s :str ?str
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s8>', '"👪"', '"%F0%9F%91%AA"']
+        - ['<http://example.org/s9>', '"👨‍👩‍👧‍👦"', '"%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7%E2%80%8D%F0%9F%91%A6"']
+
+  # CONTAINS()
+  - name: contains01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?s ?str WHERE {
+          ?s :str ?str
+          FILTER CONTAINS(?str, "a")
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s2>', '"bar"@en']
+        - ['<http://example.org/s6>', '"abc"']
+
+  # STRSTARTS()
+  - name: starts01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?s ?str WHERE {
+          ?s ?p ?str
+          FILTER STRSTARTS(STR(?str), "1")
+      }
+    expect:
+      terms:
+        - ['<http://example.org/n3>', '"1.1"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://example.org/s5>', '"100%"']
+
+  # STRENDS()
+  - name: ends01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?s ?str WHERE {
+          ?s ?p ?str
+          FILTER STRENDS(?str, "bc")
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s6>', '"abc"']
+
+  # plus-2-corrected
+  - name: plus_2_corrected
+    setup:
+      - |
+        INSERT DATA {
+          <http://example/x1> <http://example/p> "a" .
+          <http://example/x1> <http://example/q> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/x2> <http://example/p> _:b0 .
+          <http://example/x2> <http://example/q> "1" .
+          <http://example/x3> <http://example/p> <http://example/a> .
+          <http://example/x3> <http://example/q> "1" .
+          <http://example/x4> <http://example/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/x4> <http://example/q> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/x5> <http://example/p> "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example/x5> <http://example/q> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example/x6> <http://example/p> "1" .
+          <http://example/x6> <http://example/q> "2" .
+          <http://example/x7> <http://example/p> "1"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example/x7> <http://example/q> "2" .
+          <http://example/x8> <http://example/p> "1"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example/x8> <http://example/q> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX  : <http://example/>
+
+      SELECT  ?x ?y ( str(?x) + str(?y) AS ?sum)
+      WHERE
+          { ?s :p ?x ; :q ?y .
+          }
+    expect:
+      terms:
+        - ['_:b', '"1"', null]
+        - ['<http://example/a>', '"1"', null]
+        - ['"1"', '"2"', null]
+        - ['"1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>', null]
+        - ['"1"', '"2"', null]
+        - ['"1"', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>', null]
+        - ['"1.0"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>', null]
+        - ['"a"', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', null]
+
+  # MD5()
+  - name: md5_01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT (MD5(?l) AS ?hash) WHERE {
+          :s1 :str ?l
+      }
+    expect:
+      terms:
+        - ['"acbd18db4cc2f85cedef654fccc4a4d8"']
+
+  # MD5() over Unicode data
+  - name: md5_02
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT (MD5(?l) AS ?hash) WHERE {
+          :s4 :str ?l
+      }
+    expect:
+      terms:
+        - ['"e7ada485d13b1decf628c9211bc3a97b"']
+
+  # SHA1()
+  - name: sha1_01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT (SHA1(?l) AS ?hash) WHERE {
+          :s1 :str ?l
+      }
+    expect:
+      terms:
+        - ['"0beec7b5ea3f0fdbc95d0dd47f3c5bc275da8a33"']
+
+  # SHA1() on Unicode data
+  - name: sha1_02
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s8> <http://example.org/str> "食" .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT (SHA1(?l) AS ?hash) WHERE {
+          :s8 :str ?l
+      }
+    expect:
+      terms:
+        - ['"d46696735b6a09ff407bfc1a9407e008840db9c9"']
+
+  # SHA256()
+  - name: sha256_01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT (SHA256(?l) AS ?hash) WHERE {
+          :s1 :str ?l
+      }
+    expect:
+      terms:
+        - ['"2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"']
+
+  # SHA256() on Unicode data
+  - name: sha256_02
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s8> <http://example.org/str> "食" .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT (SHA256(?l) AS ?hash) WHERE {
+          :s8 :str ?l
+      }
+    expect:
+      terms:
+        - ['"0fbe868d1df356ca9df7ebff346da3a56280e059a7ea81186ef885b140d254ee"']
+
+  # SHA384()
+  - name: sha384_01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT (SHA384(?l) AS ?hash) WHERE {
+          :s1 :str ?l
+      }
+    expect:
+      terms:
+        - ['"98c11ffdfdd540676b1a137cb1a22b2a70350c9a44171d6b1180c6be5cbb2ee3f79d532c8a1dd9ef2e8e08e752a3babb"']
+
+  # SHA384() on Unicode data
+  - name: sha384_02
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s8> <http://example.org/str> "食" .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT (SHA384(?l) AS ?hash) WHERE {
+          :s8 :str ?l
+      }
+    expect:
+      terms:
+        - ['"adfda7e9ad8789b391855038d0d74dce3efe3af1eefcea35d50b91d6c244a0c546375445b518c9fb61e03e6a060bc95d"']
+
+  # SHA512()
+  - name: sha512_01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT (SHA512(?l) AS ?hash) WHERE {
+          :s1 :str ?l
+      }
+    expect:
+      terms:
+        - ['"f7fbba6e0636f890e56fbbf3283e524c6fa3204ae298382d624741d0dc6638326e282c41be5e4254d8820772c5518a2c5a8c0c7f7eda19594a7eb539453e1ed7"']
+
+  # SHA512() on Unicode data
+  - name: sha512_02
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s8> <http://example.org/str> "食" .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT (SHA512(?l) AS ?hash) WHERE {
+          :s8 :str ?l
+      }
+    expect:
+      terms:
+        - ['"b433ed0e60c818bea72d3aa1a43db89b3ed2b624597407b7912bbb7685f2e45ae5500e092da5f938391d282b26bc43e4035b12460c93ab5e2e1a05d582331d85"']
+
+  # MINUTES()
+  - name: minutes
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?s (MINUTES(?date) AS ?x) WHERE {
+          ?s :date ?date
+      }
+    expect:
+      terms:
+        - ['<http://example.org/d1>', '"28"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/d2>', '"38"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/d3>', '"59"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/d4>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # SECONDS()
+  - name: seconds
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?s (SECONDS(?date) AS ?x) WHERE {
+          ?s :date ?date
+      }
+    expect:
+      terms:
+        - ['<http://example.org/d1>', '"1"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://example.org/d2>', '"2"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://example.org/d3>', '"0"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://example.org/d4>', '"3"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+
+  # HOURS()
+  - name: hours
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?s (HOURS(?date) AS ?x) WHERE {
+          ?s :date ?date
+      }
+    expect:
+      terms:
+        - ['<http://example.org/d1>', '"11"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/d2>', '"15"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/d3>', '"23"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/d4>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # MONTH()
+  - name: month
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?s (MONTH(?date) AS ?x) WHERE {
+          ?s :date ?date
+      }
+    expect:
+      terms:
+        - ['<http://example.org/d1>', '"6"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/d2>', '"12"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/d3>', '"6"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/d4>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # YEAR()
+  - name: year
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?s (YEAR(?date) AS ?x) WHERE {
+          ?s :date ?date
+      }
+    expect:
+      terms:
+        - ['<http://example.org/d1>', '"2010"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/d2>', '"2010"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/d3>', '"2008"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/d4>', '"2011"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # DAY()
+  - name: day
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?s (DAY(?date) AS ?x) WHERE {
+          ?s :date ?date
+      }
+    expect:
+      terms:
+        - ['<http://example.org/d1>', '"21"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/d2>', '"21"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/d3>', '"20"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://example.org/d4>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # TIMEZONE()
+  - name: timezone
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?s (TIMEZONE(?date) AS ?x) WHERE {
+          ?s :date ?date
+      }
+    expect:
+      terms:
+        - ['<http://example.org/d1>', '"PT0S"^^<http://www.w3.org/2001/XMLSchema#dayTimeDuration>']
+        - ['<http://example.org/d2>', '"-PT8H"^^<http://www.w3.org/2001/XMLSchema#dayTimeDuration>']
+        - ['<http://example.org/d3>', '"PT0S"^^<http://www.w3.org/2001/XMLSchema#dayTimeDuration>']
+        - ['<http://example.org/d4>', null]
+
+  # TZ()
+  - name: tz
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      SELECT ?s (TZ(?date) AS ?x) WHERE {
+          ?s :date ?date
+      }
+    expect:
+      terms:
+        - ['<http://example.org/d1>', '"Z"']
+        - ['<http://example.org/d2>', '"-08:00"']
+        - ['<http://example.org/d3>', '"Z"']
+        - ['<http://example.org/d4>', '""']
+
+  # BNODE(str)
+  - name: bnode01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?s1 ?s2
+      (BNODE(?s1) AS ?b1) (BNODE(?s2) AS ?b2)
+      WHERE {
+          ?a :str ?s1 .
+          ?b :str ?s2 .
+          FILTER (?a = :s1 || ?a = :s3)
+          FILTER (?b = :s1 || ?b = :s3)
+      }
+    expect:
+      terms:
+        - ['"BAZ"', '"BAZ"', '_:b', '_:b']
+        - ['"foo"', '"foo"', '_:b', '_:b']
+        - ['"foo"', '"BAZ"', '_:b', '_:b']
+        - ['"BAZ"', '"foo"', '_:b', '_:b']
+
+  # BNODE()
+  - name: bnode02
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (BNODE() AS ?b1) (BNODE() AS ?b2)
+      WHERE {}
+    expect:
+      terms:
+        - ['_:b', '_:b']
+
+  # IN 1
+  - name: in01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      ASK {
+          FILTER(2 IN (1, 2, 3))
+      }
+    expect:
+      rows:
+        - [true]
+
+  # IN 2
+  - name: in02
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      ASK {
+          FILTER(2 IN (1, 3))
+      }
+    expect:
+      rows:
+        - [false]
+
+  # NOT IN 1
+  - name: notin01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      ASK {
+          FILTER(2 NOT IN ())
+      }
+    expect:
+      rows:
+        - [true]
+
+  # NOT IN 2
+  - name: notin02
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      ASK {
+          FILTER(2 NOT IN (1/0, 2))
+      }
+    expect:
+      rows:
+        - [false]
+
+  # NOW()
+  - name: now01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      ASK {
+          BIND(NOW() AS ?n)
+          FILTER(DATATYPE(?n) = xsd:dateTime)
+      }
+    expect:
+      rows:
+        - [true]
+
+  # RAND()
+  - name: rand01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      ASK {
+          BIND(RAND() AS ?r)
+          FILTER(DATATYPE(?r) = xsd:double && ?r >= 0.0 && ?r < 1.0)
+      }
+    expect:
+      rows:
+        - [true]
+
+  # IRI()/URI()
+  - name: iri01
+    xfail:
+      spec: "W3C SPARQL 1.1 functions/iri01"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      BASE <http://example.org/>
+      SELECT (URI("uri") AS ?uri) (IRI("iri") AS ?iri)
+      WHERE {}
+    expect:
+      terms:
+        - ['<http://example.org/uri>', '<http://example.org/iri>']
+
+  # IRI()/URI() when the input is an IRI
+  - name: iri02
+    xfail:
+      spec: "W3C SPARQL 1.1 functions/iri02"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/d1> <http://example.org/date> "2010-06-21T11:28:01Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d2> <http://example.org/date> "2010-12-21T15:38:02-08:00"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d3> <http://example.org/date> "2008-06-20T23:59:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/d4> <http://example.org/date> "2011-02-01T01:02:03"^^<http://www.w3.org/2001/XMLSchema#dateTime> .
+          <http://example.org/n1> <http://example.org/num> "-1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/num> "-1.6"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n3> <http://example.org/num> "1.1"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/n4> <http://example.org/num> "-2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n5> <http://example.org/num> "2.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.org/s1> <http://example.org/str> "foo" .
+          <http://example.org/s2> <http://example.org/str> "bar"@en .
+          <http://example.org/s3> <http://example.org/str> "BAZ" .
+          <http://example.org/s4> <http://example.org/str> "食べ物" .
+          <http://example.org/s5> <http://example.org/str> "100%" .
+          <http://example.org/s6> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "DEF"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      BASE <http://example.org/>
+      SELECT (URI(<uri>) AS ?uri) (IRI(<iri>) AS ?iri)
+      WHERE {}
+    expect:
+      terms:
+        - ['<http://example.org/uri>', '<http://example.org/iri>']
+
+  # IF()
+  - name: if01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/str> "123" .
+          <http://example.org/s2> <http://example.org/str> "日本語"@ja .
+          <http://example.org/s3> <http://example.org/str> "english"@en .
+          <http://example.org/s4> <http://example.org/str> "français"@fr .
+          <http://example.org/s5> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s6> <http://example.org/str> "def"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "7"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      BASE <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?o (IF(lang(?o) = "ja", true, false) AS ?integer)
+      WHERE {
+          ?s ?p ?o
+      }
+    expect:
+      terms:
+        - ['"123"', '"false"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['"def"', '"false"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['"français"@fr', '"false"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['"日本語"@ja', '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['"7"^^<http://www.w3.org/2001/XMLSchema#integer>', '"false"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['"abc"', '"false"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['"english"@en', '"false"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+
+  # IF() error propogation
+  - name: if02
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/str> "123" .
+          <http://example.org/s2> <http://example.org/str> "日本語"@ja .
+          <http://example.org/s3> <http://example.org/str> "english"@en .
+          <http://example.org/s4> <http://example.org/str> "français"@fr .
+          <http://example.org/s5> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s6> <http://example.org/str> "def"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "7"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      SELECT (IF(1/0, false, true) AS ?error) WHERE {}
+    expect:
+      terms:
+        - [null]
+
+  # COALESCE() without arguments
+  - name: coalesce_empty
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/n0> <http://example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n1> <http://example.org/p> "0"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n1> <http://example.org/q> "0"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/p> "0"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n2> <http://example.org/q> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n3> <http://example.org/p> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/n3> <http://example.org/q> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      SELECT (COALESCE() AS ?err) WHERE {}
+    expect:
+      terms:
+        - [null]
+
+  # STRBEFORE()
+  - name: strbefore01a
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/str> "123" .
+          <http://example.org/s2> <http://example.org/str> "日本語"@ja .
+          <http://example.org/s3> <http://example.org/str> "english"@en .
+          <http://example.org/s4> <http://example.org/str> "français"@fr .
+          <http://example.org/s5> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s6> <http://example.org/str> "def"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "7"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?s (STRBEFORE(?str,"s") AS ?prefix) WHERE {
+          ?s :str ?str
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s1>', '""']
+        - ['<http://example.org/s2>', '""']
+        - ['<http://example.org/s3>', '"engli"@en']
+        - ['<http://example.org/s4>', '"françai"@fr']
+        - ['<http://example.org/s5>', '""']
+        - ['<http://example.org/s6>', '""']
+        - ['<http://example.org/s7>', null]
+
+  # STRBEFORE() datatyping
+  - name: strbefore02
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/str> "abc" .
+          <http://example.org/s2> <http://example.org/str> "abc"@en .
+          <http://example.org/s3> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT
+          ?s
+          ?str
+          (STRBEFORE(?str,"b") AS ?bb)
+          (STRBEFORE(?str,"bc") AS ?bbc)
+          (STRBEFORE(?str,"b"@cy) AS ?bbcy)
+          (STRBEFORE(?str,"") AS ?b)
+          (STRBEFORE(?str,""@en) AS ?ben)
+          (STRBEFORE(?str,"b"^^xsd:string) AS ?bbx)
+          (STRBEFORE(?str,"xyz"^^xsd:string) AS ?bxyzx)
+      WHERE {
+          ?s :str ?str
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s1>', '"abc"', '"a"', '"a"', null, '""', null, '"a"', '""']
+        - ['<http://example.org/s2>', '"abc"@en', '"a"@en', '"a"@en', null, '""@en', '""@en', '"a"@en', '""']
+        - ['<http://example.org/s3>', '"abc"', '"a"', '"a"', null, '""', null, '"a"', '""']
+
+  # STRAFTER()
+  - name: strafter01a
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/str> "123" .
+          <http://example.org/s2> <http://example.org/str> "日本語"@ja .
+          <http://example.org/s3> <http://example.org/str> "english"@en .
+          <http://example.org/s4> <http://example.org/str> "français"@fr .
+          <http://example.org/s5> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s6> <http://example.org/str> "def"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "7"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?s (STRAFTER(?str,"e") AS ?suffix) WHERE {
+          ?s :str ?str
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s1>', '""']
+        - ['<http://example.org/s2>', '""']
+        - ['<http://example.org/s3>', '"nglish"@en']
+        - ['<http://example.org/s4>', '""']
+        - ['<http://example.org/s5>', '""']
+        - ['<http://example.org/s6>', '"f"']
+        - ['<http://example.org/s7>', null]
+
+  # STRAFTER() datatyping
+  - name: strafter02
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/str> "abc" .
+          <http://example.org/s2> <http://example.org/str> "abc"@en .
+          <http://example.org/s3> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT
+          ?s
+          ?str
+          (STRAFTER(?str,"b") AS ?ab)
+          (STRAFTER(?str,"ab") AS ?aab)
+          (STRAFTER(?str,"b"@cy) AS ?abcy)
+          (STRAFTER(?str,"") AS ?a)
+          (STRAFTER(?str,""@en) AS ?aen)
+          (STRAFTER(?str,"b"^^xsd:string) AS ?abx)
+          (STRAFTER(?str,"xyz"^^xsd:string) AS ?axyzx)
+      WHERE {
+          ?s :str ?str
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s1>', '"abc"', '"c"', '"c"', null, '"abc"', null, '"c"', '""']
+        - ['<http://example.org/s2>', '"abc"@en', '"c"@en', '"c"@en', null, '"abc"@en', '"abc"@en', '"c"@en', '""']
+        - ['<http://example.org/s3>', '"abc"', '"c"', '"c"', null, '"abc"', null, '"c"', '""']
+
+  # REPLACE()
+  - name: replace01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/str> "123" .
+          <http://example.org/s2> <http://example.org/str> "日本語"@ja .
+          <http://example.org/s3> <http://example.org/str> "English"@en .
+          <http://example.org/s4> <http://example.org/str> "Français"@fr .
+          <http://example.org/s5> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s6> <http://example.org/str> "def"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "7"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s8> <http://example.org/str> "banana" .
+          <http://example.org/s9> <http://example.org/str> "abcd" .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?s (REPLACE(?str,"[^a-z0-9]", "-") AS ?new) WHERE {
+          ?s :str ?str
+      }
+    expect:
+      terms:
+        - ['<http://example.org/s1>', '"123"']
+        - ['<http://example.org/s2>', '"---"@ja']
+        - ['<http://example.org/s3>', '"-nglish"@en']
+        - ['<http://example.org/s4>', '"-ran-ais"@fr']
+        - ['<http://example.org/s5>', '"abc"']
+        - ['<http://example.org/s6>', '"def"']
+        - ['<http://example.org/s7>', null]
+        - ['<http://example.org/s8>', '"banana"']
+        - ['<http://example.org/s9>', '"abcd"']
+
+  # REPLACE() with overlapping pattern
+  - name: replace02
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/str> "123" .
+          <http://example.org/s2> <http://example.org/str> "日本語"@ja .
+          <http://example.org/s3> <http://example.org/str> "English"@en .
+          <http://example.org/s4> <http://example.org/str> "Français"@fr .
+          <http://example.org/s5> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s6> <http://example.org/str> "def"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "7"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s8> <http://example.org/str> "banana" .
+          <http://example.org/s9> <http://example.org/str> "abcd" .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (REPLACE(?str,"ana", "*") AS ?new) WHERE {
+          :s8 :str ?str
+      }
+    expect:
+      terms:
+        - ['"b*na"']
+
+  # REPLACE() with captured substring
+  - name: replace03
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.org/s1> <http://example.org/str> "123" .
+          <http://example.org/s2> <http://example.org/str> "日本語"@ja .
+          <http://example.org/s3> <http://example.org/str> "English"@en .
+          <http://example.org/s4> <http://example.org/str> "Français"@fr .
+          <http://example.org/s5> <http://example.org/str> "abc"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s6> <http://example.org/str> "def"^^<http://www.w3.org/2001/XMLSchema#string> .
+          <http://example.org/s7> <http://example.org/str> "7"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.org/s8> <http://example.org/str> "banana" .
+          <http://example.org/s9> <http://example.org/str> "abcd" .
+        }
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (REPLACE(?str,"(ab)|(a)", "[1=$1][2=$2]") AS ?new) WHERE {
+          :s9 :str ?str
+      }
+    expect:
+      terms:
+        - ['"[1=ab][2=]cd"']
+
+  # REPLACE() with the 'i' option
+  - name: replace_case_insensitive
+    query: |
+      SELECT (REPLACE("aAbBaC", "a", "~/", "i") AS ?new) WHERE {}
+    expect:
+      terms:
+        - ['"~/~/bB~/C"']
+
+  # UUID() pattern match
+  - name: uuid01
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (STRLEN(STR(?uuid)) AS ?length)
+      WHERE {
+          BIND(UUID() AS ?uuid)
+          FILTER(ISIRI(?uuid) && REGEX(STR(?uuid), "^urn:uuid:[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$", "i"))
+      }
+    expect:
+      terms:
+        - ['"45"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # UUID() per binding
+  - name: uuid02
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      ASK {
+          BIND(UUID() AS ?u1)
+          BIND(UUID() AS ?u2)
+          FILTER(?u1 != ?u2)
+      }
+    expect:
+      rows:
+        - [true]
+
+  # STRUUID() pattern match
+  - name: struuid01
+    query: |
+      PREFIX : <http://example.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (STRLEN(?uuid) AS ?length)
+      WHERE {
+          BIND(STRUUID() AS ?uuid)
+          FILTER(ISLITERAL(?uuid) && REGEX(?uuid, "^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$", "i"))
+      }
+    expect:
+      terms:
+        - ['"36"^^<http://www.w3.org/2001/XMLSchema#integer>']

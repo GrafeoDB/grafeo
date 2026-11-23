@@ -99,7 +99,7 @@ Errors from the Grafeo engine are thrown as standard JavaScript `Error` objects.
 
 - `"Query error: ..."` for syntax or execution errors
 - `"Transaction error: ..."` for conflicts or state errors
-- `"Database closed: ..."` for a write after `close()`
+- `"Database closed: ..."` for a call after `close()`
 - `"Database error: ..."` for storage or configuration errors
 
 An error from the database also carries `errorCode` (the Grafeo code, such as `GRAFEO-T001` for a write conflict),

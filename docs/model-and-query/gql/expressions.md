@@ -184,7 +184,7 @@ RETURN none(x IN [1, 2, 3] WHERE x > 5)  -- true
 RETURN single(x IN [1, 2, 3] WHERE x = 2)  -- true
 
 -- Practical example: check path properties
-MATCH path = (a:Person)-[:KNOWS*]->(b:Person)
+MATCH path = TRAIL (a:Person)-[:KNOWS*]->(b:Person)
 WHERE a.name = 'Alix'
     AND all(n IN nodes(path) WHERE n.active = true)
 RETURN path

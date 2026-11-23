@@ -59,6 +59,64 @@
 /// the log position up to which backups hold the WAL.
 pub const BACKUP_CURSOR_FILE: &str = "backup_cursor.meta";
 
+/// The name of a change data capture consumer's cursor, whose file in a WAL
+/// directory is `cdc_cursor_<name>.json`: 1 to 64 of `a` to `z`, `0` to `9`,
+/// `-` and `_`, so the name never leaves the directory.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CdcCursorName(String);
+
+impl CdcCursorName {
+    /// The name of the one cursor there is today.
+    pub const DEFAULT: &'static str = "default";
+
+    /// The cursor name `name`.
+    ///
+    /// # Errors
+    ///
+    /// [`WalError::InvalidCursorName`] when `name` is empty, longer than 64
+    /// characters, or holds a character other than `a` to `z`, `0` to `9`,
+    /// `-` and `_`.
+    pub fn new(name: &str) -> Result<Self, WalError> {
+        if is_cdc_cursor_name(name) {
+            Ok(Self(name.to_string()))
+        } else {
+            Err(WalError::InvalidCursorName {
+                name: name.to_string(),
+            })
+        }
+    }
+
+    /// The name of the cursor's file: `cdc_cursor_<name>.json`.
+    #[must_use]
+    pub fn file_name(&self) -> String {
+        format!("cdc_cursor_{}.json", self.0)
+    }
+}
+
+/// The cursor of the default consumer, [`CdcCursorName::DEFAULT`].
+impl Default for CdcCursorName {
+    fn default() -> Self {
+        Self(Self::DEFAULT.to_string())
+    }
+}
+
+/// Whether `name` is a valid [`CdcCursorName`].
+fn is_cdc_cursor_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_'))
+}
+
+/// Whether `name` is exactly the file name of a CDC cursor
+/// ([`CdcCursorName::file_name`]).
+#[must_use]
+pub fn is_cdc_cursor_file(name: &str) -> bool {
+    name.strip_prefix("cdc_cursor_")
+        .and_then(|rest| rest.strip_suffix(".json"))
+        .is_some_and(is_cdc_cursor_name)
+}
+
 #[cfg(feature = "async-storage")]
 mod async_log;
 #[cfg(feature = "async-storage")]

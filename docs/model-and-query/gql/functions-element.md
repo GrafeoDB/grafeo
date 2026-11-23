@@ -68,7 +68,7 @@ LIMIT 10
 
 ```sql
 -- Capture a path variable
-MATCH path = (a:Person)-[:KNOWS*]->(b:Person)
+MATCH path = TRAIL (a:Person)-[:KNOWS*]->(b:Person)
 WHERE a.name = 'Alix' AND b.name = 'Dave'
 
 -- Number of edges in the path
@@ -88,7 +88,7 @@ RETURN relationships(path) -- alias for edges()
 Test structural properties of a path:
 
 ```sql
-MATCH path = (a:Person)-[:KNOWS*]->(b:Person)
+MATCH path = TRAIL (a:Person)-[:KNOWS*]->(b:Person)
 WHERE a.name = 'Alix'
 
 -- No repeated nodes at all
@@ -103,7 +103,7 @@ RETURN isTrail(path)
 
 ```sql
 -- Practical: find only acyclic paths
-MATCH path = (a:Person)-[:KNOWS*]->(b:Person)
+MATCH path = TRAIL (a:Person)-[:KNOWS*]->(b:Person)
 WHERE a.name = 'Alix' AND isAcyclic(path)
 RETURN b.name, length(path)
 ```

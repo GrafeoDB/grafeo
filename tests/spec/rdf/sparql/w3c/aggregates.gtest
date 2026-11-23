@@ -1,0 +1,913 @@
+# W3C SPARQL 1.1 Test Suite: Aggregates
+# Generated from the W3C manifest by scripts/convert_w3c_sparql.py
+# Source: https://github.com/w3c/rdf-tests at 7b5afb91857a9c282c03d2e45d3f76485797c901
+# Copyright W3C (MIT, ERCIM, Keio, Beihang), used under the W3C test suite
+# licences: https://www.w3.org/Consortium/Legal/2008/04-testsuite-copyright.html
+# Not converted:
+#   agg08: NegativeSyntaxTest11: not a query evaluation test
+#   agg09: NegativeSyntaxTest11: not a query evaluation test
+#   agg10: NegativeSyntaxTest11: not a query evaluation test
+#   agg11: NegativeSyntaxTest11: not a query evaluation test
+#   agg12: NegativeSyntaxTest11: not a query evaluation test
+#   agg-avg-02: spec-disagreement: the result writes the computed decimal 2 in its XSD 1.0 canonical form 2.0; Grafeo writes the XSD 1.1 canonical form 2
+#   agg-err-02: spec-disagreement: the result writes the computed decimal 2 in its XSD 1.0 canonical form 2.0; Grafeo writes the XSD 1.1 canonical form 2
+#   agg-empty-group-count-graph: named graphs (qt:graphData)
+#   agg-avg-distinct: spec-disagreement: the result writes the double 1.05E3 as 1050; exact terms compare lexical forms
+#   agg-sum-distinct: spec-disagreement: the result writes the double 2.1E3 as 2100; exact terms compare lexical forms
+
+meta:
+  language: sparql
+  model: rdf
+  section: "w3c.aggregates"
+  title: W3C Aggregates
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # COUNT 1
+  - name: agg01
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/s> <http://www.example.org/p1> <http://www.example.org/o1> .
+          <http://www.example.org/s> <http://www.example.org/p1> <http://www.example.org/o2> .
+          <http://www.example.org/s> <http://www.example.org/p1> <http://www.example.org/o3> .
+          <http://www.example.org/s> <http://www.example.org/p2> <http://www.example.org/o1> .
+          <http://www.example.org/s> <http://www.example.org/p2> <http://www.example.org/o2> .
+        }
+    query: |
+      PREFIX : <http://www.example.org>
+
+      SELECT (COUNT(?O) AS ?C)
+      WHERE { ?S ?P ?O }
+    expect:
+      terms:
+        - ['"5"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # COUNT 2
+  - name: agg02
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/s> <http://www.example.org/p1> <http://www.example.org/o1> .
+          <http://www.example.org/s> <http://www.example.org/p1> <http://www.example.org/o2> .
+          <http://www.example.org/s> <http://www.example.org/p1> <http://www.example.org/o3> .
+          <http://www.example.org/s> <http://www.example.org/p2> <http://www.example.org/o1> .
+          <http://www.example.org/s> <http://www.example.org/p2> <http://www.example.org/o2> .
+        }
+    query: |
+      PREFIX : <http://www.example.org>
+
+      SELECT ?P (COUNT(?O) AS ?C)
+      WHERE { ?S ?P ?O }
+      GROUP BY ?P
+    expect:
+      terms:
+        - ['<http://www.example.org/p1>', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://www.example.org/p2>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # COUNT 3
+  - name: agg03
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/s> <http://www.example.org/p1> <http://www.example.org/o1> .
+          <http://www.example.org/s> <http://www.example.org/p1> <http://www.example.org/o2> .
+          <http://www.example.org/s> <http://www.example.org/p1> <http://www.example.org/o3> .
+          <http://www.example.org/s> <http://www.example.org/p2> <http://www.example.org/o1> .
+          <http://www.example.org/s> <http://www.example.org/p2> <http://www.example.org/o2> .
+        }
+    query: |
+      PREFIX : <http://www.example.org>
+
+      SELECT ?P (COUNT(?O) AS ?C)
+      WHERE { ?S ?P ?O }
+      GROUP BY ?P
+      HAVING (COUNT(?O) > 2 )
+    expect:
+      terms:
+        - ['<http://www.example.org/p1>', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # COUNT 4
+  - name: agg04
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/s> <http://www.example.org/p1> <http://www.example.org/o1> .
+          <http://www.example.org/s> <http://www.example.org/p1> <http://www.example.org/o2> .
+          <http://www.example.org/s> <http://www.example.org/p1> <http://www.example.org/o3> .
+          <http://www.example.org/s> <http://www.example.org/p2> <http://www.example.org/o1> .
+          <http://www.example.org/s> <http://www.example.org/p2> <http://www.example.org/o2> .
+        }
+    query: |
+      PREFIX : <http://www.example.org>
+
+      SELECT (COUNT(*) AS ?C)
+      WHERE { ?S ?P ?O }
+    expect:
+      terms:
+        - ['"5"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # COUNT 5
+  - name: agg05
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/s> <http://www.example.org/p1> <http://www.example.org/o1> .
+          <http://www.example.org/s> <http://www.example.org/p1> <http://www.example.org/o2> .
+          <http://www.example.org/s> <http://www.example.org/p1> <http://www.example.org/o3> .
+          <http://www.example.org/s> <http://www.example.org/p2> <http://www.example.org/o1> .
+          <http://www.example.org/s> <http://www.example.org/p2> <http://www.example.org/o2> .
+        }
+    query: |
+      PREFIX : <http://www.example.org>
+
+      SELECT ?P (COUNT(*) AS ?C)
+      WHERE { ?S ?P ?O }
+      GROUP BY ?P
+    expect:
+      terms:
+        - ['<http://www.example.org/p1>', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://www.example.org/p2>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # COUNT 6
+  - name: agg06
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/s> <http://www.example.org/p1> <http://www.example.org/o1> .
+          <http://www.example.org/s> <http://www.example.org/p1> <http://www.example.org/o2> .
+          <http://www.example.org/s> <http://www.example.org/p1> <http://www.example.org/o3> .
+          <http://www.example.org/s> <http://www.example.org/p2> <http://www.example.org/o1> .
+          <http://www.example.org/s> <http://www.example.org/p2> <http://www.example.org/o2> .
+        }
+    query: |
+      PREFIX : <http://www.example.org>
+
+      SELECT (COUNT(*) AS ?C)
+      WHERE { ?S ?P ?O }
+      HAVING (COUNT(*) > 0 )
+    expect:
+      terms:
+        - ['"5"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # COUNT 7
+  - name: agg07
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/s> <http://www.example.org/p1> <http://www.example.org/o1> .
+          <http://www.example.org/s> <http://www.example.org/p1> <http://www.example.org/o2> .
+          <http://www.example.org/s> <http://www.example.org/p1> <http://www.example.org/o3> .
+          <http://www.example.org/s> <http://www.example.org/p2> <http://www.example.org/o1> .
+          <http://www.example.org/s> <http://www.example.org/p2> <http://www.example.org/o2> .
+        }
+    query: |
+      PREFIX : <http://www.example.org>
+
+      SELECT ?P (COUNT(*) AS ?C)
+      WHERE { ?S ?P ?O }
+      GROUP BY ?P
+      HAVING ( COUNT(*) > 2 )
+    expect:
+      terms:
+        - ['<http://www.example.org/p1>', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # COUNT 8b
+  - name: agg08b
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/s> <http://www.example.org/p> "0"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/s> <http://www.example.org/p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/s> <http://www.example.org/p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/s> <http://www.example.org/q> "0"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/s> <http://www.example.org/q> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/s> <http://www.example.org/q> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://www.example.org/>
+
+         SELECT ?O12 (COUNT(?O1) AS ?C)
+         WHERE { ?S :p ?O1; :q ?O2 } GROUP BY ((?O1 + ?O2) AS ?O12)
+         ORDER BY ?O12
+    expect:
+      terms:
+        - ['"0"^^<http://www.w3.org/2001/XMLSchema#integer>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"2"^^<http://www.w3.org/2001/XMLSchema#integer>', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"3"^^<http://www.w3.org/2001/XMLSchema#integer>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"4"^^<http://www.w3.org/2001/XMLSchema#integer>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # GROUP_CONCAT 1
+  - name: agg_groupconcat_01
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/s> <http://www.example.org/p1> "1" .
+          <http://www.example.org/s> <http://www.example.org/p1> "22" .
+          <http://www.example.org/s> <http://www.example.org/p2> "aaa" .
+          <http://www.example.org/s> <http://www.example.org/p2> "bb" .
+          <http://www.example.org/s> <http://www.example.org/p2> "c" .
+        }
+    query: |
+      PREFIX : <http://www.example.org/>
+      ASK {
+          {SELECT (GROUP_CONCAT(?o) AS ?g) WHERE {
+              [] :p1 ?o
+          }}
+          FILTER(?g = "1 22" || ?g = "22 1")
+      }
+    expect:
+      rows:
+        - [true]
+
+  # GROUP_CONCAT 2
+  - name: agg_groupconcat_02
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/s> <http://www.example.org/p1> "1" .
+          <http://www.example.org/s> <http://www.example.org/p1> "22" .
+          <http://www.example.org/s> <http://www.example.org/p2> "aaa" .
+          <http://www.example.org/s> <http://www.example.org/p2> "bb" .
+          <http://www.example.org/s> <http://www.example.org/p2> "c" .
+        }
+    query: |
+      PREFIX : <http://www.example.org/>
+      SELECT (COUNT(*) AS ?c) {
+          {SELECT ?p (GROUP_CONCAT(?o) AS ?g) WHERE {
+              [] ?p ?o
+          } GROUP BY ?p}
+          FILTER(
+              (?p = :p1 && (?g = "1 22" || ?g = "22 1"))
+              || (?p = :p2 && (?g = "aaa bb c" || ?g = "aaa c bb" || ?g = "bb aaa c" || ?g = "bb c aaa" || ?g = "c aaa bb" || ?g = "c bb aaa"))
+          )
+      }
+    expect:
+      terms:
+        - ['"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # GROUP_CONCAT with SEPARATOR
+  - name: agg_groupconcat_03
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/s> <http://www.example.org/p1> "1" .
+          <http://www.example.org/s> <http://www.example.org/p1> "22" .
+          <http://www.example.org/s> <http://www.example.org/p2> "aaa" .
+          <http://www.example.org/s> <http://www.example.org/p2> "bb" .
+          <http://www.example.org/s> <http://www.example.org/p2> "c" .
+        }
+    query: |
+      PREFIX : <http://www.example.org/>
+      ASK {
+          {SELECT (GROUP_CONCAT(?o;SEPARATOR=":") AS ?g) WHERE {
+              [] :p1 ?o
+          }}
+          FILTER(?g = "1:22" || ?g = "22:1")
+      }
+    expect:
+      rows:
+        - [true]
+
+  # GROUP_CONCAT with same language tag
+  - name: agg_groupconcat_04
+    query: |
+      PREFIX : <http://www.example.org/>
+      ASK {
+          {SELECT (GROUP_CONCAT(?o) AS ?g) WHERE {
+              VALUES ?o { "1"@en "2"@en }
+          }}
+          FILTER(?g = "1 2" || ?g = "2 1")
+      }
+    expect:
+      rows:
+        - [true]
+
+  # GROUP_CONCAT with different language tags
+  - name: agg_groupconcat_05
+    query: |
+      PREFIX : <http://www.example.org/>
+      ASK {
+          {SELECT (GROUP_CONCAT(?o) AS ?g) WHERE {
+              VALUES ?o { "1"@en "2"@fr }
+          }}
+          FILTER(?g = "1 2" || ?g = "2 1")
+      }
+    expect:
+      rows:
+        - [true]
+
+  # GROUP_CONCAT with one element
+  - name: agg_groupconcat_06
+    query: |
+      PREFIX : <http://www.example.org/>
+      ASK {
+          {SELECT (GROUP_CONCAT(?o) AS ?g) WHERE {
+              VALUES ?o { "1"@en }
+          }}
+          FILTER(?g = "1")
+      }
+    expect:
+      rows:
+        - [true]
+
+  # SUM
+  - name: agg_sum_01
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/decimals> <http://www.example.org/dec> "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "3.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "1.0E2"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "2.0E3"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "3.0E4"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/ints> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed1> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed1> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed2> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed2> <http://www.example.org/double> "2.0E-1"^^<http://www.w3.org/2001/XMLSchema#double> .
+        }
+    query: |
+      PREFIX : <http://www.example.org/>
+      SELECT (SUM(?o) AS ?sum)
+      WHERE {
+          ?s :dec ?o
+      }
+    expect:
+      terms:
+        - ['"11.1"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+
+  # SUM with GROUP BY
+  - name: agg_sum_02
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/decimals> <http://www.example.org/dec> "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "3.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "1.0E2"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "2.0E3"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "3.0E4"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/ints> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed1> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed1> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed2> <http://www.example.org/dec> "0.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed2> <http://www.example.org/double> "2E-1"^^<http://www.w3.org/2001/XMLSchema#double> .
+        }
+    query: |
+      PREFIX : <http://www.example.org/>
+      SELECT ?s (SUM(?o) AS ?sum)
+      WHERE {
+          ?s ?p ?o
+      }
+      GROUP BY ?s
+    expect:
+      terms:
+        - ['<http://www.example.org/ints>', '"6"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://www.example.org/decimals>', '"6.7"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://www.example.org/doubles>', '"3.21E4"^^<http://www.w3.org/2001/XMLSchema#double>']
+        - ['<http://www.example.org/mixed1>', '"3.2"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://www.example.org/mixed2>', '"4.0E-1"^^<http://www.w3.org/2001/XMLSchema#double>']
+
+  # AVG
+  - name: agg_avg_01
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/decimals> <http://www.example.org/dec> "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "3.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "1.0E2"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "2.0E3"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "3.0E4"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/ints> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed1> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed1> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed2> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed2> <http://www.example.org/double> "2.0E-1"^^<http://www.w3.org/2001/XMLSchema#double> .
+        }
+    query: |
+      PREFIX : <http://www.example.org/>
+      SELECT (AVG(?o) AS ?avg)
+      WHERE {
+          ?s :dec ?o
+      }
+    expect:
+      terms:
+        - ['"2.22"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+
+  # AVG with empty group (value defined to be 0)
+  - name: agg_avg_03
+    query: |
+      SELECT (AVG(?o) AS ?avg)
+      WHERE { ?s ?p ?o }
+    expect:
+      terms:
+        - ['"0"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # MIN
+  - name: agg_min_01
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/decimals> <http://www.example.org/dec> "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "3.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "1.0E2"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "2.0E3"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "3.0E4"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/ints> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed1> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed1> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed2> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed2> <http://www.example.org/double> "2.0E-1"^^<http://www.w3.org/2001/XMLSchema#double> .
+        }
+    query: |
+      PREFIX : <http://www.example.org/>
+      SELECT (MIN(?o) AS ?min)
+      WHERE {
+          ?s :dec ?o
+      }
+    expect:
+      terms:
+        - ['"1.0"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+
+  # MIN with GROUP BY
+  - name: agg_min_02
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/decimals> <http://www.example.org/dec> "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "3.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "1.0E2"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "2.0E3"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "3.0E4"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/ints> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed1> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed1> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed2> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed2> <http://www.example.org/double> "2.0E-1"^^<http://www.w3.org/2001/XMLSchema#double> .
+        }
+    query: |
+      PREFIX : <http://www.example.org/>
+      SELECT ?s (MIN(?o) AS ?min)
+      WHERE {
+          ?s ?p ?o
+      }
+      GROUP BY ?s
+    expect:
+      terms:
+        - ['<http://www.example.org/ints>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://www.example.org/decimals>', '"1.0"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://www.example.org/doubles>', '"1.0E2"^^<http://www.w3.org/2001/XMLSchema#double>']
+        - ['<http://www.example.org/mixed1>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://www.example.org/mixed2>', '"2.0E-1"^^<http://www.w3.org/2001/XMLSchema#double>']
+
+  # MAX
+  - name: agg_max_01
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/decimals> <http://www.example.org/dec> "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "3.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "1.0E2"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "2.0E3"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "3.0E4"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/ints> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed1> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed1> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed2> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed2> <http://www.example.org/double> "2.0E-1"^^<http://www.w3.org/2001/XMLSchema#double> .
+        }
+    query: |
+      PREFIX : <http://www.example.org/>
+      SELECT (MAX(?o) AS ?max)
+      WHERE {
+          ?s ?p ?o
+      }
+    expect:
+      terms:
+        - ['"3.0E4"^^<http://www.w3.org/2001/XMLSchema#double>']
+
+  # MAX with GROUP BY
+  - name: agg_max_02
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/decimals> <http://www.example.org/dec> "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "3.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "1.0E2"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "2.0E3"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "3.0E4"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/ints> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed1> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed1> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed2> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed2> <http://www.example.org/double> "2.0E-1"^^<http://www.w3.org/2001/XMLSchema#double> .
+        }
+    query: |
+      PREFIX : <http://www.example.org/>
+      SELECT ?s (MAX(?o) AS ?max)
+      WHERE {
+          ?s ?p ?o
+      }
+      GROUP BY ?s
+    expect:
+      terms:
+        - ['<http://www.example.org/ints>', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://www.example.org/decimals>', '"3.5"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://www.example.org/doubles>', '"3.0E4"^^<http://www.w3.org/2001/XMLSchema#double>']
+        - ['<http://www.example.org/mixed1>', '"2.2"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://www.example.org/mixed2>', '"2.2"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+
+  # SAMPLE
+  - name: agg_sample_01
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/decimals> <http://www.example.org/dec> "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "3.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "1.0E2"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "2.0E3"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "3.0E4"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/ints> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed1> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed1> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed2> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed2> <http://www.example.org/double> "2.0E-1"^^<http://www.w3.org/2001/XMLSchema#double> .
+        }
+    query: |
+      PREFIX : <http://www.example.org/>
+      ASK {
+          {
+              SELECT (SAMPLE(?o) AS ?sample)
+              WHERE {
+                  ?s :dec ?o
+              }
+          }
+          FILTER(?sample = 1.0 || ?sample = 2.2 || ?sample = 3.5)
+      }
+    expect:
+      rows:
+        - [true]
+
+  # Error in AVG
+  - name: agg_err_01
+    setup:
+      - |
+        INSERT DATA {
+          <http://example.com/data/#x> <http://example.com/data/#p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.com/data/#x> <http://example.com/data/#p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.com/data/#x> <http://example.com/data/#p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.com/data/#x> <http://example.com/data/#p> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.com/data/#y> <http://example.com/data/#p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.com/data/#y> <http://example.com/data/#p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.com/data/#y> <http://example.com/data/#p> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://example.com/data/#y> <http://example.com/data/#p> _:b0 .
+          <http://example.com/data/#z> <http://example.com/data/#p> "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.com/data/#z> <http://example.com/data/#p> "2.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.com/data/#z> <http://example.com/data/#p> "3.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://example.com/data/#z> <http://example.com/data/#p> "4"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://example.com/data/#>
+      SELECT ?g (AVG(?p) AS ?avg) ((MIN(?p) + MAX(?p)) / 2 AS ?c)
+      WHERE {
+        ?g :p ?p .
+      }
+      GROUP BY ?g
+    expect:
+      terms:
+        - ['<http://example.com/data/#x>', '"2.5"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"2.5"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://example.com/data/#y>', null, null]
+        - ['<http://example.com/data/#z>', '"2.5"^^<http://www.w3.org/2001/XMLSchema#decimal>', '"2.5"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+
+  # agg on empty set, explicit grouping
+  - name: agg_empty_group_max_1
+    query: |
+      PREFIX ex: <http://example.com/>
+      SELECT ?x (MAX(?value) AS ?max)
+      WHERE {
+          ?x ex:p ?value
+      } GROUP BY ?x
+    expect:
+      empty: true
+
+  # agg on empty set, no grouping
+  - name: agg_empty_group_max_2
+    query: |
+      PREFIX ex: <http://example.com/>
+      SELECT (MAX(?value) AS ?max)
+      WHERE {
+          ?x ex:p ?value
+      }
+    expect:
+      terms:
+        - [null]
+
+  # COUNT: no match, with group
+  - name: agg_empty_group_count_1
+    query: |
+      PREFIX : <http://example/>
+
+      SELECT (count(*) AS ?C)
+      WHERE {
+         ?s :p ?x
+      }
+      GROUP BY ?s
+    expect:
+      empty: true
+
+  # COUNT: no match, no group
+  - name: agg_empty_group_count_2
+    query: |
+      PREFIX : <http://example/>
+
+      SELECT (count(*) AS ?C)
+      WHERE {
+         ?s :p ?x
+      }
+    expect:
+      terms:
+        - ['"0"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # HAVING: multiple conditions
+  - name: agg_multiple_having
+    xfail:
+      spec: "W3C SPARQL 1.1 aggregates/agg-multiple-having"
+      issue: fix in 0.6.5
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/decimals> <http://www.example.org/dec> "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "3.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "1.0E2"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "2.0E3"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "3.0E4"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/ints> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed1> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed1> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed2> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed2> <http://www.example.org/double> "2.0E-1"^^<http://www.w3.org/2001/XMLSchema#double> .
+        }
+    query: |
+      PREFIX : <http://www.example.org/>
+      SELECT ?s
+      WHERE {
+          ?s ?p ?o
+      }
+      GROUP BY ?s
+      HAVING (COUNT(*) > 1) (COUNT(*) < 3)
+    expect:
+      terms:
+        - ['<http://www.example.org/mixed1>']
+        - ['<http://www.example.org/mixed2>']
+
+  # GROUP BY with a function
+  - name: agg_group_fn
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/decimals> <http://www.example.org/dec> "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "3.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "1.0E2"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "2.0E3"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "3.0E4"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/ints> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed1> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed1> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed2> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed2> <http://www.example.org/double> "2.0E-1"^^<http://www.w3.org/2001/XMLSchema#double> .
+        }
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?i
+      WHERE {
+          ?s ?p ?o
+      }
+      GROUP BY (xsd:integer(?o) AS ?i)
+    expect:
+      terms:
+        - ['"0"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"3"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"100"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"2000"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['"30000"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # GROUP BY with a built-in function
+  - name: agg_group_builtin
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/decimals> <http://www.example.org/dec> "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "3.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "1.0E2"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "2.0E3"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "3.0E4"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/ints> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed1> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed1> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed2> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed2> <http://www.example.org/double> "2.0E-1"^^<http://www.w3.org/2001/XMLSchema#double> .
+        }
+    query: |
+      PREFIX : <http://www.example.org/>
+      SELECT ?d (COUNT(*) AS ?c)
+      WHERE {
+          ?s ?p ?o
+      }
+      GROUP BY (DATATYPE(?o) AS ?d)
+    expect:
+      terms:
+        - ['<http://www.w3.org/2001/XMLSchema#decimal>', '"5"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://www.w3.org/2001/XMLSchema#double>', '"4"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://www.w3.org/2001/XMLSchema#integer>', '"4"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # COUNT DISTINCT with GROUP BY
+  - name: agg_count_distinct
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/decimals> <http://www.example.org/dec> "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "1.0E2"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "2.0E3"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/ints> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed1> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed1> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://www.example.org/>
+      SELECT ?s (COUNT(DISTINCT ?o) AS ?count) WHERE {
+          ?s ?p ?o
+      } GROUP BY ?s
+    expect:
+      terms:
+        - ['<http://www.example.org/ints>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://www.example.org/decimals>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://www.example.org/doubles>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://www.example.org/mixed1>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # COUNT(DISTINCT *) with GROUP BY
+  - name: agg_count_rows_distinct
+    xfail:
+      spec: "W3C SPARQL 1.1 aggregates/agg-count-rows-distinct"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/decimals> <http://www.example.org/dec> "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "1.0E2"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "2.0E3"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/ints> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed1> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed1> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://www.example.org/>
+      SELECT ?s (COUNT(DISTINCT *) AS ?count) WHERE {
+          ?s ?p ?o
+      } GROUP BY ?s
+    expect:
+      terms:
+        - ['<http://www.example.org/ints>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://www.example.org/decimals>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://www.example.org/doubles>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://www.example.org/mixed1>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # GROUP_CONCAT DISTINCT
+  - name: agg_groupconcat_distinct
+    query: |
+      PREFIX : <http://www.example.org/>
+      ASK {
+          {SELECT (GROUP_CONCAT(DISTINCT ?o) AS ?g) WHERE {
+              VALUES ?o { "1" "2" "1" }
+          }}
+          FILTER(?g = "1 2" || ?g = "2 1")
+      }
+    expect:
+      rows:
+        - [true]
+
+  # MAX DISTINCT with GROUP BY
+  - name: agg_max_distinct
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/decimals> <http://www.example.org/dec> "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "1.0E2"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "2.0E3"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/ints> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed1> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed1> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://www.example.org/>
+      SELECT ?s (MAX(DISTINCT ?o) AS ?max)
+      WHERE {
+          ?s ?p ?o
+      }
+      GROUP BY ?s
+    expect:
+      terms:
+        - ['<http://www.example.org/ints>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://www.example.org/decimals>', '"2.2"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://www.example.org/doubles>', '"2.0E3"^^<http://www.w3.org/2001/XMLSchema#double>']
+        - ['<http://www.example.org/mixed1>', '"2.2"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+
+  # MIN DISTINCT with GROUP BY
+  - name: agg_min_distinct
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/decimals> <http://www.example.org/dec> "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "1.0E2"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "2.0E3"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/ints> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed1> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed1> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://www.example.org/>
+      SELECT ?s (MIN(DISTINCT ?o) AS ?min)
+      WHERE {
+          ?s ?p ?o
+      }
+      GROUP BY ?s
+    expect:
+      terms:
+        - ['<http://www.example.org/ints>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://www.example.org/decimals>', '"1.0"^^<http://www.w3.org/2001/XMLSchema#decimal>']
+        - ['<http://www.example.org/doubles>', '"1.0E2"^^<http://www.w3.org/2001/XMLSchema#double>']
+        - ['<http://www.example.org/mixed1>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # SAMPLE DISTINCT
+  - name: agg_sample_distinct
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/decimals> <http://www.example.org/dec> "1.0"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/decimals> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "1.0E2"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/doubles> <http://www.example.org/double> "2.0E3"^^<http://www.w3.org/2001/XMLSchema#double> .
+          <http://www.example.org/ints> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/ints> <http://www.example.org/int> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/mixed1> <http://www.example.org/dec> "2.2"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://www.example.org/mixed1> <http://www.example.org/int> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      PREFIX : <http://www.example.org/>
+      ASK {
+          {
+              SELECT (SAMPLE(DISTINCT ?o) AS ?sample)
+              WHERE {
+                  ?s :dec ?o
+              }
+          }
+          FILTER(?sample = 1.0 || ?sample = 2.2 || ?sample = 3.5)
+      }
+    expect:
+      rows:
+        - [true]

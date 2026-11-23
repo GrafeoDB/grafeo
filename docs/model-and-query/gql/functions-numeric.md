@@ -49,10 +49,18 @@ RETURN sign(42)          -- 1
 
 ## Power
 
+`POWER(b, x)` is ISO GQL's power function, and the conformant way to write a power:
+
 ```sql
 RETURN power(2, 10)      -- 1024.0
 RETURN pow(9, 0.5)       -- 3.0 (square root)
+RETURN power(2, power(3, 2))   -- 512.0
 ```
+
+`b ^ x` is a Grafeo extension with the same meaning, binding tighter than `*`. ISO GQL has
+no power operator, so it does not say how a chain groups: `2 ^ 3 ^ 2` is a syntax error,
+and parentheses say which power comes first (`(2 ^ 3) ^ 2` is 64.0, `2 ^ (3 ^ 2)` is
+512.0). Cypher reads the same chain from the left, as openCypher does.
 
 ## Logarithmic and Exponential
 

@@ -95,9 +95,12 @@ pub struct BufferManager {
     shutdown: AtomicBool,
 }
 
+/// The smallest grant a settle rounds to, and the smallest grant step.
+const GRANT_FLOOR: usize = 4 << 10;
+
 /// The grant step of a manager of `budget` bytes (see [`BufferManager::grant_step`]).
 fn grant_step_of(budget: usize) -> usize {
-    (budget / 64).clamp(4 << 10, GRANT_STEP)
+    (budget / 64).clamp(GRANT_FLOOR, GRANT_STEP)
 }
 
 impl BufferManager {
@@ -194,31 +197,77 @@ impl BufferManager {
 
     /// Brings `grant` (an empty one of `region` from this manager when it is `None`) to cover
     /// `counted` bytes whatever the limit, for memory a part holds already (a commit's, a read's,
-    /// a load's): it grows to the step at or above `counted` when short, and gives back what it
-    /// holds two steps past `counted`, so `counted <= size < counted + 2 * step` (the
-    /// [`grant_step`](Self::grant_step)). A
-    /// compare while it is within that bound; an atomic only when it crosses a step.
+    /// a load's): to [`settled_size`](Self::settled_size). A compare while the grant is within
+    /// its bound; an atomic only when it crosses one.
     pub fn settle_forced(
         self: &Arc<Self>,
         grant: &mut Option<MemoryGrant>,
         region: MemoryRegion,
         counted: usize,
     ) {
-        let grant_step = self.grant_step;
-        let step = |bytes: usize| {
-            bytes
-                .checked_next_multiple_of(grant_step)
-                .unwrap_or(usize::MAX)
-        };
         let held = grant.as_ref().map_or(0, MemoryGrant::size);
-        if held < counted {
+        let size = self.settled_size(held, counted);
+        if size > held {
             grant
                 .get_or_insert_with(|| self.empty_grant(region))
-                .grow_forced(step(counted).saturating_sub(held));
-        } else if held - counted >= 2 * grant_step
+                .grow_forced(size - held);
+        } else if size < held
             && let Some(grant) = grant.as_mut()
         {
-            grant.shrink(held.saturating_sub(step(counted.saturating_add(grant_step))));
+            grant.shrink(held - size);
+        }
+    }
+
+    /// The size a grant of `held` bytes settles to for `counted` bytes (see
+    /// [`settle_forced`](Self::settle_forced)): [`grant_size`](Self::grant_size) of `counted`
+    /// when it is short. Otherwise it keeps what it holds, unless the count is below one step
+    /// and the grant holds more than the rounding of twice its rounding (or of 8 KiB), when it
+    /// shrinks to the rounding, or the count is larger and the grant holds two steps past it,
+    /// when it shrinks to the step at or above `counted` plus one step. So a count that moves
+    /// back and forth across a boundary does not settle on every call. Below one step a grant
+    /// holds at most the rounding of twice its rounding (twice it at a step that is a power of
+    /// two, up to two steps otherwise), above it less than two steps past `counted`.
+    #[must_use]
+    pub fn settled_size(&self, held: usize, counted: usize) -> usize {
+        let step = self.grant_step;
+        if held < counted {
+            self.grant_size(counted)
+        } else if counted < step {
+            let rounded = self.grant_size(counted);
+            // The rounding of twice the rounding, not twice it: at a step that is no power of
+            // two an admit's want rounds up to the step, and must not shrink back at the settle.
+            if held > self.grant_size(2 * rounded.max(GRANT_FLOOR)) {
+                rounded
+            } else {
+                held
+            }
+        } else if held - counted >= 2 * step {
+            self.grant_size(counted.saturating_add(step))
+        } else {
+            held
+        }
+    }
+
+    /// The size a grant of `bytes` rounds up to: nothing for nothing; below one
+    /// [`grant_step`](Self::grant_step), the next power of two, at least 4 KiB and at most the
+    /// step, so a small holder takes at most twice what it counts (or 4 KiB); from one step up,
+    /// the next multiple of the step, so a large one takes less than a step more. Saturating.
+    #[must_use]
+    pub fn grant_size(&self, bytes: usize) -> usize {
+        Self::grant_size_by(self.grant_step, bytes)
+    }
+
+    /// [`grant_size`](Self::grant_size) under grants that grow by `step` bytes instead of this
+    /// manager's step: the same rule for a holder with a smaller step of its own (a statement
+    /// under a small query memory limit). A step below the 4 KiB floor rounds to the step. The
+    /// step is never 0 (a statement's is at least 1); at 0 every grant would saturate.
+    #[must_use]
+    pub fn grant_size_by(step: usize, bytes: usize) -> usize {
+        debug_assert!(step > 0, "a grant step is never 0");
+        match bytes {
+            0 => 0,
+            small if small < step => small.next_power_of_two().max(GRANT_FLOOR).min(step),
+            large => large.checked_next_multiple_of(step).unwrap_or(usize::MAX),
         }
     }
 
@@ -726,19 +775,135 @@ mod tests {
         assert_eq!(BufferManager::with_budget(1).grant_step(), 4 << 10);
     }
 
-    /// A forced settle grows and shrinks by the manager's step.
+    /// A forced settle grows and shrinks by the manager's step from one step up.
     #[test]
     fn a_forced_settle_keeps_to_the_managers_step() {
         let manager = BufferManager::with_budget(4 << 20);
         let step = manager.grant_step();
         let mut grant = None;
         manager.settle_forced(&mut grant, MemoryRegion::GraphStorage, 1);
-        assert_eq!(grant.as_ref().map(MemoryGrant::size), Some(step));
+        assert_eq!(grant.as_ref().map(MemoryGrant::size), Some(4 << 10));
         manager.settle_forced(&mut grant, MemoryRegion::GraphStorage, 5 * step);
         assert_eq!(grant.as_ref().map(MemoryGrant::size), Some(5 * step));
         manager.settle_forced(&mut grant, MemoryRegion::GraphStorage, step);
         assert_eq!(grant.as_ref().map(MemoryGrant::size), Some(2 * step));
     }
+
+    /// The size a forced settle of `counted` bytes grows an empty grant to.
+    fn settled(manager: &Arc<BufferManager>, counted: usize) -> usize {
+        let mut grant = None;
+        manager.settle_forced(&mut grant, MemoryRegion::GraphStorage, counted);
+        grant.as_ref().map_or(0, MemoryGrant::size)
+    }
+
+    /// Below one step a grant rounds to the next power of two, at least 4 KiB (at most the
+    /// step); from one step up, to the next multiple of the step.
+    #[test]
+    fn a_small_grant_rounds_to_a_power_of_two() {
+        let manager = BufferManager::with_budget(64 << 20);
+        let step = manager.grant_step();
+        assert_eq!(step, 1 << 20);
+        for (counted, size) in [
+            (0, 0),
+            (1, 4 << 10),
+            (4 << 10, 4 << 10),
+            ((4 << 10) + 1, 8 << 10),
+            (step - 1, step),
+            (step, step),
+            (step + 1, 2 * step),
+        ] {
+            assert_eq!(settled(&manager, counted), size, "{counted} bytes counted");
+        }
+        // A step that is not a power of two caps the rounding below it.
+        let manager = BufferManager::with_budget(3 << 20);
+        let step = manager.grant_step();
+        assert_eq!(step, 48 << 10);
+        assert_eq!(settled(&manager, step - 1), step);
+        assert_eq!(settled(&manager, (32 << 10) + 1), step);
+        assert_eq!(settled(&manager, step + 1), 2 * step);
+        assert_eq!(manager.grant_size(usize::MAX), usize::MAX, "it saturates");
+    }
+
+    /// The rule at a step of the caller's: a step below the 4 KiB floor rounds to the step (it
+    /// does not panic), and one that is no power of two caps the rounding below it.
+    #[test]
+    fn the_grant_rule_runs_at_any_step() {
+        for (step, bytes, size) in [
+            (1, 1, 1),
+            (1, 5, 5),
+            (1000, 1, 1000),
+            (1000, 999, 1000),
+            (1000, 1001, 2000),
+            (15_625, 10_000, 15_625),
+            (15_625, 4_000, 4 << 10),
+            (16 << 10, 17 << 10, 32 << 10),
+            (16 << 10, 33 << 10, 48 << 10),
+        ] {
+            assert_eq!(
+                BufferManager::grant_size_by(step, bytes),
+                size,
+                "{bytes} bytes at a step of {step}"
+            );
+        }
+    }
+
+    /// A small grant shrinks only once it holds more than the rounding of twice its rounded
+    /// size, so counts that go back and forth across a boundary settle a bounded number of
+    /// times, at a step that is a power of two and at one that is not.
+    #[test]
+    fn a_small_grant_shrinks_with_hysteresis() {
+        let size = |grant: &Option<MemoryGrant>| grant.as_ref().map_or(0, MemoryGrant::size);
+        // A step that is a power of two (1 MiB), and one that is not (48 KiB): across the
+        // largest power of two below it and the step, a count settles a bounded number of times.
+        for budget in [64 << 20, 3 << 20] {
+            let manager = BufferManager::with_budget(budget);
+            let step = manager.grant_step();
+            let mut grant = None;
+            for (low, high) in [
+                (8 << 10, (8 << 10) + 1),
+                ((4 << 10) - 1, (4 << 10) + 1),
+                (step, step + 1),
+                (step - 1, step + 1),
+                (30 << 10, 49 << 10),
+                (28 << 10, 56 << 10),
+            ] {
+                let mut changes = 0;
+                let mut last = size(&grant);
+                for round in 0..100 {
+                    let counted = if round % 2 == 0 { high } else { low };
+                    manager.settle_forced(&mut grant, MemoryRegion::GraphStorage, counted);
+                    assert!(size(&grant) >= counted, "{counted} bytes covered");
+                    if size(&grant) != last {
+                        changes += 1;
+                        last = size(&grant);
+                    }
+                }
+                assert!(
+                    changes <= 2,
+                    "{low} and {high} at a {step}-byte step: {changes} settles moved the grant"
+                );
+            }
+            drop(grant);
+        }
+        let manager = BufferManager::with_budget(64 << 20);
+        let step = manager.grant_step();
+        // Held at twice the rounded size, a grant stays; past it, it shrinks to that size.
+        let mut grant = None;
+        manager.settle_forced(&mut grant, MemoryRegion::GraphStorage, 64 << 10);
+        manager.settle_forced(&mut grant, MemoryRegion::GraphStorage, 32 << 10);
+        assert_eq!(size(&grant), 64 << 10);
+        manager.settle_forced(&mut grant, MemoryRegion::GraphStorage, 16 << 10);
+        assert_eq!(size(&grant), 16 << 10);
+        // A large grant whose count falls below a step shrinks to the small rounding.
+        manager.settle_forced(&mut grant, MemoryRegion::GraphStorage, 5 * step);
+        manager.settle_forced(&mut grant, MemoryRegion::GraphStorage, 1);
+        assert_eq!(size(&grant), 4 << 10);
+        manager.settle_forced(&mut grant, MemoryRegion::GraphStorage, 0);
+        assert_eq!(size(&grant), 4 << 10, "the 4 KiB floor stays held at 0");
+        drop(grant);
+        assert_eq!(manager.stats().total_allocated, 0);
+    }
+
     use crate::memory::buffer::consumer::priorities;
     use std::sync::atomic::AtomicUsize;
 

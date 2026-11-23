@@ -1,0 +1,370 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/expressions/literals/Literals8.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.Literals8"
+  title: "Literals8 - Maps"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Return an empty map
+  - name: s1_return_an_empty_map
+    query: |
+      RETURN {} AS literal
+    expect:
+      values: |
+        | literal |
+        | {} |
+      side_effects: {}
+
+  # [2] Return a map containing one value with alphabetic lower case key
+  - name: s2_return_a_map_containing_one_value_with_alphabetic_lower_case_key
+    query: |
+      RETURN {abc: 1} AS literal
+    expect:
+      values: |
+        | literal |
+        | {abc: 1} |
+      side_effects: {}
+
+  # [3] Return a map containing one value with alphabetic upper case key
+  - name: s3_return_a_map_containing_one_value_with_alphabetic_upper_case_key
+    query: |
+      RETURN {ABC: 1} AS literal
+    expect:
+      values: |
+        | literal |
+        | {ABC: 1} |
+      side_effects: {}
+
+  # [4] Return a map containing one value with alphabetic mixed case key
+  - name: s4_return_a_map_containing_one_value_with_alphabetic_mixed_case_key
+    query: |
+      RETURN {aBCdeF: 1} AS literal
+    expect:
+      values: |
+        | literal |
+        | {aBCdeF: 1} |
+      side_effects: {}
+
+  # [5] Return a map containing one value with alphanumeric mixed case key
+  - name: s5_return_a_map_containing_one_value_with_alphanumeric_mixed_case_key
+    query: |
+      RETURN {a1B2c3e67: 1} AS literal
+    expect:
+      values: |
+        | literal |
+        | {a1B2c3e67: 1} |
+      side_effects: {}
+
+  # [6] Return a map containing a boolean
+  - name: s6_return_a_map_containing_a_boolean
+    query: |
+      RETURN {k: false} AS literal
+    expect:
+      values: |
+        | literal |
+        | {k: false} |
+      side_effects: {}
+
+  # [7] Return a map containing a null
+  - name: s7_return_a_map_containing_a_null
+    query: |
+      RETURN {k: null} AS literal
+    expect:
+      values: |
+        | literal |
+        | {k: null} |
+      side_effects: {}
+
+  # [8] Return a map containing a integer
+  - name: s8_return_a_map_containing_a_integer
+    query: |
+      RETURN {k: 1} AS literal
+    expect:
+      values: |
+        | literal |
+        | {k: 1} |
+      side_effects: {}
+
+  # [9] Return a map containing a hexadecimal integer
+  - name: s9_return_a_map_containing_a_hexadecimal_integer
+    query: |
+      RETURN {F: -0x162CD4F6} AS literal
+    expect:
+      values: |
+        | literal |
+        | {F: -372036854} |
+      side_effects: {}
+
+  # [10] Return a map containing a octal integer
+  - name: s10_return_a_map_containing_a_octal_integer
+    query: |
+      RETURN {k: 0o2613152366} AS literal
+    expect:
+      values: |
+        | literal |
+        | {k: 372036854} |
+      side_effects: {}
+
+  # [11] Return a map containing a float
+  - name: s11_return_a_map_containing_a_float
+    query: |
+      RETURN {k: -.1e-5} AS literal
+    expect:
+      values: |
+        | literal |
+        | {k: -0.000001} |
+      side_effects: {}
+
+  # [12] Return a map containing a string
+  - name: s12_return_a_map_containing_a_string
+    query: |
+      RETURN {k: 'ab: c, as#?lßdj '} AS literal
+    expect:
+      values: |
+        | literal |
+        | {k: 'ab: c, as#?lßdj '} |
+      side_effects: {}
+
+  # [13] Return a map containing an empty map
+  - name: s13_return_a_map_containing_an_empty_map
+    query: |
+      RETURN {a: {}} AS literal
+    expect:
+      values: |
+        | literal |
+        | {a: {}} |
+      side_effects: {}
+
+  # [14] Return seven-deep nested maps
+  - name: s14_return_seven_deep_nested_maps
+    query: |
+      RETURN {a1: {a2: {a3: {a4: {a5: {a6: {}}}}}}} AS literal
+    expect:
+      values: |
+        | literal |
+        | {a1: {a2: {a3: {a4: {a5: {a6: {}}}}}}} |
+      side_effects: {}
+
+  # [15] Return 20-deep nested maps
+  - name: s15_return_20_deep_nested_maps
+    query: |
+      RETURN {a1: {a2: {a3: {a4: {a5: {a6: {a7: {a8: {a9: {a10: {a11: {a12: {a13: {a14: {a15: {a16: {a17: {a18: {a19: {}}}}}}}}}}}}}}}}}}}} AS literal
+    expect:
+      values: |
+        | literal |
+        | {a1: {a2: {a3: {a4: {a5: {a6: {a7: {a8: {a9: {a10: {a11: {a12: {a13: {a14: {a15: {a16: {a17: {a18: {a19: {}}}}}}}}}}}}}}}}}}}} |
+      side_effects: {}
+
+  # [16] Return 40-deep nested maps
+  - name: s16_return_40_deep_nested_maps
+    query: |
+      RETURN {a1: {a2: {a3: {a4: {a5: {a6: {a7: {a8: {a9: {a10: {a11: {a12: {a13: {a14: {a15: {a16: {a17: {a18: {a19: {a20: {a21: {a22: {a23: {a24: {a25: {a26: {a27: {a28: {a29: {a30: {a31: {a32: {a33: {a34: {a35: {a36: {a37: {a38: {a39: {}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}} AS literal
+    expect:
+      values: |
+        | literal |
+        | {a1: {a2: {a3: {a4: {a5: {a6: {a7: {a8: {a9: {a10: {a11: {a12: {a13: {a14: {a15: {a16: {a17: {a18: {a19: {a20: {a21: {a22: {a23: {a24: {a25: {a26: {a27: {a28: {a29: {a30: {a31: {a32: {a33: {a34: {a35: {a36: {a37: {a38: {a39: {}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}} |
+      side_effects: {}
+
+  # [17] Return a map containing real and fake nested maps
+  - name: s17_return_a_map_containing_real_and_fake_nested_maps
+    query: |
+      RETURN { a : ' { b : ' , c : { d : ' ' } , d : ' } ' } AS literal
+    expect:
+      values: |
+        | literal |
+        | {a: ' { b : ', c: {d: ' '}, d: ' } '} |
+      side_effects: {}
+
+  # [18] Return a complex map containing multiple mixed and nested values
+  - name: s18_return_a_complex_map_containing_multiple_mixed_and_nested_values
+    query: |
+      RETURN  { data: [ {
+                  id: '0001',
+                  type: 'donut',
+                  name: 'Cake',
+                  ppu: 0.55,
+                  batters:
+                      {
+                          batter:
+                              [
+                                  { id: '1001', type: 'Regular' },
+                                  { id: '1002', type: 'Chocolate' },
+                                  { id: '1003', type: 'Blueberry' },
+                                  { id: '1004', type: 'Devils Food' }
+                              ]
+                      },
+                  topping:
+                      [
+                          { id: '5001', type: 'None' },
+                          { id: '5002', type: 'Glazed' },
+                          { id: '5005', type: 'Sugar' },
+                          { id: '5007', type: 'Powdered Sugar' },
+                          { id: '5006', type: 'Chocolate Sprinkles' },
+                          { id: '5003', type: 'Chocolate' },
+                          { id: '5004', type: 'Maple' }
+                      ]
+              },
+              {
+                  id: '0002',
+                  type: 'donut',
+                  name: 'Raised',
+                  ppu: 0.55,
+                  batters:
+                      {
+                          batter:
+                              [
+                                  { id: '1001', type: 'Regular' }
+                              ]
+                      },
+                  topping:
+                      [
+                          { id: '5001', type: 'None' },
+                          { id: '5002', type: 'Glazed' },
+                          { id: '5005', type: 'Sugar' },
+                          { id: '5003', type: 'Chocolate' },
+                          { id: '5004', type: 'Maple' }
+                      ]
+              },
+              {
+                  id: '0003',
+                  type: 'donut',
+                  name: 'Old Fashioned',
+                  ppu: 0.55,
+                  batters:
+                      {
+                          batter:
+                              [
+                                  { id: '1001', type: 'Regular' },
+                                  { id: '1002', type: 'Chocolate' }
+                              ]
+                      },
+                  topping:
+                      [
+                          { id: '5001', type: 'None' },
+                          { id: '5002', type: 'Glazed' },
+                          { id: '5003', type: 'Chocolate' },
+                          { id: '5004', type: 'Maple' }
+                      ]
+              } ] } AS literal
+    expect:
+      values: |
+        | literal |
+        | {data: [{id: '0001', type: 'donut', name: 'Cake', ppu: 0.55, batters: {batter: [{id: '1001', type: 'Regular'}, {id: '1002', type: 'Chocolate'}, {id: '1003', type: 'Blueberry'}, {id: '1004', type: 'Devils Food'}]}, topping: [{id: '5001', type: 'None'}, {id: '5002', type: 'Glazed'}, {id: '5005', type: 'Sugar'}, {id: '5007', type: 'Powdered Sugar'}, {id: '5006', type: 'Chocolate Sprinkles'}, {id: '5003', type: 'Chocolate'}, {id: '5004', type: 'Maple'}]}, {id: '0002', type: 'donut', name: 'Raised', ppu: 0.55, batters: {batter: [{id: '1001', type: 'Regular'}]}, topping: [{id: '5001', type: 'None'}, {id: '5002', type: 'Glazed'}, {id: '5005', type: 'Sugar'}, {id: '5003', type: 'Chocolate'}, {id: '5004', type: 'Maple'}]}, {id: '0003', type: 'donut', name: 'Old Fashioned', ppu: 0.55, batters: {batter: [{id: '1001', type: 'Regular'}, {id: '1002', type: 'Chocolate'}]}, topping: [{id: '5001', type: 'None'}, {id: '5002', type: 'Glazed'}, {id: '5003', type: 'Chocolate'}, {id: '5004', type: 'Maple'}]}]} |
+      side_effects: {}
+
+  # [19] Fail on a map containing key starting with a number
+  # TCK: SyntaxError at compile time: UnexpectedSyntax
+  - name: s19_fail_on_a_map_containing_key_starting_with_a_number
+    query: |
+      RETURN {1B2c3e67:1} AS literal
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [20] Fail on a map containing key with symbol
+  # TCK: SyntaxError at compile time: UnexpectedSyntax
+  - name: s20_fail_on_a_map_containing_key_with_symbol
+    query: |
+      RETURN {k1#k: 1} AS literal
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [21] Fail on a map containing key with dot
+  # TCK: SyntaxError at compile time: UnexpectedSyntax
+  - name: s21_fail_on_a_map_containing_key_with_dot
+    query: |
+      RETURN {k1.k: 1} AS literal
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [22] Fail on a map containing unquoted string
+  # TCK: SyntaxError at compile time: UndefinedVariable
+  - name: s22_fail_on_a_map_containing_unquoted_string
+    query: |
+      RETURN {k1: k2} AS literal
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [23] Fail on a map containing only a comma
+  # TCK: SyntaxError at compile time: UnexpectedSyntax
+  - name: s23_fail_on_a_map_containing_only_a_comma
+    query: |
+      RETURN {, } AS literal
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [24] Fail on a map containing a value without key
+  # TCK: SyntaxError at compile time: UnexpectedSyntax
+  - name: s24_fail_on_a_map_containing_a_value_without_key
+    query: |
+      RETURN {1} AS literal
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [25] Fail on a map containing a list without key
+  # TCK: SyntaxError at compile time: UnexpectedSyntax
+  - name: s25_fail_on_a_map_containing_a_list_without_key
+    query: |
+      RETURN {[]} AS literal
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [26] Fail on a map containing a map without key
+  # TCK: SyntaxError at compile time: UnexpectedSyntax
+  - name: s26_fail_on_a_map_containing_a_map_without_key
+    query: |
+      RETURN {{}} AS literal
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [27] Fail on a nested map with non-matching braces
+  # TCK: SyntaxError at compile time: UnexpectedSyntax
+  - name: s27_fail_on_a_nested_map_with_non_matching_braces
+    query: |
+      RETURN {k: {k: {}} AS literal
+    expect:
+      gql_status: "42"
+      side_effects: {}

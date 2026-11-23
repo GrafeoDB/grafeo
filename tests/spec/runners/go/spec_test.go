@@ -94,6 +94,9 @@ type Meta struct {
 	Dataset  string
 	Requires []string
 	Tags     []string
+	// ValuesDialect is how `values:` cells read: "strict", or "tck", where a quoted cell
+	// also matches a temporal by its Cypher toString().
+	ValuesDialect string
 }
 
 // TestCase represents a single test within a .gtest file. Params holds each
@@ -104,12 +107,16 @@ type TestCase struct {
 	Query      string
 	Statements []string
 	Setup      []string
-	Params     map[string]string
-	Tags       []string
-	Requires   []string
-	Skip       string
+	// SetupGql are GQL statements run before Setup, whatever the file's language.
+	SetupGql []string
+	Params   map[string]string
+	Tags     []string
+	Requires []string
+	Skip     string
 	// Xfail is the spec and the issue of a case expected to fail (`xfail:`), nil otherwise.
 	Xfail *Xfail
+	// RunnerGap names runners that skip the case for a gap of their binding (`runner_gap:`).
+	RunnerGap *RunnerGap
 	// Probe is a runner probe (`probe:`), only in a file under a spec-probes directory.
 	Probe    string
 	Language string
@@ -123,7 +130,23 @@ type TestCase struct {
 type Xfail struct {
 	Spec  string
 	Issue string
+	// PassesIn names the runners where the case passes all the same and must (`passes_in:`).
+	PassesIn []string
 }
+
+// RunnerGap is a gap of some runners' bindings: those runners skip the case, naming the
+// reason and the issue that closes the gap.
+type RunnerGap struct {
+	Runners []string
+	Issue   string
+	Reason  string
+}
+
+// knownRunners are the runners a `runner_gap:` or `passes_in:` may name.
+var knownRunners = map[string]bool{"rust": true, "python": true, "node": true, "wasm": true, "go": true, "csharp": true, "dart": true}
+
+// sideEffectKeys are the keys of `side_effects:`, as the openCypher TCK names them.
+var sideEffectKeys = []string{"+nodes", "-nodes", "+relationships", "-relationships", "+labels", "-labels", "+properties", "-properties"}
 
 // Expect holds the expected result assertions for a test case.
 type Expect struct {
@@ -143,6 +166,15 @@ type Expect struct {
 	// result's order (by code): none without the key, so every test that runs
 	// to a result also checks that it raises no other warning.
 	Warnings []string
+	// Values is a `values:` table in the TCK's value notation, its first row the columns.
+	Values *string
+	// UnorderedLists compares every list in Values as a bag.
+	UnorderedLists bool
+	// SideEffects are the statement's expected side effects (`side_effects:`), nil when not
+	// checked; a key not named is 0.
+	SideEffects map[string]int
+	// Invalid is what is wrong with a key it reads: the test fails on it.
+	Invalid string
 	// UnknownKey is an expect key no runner reads: the test fails on it, as
 	// it would otherwise check nothing.
 	UnknownKey string
@@ -231,6 +263,10 @@ func paramValue(text string) (interface{}, error) {
 	}
 	if text == "true" || text == "false" {
 		return text == "true", nil
+	}
+	// A bare null is null; a quoted 'null' is the string
+	if text == "null" {
+		return nil, nil
 	}
 	return text, nil
 }
@@ -764,8 +800,9 @@ func parseGtestFile(path string) (*GtestFile, error) {
 
 func parseMeta(ctx *parseContext) (Meta, error) {
 	meta := Meta{
-		Language: "gql",
-		Dataset:  "empty",
+		Language:      "gql",
+		Dataset:       "empty",
+		ValuesDialect: "strict",
 	}
 	if err := expectLine(ctx, "meta:"); err != nil {
 		return meta, err
@@ -800,6 +837,11 @@ func parseMeta(ctx *parseContext) (Meta, error) {
 			meta.Requires = parseYamlList(value)
 		case "tags":
 			meta.Tags = parseYamlList(value)
+		case "values_dialect":
+			meta.ValuesDialect = unquote(value)
+			if meta.ValuesDialect != "strict" && meta.ValuesDialect != "tck" {
+				return meta, fmt.Errorf("unknown values_dialect '%s' (known: strict, tck)", meta.ValuesDialect)
+			}
 		}
 		ctx.idx++
 	}
@@ -899,6 +941,15 @@ func parseSingleTest(ctx *parseContext) (TestCase, error) {
 		case "setup":
 			ctx.idx++
 			tc.Setup = parseStringList(ctx)
+		case "setup_gql":
+			ctx.idx++
+			tc.SetupGql = parseStringList(ctx)
+		case "runner_gap":
+			gap, err := parseRunnerGap(ctx)
+			if err != nil {
+				return tc, fmt.Errorf("test '%s': %w", tc.Name, err)
+			}
+			tc.RunnerGap = gap
 		case "statements":
 			ctx.idx++
 			tc.Statements = parseStringList(ctx)
@@ -935,6 +986,18 @@ func checkMarks(tc TestCase, path string) error {
 		if strings.TrimSpace(tc.Xfail.Issue) == "" {
 			return fmt.Errorf("test '%s': an xfail names its `issue:`", tc.Name)
 		}
+	}
+	if tc.RunnerGap != nil {
+		if len(tc.RunnerGap.Runners) == 0 || strings.TrimSpace(tc.RunnerGap.Issue) == "" || strings.TrimSpace(tc.RunnerGap.Reason) == "" {
+			return fmt.Errorf("test '%s': a runner_gap names its `runners:`, `issue:` and `reason:`", tc.Name)
+		}
+	}
+	if tc.Expect.Invalid != "" {
+		return fmt.Errorf("test '%s': %s", tc.Name, tc.Expect.Invalid)
+	}
+	e := tc.Expect
+	if e.Values != nil && (len(e.Rows) > 0 || len(e.Terms) > 0 || e.Count != nil || e.Empty || e.Error != nil || e.GQLStatus != nil) {
+		return fmt.Errorf("test '%s': `values:` excludes `rows`, `terms`, `count`, `empty`, `error` and `gql_status`", tc.Name)
 	}
 	if tc.Skip != "" && tc.Xfail != nil {
 		return fmt.Errorf("test '%s': a case is either skipped or expected to fail, not both", tc.Name)
@@ -977,12 +1040,106 @@ func parseXfail(ctx *parseContext) (*Xfail, error) {
 			xfail.Spec = unquote(kv[1])
 		case kv != nil && kv[0] == "issue":
 			xfail.Issue = unquote(kv[1])
+		case kv != nil && kv[0] == "passes_in":
+			xfail.PassesIn = parseYamlList(kv[1])
+			for _, runner := range xfail.PassesIn {
+				if !knownRunners[runner] {
+					return nil, fmt.Errorf("unknown runner '%s' in passes_in", runner)
+				}
+			}
 		default:
 			return nil, fmt.Errorf("unknown xfail key at line %d: '%s'", ctx.idx+1, trimmed)
 		}
 		ctx.idx++
 	}
 	return xfail, nil
+}
+
+// nestedPairs reads the `key: value` lines indented under the key at ctx.lines[ctx.idx],
+// leaving ctx.idx past them.
+func nestedPairs(ctx *parseContext) ([][2]string, error) {
+	indent := func(line string) int { return len(line) - len(strings.TrimLeft(line, " \t")) }
+	own := indent(ctx.lines[ctx.idx])
+	ctx.idx++
+	var pairs [][2]string
+	for ctx.idx < len(ctx.lines) {
+		line := ctx.lines[ctx.idx]
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			ctx.idx++
+			continue
+		}
+		if indent(line) <= own {
+			break
+		}
+		kv := parseKV(trimmed)
+		if kv == nil {
+			return nil, fmt.Errorf("not a key at line %d: '%s'", ctx.idx+1, trimmed)
+		}
+		pairs = append(pairs, [2]string{kv[0], kv[1]})
+		ctx.idx++
+	}
+	return pairs, nil
+}
+
+// parseRunnerGap reads a `runner_gap:` at ctx.lines[ctx.idx]: its runners, issue and reason.
+func parseRunnerGap(ctx *parseContext) (*RunnerGap, error) {
+	pairs, err := nestedPairs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	gap := &RunnerGap{}
+	for _, kv := range pairs {
+		switch kv[0] {
+		case "runners":
+			gap.Runners = parseYamlList(kv[1])
+		case "issue":
+			gap.Issue = unquote(kv[1])
+		case "reason":
+			gap.Reason = unquote(kv[1])
+		default:
+			return nil, fmt.Errorf("unknown runner_gap key '%s'", kv[0])
+		}
+	}
+	for _, runner := range gap.Runners {
+		if !knownRunners[runner] {
+			return nil, fmt.Errorf("unknown runner '%s' in runner_gap", runner)
+		}
+	}
+	return gap, nil
+}
+
+// parseSideEffects reads a `side_effects:` key whose value is value: `{}`, or one key per
+// line below it. A problem goes to exp.Invalid.
+func parseSideEffects(ctx *parseContext, value string, exp *Expect) map[string]int {
+	counts := map[string]int{}
+	if value == "{}" {
+		ctx.idx++
+		return counts
+	}
+	if value != "" {
+		exp.Invalid = fmt.Sprintf("`side_effects:` is `{}` or one key per line, not '%s'", value)
+		ctx.idx++
+		return counts
+	}
+	pairs, err := nestedPairs(ctx)
+	if err != nil {
+		exp.Invalid = err.Error()
+		return counts
+	}
+	for _, kv := range pairs {
+		known := false
+		for _, key := range sideEffectKeys {
+			known = known || key == kv[0]
+		}
+		count, err := strconv.Atoi(kv[1])
+		if !known || err != nil {
+			exp.Invalid = fmt.Sprintf("bad side effect '%s: %s'", kv[0], kv[1])
+			return counts
+		}
+		counts[kv[0]] = count
+	}
+	return counts
 }
 
 // ---------------------------------------------------------------------------
@@ -1065,6 +1222,19 @@ func parseExpectBlock(ctx *parseContext) Expect {
 		case "terms":
 			ctx.idx++
 			exp.Terms = parseRows(ctx)
+		case "values":
+			if value != "|" {
+				exp.Invalid = "`values:` is a block scalar (`|`)"
+				ctx.idx++
+				break
+			}
+			table := strings.TrimSpace(parseBlockScalar(ctx))
+			exp.Values = &table
+		case "unordered_lists":
+			exp.UnorderedLists = value == "true"
+			ctx.idx++
+		case "side_effects":
+			exp.SideEffects = parseSideEffects(ctx, value, &exp)
 		default:
 			if exp.UnknownKey == "" {
 				exp.UnknownKey = key
@@ -1414,13 +1584,23 @@ func TestSpec(t *testing.T) {
 // variantQuery overrides tc.Query.
 func runSingleTest(t *testing.T, gf *GtestFile, tc TestCase, variantLang, variantQuery string, datasetsDir string) {
 	t.Helper()
+	// Every skip counts in the summary, whichever check skips the case
+	defer func() {
+		if t.Skipped() {
+			summary.skipped.Add(1)
+		}
+	}()
 
 	// Skip if test has a skip field
 	if tc.Skip != "" {
-		summary.skipped.Add(1)
 		t.Skipf("skipped in .gtest: %s", tc.Skip)
 	}
-	if tc.Xfail == nil {
+	// A gap of this binding (`runner_gap:`) skips the case here, as `skip:` does
+	if tc.RunnerGap != nil && containsString(tc.RunnerGap.Runners, "go") {
+		t.Skipf("runner gap: %s (%s)", tc.RunnerGap.Reason, tc.RunnerGap.Issue)
+	}
+	// An xfail that names this runner in `passes_in` does not hold here: the case runs
+	if tc.Xfail == nil || containsString(tc.Xfail.PassesIn, "go") {
 		runCase(t, gf, tc, variantLang, variantQuery, datasetsDir)
 		return
 	}
@@ -1555,7 +1735,13 @@ func runCase(t specT, gf *GtestFile, tc TestCase, variantLang, variantQuery stri
 		loadDataset(t, db, effectiveDataset, datasetsDir)
 	}
 
-	// Run setup queries in the file's declared language
+	// GQL statements first (the TCK's test procedures), then the setup queries in the
+	// file's declared language
+	for _, statement := range tc.SetupGql {
+		if _, err := executeQuery(db, "gql", statement); err != nil {
+			t.Fatalf("setup_gql statement failed: %v\nStatement: %s", err, statement)
+		}
+	}
 	setupLang := gf.Meta.Language
 	for _, setupQ := range tc.Setup {
 		if _, err := executeQuery(db, setupLang, setupQ); err != nil {
@@ -1592,9 +1778,18 @@ func runCase(t specT, gf *GtestFile, tc TestCase, variantLang, variantQuery stri
 		t.Fatalf("%v", err)
 	}
 
+	// The graph before the statements, when their side effects are checked
+	var before graphObservation
+	if exp.SideEffects != nil {
+		before = observeGraph(t, db)
+	}
+
 	// Error tests
 	if exp.Error != nil || exp.GQLStatus != nil {
 		runErrorTest(t, db, language, queries, exp.Error, exp.GQLStatus, paramsJSON)
+		if before != nil {
+			assertSideEffects(t, before, observeGraph(t, db), exp.SideEffects)
+		}
 		return
 	}
 
@@ -1607,9 +1802,6 @@ func runCase(t specT, gf *GtestFile, tc TestCase, variantLang, variantQuery stri
 			_, fireErr = executeQuery(db, language, q)
 		}
 		if fireErr != nil {
-			if isUnsupportedLanguageError(fireErr) {
-				t.Skipf("Language %q not available: %v", language, fireErr)
-			}
 			t.Fatalf("Statement failed: %v\nQuery: %s", fireErr, q)
 		}
 	}
@@ -1622,14 +1814,21 @@ func runCase(t specT, gf *GtestFile, tc TestCase, variantLang, variantQuery stri
 		result, err = executeQuery(db, language, queries[len(queries)-1])
 	}
 	if err != nil {
-		if isUnsupportedLanguageError(err) {
-			t.Skipf("Language %q not available: %v", language, err)
-		}
 		t.Fatalf("Query failed: %v\nQuery: %s", err, queries[len(queries)-1])
+	}
+
+	if before != nil {
+		assertSideEffects(t, before, observeGraph(t, db), exp.SideEffects)
 	}
 
 	// The warnings, also when none are expected
 	assertWarnings(t, result, exp.Warnings)
+
+	// Typed rows in the TCK's value notation
+	if exp.Values != nil {
+		assertValues(t, db, result, *exp.Values, exp.Ordered, exp.UnorderedLists, gf.Meta.ValuesDialect == "tck")
+		return
+	}
 
 	// Column assertion (checked before value assertions)
 	if len(exp.Columns) > 0 {
@@ -1675,9 +1874,6 @@ func runErrorTest(t specT, db *grafeo.Database, language string, queries []strin
 			_, setupErr = executeQuery(db, language, q)
 		}
 		if setupErr != nil {
-			if isUnsupportedLanguageError(setupErr) {
-				t.Skipf("Language %q not available: %v", language, setupErr)
-			}
 			t.Fatalf("Pre-error statement failed unexpectedly: %v\nQuery: %s", setupErr, q)
 		}
 	}
@@ -1707,7 +1903,10 @@ func runErrorTest(t specT, db *grafeo.Database, language string, queries []strin
 		if !errors.As(err, &grafeoErr) || grafeoErr.GQLStatus == "" {
 			t.Fatalf("Error %q (%T) has no GQLSTATUS", errMsg, err)
 		}
-		if grafeoErr.GQLStatus != *expectedStatus {
+		// Two characters name a class (42), five a status (42001)
+		matches := grafeoErr.GQLStatus == *expectedStatus ||
+			(len(*expectedStatus) == 2 && strings.HasPrefix(grafeoErr.GQLStatus, *expectedStatus))
+		if !matches {
 			t.Fatalf("Error %q has GQLSTATUS %s, expected %s", errMsg, grafeoErr.GQLStatus, *expectedStatus)
 		}
 	}
@@ -1723,16 +1922,6 @@ func describeError(expectedSubstr *string, expectedStatus *string) string {
 		parts = append(parts, "with GQLSTATUS "+*expectedStatus)
 	}
 	return strings.Join(parts, " ")
-}
-
-// isUnsupportedLanguageError checks if an error indicates the language is not
-// compiled into the grafeo-c library.
-func isUnsupportedLanguageError(err error) bool {
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "unsupported language") ||
-		strings.Contains(msg, "not available") ||
-		strings.Contains(msg, "not supported") ||
-		strings.Contains(msg, "unknown language")
 }
 
 // ---------------------------------------------------------------------------
@@ -1887,4 +2076,14 @@ func assertTerms(t specT, result *grafeo.QueryResult, expected [][]string, order
 			}
 		}
 	}
+}
+
+// containsString reports whether items holds item.
+func containsString(items []string, item string) bool {
+	for _, x := range items {
+		if x == item {
+			return true
+		}
+	}
+	return false
 }

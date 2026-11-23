@@ -213,9 +213,9 @@ fn element_where_on_a_node_and_an_edge() {
     let comments = rows(&db, "gql", "MATCH (c:Comment) RETURN c.id").len();
     let zero_hops = agree(
         &db,
-        "(c:Comment)-[r:REPLY_OF WHERE r.x = 1]->*(m:Message)",
+        "TRAIL (c:Comment)-[r:REPLY_OF WHERE r.x = 1]->*(m:Message)",
         "c.id AS comment, m.id AS message",
-        "(c:Comment)-[r:REPLY_OF WHERE r.x = 1]->*(m:Message)",
+        "TRAIL (c:Comment)-[r:REPLY_OF WHERE r.x = 1]->*(m:Message)",
         "c.id, m.id",
     );
     assert_eq!(zero_hops, comments, "each comment, zero hops from itself");
@@ -242,28 +242,50 @@ fn element_where_on_a_node_and_an_edge() {
 #[test]
 fn quantifiers_after_an_edge() {
     let db = database();
-    for (sql, gql) in [
-        ("*", "*"),
-        ("+", "+"),
-        ("{2}", "{2}"),
-        ("{1,3}", "{1,3}"),
-        ("{,2}", "{0,2}"),
-        ("{2,}", "{2,}"),
+    // An unbounded form needs a path mode or a selector (ISO/IEC 39075 16.4, syntax rule 14):
+    // it runs as a trail, and alone it is refused before it runs, in both languages.
+    for (sql, gql, unbounded) in [
+        ("*", "*", true),
+        ("+", "+", true),
+        ("{2}", "{2}", false),
+        ("{1,3}", "{1,3}", false),
+        ("{,2}", "{0,2}", false),
+        ("{2,}", "{2,}", true),
     ] {
+        let mode = if unbounded { "TRAIL " } else { "" };
         agree(
             &db,
-            &format!("(c:Comment)-[r:REPLY_OF]->{sql}(m:Message)"),
+            &format!("{mode}(c:Comment)-[r:REPLY_OF]->{sql}(m:Message)"),
             "c.id AS comment, m.id AS message",
-            &format!("(c:Comment)-[r:REPLY_OF]->{gql}(m:Message)"),
+            &format!("{mode}(c:Comment)-[r:REPLY_OF]->{gql}(m:Message)"),
             "c.id, m.id",
         );
+        if unbounded {
+            let bare = format!("(c:Comment)-[r:REPLY_OF]->{sql}(m:Message)");
+            for (language, query) in [
+                (
+                    "sql-pgq",
+                    format!("SELECT * FROM GRAPH_TABLE (MATCH {bare} COLUMNS (c.id AS id))"),
+                ),
+                ("gql", format!("MATCH {bare} RETURN c.id")),
+            ] {
+                let error = db
+                    .execute_language(&query, language, None)
+                    .expect_err(&query);
+                assert_eq!(
+                    grafeo_common::utils::gqlstatus::GqlStatus::from(&error).as_str(),
+                    "42001",
+                    "{language} `{query}`: {error}"
+                );
+            }
+        }
     }
     // `*` has zero hops: each comment reaches itself.
     let comments = rows(&db, "gql", "MATCH (c:Comment) RETURN c.id").len();
     let itself = rows(
         &db,
         "sql-pgq",
-        "SELECT * FROM GRAPH_TABLE (MATCH (c:Comment)-[r:REPLY_OF]->*(m:Message) \
+        "SELECT * FROM GRAPH_TABLE (MATCH TRAIL (c:Comment)-[r:REPLY_OF]->*(m:Message) \
          WHERE c.id = m.id COLUMNS (c.id AS id))",
     );
     assert_eq!(itself.len(), comments, "zero hops: m = c for every comment");

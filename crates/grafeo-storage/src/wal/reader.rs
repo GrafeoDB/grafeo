@@ -278,7 +278,11 @@ fn new_damaged_dir(dir: &Path, lsn: u64) -> Result<PathBuf, WalError> {
 fn is_known_entry(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name == super::BACKUP_CURSOR_FILE || name.starts_with("damaged-"))
+        .is_some_and(|name| {
+            name == super::BACKUP_CURSOR_FILE
+                || super::is_cdc_cursor_file(name)
+                || name.starts_with("damaged-")
+        })
 }
 
 /// Where the bytes of one segment lie: a segment file of a WAL directory,
@@ -2137,6 +2141,7 @@ mod tests {
         three_segments(dir.path());
         std::fs::write(dir.path().join("wal_00000001.log"), b"0.5").unwrap();
         std::fs::write(dir.path().join(super::super::BACKUP_CURSOR_FILE), b"88").unwrap();
+        std::fs::write(dir.path().join("cdc_cursor_default.json"), b"88").unwrap();
         std::fs::create_dir(dir.path().join("damaged-00000000000000000003")).unwrap();
         let (_, end) = scan_all(dir.path(), ScanOptions::new(DATABASE, 0)).unwrap();
         assert_eq!(end.unknown_files, [dir.path().join("wal_00000001.log")]);

@@ -11,6 +11,7 @@ use grafeo_common::utils::error::Result;
 use grafeo_core::graph::rdf::RdfStore;
 
 use super::GrafeoDB;
+use super::Open;
 
 /// The syntax of an RDF file (see [`GrafeoDB::load_rdf`]).
 ///
@@ -55,34 +56,13 @@ impl RdfFormat {
 // Query operations
 // =========================================================================
 
-impl GrafeoDB {
-    /// Executes a SPARQL query and returns the result.
-    ///
-    /// SPARQL queries operate on the RDF triple store.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the query fails; for an update, also on a
-    /// read-only database, after `close()` of a persistent database, and after
-    /// a commit that did not complete.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// use grafeo_engine::GrafeoDB;
-    ///
-    /// let db = GrafeoDB::new_in_memory();
-    /// let result = db.execute_sparql("SELECT ?s ?p ?o WHERE { ?s ?p ?o }")?;
-    /// # Ok(())
-    /// # }
-    /// ```
+impl Open {
     #[cfg(feature = "sparql")]
-    pub fn execute_sparql(&self, query: &str) -> Result<super::QueryResult> {
+    pub(crate) fn execute_sparql(&self, query: &str) -> Result<super::QueryResult> {
         use crate::query::{optimizer::Optimizer, planner::rdf::RdfPlanner, translators::sparql};
 
         // Parse and translate the SPARQL query to a logical plan
-        let logical_plan = sparql::translate(query)?;
+        let logical_plan = sparql::translate(query, &self.config.parse_limits())?;
 
         // Optimize the plan using RDF-specific statistics
         let optimizer = Optimizer::for_rdf_plan(&self.rdf_store, &logical_plan);
@@ -119,38 +99,26 @@ impl GrafeoDB {
         // Everything else runs as in a session: an update in a transaction
         // of its own, which logs it and reports it to change data capture
         // when it commits.
-        self.session().run_rdf_plan(&optimized_plan, "sparql")
+        self.session_unlisted()
+            .run_rdf_plan(&optimized_plan, "sparql")
     }
 
-    /// Returns the RDF store.
-    ///
-    /// Writes through it bypass transactions, the log, change data capture
-    /// and the snapshots readers hold: a query that runs meanwhile can see
-    /// half of one. Reads through it read the newest state, not a snapshot.
-    #[deprecated(
-        since = "0.6.3",
-        note = "writes through the RDF store bypass transactions, snapshots and the log; write with SPARQL updates in a session or transaction, or `batch_insert_rdf`; read with SPARQL in a session. Removed in 0.7.0"
-    )]
     #[must_use]
-    pub fn rdf_store(&self) -> &Arc<RdfStore> {
+    pub(crate) fn rdf_store(&self) -> &Arc<RdfStore> {
         &self.rdf_store
     }
 
-    /// How many overlay entries the RDF store keeps for readers at earlier
-    /// snapshots: 0 once every commit finished with no reader open.
     #[cfg(feature = "testing-statement-injection")]
     #[doc(hidden)]
     #[must_use]
-    pub fn rdf_overlay_len(&self) -> usize {
+    pub(crate) fn rdf_overlay_len(&self) -> usize {
         self.rdf_store.overlay().len()
     }
 
-    /// How many times an RDF view worked out the commits after its
-    /// snapshot: 0 while every reader takes the fast path.
     #[cfg(feature = "testing-statement-injection")]
     #[doc(hidden)]
     #[must_use]
-    pub fn rdf_overlay_views_extended(&self) -> u64 {
+    pub(crate) fn rdf_overlay_views_extended(&self) -> u64 {
         self.rdf_store.overlay().views_extended()
     }
 }
@@ -159,32 +127,8 @@ impl GrafeoDB {
 // CRUD operations
 // =========================================================================
 
-impl GrafeoDB {
-    /// Batch-inserts RDF triples into the RDF store.
-    ///
-    /// Delegates to `RdfStore::batch_insert`, which acquires each index lock
-    /// once for the entire batch. Duplicates are silently skipped.
-    ///
-    /// Returns the number of triples that were newly inserted.
-    ///
-    /// The insert is one bulk write: its triples are written to the WAL as it
-    /// goes, closed by one commit marker, and inserted once the marker is
-    /// written, so after a crash the database holds all of them or none, and
-    /// once the call returns they survive a crash. It reports no change data
-    /// capture events.
-    ///
-    /// While it changes the store, commits, new transactions and checkpoints
-    /// wait for it; `triples` is collected before, without blocking anything,
-    /// and only once the database takes the insert: a refused call never
-    /// pulls the iterator.
-    ///
-    /// # Errors
-    ///
-    /// Returns the read-only error on a read-only database, the
-    /// database-closed error after `close()` of a persistent database
-    /// (read-only or not), and the incomplete-commit error after a commit
-    /// that did not complete.
-    pub fn batch_insert_rdf(
+impl Open {
+    pub(crate) fn batch_insert_rdf(
         &self,
         triples: impl IntoIterator<Item = grafeo_core::graph::rdf::Triple>,
     ) -> Result<usize> {
@@ -247,27 +191,7 @@ impl GrafeoDB {
         }
     }
 
-    /// Loads the RDF file at `path` into the default graph as one bulk write,
-    /// as [`batch_insert_rdf`](Self::batch_insert_rdf) inserts its triples:
-    /// the file is parsed first, without blocking anything, and nothing is
-    /// inserted when a line does not parse. `format` names the syntax, or
-    /// `None` for the one the file's extension names (`.ttl`, `.nt`). Returns
-    /// how many triples were new.
-    ///
-    /// [`load_rdf_into`](Self::load_rdf_into) loads into a named graph, and
-    /// [`load_rdf_text`](Self::load_rdf_text) loads text.
-    ///
-    /// # Stability: Experimental
-    ///
-    /// New in 0.6.1: formats and options may be added. See
-    /// <https://grafeo.dev/stability/>.
-    ///
-    /// # Errors
-    ///
-    /// A file it cannot read or that is not UTF-8 text, a format it cannot
-    /// tell from the extension, the line and reason of a parse error, and
-    /// the errors of [`batch_insert_rdf`](Self::batch_insert_rdf).
-    pub fn load_rdf(
+    pub(crate) fn load_rdf(
         &self,
         path: impl AsRef<std::path::Path>,
         format: Option<RdfFormat>,
@@ -275,22 +199,7 @@ impl GrafeoDB {
         self.load_rdf_into(path, format, None)
     }
 
-    /// Loads the RDF file at `path` into `graph`, the named graph with that
-    /// IRI (created when it does not exist), or the default graph for
-    /// `None`, as [`load_rdf`](Self::load_rdf) loads it: one bulk write, in
-    /// the WAL as one group, nothing inserted when a line does not parse.
-    /// The triples are where `INSERT DATA { GRAPH <graph> { ... } }` puts
-    /// them. Returns how many triples were new in that graph.
-    ///
-    /// # Stability: Experimental
-    ///
-    /// New in 0.6.1: formats and options may be added. See
-    /// <https://grafeo.dev/stability/>.
-    ///
-    /// # Errors
-    ///
-    /// The errors of [`load_rdf`](Self::load_rdf), and an empty graph name.
-    pub fn load_rdf_into(
+    pub(crate) fn load_rdf_into(
         &self,
         path: impl AsRef<std::path::Path>,
         format: Option<RdfFormat>,
@@ -319,36 +228,7 @@ impl GrafeoDB {
         self.insert_rdf_into(triples, graph)
     }
 
-    /// Loads `text`, RDF in `format`, into `graph` (the named graph with
-    /// that IRI, created when it does not exist, or the default graph for
-    /// `None`) as [`load_rdf_into`](Self::load_rdf_into) loads a file: one
-    /// bulk write, nothing inserted when a line does not parse. Returns how
-    /// many triples were new in that graph.
-    ///
-    /// # Stability: Experimental
-    ///
-    /// New in 0.6.1: formats and options may be added. See
-    /// <https://grafeo.dev/stability/>.
-    ///
-    /// # Errors
-    ///
-    /// The line and reason of a parse error, an empty graph name, and the
-    /// errors of [`batch_insert_rdf`](Self::batch_insert_rdf).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use grafeo_engine::{GrafeoDB, RdfFormat};
-    ///
-    /// let db = GrafeoDB::new_in_memory();
-    /// let turtle = "@prefix ex: <http://example.org/> .\n\
-    ///               ex:alix ex:knows ex:gus ; ex:city \"Amsterdam\" .";
-    /// assert_eq!(db.load_rdf_text(turtle, RdfFormat::Turtle, None)?, 2);
-    /// let people = Some("http://example.org/people");
-    /// assert_eq!(db.load_rdf_text(turtle, RdfFormat::Turtle, people)?, 2);
-    /// # Ok::<(), grafeo_common::utils::error::Error>(())
-    /// ```
-    pub fn load_rdf_text(
+    pub(crate) fn load_rdf_text(
         &self,
         text: &str,
         format: RdfFormat,
@@ -483,15 +363,9 @@ fn check_graph_name(graph: Option<&str>) -> Result<()> {
 // Admin operations
 // =========================================================================
 
-impl GrafeoDB {
-    /// Returns RDF schema information: the predicates with their triple
-    /// counts, the named graphs, and the distinct subjects and objects of the
-    /// default graph, all read at one committed epoch, so a commit running
-    /// meanwhile is in all of it or none.
-    ///
-    /// Only available when the RDF feature is enabled.
+impl Open {
     #[must_use]
-    pub fn rdf_schema(&self) -> crate::admin::SchemaInfo {
+    pub(crate) fn rdf_schema(&self) -> crate::admin::SchemaInfo {
         // Pinned at the published epoch: no prune passes a pinned epoch, so
         // the view is there (the newest state is the fallback in name only).
         let pin = self.transaction_manager.pin_read();
@@ -535,13 +409,8 @@ impl GrafeoDB {
 // =========================================================================
 
 #[cfg(feature = "shacl")]
-impl GrafeoDB {
-    /// Validates the default graph against SHACL shapes in a named graph.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if shape parsing fails or the shapes graph doesn't exist.
-    pub fn validate_shacl(
+impl Open {
+    pub(crate) fn validate_shacl(
         &self,
         shapes_graph: &str,
     ) -> grafeo_common::utils::error::Result<grafeo_core::graph::rdf::shacl::ValidationReport> {
@@ -768,5 +637,229 @@ mod tests {
             error.contains("WAL record DeleteRdfTriple in the default graph, subject"),
             "{error}"
         );
+    }
+}
+
+// The database's public methods: each reaches the open state for its call (#712).
+impl GrafeoDB {
+    /// Executes a SPARQL query and returns the result.
+    ///
+    /// SPARQL queries operate on the RDF triple store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails; for an update, also on a
+    /// read-only database, after `close()`, and after
+    /// a commit that did not complete.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use grafeo_engine::GrafeoDB;
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let result = db.execute_sparql("SELECT ?s ?p ?o WHERE { ?s ?p ?o }")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "sparql")]
+    pub fn execute_sparql(&self, query: &str) -> Result<super::QueryResult> {
+        self.live()?.execute_sparql(query)
+    }
+
+    /// Returns the RDF store.
+    ///
+    /// Writes through it bypass transactions, the log, change data capture
+    /// and the snapshots readers hold: a query that runs meanwhile can see
+    /// half of one. Reads through it read the newest state, not a snapshot.
+    ///
+    /// Since 0.6.4 it returns an owned handle, and after `close()` an empty one: holding it keeps
+    /// that part of the database alive past `close()`.
+    #[deprecated(
+        since = "0.6.3",
+        note = "writes through the RDF store bypass transactions, snapshots and the log; write with SPARQL updates in a session or transaction, or `batch_insert_rdf`; read with SPARQL in a session. Removed in 0.7.0"
+    )]
+    #[must_use]
+    pub fn rdf_store(&self) -> Arc<RdfStore> {
+        self.live_if().map_or_else(
+            || Arc::new(RdfStore::new()),
+            |open| Arc::clone(open.rdf_store()),
+        )
+    }
+
+    /// How many overlay entries the RDF store keeps for readers at earlier
+    /// snapshots: 0 once every commit finished with no reader open. After `close()` it returns 0;
+    /// it returns a `Result` from 0.7.0.
+    #[cfg(feature = "testing-statement-injection")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn rdf_overlay_len(&self) -> usize {
+        self.live_if()
+            .map_or_else(Default::default, |open| open.rdf_overlay_len())
+    }
+
+    /// How many times an RDF view worked out the commits after its
+    /// snapshot: 0 while every reader takes the fast path. After `close()` it returns 0; it returns
+    /// a `Result` from 0.7.0.
+    #[cfg(feature = "testing-statement-injection")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn rdf_overlay_views_extended(&self) -> u64 {
+        self.live_if()
+            .map_or_else(Default::default, |open| open.rdf_overlay_views_extended())
+    }
+
+    /// Batch-inserts RDF triples into the RDF store.
+    ///
+    /// Delegates to `RdfStore::batch_insert`, which acquires each index lock
+    /// once for the entire batch. Duplicates are silently skipped.
+    ///
+    /// Returns the number of triples that were newly inserted.
+    ///
+    /// The insert is one bulk write: its triples are written to the WAL as it
+    /// goes, closed by one commit marker, and inserted once the marker is
+    /// written, so after a crash the database holds all of them or none, and
+    /// once the call returns they survive a crash. It reports no change data
+    /// capture events.
+    ///
+    /// While it changes the store, commits, new transactions and checkpoints
+    /// wait for it; `triples` is collected before, without blocking anything,
+    /// and only once the database takes the insert: a refused call never
+    /// pulls the iterator.
+    ///
+    /// # Errors
+    ///
+    /// Returns the read-only error on a read-only database, the
+    /// database-closed error after `close()`, and the incomplete-commit error after a commit
+    /// that did not complete.
+    pub fn batch_insert_rdf(
+        &self,
+        triples: impl IntoIterator<Item = grafeo_core::graph::rdf::Triple>,
+    ) -> Result<usize> {
+        // The caller's iterator runs before the lock (one that calls the database cannot
+        // deadlock against a close() waiting for it), and only once the call is allowed: a
+        // closed, read-only or poisoned database pulls nothing.
+        self.live()?.check_import_allowed()?;
+        let triples: Vec<grafeo_core::graph::rdf::Triple> = triples.into_iter().collect();
+        self.live()?.batch_insert_rdf(triples)
+    }
+
+    /// Loads the RDF file at `path` into the default graph as one bulk write,
+    /// as [`batch_insert_rdf`](Self::batch_insert_rdf) inserts its triples:
+    /// the file is parsed first, without blocking anything, and nothing is
+    /// inserted when a line does not parse. `format` names the syntax, or
+    /// `None` for the one the file's extension names (`.ttl`, `.nt`). Returns
+    /// how many triples were new.
+    ///
+    /// [`load_rdf_into`](Self::load_rdf_into) loads into a named graph, and
+    /// [`load_rdf_text`](Self::load_rdf_text) loads text.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.1: formats and options may be added. See
+    /// <https://grafeo.dev/stability/>.
+    ///
+    /// # Errors
+    ///
+    /// A file it cannot read or that is not UTF-8 text, a format it cannot
+    /// tell from the extension, the line and reason of a parse error, and
+    /// the errors of [`batch_insert_rdf`](Self::batch_insert_rdf).
+    pub fn load_rdf(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        format: Option<RdfFormat>,
+    ) -> Result<usize> {
+        self.live()?.load_rdf(path, format)
+    }
+
+    /// Loads the RDF file at `path` into `graph`, the named graph with that
+    /// IRI (created when it does not exist), or the default graph for
+    /// `None`, as [`load_rdf`](Self::load_rdf) loads it: one bulk write, in
+    /// the WAL as one group, nothing inserted when a line does not parse.
+    /// The triples are where `INSERT DATA { GRAPH <graph> { ... } }` puts
+    /// them. Returns how many triples were new in that graph.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.1: formats and options may be added. See
+    /// <https://grafeo.dev/stability/>.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`load_rdf`](Self::load_rdf), and an empty graph name.
+    pub fn load_rdf_into(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        format: Option<RdfFormat>,
+        graph: Option<&str>,
+    ) -> Result<usize> {
+        self.live()?.load_rdf_into(path, format, graph)
+    }
+
+    /// Loads `text`, RDF in `format`, into `graph` (the named graph with
+    /// that IRI, created when it does not exist, or the default graph for
+    /// `None`) as [`load_rdf_into`](Self::load_rdf_into) loads a file: one
+    /// bulk write, nothing inserted when a line does not parse. Returns how
+    /// many triples were new in that graph.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.1: formats and options may be added. See
+    /// <https://grafeo.dev/stability/>.
+    ///
+    /// # Errors
+    ///
+    /// The line and reason of a parse error, an empty graph name, and the
+    /// errors of [`batch_insert_rdf`](Self::batch_insert_rdf).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use grafeo_engine::{GrafeoDB, RdfFormat};
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let turtle = "@prefix ex: <http://example.org/> .\n\
+    ///               ex:alix ex:knows ex:gus ; ex:city \"Amsterdam\" .";
+    /// assert_eq!(db.load_rdf_text(turtle, RdfFormat::Turtle, None)?, 2);
+    /// let people = Some("http://example.org/people");
+    /// assert_eq!(db.load_rdf_text(turtle, RdfFormat::Turtle, people)?, 2);
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
+    /// ```
+    pub fn load_rdf_text(
+        &self,
+        text: &str,
+        format: RdfFormat,
+        graph: Option<&str>,
+    ) -> Result<usize> {
+        self.live()?.load_rdf_text(text, format, graph)
+    }
+
+    /// Returns RDF schema information: the predicates with their triple
+    /// counts, the named graphs, and the distinct subjects and objects of the
+    /// default graph, all read at one committed epoch, so a commit running
+    /// meanwhile is in all of it or none. After `close()` it returns an empty RDF schema; it
+    /// returns a `Result` from 0.7.0.
+    ///
+    /// Only available when the RDF feature is enabled.
+    #[must_use]
+    pub fn rdf_schema(&self) -> crate::admin::SchemaInfo {
+        self.live_if().map_or_else(
+            || crate::admin::SchemaInfo::Rdf(crate::admin::RdfSchemaInfo::default()),
+            |open| open.rdf_schema(),
+        )
+    }
+
+    /// Validates the default graph against SHACL shapes in a named graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if shape parsing fails or the shapes graph doesn't exist.
+    #[cfg(feature = "shacl")]
+    pub fn validate_shacl(
+        &self,
+        shapes_graph: &str,
+    ) -> grafeo_common::utils::error::Result<grafeo_core::graph::rdf::shacl::ValidationReport> {
+        self.live()?.validate_shacl(shapes_graph)
     }
 }

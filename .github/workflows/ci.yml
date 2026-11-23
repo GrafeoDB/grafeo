@@ -6,6 +6,14 @@ on:
   pull_request:
     branches: [main, 'release/*']
 
+# A push to a branch with an open PR starts both triggers; keyed on the head repository and
+# branch, the later run cancels the earlier one, and a newer push cancels a stale run. A fork's
+# branch never shares a group with ours. Every push to main gets a group of its own, so no main
+# run is cancelled or dropped while pending.
+concurrency:
+  group: ${{ github.ref == 'refs/heads/main' && format('ci-main-{0}', github.run_id) || format('ci-{0}-{1}', github.event.pull_request.head.repo.full_name || github.repository, github.head_ref || github.ref_name) }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -455,6 +463,16 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
+      - name: Test the query memory limit without spilling
+        run: |
+          cargo nextest run -p grafeo-core --no-default-features --lib -E 'test(/memory::operator_memory_tests::/)'
+          cargo nextest run -p grafeo-engine --no-default-features --features gql,cypher,sparql,triple-store,regex,algos --test memory_query_limit_operators --test sparql_order_under_limit
+          cargo nextest run -p grafeo-engine --no-default-features --features gql,regex-lite --test memory_query_limit_operators
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
       - name: Test and lint the grafeo crate with its default features
         run: |
           cargo nextest run -p grafeo --test main open_with_default_features::
@@ -845,8 +863,9 @@ jobs:
   # Memory per entity (#431): bytes per node, per edge and per property value on a fixed
   # workload, counted by an allocator and as `memory_usage()` reports them. Fails when a count
   # moves more than 5%, up or down, from benches/memory_per_entity.baseline.json, or is in one and
-  # not the other; a change that moves memory updates the baseline in the same commit
-  # (`-- --update-baseline`). The table goes to the job summary, with the compact store's targets
+  # not the other. Built with triple-store, so the RDF rows (bytes per triple) are checked too.
+  # A change that moves memory updates the baseline in the same commit (`-- --update-baseline`,
+  # with `--features triple-store`). The table goes to the job summary, with the compact store's targets
   # beside it.
   memory-per-entity:
     name: Memory per Entity
@@ -872,9 +891,54 @@ jobs:
             ${{ runner.os }}-cargo-memory-per-entity-
 
       - name: Measure and check against the baseline
-        run: cargo bench -p grafeo-engine --bench memory_per_entity -- --check
+        run: cargo bench -p grafeo-engine --features triple-store --bench memory_per_entity -- --check
         env:
           RUSTC_WRAPPER: sccache
+
+  # Work per query (#794): the engine's own count of the work each graph-bench query does, per
+  # class, in a build with `--cfg grafeo_work_counters` (no shipped or timed build counts). Fails
+  # when a count differs from benches/work_per_query.baseline.json, up or down; a change that moves
+  # work updates the baseline in the same commit (`-- --update-baseline`). Code under the cfg
+  # escapes the other jobs, so this one also runs clippy and the counter tests with it.
+  work-per-query:
+    name: Work per Query
+    needs: [rust-check]
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --cfg grafeo_work_counters
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          components: clippy
+
+      - name: Configure sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-work-per-query-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-work-per-query-
+
+      - name: Clippy with the counters
+        run: cargo clippy -p grafeo-common -p grafeo-core -p grafeo-adapters -p grafeo-engine --all-features --all-targets -- -D warnings
+
+      - name: The counter tests
+        run: |
+          cargo test -p grafeo-common --all-features --lib work::
+          cargo test -p grafeo-core --all-features --lib profile
+          cargo test -p grafeo-engine --all-features --test main -- work_counters:: prepared_filters:: prepared_recipes::
+
+      - name: Count and check against the baseline
+        run: cargo bench -p grafeo-engine --features cypher,sql-pgq,algos --bench work_per_query -- --check
 
   # Miri undefined behavior check
   miri:
@@ -1014,7 +1078,7 @@ jobs:
         shell: bash
         run: |
           uv pip install --system dist/*.whl
-          uv pip install --system pytest pytest-asyncio networkx numpy scipy solvor pandas pyarrow polars
+          uv pip install --system pytest pytest-asyncio networkx numpy scipy solvor pandas pyarrow polars tzdata
 
       - name: Run Python tests
         env:
@@ -1081,7 +1145,7 @@ jobs:
         shell: bash
         run: |
           uv pip install --system dist/*.whl
-          uv pip install --system pytest pytest-asyncio networkx numpy scipy solvor pandas pyarrow polars
+          uv pip install --system pytest pytest-asyncio networkx numpy scipy solvor pandas pyarrow polars tzdata
 
       - name: Run Python tests
         run: pytest crates/bindings/python/tests/ -v --ignore=crates/bindings/python/tests/benchmark_phases.py
@@ -1672,7 +1736,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: crate-ci/typos@v1.52.0
+      - uses: crate-ci/typos@v1.52.2
 
   # The manifest of @grafeo-db/js as a release publishes it: the repository's leaves out
   # its platform packages, so a mistake in adding them would ship a package with no
@@ -1714,7 +1778,7 @@ jobs:
         run: python scripts/check_policy.py tree
       - name: Policy script tests
         run: |
-          uv pip install --system pytest
+          uv pip install --system pytest rdflib
           pytest scripts/tests -q
 
   # The one check to require on main and release/*: fails when any job it needs failed
@@ -1741,6 +1805,7 @@ jobs:
       - rust-feature-matrix
       - rust-feature-builds
       - memory-per-entity
+      - work-per-query
       - miri
       - python-test
       - python-test-lpg

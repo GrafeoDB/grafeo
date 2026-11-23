@@ -54,6 +54,31 @@ describe('memory settings', () => {
     await expect(db.execute(BATCH)).rejects.toThrow()
     expect(await count(db, 'Fill')).toBe(held)
   })
+
+  it('read the plan cache limit back, capped at the memory limit, 0 turning it off (#674)', async () => {
+    const caches = (db) => db.memoryUsage().caches
+    const db = GrafeoDB.create(undefined, { memoryLimit: 64 * MIB, planCacheLimit: 8 * MIB })
+    expect(caches(db).planCacheLimitBytes).toBe(8 * MIB)
+    const capped = GrafeoDB.create(undefined, { memoryLimit: 32 * MIB, planCacheLimit: 1024 * MIB })
+    expect(caches(capped).planCacheLimitBytes).toBe(32 * MIB)
+    expect(caches(GrafeoDB.create()).planCacheLimitBytes).toBeGreaterThan(0)
+    const off = GrafeoDB.create(undefined, { planCacheLimit: 0 })
+    await off.execute('RETURN 1 AS one')
+    await off.execute('RETURN 1 AS one')
+    expect(caches(off).planCacheLimitBytes).toBe(0)
+    expect(caches(off).cachedPlanCount).toBe(0)
+    expect(() => GrafeoDB.create(undefined, { planCacheLimit: -1 })).toThrow()
+  })
+
+  it('read the CDC memory limit back, a sixteenth by default, capped, 0 refused (#679)', () => {
+    const cdc = (db) => db.memoryUsage().cdc
+    const db = GrafeoDB.create(undefined, { memoryLimit: 64 * MIB, cdcMemoryLimit: 512 * 1024 })
+    expect(cdc(db).limitBytes).toBe(512 * 1024)
+    expect(cdc(GrafeoDB.create(undefined, { memoryLimit: 64 * MIB })).limitBytes).toBe(4 * MIB)
+    const capped = GrafeoDB.create(undefined, { memoryLimit: 32 * MIB, cdcMemoryLimit: 1024 * MIB })
+    expect(cdc(capped).limitBytes).toBe(32 * MIB)
+    expect(() => GrafeoDB.create(undefined, { cdcMemoryLimit: 0 })).toThrow()
+  })
 })
 
 describe('spill settings', () => {

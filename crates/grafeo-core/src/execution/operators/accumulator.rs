@@ -92,6 +92,9 @@ pub struct AggregateExpr {
     pub percentile: Option<f64>,
     /// Separator string for GROUP_CONCAT / LISTAGG.
     pub separator: Option<String>,
+    /// Whether a `collect` keeps a null operand as an item, as the list of a
+    /// pattern comprehension does; no function name sets it.
+    pub keep_nulls: bool,
     /// Whether this is SPARQL's SUM or AVG: the operands are the numbers of
     /// RDF terms, an operand that is no number makes the result unbound
     /// (an unbound operand, NULL, is skipped), AVG divides by XPath's rules,
@@ -122,6 +125,7 @@ impl AggregateExpr {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         }
@@ -137,6 +141,7 @@ impl AggregateExpr {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         }
@@ -152,6 +157,7 @@ impl AggregateExpr {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         }
@@ -167,6 +173,7 @@ impl AggregateExpr {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         }
@@ -182,6 +189,7 @@ impl AggregateExpr {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         }
@@ -197,6 +205,7 @@ impl AggregateExpr {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         }
@@ -212,6 +221,7 @@ impl AggregateExpr {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         }
@@ -227,6 +237,7 @@ impl AggregateExpr {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         }
@@ -242,6 +253,7 @@ impl AggregateExpr {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         }
@@ -257,6 +269,7 @@ impl AggregateExpr {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         }
@@ -272,6 +285,7 @@ impl AggregateExpr {
             alias: None,
             percentile: None,
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         }
@@ -291,6 +305,7 @@ impl AggregateExpr {
             alias: None,
             percentile: Some(percentile.clamp(0.0, 1.0)),
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         }
@@ -310,6 +325,7 @@ impl AggregateExpr {
             alias: None,
             percentile: Some(percentile.clamp(0.0, 1.0)),
             separator: None,
+            keep_nulls: false,
             rdf_literals: false,
             temporal: TemporalComparison::TypesApart,
         }
@@ -368,12 +384,14 @@ impl HashableValue {
 
 impl From<&Value> for HashableValue {
     fn from(value: &Value) -> Self {
+        grafeo_common::work::count(grafeo_common::work::Work::ValueHash, 1);
         Self(grafeo_common::types::HashableValue(representative(value)))
     }
 }
 
 impl From<Value> for HashableValue {
     fn from(value: Value) -> Self {
+        grafeo_common::work::count(grafeo_common::work::Work::ValueHash, 1);
         let representative = match value {
             Value::Float64(float) => representative_float(float),
             Value::Decimal(decimal) => representative_decimal(decimal),

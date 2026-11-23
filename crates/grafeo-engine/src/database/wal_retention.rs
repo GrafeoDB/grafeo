@@ -3,7 +3,8 @@
 //! A checkpoint covers the log up to its position, so the segments below it
 //! could go, but a cursor may still need them: the backup cursor marks where
 //! the last backup ended, and the next incremental backup copies the log
-//! from there. [`retention_floor`] is the one rule that decides where a
+//! from there; a change data capture cursor marks where its consumer reads
+//! the durable feed from (#679). [`retention_floor`] is the one rule that decides where a
 //! checkpoint cuts the log: at the lowest position a cursor needs, but never
 //! more than the configured limit below the checkpoint
 //! ([`Config::with_wal_retention_limit`](crate::Config::with_wal_retention_limit)),
@@ -34,6 +35,19 @@ pub(super) struct RetentionFloor {
     pub lsn: u64,
     /// A cursor needed the log below `lsn`: the limit cut it off.
     pub limited: bool,
+}
+
+impl RetentionFloor {
+    /// Whether this floor cut off the log `cursor` needs: a cursor below
+    /// it, or an unreadable one once any log goes. A pin is never cut.
+    #[must_use]
+    pub(super) fn cuts(&self, cursor: CursorPosition) -> bool {
+        match cursor {
+            CursorPosition::At(lsn) => lsn < self.lsn,
+            CursorPosition::Unreadable => 0 < self.lsn,
+            CursorPosition::Pinned(_) => false,
+        }
+    }
 }
 
 /// Where a checkpoint at `checkpoint_lsn` cuts the WAL: at the lowest
@@ -85,6 +99,11 @@ pub(crate) struct WalRetention {
     pub limit: u64,
     limited_warned: AtomicBool,
     unreadable_warned: AtomicBool,
+    /// The same two warnings for the change data capture cursors.
+    #[cfg(feature = "cdc")]
+    cdc_limited_warned: AtomicBool,
+    #[cfg(feature = "cdc")]
+    cdc_unreadable_warned: AtomicBool,
     /// The pins of running backups and how far checkpoints removed the log:
     /// one lock, so a pin is never taken between a checkpoint's floor and
     /// its removal.
@@ -126,6 +145,10 @@ impl WalRetention {
             limit,
             limited_warned: AtomicBool::new(false),
             unreadable_warned: AtomicBool::new(false),
+            #[cfg(feature = "cdc")]
+            cdc_limited_warned: AtomicBool::new(false),
+            #[cfg(feature = "cdc")]
+            cdc_unreadable_warned: AtomicBool::new(false),
             state: parking_lot::Mutex::new(RetentionState::default()),
         }
     }
@@ -153,9 +176,10 @@ impl WalRetention {
     }
 
     /// Decides where a checkpoint at `checkpoint_lsn` cuts the log
-    /// ([`retention_floor`] of `cursor`, the pins of running backups and the
-    /// WAL's `segment_starts`), and calls `remove` with the floor, all under
-    /// one lock, so a backup never pins log that this removal takes.
+    /// ([`retention_floor`] of `cursors`, the backup cursor and the change
+    /// data capture cursors, the pins of running backups and the WAL's
+    /// `segment_starts`), and calls `remove` with the floor, all under one
+    /// lock, so a backup never pins log that this removal takes.
     ///
     /// # Errors
     ///
@@ -163,7 +187,7 @@ impl WalRetention {
     pub(super) fn release_below_floor<E>(
         &self,
         checkpoint_lsn: u64,
-        cursor: Option<CursorPosition>,
+        cursors: &[CursorPosition],
         segment_starts: &[u64],
         remove: impl FnOnce(u64) -> Result<(), E>,
     ) -> Result<RetentionFloor, E> {
@@ -171,7 +195,7 @@ impl WalRetention {
         let pins = state.pins.iter().copied().map(CursorPosition::Pinned);
         let floor = retention_floor(
             checkpoint_lsn,
-            cursor.into_iter().chain(pins),
+            cursors.iter().copied().chain(pins),
             self.limit,
             segment_starts,
         );
@@ -189,6 +213,18 @@ impl WalRetention {
     /// Whether the cursor was unreadable for the first time in this open.
     pub(super) fn first_unreadable(&self) -> bool {
         !self.unreadable_warned.swap(true, Ordering::Relaxed)
+    }
+
+    /// [`first_limited`](Self::first_limited) for a change data capture cursor.
+    #[cfg(feature = "cdc")]
+    pub(super) fn first_cdc_limited(&self) -> bool {
+        !self.cdc_limited_warned.swap(true, Ordering::Relaxed)
+    }
+
+    /// [`first_unreadable`](Self::first_unreadable) for a change data capture cursor.
+    #[cfg(feature = "cdc")]
+    pub(super) fn first_cdc_unreadable(&self) -> bool {
+        !self.cdc_unreadable_warned.swap(true, Ordering::Relaxed)
     }
 }
 
@@ -373,7 +409,7 @@ mod tests {
     /// The floor a checkpoint at `checkpoint_lsn` without a cursor finds.
     fn floor_of(retention: &WalRetention, checkpoint_lsn: u64) -> u64 {
         retention
-            .release_below_floor(checkpoint_lsn, None, &[], |_| Ok::<(), ()>(()))
+            .release_below_floor(checkpoint_lsn, &[], &[], |_| Ok::<(), ()>(()))
             .unwrap()
             .lsn
     }
@@ -403,10 +439,48 @@ mod tests {
         let retention = WalRetention::new(GIB);
         assert!(
             retention
-                .release_below_floor(1988, None, &[], |_| Err("disk"))
+                .release_below_floor(1988, &[], &[], |_| Err("disk"))
                 .is_err()
         );
         assert!(retention.pin(319).is_some());
+    }
+
+    /// The backup cursor and a change data capture cursor together keep the log from the lower
+    /// one, and the floor tells which of them the limit cut off.
+    #[test]
+    fn several_cursors_keep_from_the_lowest_and_the_floor_names_the_cut() {
+        let retention = WalRetention::new(GIB);
+        let (backup, cdc) = (CursorPosition::At(2 * GIB), CursorPosition::At(19));
+        let floor = retention
+            .release_below_floor(3 * GIB, &[backup, cdc], &[], |_| Ok::<(), ()>(()))
+            .unwrap();
+        assert_eq!(
+            floor,
+            RetentionFloor {
+                lsn: 2 * GIB,
+                limited: true
+            }
+        );
+        assert!(!floor.cuts(backup), "the backup cursor is within the limit");
+        assert!(floor.cuts(cdc), "the CDC cursor is past it");
+        assert!(floor.cuts(CursorPosition::Unreadable));
+        assert!(!floor.cuts(CursorPosition::Pinned(19)));
+        let floor = retention
+            .release_below_floor(
+                3 * GIB,
+                &[backup, CursorPosition::At(2 * GIB + GIB / 2)],
+                &[],
+                |_| Ok::<(), ()>(()),
+            )
+            .unwrap();
+        assert_eq!(
+            floor,
+            RetentionFloor {
+                lsn: 2 * GIB,
+                limited: false
+            },
+            "both within the limit: kept from the lower, the backup cursor"
+        );
     }
 
     #[test]

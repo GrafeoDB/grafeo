@@ -1,0 +1,223 @@
+#
+# Copyright (c) "Neo4j"
+# Neo4j Sweden AB [https://neo4j.com]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Attribution Notice under the terms of the Apache License 2.0
+#
+# This work was created by the collective efforts of the openCypher community.
+# Without limiting the terms of Section 6, any Derivative Work that is not
+# approved by the public consensus process of the openCypher Implementers Group
+# should not be described as “Cypher” (and Cypher® is a registered trademark of
+# Neo4j Inc.) or as "openCypher". Extensions by implementers or prototypes or
+# proposals for change that have been documented or implemented should only be
+# described as "implementation extensions to Cypher" or as "proposed changes to
+# Cypher that are not yet approved by the openCypher community".
+#
+#
+# Converted from the openCypher TCK, tck/features/clauses/return-skip-limit/ReturnSkipLimit1.feature, by
+# scripts/convert_opencypher_tck.py.
+# Source: https://github.com/opencypher/openCypher at tag 2024.3 (677cbafabb8c3c5eed458fd3b1ec0daec8d67d23)
+
+meta:
+  language: cypher
+  model: lpg
+  section: "opencypher-tck.ReturnSkipLimit1"
+  title: "ReturnSkipLimit1 - Skip"
+  dataset: empty
+  requires: [cypher]
+  values_dialect: tck
+
+tests:
+
+  # [1] Start the result from the second row
+  - name: s1_start_the_result_from_the_second_row
+    setup:
+      - |
+        CREATE ({name: 'A'}),
+          ({name: 'B'}),
+          ({name: 'C'}),
+          ({name: 'D'}),
+          ({name: 'E'})
+    query: |
+      MATCH (n)
+      RETURN n
+      ORDER BY n.name ASC
+      SKIP 2
+    expect:
+      ordered: true
+      values: |
+        | n |
+        | ({name: 'C'}) |
+        | ({name: 'D'}) |
+        | ({name: 'E'}) |
+      side_effects: {}
+
+  # [2] Start the result from the second row by param
+  - name: s2_start_the_result_from_the_second_row_by_param
+    setup:
+      - |
+        CREATE ({name: 'A'}),
+          ({name: 'B'}),
+          ({name: 'C'}),
+          ({name: 'D'}),
+          ({name: 'E'})
+    params:
+      skipAmount: 2
+    query: |
+      MATCH (n)
+      RETURN n
+      ORDER BY n.name ASC
+      SKIP $skipAmount
+    expect:
+      ordered: true
+      values: |
+        | n |
+        | ({name: 'C'}) |
+        | ({name: 'D'}) |
+        | ({name: 'E'}) |
+      side_effects: {}
+
+  # [3] SKIP with an expression that does not depend on variables
+  - name: s3_skip_with_an_expression_that_does_not_depend_on_variables
+    xfail:
+      spec: "openCypher TCK 2024.3 ReturnSkipLimit1: [3] SKIP with an expression that does not depend on variables"
+      issue: "#797"
+    setup:
+      - |
+        UNWIND range(1, 10) AS i
+        CREATE ({nr: i})
+    query: |
+      MATCH (n)
+      WITH n SKIP toInteger(rand()*9)
+      WITH count(*) AS count
+      RETURN count > 0 AS nonEmpty
+    expect:
+      values: |
+        | nonEmpty |
+        | true |
+      side_effects: {}
+
+  # [4] Accept skip zero
+  - name: s4_accept_skip_zero
+    query: |
+      MATCH (n)
+      WHERE 1 = 0
+      RETURN n SKIP 0
+    expect:
+      values: |
+        | n |
+      side_effects: {}
+
+  # [5] SKIP with an expression that depends on variables should fail
+  # TCK: SyntaxError at compile time: NonConstantExpression
+  - name: s5_skip_with_an_expression_that_depends_on_variables_should_fail
+    query: |
+      MATCH (n) RETURN n SKIP n.count
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [6] Negative parameter for SKIP should fail
+  # TCK: SyntaxError at runtime: NegativeIntegerArgument
+  # GQL class 22, the TCK expects 42: GQL checks a SKIP or LIMIT value by a General Rule (22G02, 22G03)
+  - name: s6_negative_parameter_for_skip_should_fail
+    setup:
+      - |
+        CREATE (s:Person {name: 'Steven'}),
+               (c:Person {name: 'Craig'})
+    params:
+      _skip: -1
+    query: |
+      MATCH (p:Person)
+      RETURN p.name AS name
+      SKIP $_skip
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [7] Negative SKIP should fail
+  # TCK: SyntaxError at compile time: NegativeIntegerArgument
+  # GQL class 22, the TCK expects 42: GQL checks a SKIP or LIMIT value by a General Rule (22G02, 22G03)
+  - name: s7_negative_skip_should_fail
+    setup:
+      - |
+        CREATE (s:Person {name: 'Steven'}),
+               (c:Person {name: 'Craig'})
+    query: |
+      MATCH (p:Person)
+      RETURN p.name AS name
+      SKIP -1
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [8] Floating point parameter for SKIP should fail
+  # TCK: SyntaxError at runtime: InvalidArgumentType
+  # GQL class 22, the TCK expects 42: GQL checks a SKIP or LIMIT value by a General Rule (22G02, 22G03)
+  - name: s8_floating_point_parameter_for_skip_should_fail
+    setup:
+      - |
+        CREATE (s:Person {name: 'Steven'}),
+               (c:Person {name: 'Craig'})
+    params:
+      _limit: 1.5
+    query: |
+      MATCH (p:Person)
+      RETURN p.name AS name
+      SKIP $_limit
+    expect:
+      gql_status: "22"
+      side_effects: {}
+
+  # [9] Floating point SKIP should fail
+  # TCK: SyntaxError at compile time: InvalidArgumentType
+  - name: s9_floating_point_skip_should_fail
+    xfail:
+      spec: "openCypher TCK 2024.3 ReturnSkipLimit1: [9] Floating point SKIP should fail"
+      issue: "fix in 0.6.5"
+    setup:
+      - |
+        CREATE (s:Person {name: 'Steven'}),
+               (c:Person {name: 'Craig'})
+    query: |
+      MATCH (p:Person)
+      RETURN p.name AS name
+      SKIP 1.5
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [10] Fail when using non-constants in SKIP
+  # TCK: SyntaxError at compile time: NonConstantExpression
+  - name: s10_fail_when_using_non_constants_in_skip
+    query: |
+      MATCH (n)
+      RETURN n
+        SKIP n.count
+    expect:
+      gql_status: "42"
+      side_effects: {}
+
+  # [11] Fail when using negative value in SKIP
+  # TCK: SyntaxError at compile time: NegativeIntegerArgument
+  # GQL class 22, the TCK expects 42: GQL checks a SKIP or LIMIT value by a General Rule (22G02, 22G03)
+  - name: s11_fail_when_using_negative_value_in_skip
+    query: |
+      MATCH (n)
+      RETURN n
+        SKIP -1
+    expect:
+      gql_status: "22"
+      side_effects: {}

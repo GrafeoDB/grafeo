@@ -13,8 +13,9 @@ vi.setConfig({ testTimeout: 60_000 })
 import { readFileSync, readdirSync, statSync, existsSync } from 'fs'
 import { join, relative, resolve } from 'path'
 import { parseGtestFile, coerceParams, paramValue } from './parser.mjs'
-import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, describeError, assertGqlStatus, assertTerms } from './comparator.mjs'
+import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, describeError, assertGqlStatus, assertTerms, assertValues, assertSideEffects, observation } from './comparator.mjs'
 import { SpecFailure, runMarked, runProbe, specRoot, summary, summaryLine } from './xfail.mjs'
+import { caseCellType, matches as matchCell, parse as parseCell, toNeutral } from './tck_values.mjs'
 
 // ---------------------------------------------------------------------------
 // Import GrafeoDB. A binding that does not load fails the run: it must not pass
@@ -192,7 +193,7 @@ for (const filePath of gtestFiles) {
       if (tc.variants && Object.keys(tc.variants).length > 0) {
         for (const [lang, query] of Object.entries(tc.variants)) {
           it(`${tc.name}_${lang}`, async (ctx) => {
-            if (tc.skip) {
+            if (tc.skip || tc.runnerGap?.runners.includes('node')) {
               summary.skipped++
               return ctx.skip()
             }
@@ -210,7 +211,7 @@ for (const filePath of gtestFiles) {
                 if (effectiveDataset && effectiveDataset !== 'empty') {
                   await loadDataset(db, effectiveDataset)
                 }
-                await runTestCase(db, { ...tc, query }, lang, meta.language || 'gql')
+                await runTestCase(db, { ...tc, query }, lang, meta.language || 'gql', meta.valuesDialect)
               })
             } finally {
               db.close()
@@ -222,7 +223,8 @@ for (const filePath of gtestFiles) {
 
       it(tc.name, async (ctx) => {
         // Skip by field
-        if (tc.skip) {
+        // A gap of this binding (`runner_gap:`) skips the case here, as `skip:` does
+        if (tc.skip || tc.runnerGap?.runners.includes('node')) {
           summary.skipped++
           return ctx.skip()
         }
@@ -251,7 +253,7 @@ for (const filePath of gtestFiles) {
             if (effectiveDataset && effectiveDataset !== 'empty') {
               await loadDataset(db, effectiveDataset)
             }
-            await runTestCase(db, tc, tc.language || meta.language, meta.language || 'gql')
+            await runTestCase(db, tc, tc.language || meta.language, meta.language || 'gql', meta.valuesDialect)
           })
         } finally {
           db.close()
@@ -261,10 +263,48 @@ for (const filePath of gtestFiles) {
   })
 }
 
+const TEMPORAL_TAGS = ['$date', '$time', '$duration', '$zoned_datetime']
+
+/** Whether the Node binding gave `v` for a temporal: a tag object, or a Date. */
+function isTemporal(v) {
+  if (v instanceof Date) return true
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return false
+  const keys = Object.keys(v)
+  return keys.length === 1 && TEMPORAL_TAGS.includes(keys[0])
+}
+
+/** `v` with each temporal in it written as its Cypher `toString()`, the engine's own text. */
+async function temporalsAsText(db, v) {
+  if (isTemporal(v)) {
+    const result = await db.executeCypher('RETURN toString($v) AS s', { v })
+    return result.toArray()[0].s
+  }
+  if (Array.isArray(v)) return Promise.all(v.map((x) => temporalsAsText(db, x)))
+  if (v !== null && typeof v === 'object' && !(v instanceof Date)) {
+    const out = {}
+    for (const [k, x] of Object.entries(v)) out[k] = await temporalsAsText(db, x)
+    return out
+  }
+  return v
+}
+
+/** What the graph holds, as the openCypher TCK observes side effects. */
+async function observeGraph(db) {
+  const values = async (query) => {
+    const result = await db.execute(query)
+    return result.toArray().map((row, i) => [Object.values(row)[0], result.cellType(i, 0)])
+  }
+  return observation(await values('MATCH (n) RETURN n'), await values('MATCH ()-[r]->() RETURN r'))
+}
+
 /** Execute a single test case and assert the expected result. */
-async function runTestCase(db, tc, language, setupLanguage) {
+async function runTestCase(db, tc, language, setupLanguage, valuesDialect) {
   runProbe(tc)
-  // Run setup queries in the file's declared language (not the variant language)
+  // GQL statements first (the TCK's test procedures), then the setup queries in the file's
+  // declared language (not the variant language)
+  for (const statement of tc.setupGql) {
+    await executeQuery(db, 'gql', statement)
+  }
   for (const setupQ of tc.setup) {
     await executeQuery(db, setupLanguage || language, setupQ)
   }
@@ -277,6 +317,9 @@ async function runTestCase(db, tc, language, setupLanguage) {
   // Determine queries
   const queries = tc.statements.length > 0 ? tc.statements : (tc.query || exp.error != null || exp.gqlStatus != null) ? [tc.query ?? ''] : []
   if (queries.length === 0) throw new Error(`No query or statements in test '${tc.name}'`)
+
+  // The graph before the statements, when their side effects are checked
+  const before = exp.sideEffects ? await observeGraph(db) : null
 
   // Error case: execute all-but-last normally, only last should fail
   if (exp.error != null || exp.gqlStatus != null) {
@@ -294,6 +337,7 @@ async function runTestCase(db, tc, language, setupLanguage) {
     }
     if (exp.error != null) expect(failure.message || String(failure)).toContain(exp.error)
     if (exp.gqlStatus != null) assertGqlStatus(failure, exp.gqlStatus)
+    if (before) assertSideEffects(before, await observeGraph(db), exp.sideEffects)
     return
   }
 
@@ -304,8 +348,17 @@ async function runTestCase(db, tc, language, setupLanguage) {
     result = await executeQuery(db, language, queries[i], params)
   }
 
+  if (before) assertSideEffects(before, await observeGraph(db), exp.sideEffects)
+
   // The warnings, also when none are expected
   expect(result.warnings.map(w => w.code)).toEqual(exp.warnings)
+
+  // Typed rows in the TCK's value notation
+  if (exp.values != null) {
+    const toText = valuesDialect === 'tck' ? (v) => temporalsAsText(db, v) : async (v) => v
+    await assertValues(result, exp.values, exp.ordered, exp.unorderedLists, toText)
+    return
+  }
 
   // Column assertion (checked before value assertions)
   if (exp.columns && exp.columns.length > 0) {
@@ -348,3 +401,70 @@ async function runTestCase(db, tc, language, setupLanguage) {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// The shared value cases (tests/spec/runners/values_cases.json): this runner's
+// `values:` comparison, temporal round trips and parameter typing agree with
+// every other runner's, a gap of this binding giving the opposite verdict.
+// ---------------------------------------------------------------------------
+
+const CASE_FILE = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'values_cases.json'), 'utf-8'))
+
+/** A neutral value as the Node binding returns it. */
+async function nativeValue(db, actual) {
+  if (actual === null || typeof actual === 'boolean') return actual
+  if (Array.isArray(actual)) return Promise.all(actual.map((a) => nativeValue(db, a)))
+  const [[kind, inner]] = Object.entries(actual)
+  const props = async (p) => Object.fromEntries(await Promise.all(Object.entries(p).map(async ([k, v]) => [k, await nativeValue(db, v)])))
+  switch (kind) {
+    case 'int': { const n = BigInt(inner); return n >= -(2n ** 53n) && n <= 2n ** 53n ? Number(n) : n }
+    case 'float': return { NaN, Inf: Infinity, '-Inf': -Infinity }[inner] ?? Number(inner)
+    case 'string': return inner
+    case 'map': return props(inner)
+    case 'node': return { _id: inner.id, _labels: inner.labels, ...(await props(inner.properties)) }
+    case 'relationship':
+      return { _id: inner.id, _type: inner.type, _source: inner.source, _target: inner.target, ...(await props(inner.properties)) }
+    case 'path':
+      return {
+        nodes: await Promise.all(inner.nodes.map((n) => nativeValue(db, { node: n }))),
+        edges: await Promise.all(inner.relationships.map((r) => nativeValue(db, { relationship: r }))),
+      }
+    case 'cypher': return (await db.executeCypher(`RETURN ${inner} AS v`)).toArray()[0].v
+    default: throw new Error(`unknown neutral kind ${kind}`)
+  }
+}
+
+describe('values_cases.json', () => {
+  for (const c of CASE_FILE.cases) {
+    it(`${c.cell} vs ${JSON.stringify(c.actual)}`, async () => {
+      const db = GrafeoDB.create()
+      try {
+        let value = await nativeValue(db, c.actual)
+        if (c.dialect === 'tck') value = await temporalsAsText(db, value)
+        const ty = await caseCellType(c.actual, async (text) => (await db.executeCypher(`RETURN ${text} AS v`)).cellType(0, 0))
+        const verdict = matchCell(parseCell(c.cell), toNeutral(value, ty), { unorderedLists: !!c.unordered_lists })
+        // A gap of this binding gives the opposite verdict until fixed
+        const gap = 'node' in (c.runner_gaps ?? {})
+        expect(verdict).toBe(c.match !== gap)
+      } finally {
+        db.close()
+      }
+    })
+  }
+  for (const trip of CASE_FILE.round_trips) {
+    it(`round trip ${trip.cypher}`, async () => {
+      const db = GrafeoDB.create()
+      try {
+        const text = await temporalsAsText(db, await nativeValue(db, { cypher: trip.cypher }))
+        expect(text === trip.text).toBe(!('node' in trip.runner_gaps))
+      } finally {
+        db.close()
+      }
+    })
+  }
+  for (const p of CASE_FILE.params) {
+    it(`param ${p.param}`, () => {
+      expect(paramValue(p.param)).toEqual(p.value === null ? null : p.value.string)
+    })
+  }
+})

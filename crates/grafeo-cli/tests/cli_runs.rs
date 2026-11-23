@@ -12,7 +12,6 @@
 //! ```
 
 use std::path::Path;
-use std::process::Command;
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
@@ -20,8 +19,8 @@ use grafeo_engine::GrafeoDB;
 /// Runs the `grafeo` binary with `args`; its standard output, after
 /// checking that it succeeded.
 fn grafeo(args: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_grafeo"))
-        .arg("--no-color")
+    let temp = tempfile::tempdir().unwrap();
+    let output = crate::grafeo_command(temp.path())
         .args(args)
         .output()
         .expect("run grafeo");
@@ -207,9 +206,9 @@ fn a_damaged_full_backup_is_refused() {
         .unwrap()
         .filename
         .clone();
+    let temp = tempfile::tempdir().unwrap();
     let restore = |out: &Path| {
-        Command::new(env!("CARGO_BIN_EXE_grafeo"))
-            .arg("--no-color")
+        crate::grafeo_command(temp.path())
             .args([
                 "backup",
                 "restore-to-epoch",
@@ -332,8 +331,8 @@ fn index_list_shows_the_name_the_index_was_created_with() {
 /// Runs the `grafeo` binary with `args`: its standard output and standard
 /// error, after checking that it succeeded.
 fn grafeo_streams(args: &[&str]) -> (String, String) {
-    let output = Command::new(env!("CARGO_BIN_EXE_grafeo"))
-        .arg("--no-color")
+    let temp = tempfile::tempdir().unwrap();
+    let output = crate::grafeo_command(temp.path())
         .args(args)
         .output()
         .expect("run grafeo");
@@ -597,8 +596,9 @@ fn an_error_shows_its_cause() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("broken.grafeo");
     std::fs::write(&file, "text, not a database, long enough for a header").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_grafeo"))
-        .args(["--no-color", "info", file.to_str().unwrap()])
+    let temp = tempfile::tempdir().unwrap();
+    let output = crate::grafeo_command(temp.path())
+        .args(["info", file.to_str().unwrap()])
         .output()
         .expect("run grafeo");
     assert!(!output.status.success());

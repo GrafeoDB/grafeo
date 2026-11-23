@@ -103,7 +103,7 @@ describe('database lifecycle', () => {
     db.close()
   })
 
-  it('should refuse writes after close of a persistent database', async () => {
+  it('should refuse every call after close of a persistent database', async () => {
     const fs = await import('fs')
     const os = await import('os')
     const path = await import('path')
@@ -116,7 +116,7 @@ describe('database lifecycle', () => {
 
     expect(() => db.createNode(['Person'], { name: 'Gus' })).toThrow(/Database closed/)
     await expect(db.execute("INSERT (:Person {name: 'Gus'})")).rejects.toThrow(/Database closed/)
-    expect(db.nodeCount()).toBe(1)
+    expect(() => db.nodeCount()).toThrow(/Database closed/)
 
     const reopened = GrafeoDB.open(dbPath)
     expect(reopened.nodeCount()).toBe(1)
@@ -145,11 +145,11 @@ describe('database lifecycle', () => {
     try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* ignore */ }
   })
 
-  it('should keep taking writes after close of an in-memory database', () => {
+  it('should refuse every call after close of an in-memory database too', () => {
     const db = GrafeoDB.create()
     db.close()
-    db.createNode(['Person'], { name: 'Gus' })
-    expect(db.nodeCount()).toBe(1)
+    expect(() => db.createNode(['Person'], { name: 'Gus' })).toThrow(/Database closed/)
+    expect(() => db.nodeCount()).toThrow(/Database closed/)
   })
 })
 

@@ -1,0 +1,168 @@
+# W3C SPARQL 1.1 Test Suite: Project Expression
+# Generated from the W3C manifest by scripts/convert_w3c_sparql.py
+# Source: https://github.com/w3c/rdf-tests at 7b5afb91857a9c282c03d2e45d3f76485797c901
+# Copyright W3C (MIT, ERCIM, Keio, Beihang), used under the W3C test suite
+# licences: https://www.w3.org/Consortium/Legal/2008/04-testsuite-copyright.html
+
+meta:
+  language: sparql
+  model: rdf
+  section: "w3c.project-expression"
+  title: W3C Project Expression
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # Expression is equality
+  - name: projexp01
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/instance#a> <http://www.example.org/schema#q> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/instance#a> <http://www.example.org/schema#q> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      prefix ex:	<http://www.example.org/schema#>
+      prefix in:	<http://www.example.org/instance#>
+
+      select ?x ?y ?z ((?y = ?z) as ?eq) where {
+        ?x ex:p ?y .
+        ?x ex:q ?z
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/instance#a>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"true"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+        - ['<http://www.example.org/instance#a>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>', '"false"^^<http://www.w3.org/2001/XMLSchema#boolean>']
+
+  # Expression raise an error
+  - name: projexp02
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/instance#a> <http://www.example.org/schema#q> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/instance#a> <http://www.example.org/schema#q> "foobar" .
+        }
+    query: |
+      prefix ex:	<http://www.example.org/schema#>
+      prefix in:	<http://www.example.org/instance#>
+
+      select ?x ?y ?z ((?y + ?z) as ?sum) where {
+        ?x ex:p ?y .
+        ?x ex:q ?z
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/instance#a>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://www.example.org/instance#a>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"foobar"', null]
+
+  # Reuse a project expression variable in select
+  - name: projexp03
+    xfail:
+      spec: "W3C SPARQL 1.1 project-expression/projexp03"
+      issue: fix in 0.6.4
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/instance#a> <http://www.example.org/schema#q> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      prefix ex:	<http://www.example.org/schema#>
+      prefix in:	<http://www.example.org/instance#>
+
+      select ?x ?y ?z
+        ((?y + ?z) as ?sum)
+        ((2 * ?sum) as ?twice)
+      where {
+        ?x ex:p ?y .
+        ?x ex:q ?z
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/instance#a>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>', '"3"^^<http://www.w3.org/2001/XMLSchema#integer>', '"6"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # Reuse a project expression variable in order by
+  - name: projexp04
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      prefix ex:	<http://www.example.org/schema#>
+      prefix in:	<http://www.example.org/instance#>
+
+      select ?x ?y
+        ((?y + ?y) as ?sum)
+      where {
+        ?x ex:p ?y
+      }
+      order by ?sum
+    expect:
+      terms:
+        - ['<http://www.example.org/instance#a>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://www.example.org/instance#a>', '"2"^^<http://www.w3.org/2001/XMLSchema#integer>', '"4"^^<http://www.w3.org/2001/XMLSchema#integer>']
+
+  # Expression may return no value
+  - name: projexp05
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p> <http://www.example.org/schema#a> .
+        }
+    query: |
+      prefix ex:	<http://www.example.org/schema#>
+      prefix in:	<http://www.example.org/instance#>
+
+      select ?x ?l (datatype(?l) as ?dt) where {
+        ?x ex:p ?l
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/instance#a>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', '<http://www.w3.org/2001/XMLSchema#integer>']
+        - ['<http://www.example.org/instance#a>', '<http://www.example.org/schema#a>', null]
+
+  # Expression has undefined variable
+  - name: projexp06
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      prefix ex:	<http://www.example.org/schema#>
+      prefix in:	<http://www.example.org/instance#>
+
+      select  ?x ?l (datatype(?m) as ?dt) where {
+        ?x ex:p ?l
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/instance#a>', '"1"^^<http://www.w3.org/2001/XMLSchema#integer>', null]
+
+  # Expression has variable that may be unbound
+  - name: projexp07
+    setup:
+      - |
+        INSERT DATA {
+          <http://www.example.org/instance#a> <http://www.example.org/schema#p> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/instance#a> <http://www.example.org/schema#q> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+          <http://www.example.org/instance#b> <http://www.example.org/schema#p> "3"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        }
+    query: |
+      prefix ex:	<http://www.example.org/schema#>
+      prefix in:	<http://www.example.org/instance#>
+
+      select ?x (datatype(?l) as ?dt) where {
+        ?x ex:p ?y .
+        optional {?x ex:q ?l}
+      }
+    expect:
+      terms:
+        - ['<http://www.example.org/instance#b>', null]
+        - ['<http://www.example.org/instance#a>', '<http://www.w3.org/2001/XMLSchema#integer>']

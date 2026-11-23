@@ -731,3 +731,44 @@ fn explain_prints_an_untyped_variable_length_expand_once() {
     };
     assert!(plan.contains("[:KNOWS*1..2]"), "typed: {plan}");
 }
+
+/// A group variable stays a list of its edges through a second quantified edge pattern after
+/// it: each element is an edge, whose properties read as the edge's (`[e IN x | e.w]`,
+/// `x[0].w`), not as null. From Alix, `x` is no edge, [3] to Gus or [38] to Vincent, and `y`
+/// goes one or two edges on from there.
+#[test]
+fn a_group_list_keeps_its_edges_through_a_second_quantified_pattern() {
+    let db = people();
+    let want: &[&[&str]] = &[
+        &["Alix", "[]", "[3]", "Gus"],
+        &["Alix", "[]", "[38]", "Vincent"],
+        &["Alix", "[]", "[3, 19]", "Vincent"],
+        &["Alix", "[]", "[38, 88]", "Mia"],
+        &["Gus", "[3]", "[19]", "Vincent"],
+        &["Gus", "[3]", "[19, 88]", "Mia"],
+        &["Vincent", "[38]", "[88]", "Mia"],
+    ];
+    assert_gql(
+        &db,
+        "MATCH (a:Person {name: 'Alix'})-[x:KNOWS]->{0,1}(m)-[y:KNOWS]->{1,2}(c) \
+         RETURN m.name AS m, [e IN x | e.w] AS xs, [e IN y | e.w] AS ys, c.name AS c",
+        want,
+    );
+    #[cfg(feature = "cypher")]
+    assert_cypher(
+        &db,
+        "MATCH (a:Person {name: 'Alix'})-[x:KNOWS*0..1]->(m)-[y:KNOWS*1..2]->(c) \
+         RETURN m.name AS m, [e IN x | e.w] AS xs, [e IN y | e.w] AS ys, c.name AS c",
+        want,
+    );
+    assert_gql(
+        &db,
+        "MATCH (a:Person {name: 'Alix'})-[x:KNOWS]->{1,1}(m)-[y:KNOWS]->{1,2}(c) \
+         RETURN m.name AS m, x[0].w AS first, size(x) AS n, c.name AS c",
+        &[
+            &["Gus", "3", "1", "Vincent"],
+            &["Gus", "3", "1", "Mia"],
+            &["Vincent", "38", "1", "Mia"],
+        ],
+    );
+}

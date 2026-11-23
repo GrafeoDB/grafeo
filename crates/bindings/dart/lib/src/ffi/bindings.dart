@@ -169,6 +169,21 @@ final class GrafeoBindings {
       Pointer<Utf8> Function(Pointer<Void>),
       Pointer<Utf8> Function(Pointer<Void>)>('grafeo_result_json');
 
+  /// The column names of a result as a JSON array, also without rows.
+  late final grafeoResultColumnsJson = library.lookupFunction<
+      Pointer<Utf8> Function(Pointer<Void>),
+      Pointer<Utf8> Function(Pointer<Void>)>('grafeo_result_columns_json');
+
+  /// The nodes of a result as JSON, each once.
+  late final grafeoResultNodesJson = library.lookupFunction<
+      Pointer<Utf8> Function(Pointer<Void>),
+      Pointer<Utf8> Function(Pointer<Void>)>('grafeo_result_nodes_json');
+
+  /// The edges of a result as JSON, each once.
+  late final grafeoResultEdgesJson = library.lookupFunction<
+      Pointer<Utf8> Function(Pointer<Void>),
+      Pointer<Utf8> Function(Pointer<Void>)>('grafeo_result_edges_json');
+
   /// Get the number of rows in a result.
   late final grafeoResultRowCount = library.lookupFunction<
       IntPtr Function(Pointer<Void>),
@@ -849,10 +864,10 @@ final class GrafeoBindings {
   // Change data capture
   // ===========================================================================
 
-  /// Turn change data capture on or off.
-  late final grafeoSetCdcEnabled = library.lookupFunction<
-      Void Function(Pointer<Void>, Bool),
-      void Function(Pointer<Void>, bool)>('grafeo_set_cdc_enabled');
+  /// Turn change data capture on or off and store the setting. Returns GrafeoStatus.
+  late final grafeoSetCdc = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Bool),
+      int Function(Pointer<Void>, bool)>('grafeo_set_cdc');
 
   /// Whether change data capture is on.
   late final grafeoIsCdcEnabled = library.lookupFunction<
@@ -1195,17 +1210,60 @@ final class GrafeoBindings {
       int Function(
           Pointer<Void>, int)>('grafeo_options_set_query_memory_limit');
 
+  /// Sets the CDC memory limit in bytes, above zero. Returns GrafeoStatus.
+  late final grafeoOptionsSetCdcMemoryLimit = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64),
+      int Function(Pointer<Void>, int)>('grafeo_options_set_cdc_memory_limit');
+
   /// Sets the path search budget in bytes, above zero. Returns GrafeoStatus.
   late final grafeoOptionsSetPathSearchBudget = library.lookupFunction<
       Int32 Function(Pointer<Void>, Uint64),
       int Function(
           Pointer<Void>, int)>('grafeo_options_set_path_search_budget');
 
+  /// Sets the path expansion limit, above zero. Returns GrafeoStatus.
+  late final grafeoOptionsSetPathExpansionLimit = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64),
+      int Function(
+          Pointer<Void>, int)>('grafeo_options_set_path_expansion_limit');
+
+  /// Sets the query length limit in bytes, above zero. Returns GrafeoStatus.
+  late final grafeoOptionsSetMaxQueryLength = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64),
+      int Function(Pointer<Void>, int)>('grafeo_options_set_max_query_length');
+
+  /// Sets the identifier length limit in bytes, above zero. Returns
+  /// GrafeoStatus.
+  late final grafeoOptionsSetMaxIdentifierLength = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64),
+      int Function(
+          Pointer<Void>, int)>('grafeo_options_set_max_identifier_length');
+
+  /// Sets the snapshot retention limit in bytes; below 1 MiB the open fails.
+  /// Returns GrafeoStatus.
+  late final grafeoOptionsSetSnapshotRetentionLimit = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64),
+      int Function(
+          Pointer<Void>, int)>('grafeo_options_set_snapshot_retention_limit');
+
+  /// Sets the history retention limit in bytes; zero fails the open. Returns
+  /// GrafeoStatus.
+  late final grafeoOptionsSetHistoryRetentionLimit = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64),
+      int Function(
+          Pointer<Void>, int)>('grafeo_options_set_history_retention_limit');
+
   /// Sets the spill limit in bytes; zero means nothing spills. Returns
   /// GrafeoStatus.
   late final grafeoOptionsSetSpillLimit = library.lookupFunction<
       Int32 Function(Pointer<Void>, Uint64),
       int Function(Pointer<Void>, int)>('grafeo_options_set_spill_limit');
+
+  /// Sets the plan cache limit in bytes; zero keeps no plan. Returns
+  /// GrafeoStatus.
+  late final grafeoOptionsSetPlanCacheLimit = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64),
+      int Function(Pointer<Void>, int)>('grafeo_options_set_plan_cache_limit');
 
   /// Lifts the spill limit. Returns GrafeoStatus.
   late final grafeoOptionsSetUnlimitedSpill = library.lookupFunction<

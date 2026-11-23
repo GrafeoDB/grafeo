@@ -50,6 +50,7 @@ mod tags {
     pub const INVALID_OPERAND: u8 = 31;
     pub const SPARQL_NUMBERS: u8 = 32;
     pub const SPARQL_ERROR: u8 = 33;
+    pub const COLLECT_KEEPING_NULLS: u8 = 34;
 }
 
 fn invalid(message: &str) -> std::io::Error {
@@ -211,6 +212,7 @@ fn write_accumulator(w: &mut dyn Write, accumulator: &AggregateState) -> std::io
         AggregateState::First(_) => tags::FIRST,
         AggregateState::Last(_) => tags::LAST,
         AggregateState::Collect(_) => tags::COLLECT,
+        AggregateState::CollectKeepingNulls(_) => tags::COLLECT_KEEPING_NULLS,
         AggregateState::CollectDistinct(..) => tags::COLLECT_DISTINCT,
         AggregateState::StdDev { .. } => tags::STDDEV,
         AggregateState::StdDevPop { .. } => tags::STDDEV_POP,
@@ -263,7 +265,9 @@ fn write_accumulator(w: &mut dyn Write, accumulator: &AggregateState) -> std::io
                 serialize_value(value, w)?;
             }
         }
-        AggregateState::Collect(values) | AggregateState::CollectDistinct(values, _) => {
+        AggregateState::Collect(values)
+        | AggregateState::CollectKeepingNulls(values)
+        | AggregateState::CollectDistinct(values, _) => {
             write_len(w, values.len())?;
             for value in values {
                 serialize_value(value, w)?;
@@ -428,10 +432,12 @@ fn read_tagged_accumulator(r: &mut dyn Read, tag: u8) -> std::io::Result<Aggrega
                 _ => AggregateState::Sample(value),
             }
         }
-        tags::COLLECT | tags::COLLECT_DISTINCT => {
+        tags::COLLECT | tags::COLLECT_KEEPING_NULLS | tags::COLLECT_DISTINCT => {
             let values = read_values(r)?;
             if tag == tags::COLLECT {
                 AggregateState::Collect(values)
+            } else if tag == tags::COLLECT_KEEPING_NULLS {
+                AggregateState::CollectKeepingNulls(values)
             } else {
                 AggregateState::CollectDistinct(values, read_seen(r)?)
             }

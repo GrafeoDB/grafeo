@@ -1109,11 +1109,14 @@ fn a_long_gremlin_traversal_that_fails_to_translate_fails_with_an_error() {
 /// The length of the plan tree the Gremlin `statement` translates to.
 #[cfg(feature = "gremlin")]
 fn plan_length(statement: &str) -> usize {
-    grafeo_engine::query::translate_gremlin(statement)
-        .unwrap_or_else(|e| panic!("{statement}: {e}"))
-        .root
-        .explain_tree()
-        .len()
+    grafeo_engine::query::translate_gremlin(
+        statement,
+        &grafeo_adapters::query::limits::ParseLimits::default(),
+    )
+    .unwrap_or_else(|e| panic!("{statement}: {e}"))
+    .root
+    .explain_tree()
+    .len()
 }
 
 #[cfg(feature = "gremlin")]

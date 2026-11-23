@@ -75,10 +75,12 @@ pub enum SessionResetTarget {
 pub enum SessionCommand {
     /// `USE GRAPH name`
     UseGraph(String),
-    /// `CREATE [PROPERTY] GRAPH name [IF NOT EXISTS] [TYPED type_name] [LIKE source | AS COPY OF source] [OPEN | ANY]`
+    /// `CREATE [OR REPLACE] [PROPERTY] GRAPH [IF NOT EXISTS] name [TYPED type_name] [LIKE source | AS COPY OF source] [OPEN | ANY]`
     CreateGraph {
         /// Graph name.
         name: String,
+        /// OR REPLACE: an existing graph of that name is dropped in the same change.
+        or_replace: bool,
         /// IF NOT EXISTS flag.
         if_not_exists: bool,
         /// Optional graph type binding.

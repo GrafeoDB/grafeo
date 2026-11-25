@@ -10,8 +10,9 @@
 //!   replay applies the same op again;
 //! - its before-image, a [`Before`]: what the write replaced (the old value,
 //!   the node's labels before it, a deleted entity's labels, endpoints and
-//!   properties). It stays in memory for undo and change data capture, and
-//!   is never logged.
+//!   properties). It stays in memory for undo and change data capture; the
+//!   log holds it only while change data capture is on, so the log alone
+//!   rebuilds a commit's events ([`ChangeSet::log_records_with_before`]).
 //!
 //! With them a data entry keeps its [`PendingVersion`]: whether the write
 //! created the transaction's pending version of what it wrote or changed
@@ -41,9 +42,11 @@
 //! ([`ChangeSet::push_bulk_rows`]): each a create, without an entry, a
 //! before-image or a pending version of its own.
 //!
-//! A [`StandaloneOp`] (a graph, catalog or RDF graph operation) is no entry
-//! of a set: it is validated, logged in a group of its own
-//! ([`LogRecord::Standalone`]) and applied after that group.
+//! A [`StandaloneOp`] (a graph or catalog operation) is no entry of a set: it
+//! is validated, logged in a group of its own ([`LogRecord::Standalone`]) and
+//! applied after that group. A transaction's whole-graph RDF operation is an
+//! entry ([`Change::RdfGraph`]), logged in its place among the transaction's
+//! writes.
 //!
 //! [`LogRecord::Data`]: crate::storage::log_record::LogRecord::Data
 //! [`LogRecord::Standalone`]: crate::storage::log_record::LogRecord::Standalone
@@ -55,7 +58,10 @@ use smallvec::SmallVec;
 
 use crate::collections::GrafeoMap;
 use crate::storage::catalog_record::{CatalogKey, CatalogRecord};
-use crate::storage::log_record::{LogRecordRef, RdfGraphTarget, TermRecord, TripleRecord};
+use crate::storage::log_record::{
+    ImageLogged, ImageRef, LogRecordRef, RdfGraphTarget, TermRecord, TripleRecord,
+    logs_before_image,
+};
 use crate::types::{ArcStr, EdgeId, NodeId, PropertyKey, Value};
 use crate::utils::error::{Error, Result};
 
@@ -349,8 +355,9 @@ impl DataOp {
     }
 }
 
-/// What a write replaced: the undo half of an entry, never logged. Undo
-/// restores it and change data capture reports it, without reading the store.
+/// What a write replaced: the undo half of an entry. Undo restores it and
+/// change data capture reports it, without reading the store; while change
+/// data capture is on, the log holds it too (kind 26).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Before {
     /// Nothing: the write created what it wrote, or inserted or deleted a
@@ -373,7 +380,7 @@ impl Before {
     /// [`Value`](Self::Value) for a property set and a value for a removal,
     /// [`Labels`](Self::Labels) without an added label or with a removed
     /// one, [`Node`](Self::Node) or [`Edge`](Self::Edge) for a delete.
-    fn fits(&self, op: &DataOp) -> bool {
+    pub(crate) fn fits(&self, op: &DataOp) -> bool {
         match op {
             DataOp::CreateNode { .. }
             | DataOp::CreateEdge { .. }
@@ -454,8 +461,8 @@ pub struct EdgeImage {
     pub properties: Properties,
     /// For a delete, the node whose detach delete removed the edge
     /// (`DETACH DELETE`, `detach_delete_node`), which change data capture
-    /// reports; `None` for every other write. Not logged: replay deletes the
-    /// edge the same either way.
+    /// reports; `None` for every other write. Logged only with the
+    /// before-image (kind 26): replay deletes the edge the same either way.
     pub deleted_with: Option<NodeId>,
 }
 
@@ -822,6 +829,19 @@ impl ChangeSet {
     /// nothing. What change data capture reports; a graph operation is no
     /// data op, and the log takes it from [`log_records`](Self::log_records).
     pub fn ops(&self) -> impl Iterator<Item = (GraphSlot, &DataOp, &Before)> {
+        self.ops_logged(&[])
+            .map(|(graph, op, before, _)| (graph, op, before))
+    }
+
+    /// [`ops`](Self::ops) as the log holds them, each with what its record
+    /// keeps of its before-image: the entries of `refused` (from
+    /// [`refused_images`](Self::refused_images)) with their verdict, without
+    /// their before-image when the log keeps nothing of it, and every other
+    /// write [`ImageLogged::Whole`].
+    pub fn ops_logged<'a>(
+        &'a self,
+        refused: &'a [(usize, ImageLogged)],
+    ) -> impl Iterator<Item = (GraphSlot, &'a DataOp, &'a Before, ImageLogged)> {
         self.entries
             .iter()
             .enumerate()
@@ -829,13 +849,23 @@ impl ChangeSet {
                 let (data, rows) = match change {
                     Change::Data {
                         graph, op, before, ..
-                    } => (Some((*graph, op, before)), &[][..]),
+                    } => {
+                        let logged = verdict(refused, index);
+                        let before = if logged == ImageLogged::Nothing {
+                            &ABSENT
+                        } else {
+                            before
+                        };
+                        (Some((*graph, op, before, logged)), &[][..])
+                    }
                     Change::Bulk(_) => (None, self.rows_of(index)),
                     Change::RdfGraph { .. } => (None, &[][..]),
                 };
                 let graph = change.graph();
-                data.into_iter()
-                    .chain(rows.iter().map(move |row| (graph, row, &ABSENT)))
+                data.into_iter().chain(
+                    rows.iter()
+                        .map(move |row| (graph, row, &ABSENT, ImageLogged::Whole)),
+                )
             })
     }
 
@@ -1082,8 +1112,56 @@ impl ChangeSet {
     /// entry, the rows kept with a bulk range (see [`ops`](Self::ops)), and
     /// a graph operation's standalone record in its place. A range whose rows
     /// were logged as they were applied has none. Before-images and pending
-    /// versions are never logged.
+    /// versions are not logged (see
+    /// [`log_records_with_before`](Self::log_records_with_before)).
     pub fn log_records(&self) -> impl Iterator<Item = LogRecordRef<'_>> {
+        self.records(None)
+    }
+
+    /// [`log_records`](Self::log_records) with each write that replaced
+    /// something logged with what it replaced
+    /// ([`LogRecordRef::DataWithBefore`]), as a commit logs its writes while
+    /// change data capture is on, but for the entries of `refused` (from
+    /// [`refused_images`](Self::refused_images)): a delete's identity alone
+    /// for [`ImageLogged::Identity`], its plain kind for
+    /// [`ImageLogged::Nothing`].
+    pub fn log_records_with_before<'a>(
+        &'a self,
+        refused: &'a [(usize, ImageLogged)],
+    ) -> impl Iterator<Item = LogRecordRef<'a>> {
+        self.records(Some(refused))
+    }
+
+    /// The entries, ascending, whose whole before-image the log leaves out,
+    /// each with what it keeps (see [`logs_before_image`]): the rule runs once
+    /// per write, and the log and change data capture both take its verdict
+    /// from here. Empty, with nothing allocated, when every image is logged
+    /// whole.
+    pub fn refused_images(&self) -> Vec<(usize, ImageLogged)> {
+        let key = |graph: GraphSlot| self.graphs[graph.index()].key.as_deref();
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, change)| match change {
+                Change::Data {
+                    graph, op, before, ..
+                } if !matches!(before, Before::Absent) => {
+                    match logs_before_image(key(*graph), op, before) {
+                        ImageLogged::Whole => None,
+                        logged => Some((index, logged)),
+                    }
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The log records of the set's writes, with their before-images, as
+    /// much of each as the refused entries' verdicts keep, when `images`.
+    fn records<'a>(
+        &'a self,
+        images: Option<&'a [(usize, ImageLogged)]>,
+    ) -> impl Iterator<Item = LogRecordRef<'a>> {
         // `push`, `push_bulk` and `push_rdf_graph` took only slots of this
         // set, and slots stay.
         let key = |graph: GraphSlot| self.graphs[graph.index()].key.as_deref();
@@ -1092,13 +1170,22 @@ impl ChangeSet {
             .enumerate()
             .flat_map(move |(index, change)| {
                 let (record, rows) = match change {
-                    Change::Data { graph, op, .. } => (
-                        Some(LogRecordRef::Data {
-                            graph: key(*graph),
-                            op,
-                        }),
-                        &[][..],
-                    ),
+                    Change::Data {
+                        graph, op, before, ..
+                    } => {
+                        let graph = key(*graph);
+                        let image = match images.map(|refused| verdict(refused, index)) {
+                            _ if matches!(before, Before::Absent) => None,
+                            Some(ImageLogged::Whole) => Some(ImageRef::Change(before)),
+                            Some(ImageLogged::Identity) => Some(ImageRef::Identity(before)),
+                            Some(ImageLogged::Nothing) | None => None,
+                        };
+                        let record = match image {
+                            Some(before) => LogRecordRef::DataWithBefore { graph, op, before },
+                            None => LogRecordRef::Data { graph, op },
+                        };
+                        (Some(record), &[][..])
+                    }
                     Change::Bulk(_) => (None, self.rows_of(index)),
                     Change::RdfGraph { op, .. } => (Some(LogRecordRef::RdfGraph(op)), &[][..]),
                 };
@@ -1108,6 +1195,14 @@ impl ChangeSet {
                     .chain(rows.iter().map(move |op| LogRecordRef::Data { graph, op }))
             })
     }
+}
+
+/// The verdict of entry `index` in `refused` (ascending, from
+/// [`ChangeSet::refused_images`]): [`ImageLogged::Whole`] when it is not there.
+fn verdict(refused: &[(usize, ImageLogged)], index: usize) -> ImageLogged {
+    refused
+        .binary_search_by_key(&index, |&(entry, _)| entry)
+        .map_or(ImageLogged::Whole, |at| refused[at].1)
 }
 
 /// What a change set wrote in one graph (see [`ChangeSet::written_entities`]).

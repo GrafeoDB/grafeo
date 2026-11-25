@@ -59,6 +59,7 @@ Performance and memory release, in progress: this section lists what has landed 
 - **Commits are refused after a checkpoint of unknown outcome or a failed restore**: a database without a WAL refuses commits with `GRAFEO-S008` once a checkpoint's outcome is unknown, and a failed restore refuses commits until a reopen (`GRAFEO-T008`, or S008 when its outcome is unknown); reads go on. `GRAFEO-T008` now names a commit or a restore that did not complete.
 - **`CdcRetentionConfig::unlimited()` keeps the byte bound**: the change log drops its oldest commits past a sixteenth of the memory limit, where it grew without bound.
 - **Change data capture folds creates and deletes within a transaction** ([#679](https://github.com/GrafeoDB/grafeo/issues/679)): a node, edge or RDF triple created and deleted in one transaction produces no events, nor does a triple deleted and inserted again, and an entity changed and then deleted reports its delete alone, with what it held before the transaction (0.6.3 reported each write). An entity that exists before and after the transaction still reports one update per write.
+- **The WAL holds what each update and delete replaced while change data capture is on** ([#679](https://github.com/GrafeoDB/grafeo/issues/679)): each such write also logs its before-image, so the WAL grows with the changed values; with change data capture off the WAL is unchanged.
 
 ### Performance
 
@@ -149,6 +150,7 @@ Performance and memory release, in progress: this section lists what has landed 
 - **A Gremlin `.limit()` after a range `has` and a traversal keeps every row it should**: in `g.V().has('k', gt(0)).out('KNOWS').has('k', gt(900)).limit(3)`, the scan of `k` was cut to 3 nodes before the traversal and the second `has`, so the limit returned fewer rows than it should, often none; it now returns as many as the traversal without the limit, up to 3.
 - **A group variable keeps its edges through a second quantified edge pattern**: in `MATCH (a)-[x:R]->{0,10}(m)-[y:S]->{1,10}(c)`, the edges of `x` were read as the nodes with the same ids, so `[e IN x | e.k]` and `x[0].k` gave that node's property, or null; `x` now holds its edges, as `y` does. `size(x)` and the rows were already right.
 - **PROFILE shows the top-k that runs**: an `ORDER BY ... LIMIT` is one `TopK` line naming its sort, where PROFILE showed a full sort the statement does not run.
+- **Change data capture timestamps keep rising across reopens**: the clock is stored at each checkpoint, so a reopen, with or without a WAL, never hands out a timestamp below one already given; 0.6.3 started again from the wall clock.
 
 ## [0.6.3] - 2026-11-15
 

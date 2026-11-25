@@ -832,7 +832,9 @@ impl super::Open {
                 }
                 _ => false,
             };
-            let record = grafeo_common::storage::catalog_record::CdcConfigRecord { enabled };
+            // The clock is filled in when the record is read (`cdc_config`).
+            let record =
+                grafeo_common::storage::catalog_record::CdcConfigRecord { enabled, clock: 0 };
             let previous_record = self.catalog.set_cdc_config(Some(record));
             // Capture goes on at once, and off only once the setting is
             // stored: the commits the checkpoint lets go on while it writes

@@ -57,6 +57,11 @@ impl Open {
                 // Cut what no commit finished before the writer goes on.
                 replayed.end.cut_torn_tail()?;
                 last = last.max(replayed.last_epoch);
+                // The change log's timestamps go on past what the log reserved.
+                #[cfg(feature = "cdc")]
+                if let Some(floor) = replayed.clock {
+                    self.cdc_log.clock().update(floor);
+                }
                 (header.database_id, replayed.end.end_lsn)
             }
         };

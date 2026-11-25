@@ -952,8 +952,24 @@ pub(crate) fn catalog_records(
     if with_config && let Some(config) = catalog.stored_config() {
         records.push(CatalogRecord::StoredConfig(config));
     }
-    if with_config && let Some(config) = catalog.cdc_config() {
-        records.push(CatalogRecord::CdcConfig(config));
+    if with_config {
+        // The stored setting with its clock, or, when none is stored and
+        // this open handed out change timestamps, the setting off with the
+        // last of them: the next open starts its clock past it, so
+        // timestamps rise across reopens whenever change data capture ran.
+        let config = catalog.cdc_config();
+        #[cfg(feature = "cdc")]
+        let config = config.or_else(|| {
+            catalog.cdc_clock_moved().map(|clock| {
+                grafeo_common::storage::catalog_record::CdcConfigRecord {
+                    enabled: false,
+                    clock,
+                }
+            })
+        });
+        if let Some(config) = config {
+            records.push(CatalogRecord::CdcConfig(config));
+        }
     }
     Ok(records)
 }
@@ -1291,6 +1307,59 @@ mod tests {
         let catalog = Arc::new(Catalog::new());
         let store = Arc::new(grafeo_core::graph::rowgroup::RowGroupStore::new());
         CatalogSection::new(catalog, store, || 42)
+    }
+
+    /// The change data capture records a catalog section holds: none for a
+    /// database that stores no setting and whose open handed out no change
+    /// timestamp; the setting off with the clock once the open handed one
+    /// out; and a stored setting as it is stored, with the clock.
+    #[cfg(feature = "cdc")]
+    #[test]
+    fn kind_14_is_written_for_a_stored_setting_or_an_open_that_captured() {
+        use grafeo_common::storage::catalog_record::CdcConfigRecord;
+        let cdc = |catalog: &Catalog| -> Vec<CdcConfigRecord> {
+            catalog_records(catalog, Vec::new(), &[], true)
+                .unwrap()
+                .into_iter()
+                .filter_map(|record| match record {
+                    CatalogRecord::CdcConfig(config) => Some(config),
+                    _ => None,
+                })
+                .collect()
+        };
+        let catalog = Catalog::new();
+        assert_eq!(cdc(&catalog), [], "no clock, no setting");
+        let clock = Arc::new(grafeo_common::types::HlcClock::new());
+        catalog.attach_cdc_clock(Arc::clone(&clock));
+        assert_eq!(cdc(&catalog), [], "a clock that handed out nothing");
+        let last = clock.now().as_u64();
+        assert_eq!(
+            cdc(&catalog),
+            [CdcConfigRecord {
+                enabled: false,
+                clock: last,
+            }],
+            "the setting off with the clock"
+        );
+        assert!(
+            catalog_records(&catalog, Vec::new(), &[], false)
+                .unwrap()
+                .iter()
+                .all(|record| !matches!(record, CatalogRecord::CdcConfig(_))),
+            "a section without the configuration has none"
+        );
+        catalog.set_cdc_config(Some(CdcConfigRecord {
+            enabled: true,
+            clock: 0,
+        }));
+        assert_eq!(
+            cdc(&catalog),
+            [CdcConfigRecord {
+                enabled: true,
+                clock: last,
+            }],
+            "the stored setting, with the clock"
+        );
     }
 
     #[test]

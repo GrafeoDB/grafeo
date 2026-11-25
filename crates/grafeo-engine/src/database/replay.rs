@@ -26,8 +26,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use grafeo_common::change::{DataModel, DataOp, StandaloneOp};
+use grafeo_common::storage::log_record::GroupBegin;
 use grafeo_common::storage::{LogRecord, read_log_records};
-use grafeo_common::types::EpochId;
+use grafeo_common::types::{EpochId, HlcTimestamp};
 use grafeo_common::utils::error::{Error, Result, StorageError};
 use grafeo_core::graph::apply::{CHUNK_ROWS, GraphBackend, Writer};
 #[cfg(feature = "triple-store")]
@@ -48,6 +49,21 @@ pub(crate) struct Replayed {
     pub(crate) end: ScanEnd,
     /// How many groups were applied.
     pub(crate) groups: u64,
+    /// The last timestamp the replayed groups reserved for change events
+    /// (a clocked group's first, plus one per data record after the first):
+    /// the change log's clock starts past it.
+    #[cfg_attr(
+        not(feature = "cdc"),
+        expect(dead_code, reason = "only change data capture reads the clock")
+    )]
+    pub(crate) clock: Option<HlcTimestamp>,
+}
+
+/// The last timestamp a group with `begin` reserved for its `writes` data
+/// records; `None` for a group without a clock or without writes.
+fn last_reserved(begin: &GroupBegin, writes: u64) -> Option<HlcTimestamp> {
+    let steps = writes.checked_sub(1)?;
+    begin.clock.map(|first| first.plus(steps))
 }
 
 /// The stores and the catalog a replay applies groups to.
@@ -85,6 +101,7 @@ pub(crate) fn replay<S: RootStore>(
 ) -> Result<Replayed> {
     let mut scan = WalScan::open(dir, options).map_err(Error::from)?;
     let mut groups = 0;
+    let mut clock = None;
     while let Some(mut group) = scan.next_group().map_err(Error::from)? {
         let start = group.start_lsn();
         let failed = |reason: String| {
@@ -107,7 +124,12 @@ pub(crate) fn replay<S: RootStore>(
         };
         let mut rdf = RdfGroup::default();
         let mut creates = Creates::default();
+        let mut writes = 0;
         for record in records {
+            writes += u64::from(matches!(
+                record,
+                LogRecord::Data { .. } | LogRecord::DataWithBefore { .. }
+            ));
             let record = match record {
                 LogRecord::Data { graph, op } if creates.takes(&op) => {
                     if let Some((graph, ops)) = creates.push(graph, op) {
@@ -129,6 +151,7 @@ pub(crate) fn replay<S: RootStore>(
             apply_creates(graph.as_deref(), &ops, begin.epoch, targets)
                 .map_err(|error| failed(error.to_string()))?;
         }
+        clock = clock.max(last_reserved(&begin, writes));
         rdf.apply(targets)
             .map_err(|error| failed(error.to_string()))?;
         targets.store.sync_epoch(begin.epoch);
@@ -138,7 +161,7 @@ pub(crate) fn replay<S: RootStore>(
         groups += 1;
     }
     let end = scan.finish().map_err(Error::from)?;
-    Ok(Replayed { end, groups })
+    Ok(Replayed { end, groups, clock })
 }
 
 /// The consecutive creates of one kind (nodes or edges) for one graph that
@@ -215,6 +238,10 @@ fn apply_record<S: RootStore>(
         LogRecord::GroupBegin(_) => Err(Error::Internal(
             "a second GroupBegin inside a group".to_string(),
         )),
+        // The image is for change data capture: replay applies the write.
+        LogRecord::DataWithBefore { graph, op, .. } => {
+            apply_record(LogRecord::Data { graph, op }, epoch, targets, rdf)
+        }
         LogRecord::Data { graph, op } if op.model() == DataModel::Rdf => {
             rdf.records.push(RdfRecord::Triple(graph, op));
             Ok(())
@@ -346,6 +373,12 @@ pub(crate) struct BackendReplayed {
     /// The epoch of the last group the log holds, applied or skipped as
     /// durable already: the database goes on above it.
     pub(crate) last_epoch: EpochId,
+    /// As [`Replayed::clock`].
+    #[cfg_attr(
+        not(feature = "cdc"),
+        expect(dead_code, reason = "only change data capture reads the clock")
+    )]
+    pub(crate) clock: Option<HlcTimestamp>,
 }
 
 /// Replays the WAL in `dir` of a database on a backend of one's own
@@ -370,6 +403,7 @@ pub(crate) fn replay_into_backend(
 ) -> Result<BackendReplayed> {
     let mut scan = WalScan::open(dir, options).map_err(Error::from)?;
     let mut last_epoch = EpochId::INITIAL;
+    let mut clock = None;
     let mut unbuilt = Vec::new();
     while let Some(mut group) = scan.next_group().map_err(Error::from)? {
         let start = group.start_lsn();
@@ -394,9 +428,16 @@ pub(crate) fn replay_into_backend(
         let new = begin.epoch > durable;
         let mut creates = Creates::default();
         let writer = Writer::Replay { epoch: begin.epoch };
+        let mut writes = 0;
         for record in records {
+            // The image is for change data capture: replay applies the write.
+            let record = match record {
+                LogRecord::DataWithBefore { graph, op, .. } => LogRecord::Data { graph, op },
+                record => record,
+            };
             let record = match record {
                 LogRecord::Data { graph: None, op } if creates.takes(&op) => {
+                    writes += 1;
                     if let Some((_, ops)) = creates.push(None, op)
                         && new
                     {
@@ -417,6 +458,7 @@ pub(crate) fn replay_into_backend(
             }
             match record {
                 LogRecord::Data { graph: None, op } if op.model() != DataModel::Rdf => {
+                    writes += 1;
                     if new {
                         backend
                             .apply(&op, writer)
@@ -449,20 +491,26 @@ pub(crate) fn replay_into_backend(
                 .map_err(|error| failed(error.to_string()))?;
         }
         last_epoch = last_epoch.max(begin.epoch);
+        clock = clock.max(last_reserved(&begin, writes));
         if let Some(manager) = history {
             manager.record_commit_time(begin.epoch, begin.timestamp_ms, 0);
         }
     }
     let end = scan.finish().map_err(Error::from)?;
-    Ok(BackendReplayed { end, last_epoch })
+    Ok(BackendReplayed {
+        end,
+        last_epoch,
+        clock,
+    })
 }
 
 /// How an error names a record a database on a backend of its own does not
 /// log.
 fn describe_record(record: &LogRecord) -> &'static str {
     match record {
-        LogRecord::Data { graph: Some(_), .. } => "write to a named graph",
-        LogRecord::Data { .. } => "RDF record",
+        LogRecord::Data { graph: Some(_), .. }
+        | LogRecord::DataWithBefore { graph: Some(_), .. } => "write to a named graph",
+        LogRecord::Data { .. } | LogRecord::DataWithBefore { .. } => "RDF record",
         LogRecord::GroupBegin(_) => "second GroupBegin inside a group",
         LogRecord::Standalone(_) => "standalone record",
     }

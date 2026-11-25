@@ -233,7 +233,15 @@ pub struct ChangeEvent {
     /// (lower 16 bits) into a `u64`. Backward-compatible: plain wall-clock
     /// values have logical counter = 0.
     pub timestamp: HlcTimestamp,
-    /// Properties before the change (None for Create and for triple events).
+    /// Properties before the change: the old value of an update (None when
+    /// the property was not there), and for a delete what the entity held, a
+    /// map that is empty when it held none. None for a create and a triple,
+    /// and when the write's before-image is too large for the WAL record that
+    /// holds it (past `MAX_RECORD_BYTES` or the list rule): the record then
+    /// leaves the properties out. A delete's event still has its labels, or its
+    /// edge type and endpoints, which the record keeps, unless those alone
+    /// pass the limits (labels of about 1 GiB); then the record has no
+    /// image and the event has neither, as the durable feed reads it back.
     pub before: Option<HashMap<String, Value>>,
     /// Properties after the change (None for Delete and for triple events).
     pub after: Option<HashMap<String, Value>>,
@@ -1507,6 +1515,38 @@ impl CdcLog {
         })
     }
 
+    /// [`record_commit`](Self::record_commit) with the timestamps the commit
+    /// reserved when it wrote its log group (`first`), or, without one,
+    /// reserved now: a commit without a log group reserves in its publish
+    /// turn, where commits are serialized in epoch order too.
+    /// The verdicts of the log's image rule come with the timestamps
+    /// (`logged`: the first one and the entries whose whole image is
+    /// refused, with what the log keeps of each, see
+    /// [`ChangeSet::refused_images`](grafeo_common::change::ChangeSet::refused_images)),
+    /// or, without a log group, are taken here once: what the log leaves
+    /// out, the events leave out.
+    pub(crate) fn record_commit_at(
+        &self,
+        set: &grafeo_common::change::ChangeSet,
+        epoch: EpochId,
+        logged: Option<(
+            HlcTimestamp,
+            &[(usize, grafeo_common::storage::log_record::ImageLogged)],
+        )>,
+    ) {
+        match logged {
+            Some((first, refused)) => {
+                let writes = set.ops().count();
+                self.record_commit(set, epoch, CommitStamps { first, writes }, refused);
+            }
+            None => {
+                if let Some(stamps) = self.reserve_for(set) {
+                    self.record_commit(set, epoch, stamps, &set.refused_images());
+                }
+            }
+        }
+    }
+
     /// Records the events of a commit at `epoch` that changed what `set`
     /// holds, with the timestamps `stamps` (from
     /// [`reserve_for`](Self::reserve_for)); see [`events_for_ops`].
@@ -1515,10 +1555,11 @@ impl CdcLog {
         set: &grafeo_common::change::ChangeSet,
         epoch: EpochId,
         stamps: CommitStamps,
+        refused: &[(usize, grafeo_common::storage::log_record::ImageLogged)],
     ) {
-        let ops = set.ops().map(|(slot, op, before)| {
+        let ops = set.ops_logged(refused).map(|(slot, op, before, logged)| {
             let graph = set.graph(slot).and_then(|graph| graph.key.as_deref());
-            (graph, op, before)
+            (graph, op, before, logged)
         });
         self.record_batch(events_for_ops(ops, stamps.writes, epoch, stamps.first));
     }
@@ -1532,9 +1573,11 @@ impl CdcLog {
 /// timestamped `first.plus(i)`; `writes` is how many there are (the room the
 /// events take). A triple's event names its RDF graph as
 /// `triple_graph`, as the RDF bulk writes report theirs. An event is built
-/// from the write's op and before-image: a create carries its labels or type
-/// and endpoints and the values it was created with, a delete what the
-/// entity held, an update the value or the labels before and after. The
+/// from the write's op and before-image, as much of it as the log keeps
+/// (`logged`): a create carries its labels or type and endpoints and the
+/// values it was created with, a delete what the entity held (its labels or
+/// type and endpoints alone when the log leaves its properties out), an
+/// update the value or the labels before and after. The
 /// events are then folded into the transaction's net changes (see
 /// [`net_changes`]); a folded write's timestamp is used up.
 pub(crate) fn events_for_ops<'a>(
@@ -1543,6 +1586,7 @@ pub(crate) fn events_for_ops<'a>(
             Option<&'a str>,
             &'a grafeo_common::change::DataOp,
             &'a grafeo_common::change::Before,
+            grafeo_common::storage::log_record::ImageLogged,
         ),
     >,
     writes: usize,
@@ -1550,6 +1594,7 @@ pub(crate) fn events_for_ops<'a>(
     first: HlcTimestamp,
 ) -> Vec<ChangeEvent> {
     use grafeo_common::change::{Before, DataOp};
+    use grafeo_common::storage::log_record::ImageLogged;
 
     let values = |properties: &[(grafeo_common::types::PropertyKey, Value)]| {
         (!properties.is_empty()).then(|| {
@@ -1567,7 +1612,7 @@ pub(crate) fn events_for_ops<'a>(
     };
     let mut events = Vec::with_capacity(writes);
     let mut timestamp = first;
-    for (graph, op, before) in ops {
+    for (graph, op, before, logged) in ops {
         let stamp = timestamp;
         timestamp = timestamp.plus(1);
         let (entity_id, kind) = match op {
@@ -1652,15 +1697,19 @@ pub(crate) fn events_for_ops<'a>(
                 event.dst_id = Some(dst.as_u64());
                 event.after = values(properties);
             }
+            // A delete's `before` is what the entity held, an empty map
+            // for none, and `None` when the log left the properties out.
             (DataOp::DeleteNode { .. }, Before::Node(image)) => {
                 event.labels = Some(names(&image.labels));
-                event.before = values(&image.properties);
+                event.before = (logged == ImageLogged::Whole)
+                    .then(|| values(&image.properties).unwrap_or_default());
             }
             (DataOp::DeleteEdge { .. }, Before::Edge(image)) => {
                 event.edge_type = Some(image.edge_type.to_string());
                 event.src_id = Some(image.src.as_u64());
                 event.dst_id = Some(image.dst.as_u64());
-                event.before = values(&image.properties);
+                event.before = (logged == ImageLogged::Whole)
+                    .then(|| values(&image.properties).unwrap_or_default());
                 event.deleted_with = image.deleted_with.map(|node| node.as_u64());
             }
             (
@@ -1669,6 +1718,14 @@ pub(crate) fn events_for_ops<'a>(
                 Before::Value(old),
             ) => {
                 event.before = old.as_ref().and_then(|old| one(key, old));
+                event.after = one(key, value);
+            }
+            // A set whose old value was too large to log: the new value.
+            (
+                DataOp::SetNodeProperty { key, value, .. }
+                | DataOp::SetEdgeProperty { key, value, .. },
+                Before::Absent,
+            ) => {
                 event.after = one(key, value);
             }
             (
@@ -1832,7 +1889,9 @@ fn same_entity(earlier: Option<&ChangeEvent>, event: &ChangeEvent) -> bool {
 
 /// Gives `delete` what the entity held before the transaction: the first
 /// value each of `updates` changed, and the labels before the first label
-/// change.
+/// change. A delete whose properties the log left out (`before` is `None`)
+/// keeps them left out: the updates' old values alone would be a partial
+/// image.
 fn restore_before(delete: &mut ChangeEvent, updates: impl Iterator<Item = ChangeEvent>) {
     let mut restored = std::collections::HashSet::new();
     let mut labels_restored = false;
@@ -1843,6 +1902,9 @@ fn restore_before(delete: &mut ChangeEvent, updates: impl Iterator<Item = Change
             delete.labels = Some(labels);
             labels_restored = true;
         }
+        let Some(properties) = delete.before.as_mut() else {
+            continue;
+        };
         let keys = update
             .after
             .iter()
@@ -1852,16 +1914,13 @@ fn restore_before(delete: &mut ChangeEvent, updates: impl Iterator<Item = Change
             if !restored.insert(key.clone()) {
                 continue;
             }
-            let properties = delete.before.get_or_insert_with(HashMap::new);
             match update.before.as_ref().and_then(|before| before.get(&key)) {
                 Some(value) => properties.insert(key, value.clone()),
                 None => properties.remove(&key),
             };
         }
     }
-    if delete.before.as_ref().is_some_and(HashMap::is_empty) {
-        delete.before = None;
-    }
+    // A delete's `before` stays a map, empty when the entity held nothing.
 }
 
 /// Folds `update` into `create`, an event of the entity it changed.
@@ -2605,6 +2664,94 @@ mod tests {
             triple_object: None,
             triple_graph: None,
         }
+    }
+
+    /// An event of node 3 of `kind`, with `before` and `after` of one key `x`
+    /// and the labels `labels`.
+    fn valued_node_event(
+        kind: ChangeKind,
+        before: Option<i64>,
+        after: Option<i64>,
+        labels: Option<&[&str]>,
+    ) -> ChangeEvent {
+        let one = |value: Option<i64>| {
+            value.map(|value| HashMap::from([("x".to_string(), Value::Int64(value))]))
+        };
+        ChangeEvent {
+            entity_id: EntityId::Node(NodeId::new(3)),
+            graph: None,
+            kind,
+            epoch: EpochId(7),
+            timestamp: HlcTimestamp::new(1, 0),
+            before: one(before),
+            after: one(after),
+            labels: labels.map(|labels| labels.iter().map(ToString::to_string).collect()),
+            before_labels: None,
+            edge_type: None,
+            src_id: None,
+            dst_id: None,
+            deleted_with: None,
+            triple_subject: None,
+            triple_predicate: None,
+            triple_object: None,
+            triple_graph: None,
+        }
+    }
+
+    /// An update and then a delete of a node whose delete left its
+    /// properties out (`before` is `None`: the log kept its identity alone)
+    /// folds into the delete with its properties still left out, not the
+    /// update's old values as a partial image; a delete with its whole image
+    /// takes the updates' old values back.
+    #[test]
+    fn a_delete_without_its_properties_keeps_them_left_out_after_updates() {
+        let update = valued_node_event(ChangeKind::Update, Some(1), Some(2), None);
+        let left_out = valued_node_event(ChangeKind::Delete, None, None, Some(&["Person"]));
+        let net = net_changes(vec![update.clone(), left_out]);
+        assert_eq!(net.len(), 1, "{net:?}");
+        assert_eq!(net[0].kind, ChangeKind::Delete);
+        assert_eq!(net[0].before, None, "the properties stay left out");
+        assert_eq!(net[0].labels, Some(vec!["Person".to_string()]));
+        let whole = valued_node_event(ChangeKind::Delete, Some(2), None, Some(&["Person"]));
+        let net = net_changes(vec![update, whole]);
+        assert_eq!(
+            net[0].before,
+            Some(HashMap::from([("x".to_string(), Value::Int64(1))])),
+            "the whole image takes the old value back"
+        );
+    }
+
+    /// The `Nothing` verdict through `events_for_ops`: the log kept no image,
+    /// so a delete reports neither labels nor properties, and a set keeps its
+    /// new value with no old one.
+    #[test]
+    fn a_write_logged_without_its_image_reports_without_it() {
+        use grafeo_common::change::{Before, DataOp};
+        use grafeo_common::storage::log_record::ImageLogged;
+        let delete = DataOp::DeleteNode { id: NodeId::new(3) };
+        let set = DataOp::SetNodeProperty {
+            id: NodeId::new(4),
+            key: "x".into(),
+            value: Value::Int64(2),
+        };
+        let absent = Before::Absent;
+        let ops = [
+            (None, &delete, &absent, ImageLogged::Nothing),
+            (None, &set, &absent, ImageLogged::Nothing),
+        ];
+        let events = events_for_ops(ops.into_iter(), 2, EpochId(7), HlcTimestamp::new(1, 0));
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(events[0].kind, ChangeKind::Delete);
+        assert_eq!(
+            (events[0].labels.is_none(), events[0].before.is_none()),
+            (true, true)
+        );
+        assert_eq!(events[1].kind, ChangeKind::Update);
+        assert_eq!(events[1].before, None);
+        assert_eq!(
+            events[1].after,
+            Some(HashMap::from([("x".to_string(), Value::Int64(2))]))
+        );
     }
 
     /// The fold keys on the graph as well as the id: a create in one graph and a delete of the

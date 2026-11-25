@@ -129,10 +129,11 @@ impl Database {
                     &changes,
                     &[],
                     grafeo_common::storage::log_record::Origin::Transaction,
+                    None,
                 )
                 .unwrap();
                 if let Some(logged) = logged {
-                    super::super::wal_log::sync_commit(wal, logged).unwrap();
+                    super::super::wal_log::sync_commit(wal, &logged).unwrap();
                 }
                 commit
             }

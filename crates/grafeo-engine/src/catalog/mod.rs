@@ -43,6 +43,13 @@ pub struct Catalog {
     /// The change data capture setting the database file stores (#679), when
     /// it stores one: written and read as the stored configuration is.
     cdc_config: RwLock<Option<grafeo_common::storage::catalog_record::CdcConfigRecord>>,
+    /// The change log's clock, once a database attached it, and its last
+    /// timestamp then: the stored setting carries its last timestamp (see
+    /// [`cdc_config`](Self::cdc_config)), and an open that handed out
+    /// timestamps past it stores them without a setting (see
+    /// [`cdc_clock_moved`](Self::cdc_clock_moved)).
+    #[cfg(feature = "cdc")]
+    cdc_clock: std::sync::OnceLock<(Arc<grafeo_common::types::HlcClock>, u64)>,
     /// Moves with every change of the rules writes must meet, as a catalog op applies
     /// (`standalone::apply`): a commit compares it with its transaction's start, and checks
     /// its writes only when it moved.
@@ -73,6 +80,8 @@ impl Catalog {
             schema: Some(SchemaCatalog::new()),
             stored_config: RwLock::new(None),
             cdc_config: RwLock::new(None),
+            #[cfg(feature = "cdc")]
+            cdc_clock: std::sync::OnceLock::new(),
             rules_generation: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -95,12 +104,44 @@ impl Catalog {
     }
 
     /// The change data capture setting the database stores, when it stores
-    /// one.
+    /// one, with the change log's last timestamp once a clock is attached
+    /// ([`attach_cdc_clock`](Self::attach_cdc_clock)): what a checkpoint
+    /// writes.
     #[must_use]
     pub(crate) fn cdc_config(
         &self,
     ) -> Option<grafeo_common::storage::catalog_record::CdcConfigRecord> {
-        *self.cdc_config.read()
+        #[cfg_attr(
+            not(feature = "cdc"),
+            expect(unused_mut, reason = "only the clock changes it")
+        )]
+        let mut record = (*self.cdc_config.read())?;
+        #[cfg(feature = "cdc")]
+        if let Some((clock, _)) = self.cdc_clock.get() {
+            record.clock = record.clock.max(clock.peek().as_u64());
+        }
+        Some(record)
+    }
+
+    /// The change log's last timestamp, when this open handed out
+    /// timestamps (or took a later one from its log) since the clock was
+    /// attached; `None` before a clock is attached and while it has not
+    /// moved. A checkpoint stores it when no setting is stored, so
+    /// timestamps rise across reopens whenever change data capture ran.
+    #[cfg(feature = "cdc")]
+    #[must_use]
+    pub(crate) fn cdc_clock_moved(&self) -> Option<u64> {
+        let (clock, attached) = self.cdc_clock.get()?;
+        let last = clock.peek().as_u64();
+        (last > *attached).then_some(last)
+    }
+
+    /// Attaches the change log's clock, whose last timestamp the stored
+    /// setting carries from now on. The first clock stays.
+    #[cfg(feature = "cdc")]
+    pub(crate) fn attach_cdc_clock(&self, clock: Arc<grafeo_common::types::HlcClock>) {
+        let attached = clock.peek().as_u64();
+        let _ = self.cdc_clock.set((clock, attached));
     }
 
     /// Sets (or with `None` clears) the change data capture setting the

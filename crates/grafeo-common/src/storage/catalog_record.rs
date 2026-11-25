@@ -605,11 +605,18 @@ pub struct StoredConfigRecord {
 
 /// Whether the database captures changes (#679): change data capture on or
 /// off, stored with the database (catalog kind 14). Optional: a release
-/// without the kind opens the file with capture off.
+/// without the kind opens the file with capture off. A checkpoint of an open
+/// that captured changes without a stored setting (`Config::with_cdc`)
+/// stores it off, with the clock, so timestamps rise across reopens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CdcConfigRecord {
     /// Change data capture is on.
     pub enabled: bool,
+    /// The last change timestamp the database handed out (the raw `u64` of
+    /// an `HlcTimestamp`, 0 before any) when the file was checkpointed: an
+    /// open starts its change log's clock past it, so timestamps rise across
+    /// reopens also when no WAL is left to replay.
+    pub clock: u64,
 }
 
 /// How long a database keeps history.
@@ -2298,16 +2305,23 @@ mod tests {
     fn the_cdc_setting_is_kind_14_and_optional() {
         #[rustfmt::skip]
         const EXPECTED: &[u8] = &[
-            14, 0, 1, 0, 0, 0, // kind 14 (CdcConfig), optional, 1 byte
+            14, 0, 10, 0, 0, 0, // kind 14 (CdcConfig), optional, 10 bytes
             1, // enabled
+            253, 3, 0, 123, 165, 71, 255, 138, 1, // the clock: 1,696,500,000,123 ms, logical 3
         ];
-        let record = CatalogRecord::CdcConfig(CdcConfigRecord { enabled: true });
+        let record = CatalogRecord::CdcConfig(CdcConfigRecord {
+            enabled: true,
+            clock: (1_696_500_000_123 << 16) | 3,
+        });
         assert_eq!(framed(&record), EXPECTED);
         assert_eq!(read_all(EXPECTED).unwrap(), std::slice::from_ref(&record));
         assert_eq!(record.key(), CatalogKey::CdcConfig);
         assert_eq!((record.key().kind(), record.key().flags()), (14, 0));
-        let off = CatalogRecord::CdcConfig(CdcConfigRecord { enabled: false });
-        assert_eq!(framed(&off), [14, 0, 1, 0, 0, 0, 0]);
+        let off = CatalogRecord::CdcConfig(CdcConfigRecord {
+            enabled: false,
+            clock: 0,
+        });
+        assert_eq!(framed(&off), [14, 0, 2, 0, 0, 0, 0, 0]);
     }
 
     /// A reader that does not know a kind code refuses the record instead of

@@ -832,6 +832,12 @@ impl SessionInner {
         crate::transaction::CommitGuard<'a>,
         Option<crate::database::wal_log::Logged>,
     )> {
+        // A session that reports to change data capture reserves its
+        // commit's timestamps with its group, under the commit lock.
+        #[cfg(feature = "cdc")]
+        let clock = self.records_cdc.then(|| self.cdc_log.clock().as_ref());
+        #[cfg(not(feature = "cdc"))]
+        let clock = None;
         match (self.wal(), changes) {
             (Some(wal), Some(changes)) => crate::database::wal_log::write_commit(
                 wal,
@@ -840,6 +846,7 @@ impl SessionInner {
                 changes,
                 schema,
                 grafeo_common::storage::log_record::Origin::Transaction,
+                clock,
             ),
             _ => Ok((commit, None)),
         }
@@ -5797,9 +5804,21 @@ impl SessionInner {
         // unpublished, which poisons the database until a reopen decides from
         // the log.
         #[cfg(feature = "wal")]
-        if let (Some(wal), Some(logged)) = (self.wal(), logged) {
+        if let (Some(wal), Some(logged)) = (self.wal(), &logged) {
             crate::database::wal_log::sync_commit(wal, logged)?;
         }
+
+        // The timestamps the commit reserved with its group, if it wrote one,
+        // with the image rule's verdicts.
+        #[cfg(all(feature = "cdc", feature = "wal"))]
+        let captured = logged
+            .as_ref()
+            .and_then(|logged| logged.clock.map(|first| (first, logged.refused.clone())));
+        #[cfg(all(feature = "cdc", not(feature = "wal")))]
+        let captured: Option<(
+            grafeo_common::types::HlcTimestamp,
+            Vec<(usize, grafeo_common::storage::log_record::ImageLogged)>,
+        )> = None;
 
         // In the commit's turn, after every commit below it is published:
         // what must follow the epochs.
@@ -5856,9 +5875,10 @@ impl SessionInner {
                 && let Some(changes) = &changes
             {
                 changes.read(|set| {
-                    if let Some(stamps) = self.cdc_log.reserve_for(set) {
-                        self.cdc_log.record_commit(set, commit_epoch, stamps);
-                    }
+                    let logged = captured
+                        .as_ref()
+                        .map(|(first, refused)| (*first, refused.as_slice()));
+                    self.cdc_log.record_commit_at(set, commit_epoch, logged);
                 });
             }
 

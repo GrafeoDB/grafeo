@@ -104,8 +104,8 @@ Once CDC is enabled, every mutation records a `ChangeEvent` with:
 | `graph`         | The graph the entity is in: its name (`schema/name` inside a schema, and `schema/__default__` for a schema's default graph); `None` for the default graph |
 | `kind`          | `Create`, `Update`, or `Delete`                                             |
 | `epoch`         | Commit epoch (monotonically increasing)                                     |
-| `timestamp`     | HLC timestamp (hybrid logical clock)                                        |
-| `before`        | Properties before the change; on a delete, the properties it had at the last commit |
+| `timestamp`     | HLC timestamp (hybrid logical clock): rising across commits and across reopens, with or without a WAL left to replay |
+| `before`        | Properties before the change; on a delete, the properties it had at the last commit (an empty map for none). `None` when the write's before-image is too large to log with it (past a WAL record's 1 GiB, or a list of very many tiny properties): the delete or update still succeeds, and only the properties are left out, so a delete's event keeps its labels, or its edge type and endpoints. Only when those alone pass the limits (labels of about 1 GiB together) does a delete's event have neither |
 | `after`         | Properties after the change                                                 |
 | `labels`        | Nodes: the labels on create and delete, the labels after a label change     |
 | `before_labels` | Nodes: the labels before a label change                                     |

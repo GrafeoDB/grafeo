@@ -45,3 +45,19 @@ def test_people_have_titles(loaded):
         )
     )
     assert rows[0]["c"] > 0
+
+
+def test_playground_rdf_terms_are_in_the_turtle(derived):
+    """The playground also bundles silicon-valley.ttl; its SPARQL questions use these terms."""
+    import rdflib
+
+    g = rdflib.Graph().parse(derived / "silicon-valley.ttl", format="turtle")
+    sv = rdflib.Namespace("https://docs.grafeo.dev/datasets/silicon-valley/vocab#")
+    svr = rdflib.Namespace("https://docs.grafeo.dev/datasets/silicon-valley/id#")
+    schema = rdflib.Namespace("https://schema.org/")
+    assert (svr["pied-piper"], rdflib.RDF.type, schema.Organization) in g
+    assert (svr["pied-piper"], schema.name, rdflib.Literal("Pied Piper")) in g
+    people = set(g.subjects(rdflib.RDF.type, schema.Person))
+    assert people and all(g.value(p, schema.name) is not None for p in people)
+    for link in (sv.worksAt, sv.founded):
+        assert any(s in people for s in g.subjects(link, None)), link

@@ -6,7 +6,7 @@ Demo datasets for Grafeo. Each dataset is hand-made, original text, and ships as
 
 - `silicon-valley/source.json`: the one source of truth for the Silicon Valley dataset.
 - `silicon-valley/notes.md`: notes on the content.
-- `silicon-valley/derived/`: files generated from the source (graph, timeline, GQL, Cypher, Turtle, vectors). Never edited by hand.
+- `silicon-valley/derived/`: files generated from the source (graph, timeline, GQL, Cypher, Turtle, Turtle with its vocabulary in RDFS and in OWL, the `importLpg` and `importRdf` payloads of `@grafeo-db/wasm`, vectors). Never edited by hand.
 - `tools/`: the validator, the emitters, `build.mjs` and `embed.mjs`.
 - `tests/`: the Python engine checks (every format loads into Grafeo and answers the story's questions) and their fixtures.
 

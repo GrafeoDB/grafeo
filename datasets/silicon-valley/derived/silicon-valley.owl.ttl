@@ -1,0 +1,1409 @@
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix sv: <https://docs.grafeo.dev/datasets/silicon-valley/vocab#> .
+@prefix svr: <https://docs.grafeo.dev/datasets/silicon-valley/id#> .
+@prefix schema: <https://schema.org/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+<https://docs.grafeo.dev/datasets/silicon-valley/vocab>
+    a owl:Ontology ;
+    rdfs:label "Silicon Valley" .
+
+schema:City
+    a owl:Class ;
+    rdfs:subClassOf schema:Place .
+
+schema:Event
+    a owl:Class .
+
+schema:Organization
+    a owl:Class .
+
+schema:Person
+    a owl:Class .
+
+schema:Place
+    a owl:Class .
+
+schema:Product
+    a owl:Class .
+
+sv:AI
+    a owl:Class ;
+    rdfs:label "AI" .
+
+sv:Attendance
+    a owl:Class ;
+    rdfs:label "Attendance" .
+
+sv:Base
+    a owl:Class ;
+    rdfs:label "Base" .
+
+sv:Employment
+    a owl:Class ;
+    rdfs:label "Employment" .
+
+sv:Founding
+    a owl:Class ;
+    rdfs:label "Founding" .
+
+sv:Investment
+    a owl:Class ;
+    rdfs:label "Investment" .
+
+sv:Residence
+    a owl:Class ;
+    rdfs:label "Residence" .
+
+sv:Technology
+    a owl:Class ;
+    rdfs:label "Technology" .
+
+schema:description
+    a owl:DatatypeProperty .
+
+schema:foundingDate
+    a owl:DatatypeProperty .
+
+schema:name
+    a owl:DatatypeProperty .
+
+schema:worksFor
+    a owl:ObjectProperty .
+
+sv:activity
+    a owl:DatatypeProperty ;
+    rdfs:label "activity" ;
+    rdfs:domain schema:Place ;
+    rdfs:range xsd:string .
+
+sv:amountUsd
+    a owl:DatatypeProperty ;
+    rdfs:label "amount usd" ;
+    rdfs:domain sv:Investment ;
+    rdfs:range xsd:integer .
+
+sv:attended
+    a owl:ObjectProperty ;
+    rdfs:label "attended" ;
+    rdfs:domain [ a owl:Class ; owl:unionOf ( schema:Organization schema:Person ) ] ;
+    rdfs:range schema:Event .
+
+sv:attendee
+    a owl:ObjectProperty ;
+    rdfs:label "attendee" ;
+    rdfs:domain sv:Attendance ;
+    rdfs:range [ a owl:Class ; owl:unionOf ( schema:Organization schema:Person ) ] .
+
+sv:basedIn
+    a owl:ObjectProperty ;
+    rdfs:label "based in" ;
+    rdfs:domain schema:Organization ;
+    rdfs:range [ a owl:Class ; owl:unionOf ( schema:City schema:Place ) ] .
+
+sv:bornAs
+    a owl:DatatypeProperty ;
+    rdfs:label "born as" ;
+    rdfs:domain schema:Person ;
+    rdfs:range xsd:string .
+
+sv:bugFixStrategy
+    a owl:DatatypeProperty ;
+    rdfs:label "bug fix strategy" ;
+    rdfs:domain sv:AI ;
+    rdfs:range xsd:string .
+
+sv:built
+    a owl:ObjectProperty ;
+    rdfs:label "built" ;
+    rdfs:domain schema:Person ;
+    rdfs:range [ a owl:Class ; owl:unionOf ( schema:Product sv:AI ) ] .
+
+sv:catchphrase
+    a owl:DatatypeProperty ;
+    rdfs:label "catchphrase" ;
+    rdfs:domain schema:Person ;
+    rdfs:range xsd:string .
+
+sv:city
+    a owl:ObjectProperty ;
+    rdfs:label "city" ;
+    rdfs:domain sv:Residence ;
+    rdfs:range schema:City .
+
+sv:classes
+    a owl:DatatypeProperty ;
+    rdfs:label "classes" ;
+    rdfs:domain schema:Product ;
+    rdfs:range xsd:integer .
+
+sv:company
+    a owl:ObjectProperty ;
+    rdfs:label "company" ;
+    rdfs:domain [ a owl:Class ; owl:unionOf ( sv:Base sv:Employment sv:Investment ) ] ;
+    rdfs:range schema:Organization .
+
+sv:competesWith
+    a owl:ObjectProperty ;
+    rdfs:label "competes with" ;
+    rdfs:domain schema:Product ;
+    rdfs:range schema:Product .
+
+sv:date
+    a owl:DatatypeProperty ;
+    rdfs:label "date" ;
+    rdfs:domain [ a owl:Class ; owl:unionOf ( sv:Attendance sv:Founding sv:Investment ) ] ;
+    rdfs:range xsd:date .
+
+sv:datePrecision
+    a owl:DatatypeProperty ;
+    rdfs:label "date precision" ;
+    rdfs:domain [ a owl:Class ; owl:unionOf ( sv:Attendance sv:Founding sv:Investment ) ] ;
+    rdfs:range xsd:string .
+
+sv:doors
+    a owl:DatatypeProperty ;
+    rdfs:label "doors" ;
+    rdfs:domain schema:Product ;
+    rdfs:range xsd:string .
+
+sv:event
+    a owl:ObjectProperty ;
+    rdfs:label "event" ;
+    rdfs:domain sv:Attendance ;
+    rdfs:range schema:Event .
+
+sv:firstPitchedAt
+    a owl:DatatypeProperty ;
+    rdfs:label "first pitched at" ;
+    rdfs:domain schema:Product ;
+    rdfs:range xsd:string .
+
+sv:form
+    a owl:DatatypeProperty ;
+    rdfs:label "form" ;
+    rdfs:domain sv:AI ;
+    rdfs:range xsd:string .
+
+sv:founded
+    a owl:ObjectProperty ;
+    rdfs:label "founded" ;
+    rdfs:domain [ a owl:Class ; owl:unionOf ( schema:Person sv:Founding ) ] ;
+    rdfs:range [ a owl:Class ; owl:unionOf ( schema:Organization schema:Product ) ] .
+
+sv:foundedPrecision
+    a owl:DatatypeProperty ;
+    rdfs:label "founded precision" ;
+    rdfs:domain schema:Organization ;
+    rdfs:range xsd:string .
+
+sv:founder
+    a owl:ObjectProperty ;
+    rdfs:label "founder" ;
+    rdfs:domain sv:Founding ;
+    rdfs:range schema:Person .
+
+sv:from
+    a owl:DatatypeProperty ;
+    rdfs:label "from" ;
+    rdfs:domain [ a owl:Class ; owl:unionOf ( sv:Base sv:Employment ) ] ;
+    rdfs:range xsd:date .
+
+sv:fromPrecision
+    a owl:DatatypeProperty ;
+    rdfs:label "from precision" ;
+    rdfs:domain [ a owl:Class ; owl:unionOf ( sv:Base sv:Employment ) ] ;
+    rdfs:range xsd:string .
+
+sv:hometown
+    a owl:DatatypeProperty ;
+    rdfs:label "hometown" ;
+    rdfs:domain schema:Person ;
+    rdfs:range xsd:string .
+
+sv:indentation
+    a owl:DatatypeProperty ;
+    rdfs:label "indentation" ;
+    rdfs:domain schema:Person ;
+    rdfs:range xsd:string .
+
+sv:inventor
+    a owl:DatatypeProperty ;
+    rdfs:label "inventor" ;
+    rdfs:domain sv:Technology ;
+    rdfs:range xsd:string .
+
+sv:investedIn
+    a owl:ObjectProperty ;
+    rdfs:label "invested in" ;
+    rdfs:domain [ a owl:Class ; owl:unionOf ( schema:Organization schema:Person ) ] ;
+    rdfs:range schema:Organization .
+
+sv:investor
+    a owl:ObjectProperty ;
+    rdfs:label "investor" ;
+    rdfs:domain sv:Investment ;
+    rdfs:range [ a owl:Class ; owl:unionOf ( schema:Organization schema:Person ) ] .
+
+sv:jewellery
+    a owl:DatatypeProperty ;
+    rdfs:label "jewellery" ;
+    rdfs:domain schema:Person ;
+    rdfs:range xsd:string .
+
+sv:knows
+    a owl:ObjectProperty ;
+    rdfs:label "knows" ;
+    rdfs:domain schema:Person ;
+    rdfs:range schema:Person .
+
+sv:livesIn
+    a owl:ObjectProperty ;
+    rdfs:label "lives in" ;
+    rdfs:domain schema:Person ;
+    rdfs:range schema:City .
+
+sv:locatedIn
+    a owl:ObjectProperty ;
+    rdfs:label "located in" ;
+    rdfs:domain schema:Place ;
+    rdfs:range schema:City .
+
+sv:makes
+    a owl:ObjectProperty ;
+    rdfs:label "makes" ;
+    rdfs:domain schema:Organization ;
+    rdfs:range schema:Product .
+
+sv:managementTheory
+    a owl:DatatypeProperty ;
+    rdfs:label "management theory" ;
+    rdfs:domain schema:Person ;
+    rdfs:range xsd:string .
+
+sv:meatOrderedForLunchLb
+    a owl:DatatypeProperty ;
+    rdfs:label "meat ordered for lunch lb" ;
+    rdfs:domain sv:AI ;
+    rdfs:range xsd:integer .
+
+sv:mentors
+    a owl:ObjectProperty ;
+    rdfs:label "mentors" ;
+    rdfs:domain schema:Person ;
+    rdfs:range schema:Person .
+
+sv:motto
+    a owl:DatatypeProperty ;
+    rdfs:label "motto" ;
+    rdfs:domain schema:Organization ;
+    rdfs:range xsd:string .
+
+sv:nameBoughtFrom
+    a owl:DatatypeProperty ;
+    rdfs:label "name bought from" ;
+    rdfs:domain schema:Organization ;
+    rdfs:range xsd:string .
+
+sv:netWorthCommas
+    a owl:DatatypeProperty ;
+    rdfs:label "net worth commas" ;
+    rdfs:domain schema:Person ;
+    rdfs:range xsd:integer .
+
+sv:nickname
+    a owl:DatatypeProperty ;
+    rdfs:label "nickname" ;
+    rdfs:domain schema:Person ;
+    rdfs:range xsd:string .
+
+sv:note
+    a owl:DatatypeProperty ;
+    rdfs:label "note" ;
+    rdfs:domain sv:Investment ;
+    rdfs:range xsd:string .
+
+sv:outcome
+    a owl:DatatypeProperty ;
+    rdfs:label "outcome" ;
+    rdfs:domain sv:Attendance ;
+    rdfs:range xsd:string .
+
+sv:owns
+    a owl:ObjectProperty ;
+    rdfs:label "owns" ;
+    rdfs:domain [ a owl:Class ; owl:unionOf ( schema:Organization schema:Person ) ] ;
+    rdfs:range [ a owl:Class ; owl:unionOf ( schema:Place schema:Product sv:AI ) ] .
+
+sv:person
+    a owl:ObjectProperty ;
+    rdfs:label "person" ;
+    rdfs:domain [ a owl:Class ; owl:unionOf ( sv:Employment sv:Residence ) ] ;
+    rdfs:range schema:Person .
+
+sv:place
+    a owl:ObjectProperty ;
+    rdfs:label "place" ;
+    rdfs:domain sv:Base ;
+    rdfs:range schema:Place .
+
+sv:pledge
+    a owl:DatatypeProperty ;
+    rdfs:label "pledge" ;
+    rdfs:domain schema:Person ;
+    rdfs:range xsd:string .
+
+sv:potentialFinesUsd
+    a owl:DatatypeProperty ;
+    rdfs:label "potential fines usd" ;
+    rdfs:domain schema:Product ;
+    rdfs:range xsd:integer .
+
+sv:prizeUsd
+    a owl:DatatypeProperty ;
+    rdfs:label "prize usd" ;
+    rdfs:domain schema:Event ;
+    rdfs:range xsd:integer .
+
+sv:rejectedOfferUsd
+    a owl:DatatypeProperty ;
+    rdfs:label "rejected offer usd" ;
+    rdfs:domain schema:Organization ;
+    rdfs:range xsd:integer .
+
+sv:rivalOf
+    a owl:ObjectProperty ;
+    rdfs:label "rival of" ;
+    rdfs:domain schema:Person ;
+    rdfs:range schema:Person .
+
+sv:roiStandsFor
+    a owl:DatatypeProperty ;
+    rdfs:label "roi stands for" ;
+    rdfs:domain schema:Person ;
+    rdfs:range xsd:string .
+
+sv:role
+    a owl:DatatypeProperty ;
+    rdfs:label "role" ;
+    rdfs:domain sv:Employment ;
+    rdfs:range xsd:string .
+
+sv:roof
+    a owl:DatatypeProperty ;
+    rdfs:label "roof" ;
+    rdfs:domain schema:Place ;
+    rdfs:range xsd:string .
+
+sv:round
+    a owl:DatatypeProperty ;
+    rdfs:label "round" ;
+    rdfs:domain sv:Investment ;
+    rdfs:range xsd:string .
+
+sv:severanceUsd
+    a owl:DatatypeProperty ;
+    rdfs:label "severance usd" ;
+    rdfs:domain schema:Person ;
+    rdfs:range xsd:integer .
+
+sv:signedBy
+    a owl:DatatypeProperty ;
+    rdfs:label "signed by" ;
+    rdfs:domain schema:Product ;
+    rdfs:range xsd:string .
+
+sv:talks
+    a owl:DatatypeProperty ;
+    rdfs:label "talks" ;
+    rdfs:domain sv:AI ;
+    rdfs:range xsd:boolean .
+
+sv:terms
+    a owl:DatatypeProperty ;
+    rdfs:label "terms" ;
+    rdfs:domain schema:Place ;
+    rdfs:range xsd:string .
+
+sv:title
+    a owl:DatatypeProperty ;
+    rdfs:label "title" ;
+    rdfs:domain schema:Person ;
+    rdfs:range xsd:string .
+
+sv:to
+    a owl:DatatypeProperty ;
+    rdfs:label "to" ;
+    rdfs:domain [ a owl:Class ; owl:unionOf ( sv:Base sv:Employment sv:Residence ) ] ;
+    rdfs:range xsd:date .
+
+sv:toPrecision
+    a owl:DatatypeProperty ;
+    rdfs:label "to precision" ;
+    rdfs:domain [ a owl:Class ; owl:unionOf ( sv:Base sv:Employment sv:Residence ) ] ;
+    rdfs:range xsd:string .
+
+sv:trainedOn
+    a owl:ObjectProperty ;
+    rdfs:label "trained on" ;
+    rdfs:domain sv:AI ;
+    rdfs:range sv:AI .
+
+sv:trigger
+    a owl:DatatypeProperty ;
+    rdfs:label "trigger" ;
+    rdfs:domain schema:Product ;
+    rdfs:range xsd:string .
+
+sv:uses
+    a owl:ObjectProperty ;
+    rdfs:label "uses" ;
+    rdfs:domain schema:Product ;
+    rdfs:range sv:Technology .
+
+sv:weissmanScore
+    a owl:DatatypeProperty ;
+    rdfs:label "weissman score" ;
+    rdfs:domain [ a owl:Class ; owl:unionOf ( schema:Product sv:Technology ) ] ;
+    rdfs:range xsd:double .
+
+sv:workingModels
+    a owl:DatatypeProperty ;
+    rdfs:label "working models" ;
+    rdfs:domain schema:Product ;
+    rdfs:range xsd:integer .
+
+sv:worksAt
+    a owl:ObjectProperty ;
+    rdfs:label "works at" ;
+    rdfs:domain schema:Person ;
+    rdfs:range schema:Organization ;
+    rdfs:subPropertyOf schema:worksFor .
+
+svr:anton
+    a sv:AI ;
+    schema:description "Gilfoyle's home-built server, which ran Pied Piper's early infrastructure and which he treats as a colleague." ;
+    schema:name "Anton" ;
+    sv:form "server rack" .
+
+svr:aviato
+    a schema:Organization ;
+    schema:description "Erlich Bachman's first startup, a flight-data company whose sale paid for his house." ;
+    schema:name "Aviato" .
+
+svr:bachmanity
+    a schema:Organization ;
+    schema:description "An investment company Erlich Bachman and Big Head started in 2016 with Big Head's Hooli severance." ;
+    schema:foundingDate "2016-04-01"^^xsd:date ;
+    schema:name "Bachmanity" ;
+    sv:foundedPrecision "month" .
+
+svr:bachmanity-insanity
+    a schema:Event ;
+    schema:description "A lavish party Erlich Bachman and Big Head threw for Bachmanity, paid for with much of its money." ;
+    schema:name "Bachmanity Insanity" .
+
+svr:bertram-gilfoyle
+    a schema:Person ;
+    schema:description "Pied Piper's systems architect: dry, unhurried and sure of himself, he trusts the server he built more than most people." ;
+    schema:name "Bertram Gilfoyle" ;
+    sv:title "Systems architect" .
+
+svr:bitcoin-alert
+    a schema:Product ;
+    schema:description "A script on Gilfoyle's computer that plays a death metal song whenever the price of Bitcoin crosses a set level." ;
+    schema:name "Gilfoyle's Bitcoin alert" ;
+    sv:trigger "Bitcoin price crosses a set level" .
+
+svr:blockchain
+    a sv:Technology ;
+    schema:description "A shared ledger kept in step by many computers, so that no single owner controls the record." ;
+    schema:name "Blockchain" .
+
+svr:bream-hall
+    a schema:Organization ;
+    schema:description "The venture firm Laurie Bream and Monica Hall founded in 2018 after leaving Raviga Capital." ;
+    schema:foundingDate "2018-03-01"^^xsd:date ;
+    schema:name "Bream-Hall" ;
+    sv:foundedPrecision "month" .
+
+svr:carla-walton
+    a schema:Person ;
+    schema:description "A senior engineer who joined Pied Piper in 2016 and says plainly what she thinks of everyone's code." ;
+    schema:name "Carla Walton" .
+
+svr:condor-stream
+    a schema:Event ;
+    schema:description "A live video of a condor egg in a remote nest, which Pied Piper streamed to show its platform could carry a large audience." ;
+    schema:name "The condor egg live stream" .
+
+svr:cupertino
+    a schema:City ;
+    schema:description "A city in Silicon Valley where Endframe has its office." ;
+    schema:name "Cupertino" .
+
+svr:denpok
+    a schema:Person ;
+    schema:description "Gavin Belson's spiritual advisor, paid to keep the head of Hooli calm and on message." ;
+    schema:name "Denpok" .
+
+svr:dinesh-chugtai
+    a schema:Person ;
+    schema:description "A Pied Piper engineer who is good at his job and keen to be seen as better than Gilfoyle, which rarely works out." ;
+    schema:name "Dinesh Chugtai" ;
+    sv:jewellery "gold chain" ;
+    sv:title "Engineer" .
+
+svr:ed-chen
+    a schema:Person ;
+    schema:description "An associate at Raviga Capital who works on the firm's deals under Laurie Bream." ;
+    schema:name "Ed Chen" .
+
+svr:endframe
+    a schema:Organization ;
+    schema:description "A rival startup that tried to win Pied Piper's market with its own version of the technology." ;
+    schema:name "Endframe" .
+
+svr:erlich-bachman
+    a schema:Person ;
+    schema:description "The owner of the hacker hostel and self-appointed mentor to its residents, still living off the sale of Aviato." ;
+    schema:name "Erlich Bachman" ;
+    sv:catchphrase "Aviato" ;
+    sv:title "Head of Incubation" .
+
+svr:erlichs-palapa
+    a schema:Place ;
+    schema:description "A thatched shade hut beside the hacker hostel's pool, Erlich's pride and one of his larger expenses." ;
+    schema:name "Erlich's palapa" ;
+    sv:roof "thatched" .
+
+svr:fiona
+    a sv:AI ;
+    schema:description "A humanoid robot with an emotional AI, built by a robotics startup to hold a natural conversation." ;
+    schema:name "Fiona" .
+
+svr:gavin-belson
+    a schema:Person ;
+    schema:description "The founder and CEO of Hooli, who wants to be seen as a visionary and takes every loss to Pied Piper personally." ;
+    schema:name "Gavin Belson" ;
+    sv:pledge "Tethics" .
+
+svr:hacker-hostel
+    a schema:Place ;
+    schema:description "Erlich Bachman's house in Palo Alto, run as a startup incubator: residents get a room, and he gets ten percent of their companies." ;
+    schema:name "Hacker Hostel" ;
+    sv:terms "a room for ten percent of the company" .
+
+svr:hooli
+    a schema:Organization ;
+    schema:description "A large technology company led by Gavin Belson, with a campus in Mountain View and a product for nearly everything." ;
+    schema:name "Hooli" ;
+    sv:motto "Making the world a better place" .
+
+svr:hooli-campus
+    a schema:Place ;
+    schema:description "Hooli's headquarters in Mountain View: glass buildings, company bikes and free food." ;
+    schema:name "Hooli campus" .
+
+svr:hooli-con
+    a schema:Event ;
+    schema:description "Hooli's own conference, where Gavin Belson presents new products from a very large stage." ;
+    schema:name "Hooli-Con" .
+
+svr:hooli-phone
+    a schema:Product ;
+    schema:description "Hooli's smartphone, sold with Hooli's own apps already on it." ;
+    schema:name "Hooli Phone" .
+
+svr:hooli-rooftop
+    a schema:Place ;
+    schema:description "A roof on the Hooli campus where employees Hooli would rather not lose are paid to wait for their stock to vest." ;
+    schema:name "Hooli rooftop" ;
+    sv:activity "rest and vest" .
+
+svr:hooli-xyz
+    a schema:Organization ;
+    schema:description "Hooli's moonshot division, which Big Head was put in charge of by mistake." ;
+    schema:name "Hooli XYZ" .
+
+svr:hoover
+    a schema:Person ;
+    schema:description "Hooli's head of security, loyal to Gavin Belson and very hard to surprise." ;
+    schema:name "Hoover" .
+
+svr:jack-barker
+    a schema:Person ;
+    schema:description "A veteran executive brought in as Pied Piper's CEO, who has a management diagram for every situation." ;
+    schema:name "Jack Barker" ;
+    sv:managementTheory "Conjoined Triangles of Success" ;
+    sv:nickname "Action Jack" .
+
+svr:jared-dunn
+    a schema:Person ;
+    schema:description "Pied Piper's head of business development, who left Hooli to join Richard and is loyal beyond reason. He was renamed Jared at Hooli, and the name stuck." ;
+    schema:name "Jared Dunn" ;
+    sv:bornAs "Donald Dunn" .
+
+svr:jian-yang
+    a schema:Person ;
+    schema:description "An app developer who lives at the hacker hostel, ignores Erlich's house rules and outlasts most of the other residents." ;
+    schema:name "Jian-Yang" .
+
+svr:jian-yangs-fridge
+    a sv:AI ;
+    schema:description "A smart fridge with a screen and a voice, owned by Jian-Yang and connected to more of the house network than it needs." ;
+    schema:name "Jian-Yang's fridge" ;
+    sv:talks true .
+
+svr:keenan-feldspar
+    a schema:Person ;
+    schema:description "A virtual reality founder whose headset demos win investors over with ease." ;
+    schema:name "Keenan Feldspar" .
+
+svr:laurie-bream
+    a schema:Person ;
+    schema:description "Raviga Capital's managing partner after Peter Gregory, who decides by the numbers and keeps small talk to a minimum." ;
+    schema:name "Laurie Bream" .
+
+svr:los-altos
+    a schema:City ;
+    schema:description "A quiet, wealthy town in Silicon Valley, home to Russ Hanneman and Ed Chen." ;
+    schema:name "Los Altos" .
+
+svr:menlo-park
+    a schema:City ;
+    schema:description "A city on the Peninsula where venture firms line Sand Hill Road." ;
+    schema:name "Menlo Park" .
+
+svr:middle-out
+    a sv:Technology ;
+    schema:description "A lossless compression algorithm that works on data from the middle outwards. It holds the record Weissman score of 5.2." ;
+    schema:name "Middle-out compression" ;
+    sv:inventor "Richard Hendricks" ;
+    sv:weissmanScore 5.2e0 .
+
+svr:monica-hall
+    a schema:Person ;
+    schema:description "An investor who championed Pied Piper inside Raviga Capital and later co-founded Bream-Hall with Laurie Bream." ;
+    schema:name "Monica Hall" .
+
+svr:mountain-view
+    a schema:City ;
+    schema:description "A city in Silicon Valley, home to the Hooli campus and, from September 2014, Pied Piper's office." ;
+    schema:name "Mountain View" .
+
+svr:nelson-bighetti
+    a schema:Person ;
+    schema:description "Richard's oldest friend, whose career keeps rising with very little effort on his part." ;
+    schema:name "Nelson \"Big Head\" Bighetti" ;
+    sv:nickname "Big Head" ;
+    sv:severanceUsd 20000000 .
+
+svr:not-hotdog
+    a schema:Product ;
+    schema:description "An app that recognises hot dogs in photos and labels everything else as not hot dog." ;
+    schema:name "Not Hotdog" ;
+    sv:classes 2 .
+
+svr:nucleus
+    a schema:Product ;
+    schema:description "Hooli's rival to Pied Piper's platform, built in a hurry by a very large team. It never caught up on the Weissman scale." ;
+    schema:name "Nucleus" ;
+    sv:weissmanScore 2.89e0 .
+
+svr:palo-alto
+    a schema:City ;
+    schema:description "A city on the San Francisco Peninsula and home to Erlich Bachman's hacker hostel." ;
+    schema:name "Palo Alto" .
+
+svr:peter-gregory
+    a schema:Person ;
+    schema:description "The founder of Raviga Capital and Pied Piper's first investor, who reads markets through patterns nobody else notices." ;
+    schema:name "Peter Gregory" .
+
+svr:pied-piper
+    a schema:Organization ;
+    schema:description "Richard Hendricks's startup, founded in March 2014 to turn middle-out into a business." ;
+    schema:foundingDate "2014-03-01"^^xsd:date ;
+    schema:name "Pied Piper" ;
+    sv:foundedPrecision "month" ;
+    sv:nameBoughtFrom "a sprinkler company in Gilroy" ;
+    sv:rejectedOfferUsd 10000000 .
+
+svr:pied-piper-app
+    a schema:Product ;
+    schema:description "Pied Piper's platform for storing and streaming files at a fraction of their original size." ;
+    schema:name "Pied Piper platform" .
+
+svr:pied-piper-music
+    a schema:Product ;
+    schema:description "Richard's first product: a website that checks a songwriter's melody against existing music for copyright matches." ;
+    schema:name "Pied Piper music app" .
+
+svr:pied-piper-office
+    a schema:Place ;
+    schema:description "Pied Piper's own office in Mountain View, its base since it left the incubator in September 2014." ;
+    schema:name "Pied Piper office" .
+
+svr:piper-chat
+    a schema:Product ;
+    schema:description "A video chat app Pied Piper launched in 2017 that grew fast, including among users too young to sign up." ;
+    schema:name "PiperChat" ;
+    sv:potentialFinesUsd 21000000000 .
+
+svr:pipercoin
+    a schema:Product ;
+    schema:description "Pied Piper's own cryptocurrency, created to raise money for PiperNet." ;
+    schema:name "PiperCoin" .
+
+svr:pipernet
+    a schema:Product ;
+    schema:description "Pied Piper's decentralised internet, run on the phones of its users instead of on central servers." ;
+    schema:name "PiperNet" .
+
+svr:raviga
+    a schema:Organization ;
+    schema:description "The venture capital firm Peter Gregory founded, with a long and uneasy stake in Pied Piper." ;
+    schema:name "Raviga Capital" .
+
+svr:richard-hendricks
+    a schema:Person ;
+    schema:description "A gifted and anxious programmer who left Hooli to found Pied Piper on the strength of middle-out." ;
+    schema:name "Richard Hendricks" ;
+    sv:hometown "Tulsa" ;
+    sv:indentation "tabs" .
+
+svr:ron-laflamme
+    a schema:Person ;
+    schema:description "Pied Piper's lawyer, who handles its contracts, its name and its frequent legal scares." ;
+    schema:name "Ron LaFlamme" .
+
+svr:russ-car
+    a schema:Product ;
+    schema:description "A sports car chosen so that nobody in the car park misses Russ Hanneman's arrival." ;
+    schema:name "Russ Hanneman's car" ;
+    sv:doors "open upwards" .
+
+svr:russ-hanneman
+    a schema:Person ;
+    schema:description "A billionaire investor who made his fortune by putting radio on the internet, and who makes sure everyone knows it." ;
+    schema:name "Russ Hanneman" ;
+    sv:netWorthCommas 3 ;
+    sv:roiStandsFor "Radio on internet" .
+
+svr:san-francisco
+    a schema:City ;
+    schema:description "The city at the north end of the Peninsula, where Bachmanity keeps its office and TechCrunch Disrupt is held." ;
+    schema:name "San Francisco" .
+
+svr:sand-hill-road
+    a schema:Place ;
+    schema:description "The road in Menlo Park where venture firms keep their offices, Raviga Capital and Bream-Hall among them." ;
+    schema:name "Sand Hill Road" .
+
+svr:seefood
+    a schema:Product ;
+    schema:description "An app meant to identify any food from a photo. Its only working model can tell whether a photo shows a hot dog." ;
+    schema:name "SeeFood" ;
+    sv:workingModels 1 .
+
+svr:son-of-anton
+    a sv:AI ;
+    schema:description "An AI that Gilfoyle trained on Anton's code to write and fix software. It reaches every goal by the shortest route, whether or not anyone wanted that route." ;
+    schema:name "Son of Anton" ;
+    sv:bugFixStrategy "delete the code" ;
+    sv:meatOrderedForLunchLb 4000 .
+
+svr:techcrunch-disrupt
+    a schema:Event ;
+    schema:description "A startup competition in San Francisco where Pied Piper beat Hooli's Nucleus on stage in 2014." ;
+    schema:name "TechCrunch Disrupt" ;
+    sv:prizeUsd 50000 .
+
+svr:the-box
+    a schema:Product ;
+    schema:description "A server appliance for companies that want their data in a box they can see. The Signature Edition carries Gavin Belson's signature." ;
+    schema:name "The Box (Signature Edition)" ;
+    sv:firstPitchedAt "Pied Piper" ;
+    sv:signedBy "Gavin Belson" .
+
+svr:tres-commas
+    a schema:Organization ;
+    schema:description "Russ Hanneman's brand, named for the three commas in a billion dollars." ;
+    schema:name "Tres Commas" .
+
+svr:tres-commas-tequila
+    a schema:Product ;
+    schema:description "A tequila sold under Russ Hanneman's Tres Commas brand, with a label as loud as its owner." ;
+    schema:name "Tres Commas tequila" .
+
+svr:winnie
+    a schema:Person ;
+    schema:description "A developer Richard dated until it emerged that she indents her code with spaces." ;
+    schema:name "Winnie" ;
+    sv:indentation "spaces" .
+
+svr:erlich-bachman sv:attended svr:bachmanity-insanity .
+svr:hooli sv:attended svr:hooli-con .
+svr:hooli sv:attended svr:techcrunch-disrupt .
+svr:jack-barker sv:attended svr:hooli-con .
+svr:nelson-bighetti sv:attended svr:bachmanity-insanity .
+svr:pied-piper sv:attended svr:condor-stream .
+svr:pied-piper sv:attended svr:techcrunch-disrupt .
+svr:richard-hendricks sv:attended svr:techcrunch-disrupt .
+svr:aviato sv:basedIn svr:palo-alto .
+svr:bachmanity sv:basedIn svr:san-francisco .
+svr:bream-hall sv:basedIn svr:sand-hill-road .
+svr:endframe sv:basedIn svr:cupertino .
+svr:hooli sv:basedIn svr:hooli-campus .
+svr:hooli-xyz sv:basedIn svr:hooli-campus .
+svr:pied-piper sv:basedIn svr:hacker-hostel .
+svr:pied-piper sv:basedIn svr:pied-piper-office .
+svr:raviga sv:basedIn svr:sand-hill-road .
+svr:bertram-gilfoyle sv:built svr:anton .
+svr:bertram-gilfoyle sv:built svr:bitcoin-alert .
+svr:bertram-gilfoyle sv:built svr:pipercoin .
+svr:bertram-gilfoyle sv:built svr:son-of-anton .
+svr:dinesh-chugtai sv:built svr:piper-chat .
+svr:jian-yang sv:built svr:not-hotdog .
+svr:jian-yang sv:built svr:seefood .
+svr:richard-hendricks sv:built svr:pied-piper-app .
+svr:richard-hendricks sv:built svr:pied-piper-music .
+svr:nucleus sv:competesWith svr:pied-piper-app .
+svr:the-box sv:competesWith svr:pipernet .
+svr:erlich-bachman sv:founded svr:aviato .
+svr:erlich-bachman sv:founded svr:bachmanity .
+svr:erlich-bachman sv:founded svr:seefood .
+svr:gavin-belson sv:founded svr:hooli .
+svr:jian-yang sv:founded svr:seefood .
+svr:laurie-bream sv:founded svr:bream-hall .
+svr:monica-hall sv:founded svr:bream-hall .
+svr:nelson-bighetti sv:founded svr:bachmanity .
+svr:peter-gregory sv:founded svr:raviga .
+svr:richard-hendricks sv:founded svr:pied-piper .
+svr:russ-hanneman sv:founded svr:tres-commas .
+svr:erlich-bachman sv:investedIn svr:pied-piper .
+svr:nelson-bighetti sv:investedIn svr:bachmanity .
+svr:peter-gregory sv:investedIn svr:pied-piper .
+svr:raviga sv:investedIn svr:pied-piper .
+svr:russ-hanneman sv:investedIn svr:pied-piper .
+svr:bertram-gilfoyle sv:knows svr:dinesh-chugtai .
+svr:bertram-gilfoyle sv:knows svr:jian-yang .
+svr:carla-walton sv:knows svr:richard-hendricks .
+svr:dinesh-chugtai sv:knows svr:carla-walton .
+svr:erlich-bachman sv:knows svr:bertram-gilfoyle .
+svr:erlich-bachman sv:knows svr:dinesh-chugtai .
+svr:erlich-bachman sv:knows svr:jared-dunn .
+svr:erlich-bachman sv:knows svr:nelson-bighetti .
+svr:erlich-bachman sv:knows svr:richard-hendricks .
+svr:gavin-belson sv:knows svr:denpok .
+svr:gavin-belson sv:knows svr:hoover .
+svr:gavin-belson sv:knows svr:jack-barker .
+svr:jack-barker sv:knows svr:laurie-bream .
+svr:jack-barker sv:knows svr:richard-hendricks .
+svr:jared-dunn sv:knows svr:bertram-gilfoyle .
+svr:jared-dunn sv:knows svr:dinesh-chugtai .
+svr:jian-yang sv:knows svr:erlich-bachman .
+svr:laurie-bream sv:knows svr:ed-chen .
+svr:laurie-bream sv:knows svr:keenan-feldspar .
+svr:monica-hall sv:knows svr:laurie-bream .
+svr:monica-hall sv:knows svr:peter-gregory .
+svr:nelson-bighetti sv:knows svr:gavin-belson .
+svr:peter-gregory sv:knows svr:gavin-belson .
+svr:richard-hendricks sv:knows svr:bertram-gilfoyle .
+svr:richard-hendricks sv:knows svr:dinesh-chugtai .
+svr:richard-hendricks sv:knows svr:jared-dunn .
+svr:richard-hendricks sv:knows svr:jian-yang .
+svr:richard-hendricks sv:knows svr:laurie-bream .
+svr:richard-hendricks sv:knows svr:monica-hall .
+svr:richard-hendricks sv:knows svr:nelson-bighetti .
+svr:richard-hendricks sv:knows svr:winnie .
+svr:ron-laflamme sv:knows svr:richard-hendricks .
+svr:russ-hanneman sv:knows svr:richard-hendricks .
+svr:bertram-gilfoyle sv:livesIn svr:palo-alto .
+svr:carla-walton sv:livesIn svr:san-francisco .
+svr:denpok sv:livesIn svr:mountain-view .
+svr:dinesh-chugtai sv:livesIn svr:palo-alto .
+svr:ed-chen sv:livesIn svr:los-altos .
+svr:erlich-bachman sv:livesIn svr:palo-alto .
+svr:gavin-belson sv:livesIn svr:mountain-view .
+svr:hoover sv:livesIn svr:mountain-view .
+svr:jack-barker sv:livesIn svr:san-francisco .
+svr:jared-dunn sv:livesIn svr:menlo-park .
+svr:jian-yang sv:livesIn svr:palo-alto .
+svr:laurie-bream sv:livesIn svr:menlo-park .
+svr:monica-hall sv:livesIn svr:menlo-park .
+svr:nelson-bighetti sv:livesIn svr:palo-alto .
+svr:peter-gregory sv:livesIn svr:menlo-park .
+svr:richard-hendricks sv:livesIn svr:palo-alto .
+svr:ron-laflamme sv:livesIn svr:cupertino .
+svr:russ-hanneman sv:livesIn svr:los-altos .
+svr:erlichs-palapa sv:locatedIn svr:palo-alto .
+svr:hacker-hostel sv:locatedIn svr:palo-alto .
+svr:hooli-campus sv:locatedIn svr:mountain-view .
+svr:hooli-rooftop sv:locatedIn svr:mountain-view .
+svr:pied-piper-office sv:locatedIn svr:mountain-view .
+svr:sand-hill-road sv:locatedIn svr:menlo-park .
+svr:hooli sv:makes svr:hooli-phone .
+svr:hooli sv:makes svr:nucleus .
+svr:hooli sv:makes svr:the-box .
+svr:pied-piper sv:makes svr:pied-piper-app .
+svr:pied-piper sv:makes svr:piper-chat .
+svr:pied-piper sv:makes svr:pipercoin .
+svr:pied-piper sv:makes svr:pipernet .
+svr:tres-commas sv:makes svr:tres-commas-tequila .
+svr:denpok sv:mentors svr:gavin-belson .
+svr:erlich-bachman sv:mentors svr:richard-hendricks .
+svr:peter-gregory sv:mentors svr:richard-hendricks .
+svr:erlich-bachman sv:owns svr:erlichs-palapa .
+svr:erlich-bachman sv:owns svr:hacker-hostel .
+svr:hooli sv:owns svr:hooli-campus .
+svr:hooli sv:owns svr:hooli-rooftop .
+svr:jian-yang sv:owns svr:jian-yangs-fridge .
+svr:russ-hanneman sv:owns svr:russ-car .
+svr:bertram-gilfoyle sv:rivalOf svr:dinesh-chugtai .
+svr:dinesh-chugtai sv:rivalOf svr:bertram-gilfoyle .
+svr:gavin-belson sv:rivalOf svr:richard-hendricks .
+svr:jian-yang sv:rivalOf svr:erlich-bachman .
+svr:son-of-anton sv:trainedOn svr:anton .
+svr:pied-piper-app sv:uses svr:middle-out .
+svr:piper-chat sv:uses svr:middle-out .
+svr:pipercoin sv:uses svr:blockchain .
+svr:pipernet sv:uses svr:middle-out .
+svr:bertram-gilfoyle sv:worksAt svr:pied-piper .
+svr:bertram-gilfoyle schema:worksFor svr:pied-piper .
+svr:carla-walton sv:worksAt svr:pied-piper .
+svr:carla-walton schema:worksFor svr:pied-piper .
+svr:denpok sv:worksAt svr:hooli .
+svr:denpok schema:worksFor svr:hooli .
+svr:dinesh-chugtai sv:worksAt svr:pied-piper .
+svr:dinesh-chugtai schema:worksFor svr:pied-piper .
+svr:ed-chen sv:worksAt svr:raviga .
+svr:ed-chen schema:worksFor svr:raviga .
+svr:gavin-belson sv:worksAt svr:hooli .
+svr:gavin-belson schema:worksFor svr:hooli .
+svr:hoover sv:worksAt svr:hooli .
+svr:hoover schema:worksFor svr:hooli .
+svr:jack-barker sv:worksAt svr:hooli .
+svr:jack-barker schema:worksFor svr:hooli .
+svr:jack-barker sv:worksAt svr:pied-piper .
+svr:jack-barker schema:worksFor svr:pied-piper .
+svr:jared-dunn sv:worksAt svr:hooli .
+svr:jared-dunn schema:worksFor svr:hooli .
+svr:jared-dunn sv:worksAt svr:pied-piper .
+svr:jared-dunn schema:worksFor svr:pied-piper .
+svr:laurie-bream sv:worksAt svr:bream-hall .
+svr:laurie-bream schema:worksFor svr:bream-hall .
+svr:laurie-bream sv:worksAt svr:raviga .
+svr:laurie-bream schema:worksFor svr:raviga .
+svr:monica-hall sv:worksAt svr:bream-hall .
+svr:monica-hall schema:worksFor svr:bream-hall .
+svr:monica-hall sv:worksAt svr:raviga .
+svr:monica-hall schema:worksFor svr:raviga .
+svr:nelson-bighetti sv:worksAt svr:hooli .
+svr:nelson-bighetti schema:worksFor svr:hooli .
+svr:nelson-bighetti sv:worksAt svr:hooli-xyz .
+svr:nelson-bighetti schema:worksFor svr:hooli-xyz .
+svr:peter-gregory sv:worksAt svr:raviga .
+svr:peter-gregory schema:worksFor svr:raviga .
+svr:richard-hendricks sv:worksAt svr:hooli .
+svr:richard-hendricks schema:worksFor svr:hooli .
+svr:richard-hendricks sv:worksAt svr:pied-piper .
+svr:richard-hendricks schema:worksFor svr:pied-piper .
+svr:ron-laflamme sv:worksAt svr:pied-piper .
+svr:ron-laflamme schema:worksFor svr:pied-piper .
+
+svr:attended-erlich-bachman-bachmanity-insanity-1
+    a sv:Attendance ;
+    sv:attendee svr:erlich-bachman ;
+    sv:event svr:bachmanity-insanity ;
+    sv:date "2016-05-01"^^xsd:date ;
+    sv:datePrecision "month" ;
+    sv:outcome "Hosted it" .
+
+svr:attended-hooli-hooli-con-1
+    a sv:Attendance ;
+    sv:attendee svr:hooli ;
+    sv:event svr:hooli-con ;
+    sv:date "2017-06-01"^^xsd:date ;
+    sv:datePrecision "month" ;
+    sv:outcome "Launched The Box (Signature Edition)" .
+
+svr:attended-hooli-techcrunch-disrupt-1
+    a sv:Attendance ;
+    sv:attendee svr:hooli ;
+    sv:event svr:techcrunch-disrupt ;
+    sv:date "2014-06-01"^^xsd:date ;
+    sv:datePrecision "month" ;
+    sv:outcome "Presented Nucleus, which scored 2.89" .
+
+svr:attended-jack-barker-hooli-con-1
+    a sv:Attendance ;
+    sv:attendee svr:jack-barker ;
+    sv:event svr:hooli-con ;
+    sv:date "2017-06-01"^^xsd:date ;
+    sv:datePrecision "month" ;
+    sv:outcome "Gave the keynote" .
+
+svr:attended-nelson-bighetti-bachmanity-insanity-1
+    a sv:Attendance ;
+    sv:attendee svr:nelson-bighetti ;
+    sv:event svr:bachmanity-insanity ;
+    sv:date "2016-05-01"^^xsd:date ;
+    sv:datePrecision "month" ;
+    sv:outcome "Paid for it" .
+
+svr:attended-pied-piper-condor-stream-1
+    a sv:Attendance ;
+    sv:attendee svr:pied-piper ;
+    sv:event svr:condor-stream ;
+    sv:date "2015-06-01"^^xsd:date ;
+    sv:datePrecision "month" ;
+    sv:outcome "Kept the stream running as the audience grew" .
+
+svr:attended-pied-piper-techcrunch-disrupt-1
+    a sv:Attendance ;
+    sv:attendee svr:pied-piper ;
+    sv:event svr:techcrunch-disrupt ;
+    sv:date "2014-06-01"^^xsd:date ;
+    sv:datePrecision "month" ;
+    sv:outcome "Won, with a Weissman score of 5.2" .
+
+svr:attended-richard-hendricks-techcrunch-disrupt-1
+    a sv:Attendance ;
+    sv:attendee svr:richard-hendricks ;
+    sv:event svr:techcrunch-disrupt ;
+    sv:date "2014-06-01"^^xsd:date ;
+    sv:datePrecision "month" ;
+    sv:outcome "Presented middle-out on stage" .
+
+svr:based-in-bream-hall-sand-hill-road-1
+    a sv:Base ;
+    sv:company svr:bream-hall ;
+    sv:place svr:sand-hill-road ;
+    sv:from "2018-03-01"^^xsd:date ;
+    sv:fromPrecision "month" .
+
+svr:based-in-pied-piper-hacker-hostel-1
+    a sv:Base ;
+    sv:company svr:pied-piper ;
+    sv:place svr:hacker-hostel ;
+    sv:from "2014-03-01"^^xsd:date ;
+    sv:fromPrecision "month" ;
+    sv:to "2014-09-01"^^xsd:date ;
+    sv:toPrecision "month" .
+
+svr:based-in-pied-piper-pied-piper-office-1
+    a sv:Base ;
+    sv:company svr:pied-piper ;
+    sv:place svr:pied-piper-office ;
+    sv:from "2014-09-01"^^xsd:date ;
+    sv:fromPrecision "month" .
+
+svr:founded-erlich-bachman-bachmanity-1
+    a sv:Founding ;
+    sv:founder svr:erlich-bachman ;
+    sv:founded svr:bachmanity ;
+    sv:date "2016-04-01"^^xsd:date ;
+    sv:datePrecision "month" .
+
+svr:founded-erlich-bachman-seefood-1
+    a sv:Founding ;
+    sv:founder svr:erlich-bachman ;
+    sv:founded svr:seefood ;
+    sv:date "2017-05-01"^^xsd:date ;
+    sv:datePrecision "month" .
+
+svr:founded-jian-yang-seefood-1
+    a sv:Founding ;
+    sv:founder svr:jian-yang ;
+    sv:founded svr:seefood ;
+    sv:date "2017-05-01"^^xsd:date ;
+    sv:datePrecision "month" .
+
+svr:founded-laurie-bream-bream-hall-1
+    a sv:Founding ;
+    sv:founder svr:laurie-bream ;
+    sv:founded svr:bream-hall ;
+    sv:date "2018-03-01"^^xsd:date ;
+    sv:datePrecision "month" .
+
+svr:founded-monica-hall-bream-hall-1
+    a sv:Founding ;
+    sv:founder svr:monica-hall ;
+    sv:founded svr:bream-hall ;
+    sv:date "2018-03-01"^^xsd:date ;
+    sv:datePrecision "month" .
+
+svr:founded-nelson-bighetti-bachmanity-1
+    a sv:Founding ;
+    sv:founder svr:nelson-bighetti ;
+    sv:founded svr:bachmanity ;
+    sv:date "2016-04-01"^^xsd:date ;
+    sv:datePrecision "month" .
+
+svr:founded-richard-hendricks-pied-piper-1
+    a sv:Founding ;
+    sv:founder svr:richard-hendricks ;
+    sv:founded svr:pied-piper ;
+    sv:date "2014-03-01"^^xsd:date ;
+    sv:datePrecision "month" .
+
+svr:invested-in-erlich-bachman-pied-piper-1
+    a sv:Investment ;
+    sv:investor svr:erlich-bachman ;
+    sv:company svr:pied-piper ;
+    sv:date "2014-03-01"^^xsd:date ;
+    sv:datePrecision "month" ;
+    sv:note "Ten percent of the company, in return for a room at the hacker hostel" ;
+    sv:round "Incubator stake" .
+
+svr:invested-in-nelson-bighetti-bachmanity-1
+    a sv:Investment ;
+    sv:investor svr:nelson-bighetti ;
+    sv:company svr:bachmanity ;
+    sv:amountUsd 20000000 ;
+    sv:date "2016-04-01"^^xsd:date ;
+    sv:datePrecision "month" ;
+    sv:note "Paid from his Hooli severance" ;
+    sv:round "Founding capital" .
+
+svr:invested-in-peter-gregory-pied-piper-1
+    a sv:Investment ;
+    sv:investor svr:peter-gregory ;
+    sv:company svr:pied-piper ;
+    sv:amountUsd 200000 ;
+    sv:date "2014-03-01"^^xsd:date ;
+    sv:datePrecision "month" ;
+    sv:note "From an investor who reads markets in the sesame seeds on burger buns" ;
+    sv:round "Seed" .
+
+svr:invested-in-raviga-pied-piper-1
+    a sv:Investment ;
+    sv:investor svr:raviga ;
+    sv:company svr:pied-piper ;
+    sv:date "2015-06-01"^^xsd:date ;
+    sv:datePrecision "month" ;
+    sv:note "Bought Russ Hanneman's stake, and with it control of the board" ;
+    sv:round "Secondary" .
+
+svr:invested-in-russ-hanneman-pied-piper-1
+    a sv:Investment ;
+    sv:investor svr:russ-hanneman ;
+    sv:company svr:pied-piper ;
+    sv:amountUsd 5000000 ;
+    sv:date "2015-04-01"^^xsd:date ;
+    sv:datePrecision "month" ;
+    sv:round "Series A" .
+
+svr:lives-in-peter-gregory-menlo-park-1
+    a sv:Residence ;
+    sv:person svr:peter-gregory ;
+    sv:city svr:menlo-park ;
+    sv:to "2015-04-01"^^xsd:date ;
+    sv:toPrecision "month" .
+
+svr:works-at-bertram-gilfoyle-pied-piper-1
+    a sv:Employment ;
+    sv:person svr:bertram-gilfoyle ;
+    sv:company svr:pied-piper ;
+    sv:from "2014-03-01"^^xsd:date ;
+    sv:fromPrecision "month" .
+
+svr:works-at-carla-walton-pied-piper-1
+    a sv:Employment ;
+    sv:person svr:carla-walton ;
+    sv:company svr:pied-piper ;
+    sv:from "2016-04-01"^^xsd:date ;
+    sv:fromPrecision "month" ;
+    sv:role "Engineer" .
+
+svr:works-at-denpok-hooli-1
+    a sv:Employment ;
+    sv:person svr:denpok ;
+    sv:company svr:hooli ;
+    sv:role "Spiritual Advisor" .
+
+svr:works-at-dinesh-chugtai-pied-piper-1
+    a sv:Employment ;
+    sv:person svr:dinesh-chugtai ;
+    sv:company svr:pied-piper ;
+    sv:from "2014-03-01"^^xsd:date ;
+    sv:fromPrecision "month" .
+
+svr:works-at-ed-chen-raviga-1
+    a sv:Employment ;
+    sv:person svr:ed-chen ;
+    sv:company svr:raviga ;
+    sv:role "Associate" .
+
+svr:works-at-gavin-belson-hooli-1
+    a sv:Employment ;
+    sv:person svr:gavin-belson ;
+    sv:company svr:hooli ;
+    sv:from "2018-04-01"^^xsd:date ;
+    sv:fromPrecision "month" ;
+    sv:role "CEO" .
+
+svr:works-at-gavin-belson-hooli-2
+    a sv:Employment ;
+    sv:person svr:gavin-belson ;
+    sv:company svr:hooli ;
+    sv:role "CEO" ;
+    sv:to "2017-06-01"^^xsd:date ;
+    sv:toPrecision "month" .
+
+svr:works-at-hoover-hooli-1
+    a sv:Employment ;
+    sv:person svr:hoover ;
+    sv:company svr:hooli ;
+    sv:role "Head of Security" .
+
+svr:works-at-jack-barker-hooli-1
+    a sv:Employment ;
+    sv:person svr:jack-barker ;
+    sv:company svr:hooli ;
+    sv:from "2017-06-01"^^xsd:date ;
+    sv:fromPrecision "month" ;
+    sv:role "CEO" ;
+    sv:to "2018-04-01"^^xsd:date ;
+    sv:toPrecision "month" .
+
+svr:works-at-jack-barker-hooli-2
+    a sv:Employment ;
+    sv:person svr:jack-barker ;
+    sv:company svr:hooli ;
+    sv:role "Executive" ;
+    sv:to "2017-06-01"^^xsd:date ;
+    sv:toPrecision "month" .
+
+svr:works-at-jack-barker-pied-piper-1
+    a sv:Employment ;
+    sv:person svr:jack-barker ;
+    sv:company svr:pied-piper ;
+    sv:from "2016-04-01"^^xsd:date ;
+    sv:fromPrecision "month" ;
+    sv:role "CEO" ;
+    sv:to "2016-05-01"^^xsd:date ;
+    sv:toPrecision "month" .
+
+svr:works-at-jared-dunn-hooli-1
+    a sv:Employment ;
+    sv:person svr:jared-dunn ;
+    sv:company svr:hooli ;
+    sv:role "Business development" ;
+    sv:to "2014-04-01"^^xsd:date ;
+    sv:toPrecision "month" .
+
+svr:works-at-jared-dunn-pied-piper-1
+    a sv:Employment ;
+    sv:person svr:jared-dunn ;
+    sv:company svr:pied-piper ;
+    sv:from "2014-04-01"^^xsd:date ;
+    sv:fromPrecision "month" ;
+    sv:role "Head of Business Development" .
+
+svr:works-at-laurie-bream-bream-hall-1
+    a sv:Employment ;
+    sv:person svr:laurie-bream ;
+    sv:company svr:bream-hall ;
+    sv:from "2018-03-01"^^xsd:date ;
+    sv:fromPrecision "month" ;
+    sv:role "Managing Partner" .
+
+svr:works-at-laurie-bream-raviga-1
+    a sv:Employment ;
+    sv:person svr:laurie-bream ;
+    sv:company svr:raviga ;
+    sv:from "2015-04-01"^^xsd:date ;
+    sv:fromPrecision "month" ;
+    sv:role "Managing Partner" ;
+    sv:to "2018-03-01"^^xsd:date ;
+    sv:toPrecision "month" .
+
+svr:works-at-monica-hall-bream-hall-1
+    a sv:Employment ;
+    sv:person svr:monica-hall ;
+    sv:company svr:bream-hall ;
+    sv:from "2018-03-01"^^xsd:date ;
+    sv:fromPrecision "month" ;
+    sv:role "Partner" .
+
+svr:works-at-monica-hall-raviga-1
+    a sv:Employment ;
+    sv:person svr:monica-hall ;
+    sv:company svr:raviga ;
+    sv:role "Associate" ;
+    sv:to "2018-03-01"^^xsd:date ;
+    sv:toPrecision "month" .
+
+svr:works-at-nelson-bighetti-hooli-1
+    a sv:Employment ;
+    sv:person svr:nelson-bighetti ;
+    sv:company svr:hooli ;
+    sv:from "2014-04-01"^^xsd:date ;
+    sv:fromPrecision "month" ;
+    sv:role "Engineer" ;
+    sv:to "2016-04-01"^^xsd:date ;
+    sv:toPrecision "month" .
+
+svr:works-at-nelson-bighetti-hooli-xyz-1
+    a sv:Employment ;
+    sv:person svr:nelson-bighetti ;
+    sv:company svr:hooli-xyz ;
+    sv:role "Head of Hooli XYZ" ;
+    sv:to "2016-04-01"^^xsd:date ;
+    sv:toPrecision "month" .
+
+svr:works-at-peter-gregory-raviga-1
+    a sv:Employment ;
+    sv:person svr:peter-gregory ;
+    sv:company svr:raviga ;
+    sv:role "Founder" ;
+    sv:to "2015-04-01"^^xsd:date ;
+    sv:toPrecision "month" .
+
+svr:works-at-richard-hendricks-hooli-1
+    a sv:Employment ;
+    sv:person svr:richard-hendricks ;
+    sv:company svr:hooli ;
+    sv:to "2014-03-01"^^xsd:date ;
+    sv:toPrecision "month" .
+
+svr:works-at-richard-hendricks-pied-piper-1
+    a sv:Employment ;
+    sv:person svr:richard-hendricks ;
+    sv:company svr:pied-piper ;
+    sv:from "2014-03-01"^^xsd:date ;
+    sv:fromPrecision "month" ;
+    sv:role "CEO" ;
+    sv:to "2015-06-01"^^xsd:date ;
+    sv:toPrecision "month" .
+
+svr:works-at-richard-hendricks-pied-piper-2
+    a sv:Employment ;
+    sv:person svr:richard-hendricks ;
+    sv:company svr:pied-piper ;
+    sv:from "2016-04-01"^^xsd:date ;
+    sv:fromPrecision "month" ;
+    sv:role "CTO" ;
+    sv:to "2016-05-01"^^xsd:date ;
+    sv:toPrecision "month" .
+
+svr:works-at-richard-hendricks-pied-piper-3
+    a sv:Employment ;
+    sv:person svr:richard-hendricks ;
+    sv:company svr:pied-piper ;
+    sv:from "2016-05-01"^^xsd:date ;
+    sv:fromPrecision "month" ;
+    sv:role "CEO" .
+
+svr:works-at-ron-laflamme-pied-piper-1
+    a sv:Employment ;
+    sv:person svr:ron-laflamme ;
+    sv:company svr:pied-piper ;
+    sv:from "2014-03-01"^^xsd:date ;
+    sv:fromPrecision "month" ;
+    sv:role "Lawyer" .

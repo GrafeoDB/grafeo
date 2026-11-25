@@ -20,7 +20,11 @@ __all__ = [
     "edges",
     "gql",
     "load",
+    "lpg_import",
     "nodes",
+    "owl",
+    "rdf_import",
+    "rdfs",
     "timeline",
     "turtle",
     "vectors",
@@ -78,6 +82,29 @@ def cypher() -> str:
 def turtle() -> str:
     """The Turtle text. It carries no vectors."""
     return _text("silicon-valley.ttl")
+
+
+def rdfs() -> str:
+    """The Turtle text with its vocabulary in RDFS before the data."""
+    return _text("silicon-valley.rdfs.ttl")
+
+
+def owl() -> str:
+    """The Turtle text with its vocabulary in OWL before the data."""
+    return _text("silicon-valley.owl.ttl")
+
+
+def lpg_import() -> dict[str, Any]:
+    """The `importLpg` payload of @grafeo-db/wasm: `nodes` with `labels` and
+    `properties`, `edges` whose `source` and `target` index `nodes`. A date is
+    `{"$date": "YYYY-MM-DD"}`."""
+    return json.loads(_text("silicon-valley.lpg.json"))
+
+
+def rdf_import() -> dict[str, Any]:
+    """The `importRdf` payload of @grafeo-db/wasm: `triples` with full IRIs; an
+    object is an IRI string or `{"value": ..., "datatype": ...}`."""
+    return json.loads(_text("silicon-valley.rdf.json"))
 
 
 @dataclass(frozen=True)

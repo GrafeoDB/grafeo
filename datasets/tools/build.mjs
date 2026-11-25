@@ -6,6 +6,8 @@ import { parseArgs } from 'node:util';
 import { emitCypher } from './lib/emit-cypher.mjs';
 import { emitGql } from './lib/emit-gql.mjs';
 import { emitGraph } from './lib/emit-graph.mjs';
+import { emitLpgImport, emitRdfImport } from './lib/emit-import.mjs';
+import { emitOwl, emitRdfs } from './lib/emit-schema.mjs';
 import { emitTimeline } from './lib/emit-timeline.mjs';
 import { emitTurtle } from './lib/emit-turtle.mjs';
 import { validate } from './lib/validate.mjs';
@@ -22,6 +24,10 @@ const emitters = [
   { file: 'silicon-valley.gql', emit: (s) => lines(emitGql(s)) },
   { file: 'silicon-valley.cypher', emit: (s) => lines(emitCypher(s)) },
   { file: 'silicon-valley.ttl', emit: emitTurtle },
+  { file: 'silicon-valley.rdfs.ttl', emit: emitRdfs },
+  { file: 'silicon-valley.owl.ttl', emit: emitOwl },
+  { file: 'silicon-valley.lpg.json', emit: (s) => json(emitLpgImport(s)) },
+  { file: 'silicon-valley.rdf.json', emit: (s) => json(emitRdfImport(s)) },
 ];
 
 const { values } = parseArgs({

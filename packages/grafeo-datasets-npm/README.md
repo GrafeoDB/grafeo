@@ -21,6 +21,10 @@ Node 20 or later, or any bundler. Every entry point is a plain ES module with th
 | `@grafeo-db/datasets/silicon-valley/gql-with-vectors` | GQL script with embeddings and vector indexes      |
 | `@grafeo-db/datasets/silicon-valley/cypher`           | Cypher script, as text and as statements           |
 | `@grafeo-db/datasets/silicon-valley/turtle`           | Turtle text                                        |
+| `@grafeo-db/datasets/silicon-valley/rdfs`             | Turtle text with its vocabulary in RDFS            |
+| `@grafeo-db/datasets/silicon-valley/owl`              | Turtle text with its vocabulary in OWL             |
+| `@grafeo-db/datasets/silicon-valley/lpg-import`       | The payload `db.importLpg` takes                   |
+| `@grafeo-db/datasets/silicon-valley/rdf-import`       | The payload `db.importRdf` takes                   |
 | `@grafeo-db/datasets/silicon-valley/vectors`          | Embeddings as a `Float32Array`, plus `vectorOf`    |
 
 ### Data

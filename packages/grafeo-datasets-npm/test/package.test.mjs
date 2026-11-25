@@ -45,10 +45,26 @@ for (const [sub, file] of [
   });
 }
 
-test('turtle default export matches the derived file', async () => {
-  const mod = await load('/silicon-valley/turtle');
-  assert.equal(mod.default, readFileSync(join(derived, 'silicon-valley.ttl'), 'utf8'));
-});
+for (const [sub, file] of [
+  ['turtle', 'silicon-valley.ttl'],
+  ['rdfs', 'silicon-valley.rdfs.ttl'],
+  ['owl', 'silicon-valley.owl.ttl'],
+]) {
+  test(`${sub} default export matches the derived file`, async () => {
+    const mod = await load(`/silicon-valley/${sub}`);
+    assert.equal(mod.default, readFileSync(join(derived, file), 'utf8'));
+  });
+}
+
+for (const [sub, file] of [
+  ['lpg-import', 'silicon-valley.lpg.json'],
+  ['rdf-import', 'silicon-valley.rdf.json'],
+]) {
+  test(`${sub} default export equals the derived payload`, async () => {
+    const mod = await load(`/silicon-valley/${sub}`);
+    assert.deepEqual(mod.default, JSON.parse(readFileSync(join(derived, file), 'utf8')));
+  });
+}
 
 test('vectors decode to 384 floats per node and vectorOf finds middle-out', async () => {
   const { vectors, vectorOf } = await load('/silicon-valley/vectors');
@@ -82,6 +98,10 @@ const expectedFiles = [
   'dist/silicon-valley/cypher.js',
   'dist/silicon-valley/gql-with-vectors.js',
   'dist/silicon-valley/gql.js',
+  'dist/silicon-valley/lpg-import.js',
+  'dist/silicon-valley/owl.js',
+  'dist/silicon-valley/rdf-import.js',
+  'dist/silicon-valley/rdfs.js',
   'dist/silicon-valley/turtle.js',
   'dist/silicon-valley/vectors.js',
   'package.json',
@@ -89,6 +109,10 @@ const expectedFiles = [
   'types/silicon-valley/cypher.d.ts',
   'types/silicon-valley/gql-with-vectors.d.ts',
   'types/silicon-valley/gql.d.ts',
+  'types/silicon-valley/lpg-import.d.ts',
+  'types/silicon-valley/owl.d.ts',
+  'types/silicon-valley/rdf-import.d.ts',
+  'types/silicon-valley/rdfs.d.ts',
   'types/silicon-valley/turtle.d.ts',
   'types/silicon-valley/vectors.d.ts',
 ].sort();

@@ -26,6 +26,10 @@ const PYTHON_FILES = [
   'silicon-valley.gql',
   'silicon-valley.cypher',
   'silicon-valley.ttl',
+  'silicon-valley.rdfs.ttl',
+  'silicon-valley.owl.ttl',
+  'silicon-valley.lpg.json',
+  'silicon-valley.rdf.json',
   'silicon-valley.vectors.gql',
   'vectors.f32',
   'vectors.json',
@@ -67,6 +71,10 @@ out('silicon-valley/gql.js', statementsModule('silicon-valley.gql'));
 out('silicon-valley/gql-with-vectors.js', statementsModule('silicon-valley.vectors.gql'));
 out('silicon-valley/cypher.js', statementsModule('silicon-valley.cypher'));
 out('silicon-valley/turtle.js', `export default ${lit(text('silicon-valley.ttl'))};\n`);
+out('silicon-valley/rdfs.js', `export default ${lit(text('silicon-valley.rdfs.ttl'))};\n`);
+out('silicon-valley/owl.js', `export default ${lit(text('silicon-valley.owl.ttl'))};\n`);
+out('silicon-valley/lpg-import.js', `export default ${lit(json('silicon-valley.lpg.json'))};\n`);
+out('silicon-valley/rdf-import.js', `export default ${lit(json('silicon-valley.rdf.json'))};\n`);
 
 const meta = json('vectors.json');
 const keys = meta.nodes.map((n) => n.key);

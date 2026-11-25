@@ -1,4 +1,52 @@
 //! Persistence, snapshots, and data export for GrafeoDB.
+//!
+//! # A restore and the reads beside it
+//!
+//! `restore_snapshot` replaces the graph whole: the stores, their graphs, the
+//! RDF store, the catalog and the indexes. It refuses while any transaction
+//! or pinned read is open, and holds both off while it runs, in this order:
+//! the idle gate (no transaction begins), a first count of the open work (an
+//! early exit, before reads are held off), `replacing` (a read waits to
+//! pin), commits, the final count (a copy pins with commits held and reads on
+//! after it lets them go, so one that started between the two counts refuses
+//! the restore here), the replace gate's write side (it waits for the direct
+//! reads in progress, and new ones wait for it), then the refill
+//! (`TransactionManager::hold_idle`, `check_still_idle` and
+//! `hold_replacement`). Under the write side run only the refill, the
+//! continued epochs, the history restart, the plan statistics and the
+//! restore's own checkpoint, none of which calls a direct read below (a
+//! read under the write side on the restore's thread would wait for itself).
+//!
+//! So every read of what it replaces either holds a read pin, as open work
+//! (a query, a stream, an iterator, a snapshot or view), or the replace
+//! gate's read side for its call (`TransactionManager::hold_direct_read`),
+//! as these direct calls do; under that read side none of them takes or
+//! waits on the idle gate, commits, the write freeze, the readers' lock or a
+//! read pin, which would wait for the restore that waits for it, and none
+//! calls another of them (the gate prefers a waiting writer, so a nested
+//! read would wait behind the restore; debug builds check it):
+//! `get_node`, `get_edge`, `get_node_edges`, `get_node_labels`,
+//! `get_node_history`, `get_edge_history`, `get_node_property_history`,
+//! `get_all_node_property_history`, `find_nodes_by_property`,
+//! `has_property_index`, `property_key_count`, `list_graphs`,
+//! `list_indexes`, `graph_type_scope_warnings` and `rdf_overlay_len` (the
+//! counts, `schema`, `info`, `validate`, the searches and the time-travel
+//! reads pin already, as open work). A new direct read of what a restore
+//! replaces takes the replace gate's read side too.
+//!
+//! Exempt, with the reason:
+//! - process state, a true figure at any moment: `memory_usage`, the metrics,
+//!   `checkpoint_status`, `wal_status`, `current_epoch`, the current graph
+//!   and schema, the buffer manager;
+//! - what a restore does not replace: the change log (`history`,
+//!   `history_since`, `changes_between`) and the projections
+//!   (`list_projections`);
+//! - copies and saves (`export_snapshot`, `to_memory`, `save`, a full
+//!   backup), which hold commits, as the restore does, so they run before it
+//!   or after it; an incremental backup reads the log, which its cursor keeps
+//!   from a restore's checkpoint as from any other;
+//! - handles, whose reads are their own: `store()`, `file_manager()`, the
+//!   sessions.
 
 #![deny(clippy::let_underscore_must_use)]
 
@@ -1040,7 +1088,23 @@ impl super::Open {
         if let Some(fm) = &self.file_manager {
             fm.check_checkpoint_allowed()?;
         }
+        // After a commit that did not complete only a reopen helps: refused
+        // so before the open work (the failed commit's own transaction
+        // among it) is counted.
+        self.transaction_manager.check_no_incomplete_commit()?;
+        // It replaces the graph whole: refused while other work reads or
+        // writes it, which would see a mix of the two graphs or commit into
+        // the new one; work that starts now waits for the end of the restore.
+        let idle = self.transaction_manager.hold_idle("restore a snapshot")?;
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_during_restore_window();
         let commits = self.transaction_manager.hold_commits()?;
+        self.transaction_manager
+            .check_still_idle(&idle, &commits, "restore a snapshot")?;
+        // The direct reads in progress end, and new ones wait for the refill.
+        let _replacing = self.transaction_manager.hold_replacement(&idle, &commits);
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_during_restore_refill();
         self.transaction_manager.check_open()?;
         // Validates the snapshot and refuses data this build cannot read
         // before it changes anything (see `row_groups::restore`), and a
@@ -1650,6 +1714,15 @@ impl super::GrafeoDB {
     /// commits until a reopen (`GRAFEO-T008`, or `GRAFEO-S008` when the
     /// outcome is unknown), which finds the previous state or the restored
     /// one, whole: a commit on top would replay onto the previous image.
+    ///
+    /// `GRAFEO-T004` while any other work is open, from any session, the
+    /// caller's own included: a transaction (read-only too), a result
+    /// stream, a node or edge iterator, a snapshot or AS OF view, or a
+    /// running query. The error names what is open ("cannot restore a
+    /// snapshot while 2 transactions and 1 read are open: end them first"),
+    /// nothing changes, and the open work reads the graph it started on.
+    /// Work that starts during the restore waits for it, then sees the
+    /// restored graph.
     pub fn restore_snapshot(&self, data: &[u8]) -> Result<()> {
         self.live()?.restore_snapshot(data)
     }

@@ -2478,6 +2478,8 @@ impl Open {
 
     #[must_use]
     pub(crate) fn list_graphs(&self) -> Vec<String> {
+        // A snapshot restore waits for it, or it for the restore.
+        let _read = self.transaction_manager.hold_direct_read();
         let mut names = self
             .root_store()
             .map_or_default(|store| store.graph_names());

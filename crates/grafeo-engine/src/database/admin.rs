@@ -29,6 +29,8 @@ impl super::Open {
     }
 
     pub(crate) fn property_key_count(&self) -> Result<usize> {
+        // A snapshot restore waits for it, or it for the restore.
+        let _read = self.transaction_manager.hold_direct_read();
         Ok(self.graph_store().all_property_keys()?.len())
     }
 
@@ -285,6 +287,8 @@ impl super::Open {
 
     #[must_use]
     pub(crate) fn list_indexes(&self) -> Vec<crate::admin::IndexInfo> {
+        // A snapshot restore waits for it, or it for the restore.
+        let _read = self.transaction_manager.hold_direct_read();
         let store = self.current_lpg_store().ok();
         super::index::listed_indexes(&self.catalog, store.as_deref(), |target| {
             store
@@ -306,6 +310,8 @@ impl super::Open {
     #[doc(hidden)]
     #[must_use]
     pub(crate) fn graph_type_scope_warnings(&self) -> Vec<crate::admin::ValidationWarning> {
+        // A snapshot restore waits for it, or it for the restore.
+        let _read = self.transaction_manager.hold_direct_read();
         type Listed<'a> = &'a dyn Fn(&crate::catalog::GraphTypeDefinition) -> bool;
         type Held<'a> = &'a dyn Fn(&grafeo_core::graph::rowgroup::RowGroupStore) -> bool;
 

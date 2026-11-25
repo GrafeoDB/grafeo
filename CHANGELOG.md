@@ -85,6 +85,7 @@ Performance and memory release, in progress: this section lists what has landed 
 
 ### Fixed
 
+- **A snapshot restore refuses while other work is open**: `GrafeoDB::restore_snapshot` now fails with `GRAFEO-T004` while a transaction, a result stream, a node or edge iterator, a view or a running query is open; end the open work, then restore.
 - **Cypher binds a path variable on a node alone** ([#798](https://github.com/GrafeoDB/grafeo/issues/798)): `MATCH p = (a)`, `MERGE p = (a)` and a `WITH p` after them bind a path of no relationships, where `p` was an undefined variable. openCypher TCK: Match6 [1], Merge1 [13].
 - **An aggregate may read a grouping key inside a map** ([#798](https://github.com/GrafeoDB/grafeo/issues/798)): `RETURN a.name, {foo: a.name = 'A', kids: collect(c.name)}` runs, where it was refused as not a grouping key. openCypher TCK: With1 [4].
 - **A chain of CREATE clauses no longer reaches the plan depth limit** ([#798](https://github.com/GrafeoDB/grafeo/issues/798)): a run of consecutive Cypher CREATE clauses with no other clause between them is one create operation holding their patterns in order, so a statement of more than about 120 of them runs; the limit stays at 128. A CREATE whose properties read the graph (`EXISTS`, `COUNT`, a pattern comprehension) is not joined. openCypher TCK: Create4 [1] [2].

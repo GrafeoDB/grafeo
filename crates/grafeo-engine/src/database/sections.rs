@@ -247,7 +247,10 @@ impl CheckpointSources {
         // under one lock (see `pin_history_checkpoint`).
         let (history_from, pin) = match self.transaction_manager.pin_history_checkpoint() {
             Some(pin) => (Some(pin.epoch()), pin),
-            None => (None, self.transaction_manager.pin_read_at(epoch)?),
+            None => (
+                None,
+                self.transaction_manager.pin_checkpoint_at(epoch, commits)?,
+            ),
         };
         let mut held: Vec<Box<dyn Section>> = Vec::new();
         let mut after: Vec<Box<dyn Section>> = Vec::new();

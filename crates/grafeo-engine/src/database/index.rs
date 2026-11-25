@@ -923,6 +923,8 @@ impl super::Open {
 
     #[must_use]
     pub(crate) fn has_property_index(&self, property: &str) -> bool {
+        // A snapshot restore waits for it, or it for the restore.
+        let _read = self.transaction_manager.hold_direct_read();
         // A backend of its own has no index.
         self.current_lpg_store()
             .is_ok_and(|store| store.has_property_index(property))
@@ -933,6 +935,8 @@ impl super::Open {
         property: &str,
         value: &grafeo_common::types::Value,
     ) -> Result<Vec<grafeo_common::types::NodeId>> {
+        // A snapshot restore waits for it, or it for the restore.
+        let _read = self.transaction_manager.hold_direct_read();
         // The index also holds nodes created by transactions that have not
         // committed yet; return only what a reader at the current epoch sees.
         let epoch = self.read_epoch();

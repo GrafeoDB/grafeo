@@ -66,6 +66,8 @@ impl super::Open {
     }
 
     pub(crate) fn get_node(&self, id: NodeId) -> Result<Option<Node>> {
+        // A snapshot restore waits for it, or it for the restore.
+        let _read = self.transaction_manager.hold_direct_read();
         let view = ReadView::committed(self.read_epoch());
         self.read_store(DirectTarget::Current)?.node(id, view)
     }
@@ -76,6 +78,8 @@ impl super::Open {
         direction: Direction,
         edge_types: &[&str],
     ) -> Result<Vec<(NodeId, EdgeId)>> {
+        // A snapshot restore waits for it, or it for the restore.
+        let _read = self.transaction_manager.hold_direct_read();
         self.direct(DirectTarget::Current)
             .get_node_edges(node, direction, edge_types)
     }
@@ -108,6 +112,8 @@ impl super::Open {
         &self,
         id: NodeId,
     ) -> Result<Vec<(EpochId, Option<EpochId>, Node)>> {
+        // A snapshot restore waits for it, or it for the restore.
+        let _read = self.transaction_manager.hold_direct_read();
         let epoch = self.read_epoch();
         Ok(self
             .read_store(DirectTarget::Current)?
@@ -121,6 +127,8 @@ impl super::Open {
         &self,
         id: EdgeId,
     ) -> Result<Vec<(EpochId, Option<EpochId>, Edge)>> {
+        // A snapshot restore waits for it, or it for the restore.
+        let _read = self.transaction_manager.hold_direct_read();
         let epoch = self.read_epoch();
         Ok(self
             .read_store(DirectTarget::Current)?
@@ -163,6 +171,8 @@ impl super::Open {
         id: NodeId,
         key: &str,
     ) -> Result<Vec<(EpochId, Value)>> {
+        // A snapshot restore waits for it, or it for the restore.
+        let _read = self.transaction_manager.hold_direct_read();
         let epoch = self.read_epoch();
         let mut history = self
             .property_history_store()?
@@ -175,6 +185,8 @@ impl super::Open {
         &self,
         id: NodeId,
     ) -> Result<Vec<(PropertyKey, Vec<(EpochId, Value)>)>> {
+        // A snapshot restore waits for it, or it for the restore.
+        let _read = self.transaction_manager.hold_direct_read();
         let epoch = self.read_epoch();
         let mut history = self.property_history_store()?.node_property_history(id);
         for (_, versions) in &mut history {
@@ -212,6 +224,8 @@ impl super::Open {
     }
 
     pub(crate) fn get_node_labels(&self, id: NodeId) -> Result<Option<Vec<String>>> {
+        // A snapshot restore waits for it, or it for the restore.
+        let _read = self.transaction_manager.hold_direct_read();
         let view = ReadView::committed(self.read_epoch());
         Ok(self
             .read_store(DirectTarget::Current)?
@@ -242,6 +256,8 @@ impl super::Open {
     }
 
     pub(crate) fn get_edge(&self, id: EdgeId) -> Result<Option<Edge>> {
+        // A snapshot restore waits for it, or it for the restore.
+        let _read = self.transaction_manager.hold_direct_read();
         let view = ReadView::committed(self.read_epoch());
         self.read_store(DirectTarget::Current)?.edge(id, view)
     }

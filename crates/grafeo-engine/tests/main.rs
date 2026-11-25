@@ -364,6 +364,7 @@ mod relationship_uniqueness;
 mod released_formats;
 mod restore_durability;
 mod restore_publication_durability;
+mod restore_under_open_work;
 mod result_cell_types;
 mod returned_entities;
 mod reused_change_sets;

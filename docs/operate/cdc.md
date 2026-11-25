@@ -18,23 +18,25 @@ a reopen has it as it was (an in-memory database keeps it while it is open).
 The call checkpoints, and fails on a read-only open or when the checkpoint
 fails, leaving the setting as it was. A database on a store of its own
 (`GrafeoDB::with_store`) has no file to store it in, so the call is refused
-there. While the setting is stored on, the database keeps its write-ahead log
-from a cursor (see below), so turning CDC on for an open without the WAL is
-refused, and while it is stored on, a writable open without the WAL is refused
-too (open it with the WAL, open it read-only, or turn CDC off from an open with
+there. A stored setting keeps a durable change feed, which the WAL holds (see
+[The durable change feed](#the-durable-change-feed)): turning CDC on for an open
+without the WAL is refused, and while it is stored on, a writable open without
+the WAL is refused too (open it with the WAL, open it read-only, or turn CDC off from an open with
 the WAL). Both refusals are configuration errors
 (`GRAFEO-V001`). `Config::with_cdc()` (Python `GrafeoDB(cdc=True)`) turns CDC
 on for that open only and stores nothing; the open logs a warning when the
 file's stored setting is off.
 
-With the setting stored on, the database keeps a cursor in its write-ahead log
-directory (`cdc_cursor_default.json`), and every checkpoint, and `close()`,
-keeps the log from that cursor on, as they keep it for a backup cursor: at most
-`Config::with_wal_retention_limit` beyond the last checkpoint (1 GiB by
-default). Past the limit a checkpoint removes the oldest part and logs a warning
-once. So while the setting is stored on, `<path>.wal` stays after `close()`.
-Turning the setting on while it is on leaves the cursor where it is (and writes
-it if it is missing). Turning the setting off removes the cursor, and the next
+With the setting stored on, the database keeps a cursor for the durable change
+feed in its write-ahead log directory (`cdc_cursor_default.json`), and every
+checkpoint, and `close()`, keeps the log from that cursor on, as they keep it
+for a backup cursor: at most `Config::with_wal_retention_limit` beyond the last
+checkpoint (1 GiB by default). Past the limit a checkpoint removes the oldest
+part and logs a warning once, and the feed then fails with
+[`GRAFEO-S006`](error-codes.md#storage-s). So while the setting is stored on,
+`<path>.wal` stays after `close()`. Turning the setting on while it is on leaves
+the cursor where it is (and writes it if it is missing), so calling it at every
+start skips nothing. Turning the setting off removes the cursor, and the next
 checkpoint releases the log it kept. When the setting is stored off but
 the cursor cannot be removed, the call fails with
 [`GRAFEO-S007`](error-codes.md#storage-s): the cursor then keeps no log, and
@@ -65,7 +67,7 @@ from grafeo import GrafeoDB
 # Enable at construction
 db = GrafeoDB(cdc=True)
 
-# Or toggle at runtime
+# Or toggle at runtime, stored with the file (cdc=True is for this open only)
 db.enable_cdc()
 db.disable_cdc()
 
@@ -83,6 +85,10 @@ db.enableCdc();
 console.log(db.isCdcEnabled); // true
 db.disableCdc();
 ```
+
+In Python, Node.js and C, as in Rust, the stored setting keeps the WAL for
+the durable change feed up to the retention limit, and turning it off releases
+that WAL at the next checkpoint. Only the Rust API reads the feed in 0.6.4.
 
 ### C
 
@@ -194,6 +200,58 @@ const history = await db.edgeHistory(edgeId);
 const history = await db.nodeHistorySince(nodeId, 42);
 const changes = await db.changesBetween(10, 50);
 ```
+
+## The durable change feed
+
+With the setting stored on (`set_cdc(true)` on a database file), every commit
+that reports events also logs them in the WAL: the group of its writes begins
+with the first timestamp of its events, and each update and delete is logged
+with what it replaced. The WAL grows with the changed values; with change data
+capture off it is unchanged. The feed reads the events back from the log, after
+a close or a crash too, and they equal the events the live log reported for the
+same commits, field for field (ids, graphs, kinds, epochs, timestamps, before and
+after, labels, edge types and endpoints).
+
+```rust
+use std::num::NonZeroUsize;
+
+let limit = NonZeroUsize::new(1_000).unwrap();
+for batch in db.read_cdc_feed(limit)? {
+    for event in &batch.events {
+        // handle the event
+    }
+    // Moves the feed past the commit: the next read starts after it.
+    db.acknowledge_cdc_feed(batch.position)?;
+}
+```
+
+- `read_cdc_feed(limit)` gives the commits since the last acknowledged one, a
+  `CdcBatch` per commit, in commit order, up to `limit` events. It never splits
+  a commit: the first one comes whole even when it alone holds more. A read does
+  not move the feed.
+- `acknowledge_cdc_feed(position)` moves the feed past the commit at `position`,
+  a position a read gave. A position at or behind the cursor is acknowledged
+  already, so a retry changes nothing; acknowledgements are serialized, and the
+  highest wins. A crash during one leaves the old cursor or the new one. A
+  position the feed did not give is refused with GQLSTATUS `22023` (an invalid
+  parameter value), and the cursor stays. A database opened read-only reads the
+  feed and refuses an acknowledgement.
+- A position's token, `CdcPosition::to_token()` (`<lsn>:<epoch>`), is what a
+  consumer keeps between runs; `CdcPosition::from_token` reads it back.
+- When a checkpoint removed the log at the cursor (past
+  `Config::with_wal_retention_limit`), a read fails with
+  [`GRAFEO-S006`](error-codes.md#storage-s). The error names the position of the
+  first commit still in the log: acknowledging that position goes on from it.
+- Both calls need a database file with the setting stored on.
+  `Config::with_cdc()` captures for one open only and keeps no feed. Turning the
+  setting off and on again starts a fresh feed.
+
+A delete whose whole before-image is too large to log keeps its identity in the
+feed as in the live log: its labels, or its edge type and endpoints, without
+its properties (`before` is `None`).
+
+The feed is experimental: new in 0.6.4, its calls and the position's token may
+change in a patch release until it is stable.
 
 ## Transaction semantics
 

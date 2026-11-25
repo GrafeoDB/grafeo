@@ -463,8 +463,9 @@ fn oversized_writes(db: &GrafeoDB) {
         .unwrap();
 }
 
-/// A distinct key of one to three letters for `i`, the shortest first.
-fn tiny_key(mut i: usize) -> String {
+/// A distinct key of one to three letters for `i`, the shortest first (`cdc_durable_feed` uses
+/// it too).
+pub(crate) fn tiny_key(mut i: usize) -> String {
     const LETTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
     let base = LETTERS.len();
     let mut length = 1;

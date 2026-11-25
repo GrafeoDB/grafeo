@@ -707,11 +707,14 @@ pub enum StorageError {
     BackupChainBroken(String),
 
     /// The durable change feed's cursor is behind the log that is left: a
-    /// checkpoint removed the log below `first_available`, the first log
-    /// position still there, because it passed the retention limit.
+    /// checkpoint removed the log below the first commit still there,
+    /// because it passed the retention limit. Acknowledging that commit's
+    /// position (`first_available:epoch`) goes on from it.
     CdcFeedTruncated {
-        /// The first log position the feed can still read.
+        /// The log position the first commit still there starts at.
         first_available: u64,
+        /// That commit's epoch.
+        epoch: u64,
     },
 
     /// The change data capture setting is stored off, but the cursor of its
@@ -755,11 +758,15 @@ impl fmt::Display for StorageError {
             StorageError::CheckpointFailed(msg) => write!(f, "Checkpoint failed: {msg}"),
             StorageError::Locked(msg) => write!(f, "Database locked: {msg}"),
             StorageError::BackupChainBroken(msg) => write!(f, "Backup chain broken: {msg}"),
-            StorageError::CdcFeedTruncated { first_available } => write!(
+            StorageError::CdcFeedTruncated {
+                first_available,
+                epoch,
+            } => write!(
                 f,
                 "The change feed's cursor is behind the log that is left: a checkpoint removed \
-                 the log below position {first_available}, past the retention limit \
-                 (Config::with_wal_retention_limit)"
+                 the log before the commit at position {first_available}:{epoch}, past the \
+                 retention limit (Config::with_wal_retention_limit); acknowledging that \
+                 position goes on from it"
             ),
             StorageError::CdcCursorPending(msg) => write!(
                 f,

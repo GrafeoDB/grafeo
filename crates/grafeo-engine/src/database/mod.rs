@@ -28,6 +28,8 @@ pub(crate) mod catalog_records;
 pub(crate) mod catalog_section;
 #[cfg(all(feature = "cdc", feature = "wal", feature = "grafeo-file"))]
 pub(crate) mod cdc_cursor;
+#[cfg(all(feature = "cdc", feature = "wal", feature = "grafeo-file"))]
+mod cdc_feed;
 #[cfg(feature = "grafeo-file")]
 mod checkpoint_timer;
 #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
@@ -262,6 +264,10 @@ pub(crate) struct Open {
     /// Whether this database is open in read-only mode.
     /// When true, sessions automatically enforce read-only transactions.
     read_only: bool,
+    /// Held by an acknowledgement of the durable change feed while it moves
+    /// the cursor: acknowledgements are serialized, and the highest wins.
+    #[cfg(all(feature = "cdc", feature = "wal", feature = "grafeo-file"))]
+    cdc_ack: parking_lot::Mutex<()>,
     /// The recorder of the direct calls that commit at once (while no
     /// transaction is open), made on the first one.
     immediate_writes: std::sync::OnceLock<Arc<direct::ImmediateRecorder>>,
@@ -1064,6 +1070,8 @@ impl Open {
             current_schema: RwLock::new(None),
             current_time_zone: RwLock::new(None),
             read_only: is_read_only,
+            #[cfg(all(feature = "cdc", feature = "wal", feature = "grafeo-file"))]
+            cdc_ack: parking_lot::Mutex::new(()),
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             immediate_writes: std::sync::OnceLock::new(),
             open_warnings: Vec::new(),
@@ -1295,6 +1303,8 @@ impl Open {
             current_schema: RwLock::new(None),
             current_time_zone: RwLock::new(None),
             read_only: false,
+            #[cfg(all(feature = "cdc", feature = "wal", feature = "grafeo-file"))]
+            cdc_ack: parking_lot::Mutex::new(()),
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             immediate_writes: std::sync::OnceLock::new(),
             open_warnings: memory_warning.into_iter().collect(),
@@ -1406,6 +1416,8 @@ impl Open {
             current_schema: RwLock::new(None),
             current_time_zone: RwLock::new(None),
             read_only: true,
+            #[cfg(all(feature = "cdc", feature = "wal", feature = "grafeo-file"))]
+            cdc_ack: parking_lot::Mutex::new(()),
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             immediate_writes: std::sync::OnceLock::new(),
             open_warnings: memory_warning.into_iter().collect(),

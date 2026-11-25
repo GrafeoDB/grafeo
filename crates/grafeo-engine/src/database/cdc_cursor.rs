@@ -37,6 +37,57 @@ pub(super) fn default_exists(wal_dir: &Path) -> bool {
     default_path(wal_dir).try_exists().unwrap_or(true)
 }
 
+/// The default consumer's cursor in `wal_dir`.
+///
+/// # Errors
+///
+/// As [`read`]; a missing cursor is an error too.
+pub(super) fn read_default(wal_dir: &Path) -> Result<CdcCursor> {
+    read(&default_path(wal_dir))
+}
+
+/// Moves the default consumer's cursor to `cursor`: written to a temporary
+/// file, synced, then renamed into place and the directory synced, so a
+/// crash leaves the old cursor or the new one. The crash points name each
+/// step.
+///
+/// # Errors
+///
+/// The cursor cannot be written, synced or renamed.
+pub(super) fn move_default(wal_dir: &Path, cursor: CdcCursor) -> Result<()> {
+    use grafeo_common::testing::crash::{maybe_crash, maybe_fail};
+    use std::io::Write as _;
+
+    let data = serde_json::to_vec_pretty(&cursor)
+        .map_err(|e| Error::Internal(format!("failed to serialize the CDC cursor: {e}")))?;
+    let path = default_path(wal_dir);
+    let mut temp = path.as_os_str().to_owned();
+    temp.push(".tmp");
+    let temp = PathBuf::from(temp);
+    let io = |step: &str, shown: &Path, e: std::io::Error| {
+        Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("failed to {step} the CDC cursor {}: {e}", shown.display()),
+        ))
+    };
+    maybe_crash("cdc:before_cursor_write");
+    let written = (|| {
+        let mut file = std::fs::File::create(&temp).map_err(|e| io("create", &temp, e))?;
+        file.write_all(&data).map_err(|e| io("write", &temp, e))?;
+        maybe_fail("cdc:cursor_sync")?;
+        file.sync_all().map_err(|e| io("sync", &temp, e))?;
+        drop(file);
+        maybe_crash("cdc:after_cursor_sync");
+        std::fs::rename(&temp, &path).map_err(|e| io("finalize", &path, e))
+    })();
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
+    maybe_crash("cdc:after_cursor_rename");
+    super::backup::sync_backup_entry(&path, "cdc:cursor_directory_sync")
+}
+
 /// The cursor in the file `path`.
 ///
 /// # Errors

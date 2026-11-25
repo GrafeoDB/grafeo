@@ -1689,15 +1689,20 @@ impl JsGrafeoDB {
 impl JsGrafeoDB {
     /// Enable CDC for all future sessions, and store the setting with the
     /// database: a reopen has it on. An in-memory database keeps it while it
-    /// is open. Throws when the setting cannot be stored (a read-only open,
-    /// a failed checkpoint); it stays as it was.
+    /// is open. While the setting is stored on, the database keeps its WAL
+    /// for the durable change feed, which only the Rust API reads in 0.6.4,
+    /// up to the retention limit (1 GiB by default): `<path>.wal` stays after
+    /// `close()`. `disableCdc()` releases that WAL at the next checkpoint.
+    /// Throws when the setting cannot be stored (a read-only open, a failed
+    /// checkpoint); it stays as it was.
     #[napi(js_name = "enableCdc")]
     pub fn enable_cdc(&self) -> Result<()> {
         self.set_cdc(true)
     }
 
     /// Disable CDC for all future sessions, and store the setting with the
-    /// database: a reopen has it off. Throws as `enableCdc` does.
+    /// database: a reopen has it off. The WAL kept for the change feed is
+    /// released at the next checkpoint. Throws as `enableCdc` does.
     #[napi(js_name = "disableCdc")]
     pub fn disable_cdc(&self) -> Result<()> {
         self.set_cdc(false)

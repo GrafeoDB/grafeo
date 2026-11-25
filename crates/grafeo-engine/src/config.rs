@@ -460,7 +460,7 @@ pub enum ConfigError {
     ZeroHistoryRetentionLimit,
     /// Change data capture is stored on (or turned on) for a database
     /// without a WAL: the setting keeps the WAL from its cursor, and nothing
-    /// would log the commits of that open. Raised by a
+    /// would log its durable feed for that open. Raised by a
     /// writable open without the WAL while the setting is stored on, and by
     /// `GrafeoDB::set_cdc(true)` without a WAL.
     CdcWithoutWal,
@@ -577,9 +577,9 @@ impl fmt::Display for ConfigError {
             }
             Self::CdcWithoutWal => write!(
                 f,
-                "change data capture stored with a database keeps its WAL from a cursor, \
-                 and this open has no WAL: open it with the WAL, open it read-only, or \
-                 turn CDC off from an open with the WAL"
+                "change data capture stored with a database keeps a durable feed, which \
+                 only the WAL logs, and this open has no WAL: open it with the WAL, open it \
+                 read-only, or turn CDC off from an open with the WAL"
             ),
             Self::CdcWithoutFile => write!(
                 f,
@@ -1926,7 +1926,9 @@ impl Config {
     ///
     /// The same limit holds for the WAL a change data capture cursor keeps
     /// (see [`GrafeoDB::set_cdc`](crate::GrafeoDB::set_cdc)): past it the
-    /// oldest segments go, with a warning once.
+    /// oldest segments go, with a warning once, and the change feed fails
+    /// with `GRAFEO-S006`
+    /// ([`ErrorCode::CdcFeedTruncated`](grafeo_common::utils::error::ErrorCode::CdcFeedTruncated)).
     #[must_use]
     pub fn with_wal_retention_limit(mut self, bytes: u64) -> Self {
         self.wal_retention_limit = bytes;

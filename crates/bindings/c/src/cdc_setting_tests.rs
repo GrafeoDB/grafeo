@@ -8,6 +8,7 @@ use std::ffi::CString;
 use crate::database::{
     grafeo_close, grafeo_execute, grafeo_free_database, grafeo_free_result, grafeo_is_cdc_enabled,
     grafeo_open, grafeo_open_memory, grafeo_open_read_only, grafeo_set_cdc, grafeo_set_cdc_enabled,
+    grafeo_wal_checkpoint,
 };
 use crate::error::GrafeoStatus;
 
@@ -108,5 +109,72 @@ fn the_deprecated_function_stores_nothing() {
     close(db);
     let db = grafeo_open(path.as_ptr());
     assert!(!grafeo_is_cdc_enabled(db), "nothing was stored");
+    close(db);
+}
+
+/// The bytes of every WAL segment of `file` but the newest: what checkpoints kept behind.
+fn kept_behind(file: &File) -> u64 {
+    let mut segments: Vec<_> = std::fs::read_dir(file.0.join("db.grafeo.wal"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension().is_some_and(|extension| extension == "log")
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("wal_"))
+        })
+        .collect();
+    segments.sort();
+    segments.pop();
+    segments
+        .iter()
+        .map(|segment| std::fs::metadata(segment).unwrap().len())
+        .sum()
+}
+
+/// The stored setting keeps the WAL from the change feed's cursor; turning it off removes the
+/// cursor (the file in the WAL directory), and the next checkpoint releases the WAL the cursor
+/// kept (the segments behind the newest).
+#[test]
+fn turning_cdc_off_removes_the_cursor_and_the_next_checkpoint_trims_the_wal() {
+    let file = File::new("trim");
+    let path = file.path();
+    let cursor = file.0.join("db.grafeo.wal").join("cdc_cursor_default.json");
+    let run = |db: *mut crate::types::GrafeoDatabase, statement: String| {
+        let statement = CString::new(statement).unwrap();
+        let result = grafeo_execute(db, statement.as_ptr());
+        assert!(!result.is_null());
+        grafeo_free_result(result);
+    };
+    let note = "x".repeat(300);
+    let db = grafeo_open(path.as_ptr());
+    assert!(!db.is_null());
+    assert_eq!(grafeo_set_cdc(db, true), GrafeoStatus::Ok);
+    assert!(cursor.exists(), "on writes the cursor");
+    for round in 0..4 {
+        run(
+            db,
+            format!(
+                "UNWIND range({}, {}) AS i INSERT (:Person {{i: i, note: '{note}'}})",
+                round * 100,
+                round * 100 + 99
+            ),
+        );
+        assert_eq!(grafeo_wal_checkpoint(db), GrafeoStatus::Ok);
+    }
+    assert!(
+        kept_behind(&file) > 0,
+        "the cursor keeps the WAL through checkpoints"
+    );
+    assert_eq!(grafeo_set_cdc(db, false), GrafeoStatus::Ok);
+    assert!(!cursor.exists(), "off removes the cursor");
+    run(db, format!("INSERT (:Person {{i: 10000, note: '{note}'}})"));
+    assert_eq!(grafeo_wal_checkpoint(db), GrafeoStatus::Ok);
+    assert_eq!(
+        kept_behind(&file),
+        0,
+        "the next checkpoint releases what the cursor kept"
+    );
     close(db);
 }

@@ -54,6 +54,7 @@ The implementation crates (`grafeo-common`, `grafeo-core`, `grafeo-storage`, `gr
 | The Python temporal types `grafeo.Time`, `grafeo.Duration`, `grafeo.Date`, `grafeo.Timestamp` and `grafeo.ZonedDateTime`, returned where Python's own type would lose data | New in 0.6.4: their names and attributes may change; values that Python's own types hold exactly keep those types |
 | The operator tree of a `PROFILE` statement: `QueryResult::profile`, `QueryProfile` and `OperatorProfile`, the Python and Node.js `profile` and the WASM `profile` key | New in 0.6.0; its operators and fields may still change |
 | A store of one's own: `GrafeoDB::with_store` and `GrafeoDB::with_read_store`, implementing `GraphStore` or `GraphBackend`, and the `store::conformance` suite that checks an implementation | The write contract is new in 0.6.0, and no backend outside Grafeo has run it yet: a required method may be added within 0.6.x. Calling the traits is stable |
+| The durable change feed: `GrafeoDB::read_cdc_feed`, `GrafeoDB::acknowledge_cdc_feed`, `CdcPosition` and `CdcBatch` | New in 0.6.4; the calls and the position's token may change in a patch release until the feed is stable |
 | `GrafeoDB::store()`: the built-in row-group store itself | For admin work; the row-group store's own methods follow the storage engine. Deprecated since 0.6.1 and removed in 0.7.0: write through a session or the direct API, read through `snapshot()` |
 
 ## Stable APIs

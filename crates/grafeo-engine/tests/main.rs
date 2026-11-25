@@ -55,6 +55,7 @@ mod cdc_clock_floor;
 mod cdc_commit_order;
 mod cdc_crud_api;
 mod cdc_cursor_retention;
+mod cdc_durable_feed;
 mod cdc_net_changes;
 mod cdc_session_mutations;
 mod cdc_setting;

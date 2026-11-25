@@ -282,6 +282,93 @@ pub struct ChangeEvent {
     pub triple_graph: Option<String>,
 }
 
+/// Where a commit stands in the durable change feed: the log position its
+/// group starts at, and its epoch. [`CdcBatch::position`] gives it, and
+/// [`GrafeoDB::acknowledge_cdc_feed`](crate::GrafeoDB::acknowledge_cdc_feed)
+/// moves the feed past it. Its token, `<lsn>:<epoch>`, is what a consumer
+/// keeps between runs.
+///
+/// # Stability: Experimental
+///
+/// New in 0.6.4; its token and the feed's calls may change in a patch
+/// release until the feed is stable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CdcPosition {
+    lsn: u64,
+    epoch: EpochId,
+}
+
+impl CdcPosition {
+    /// The position of the group that starts at `lsn` and commits at `epoch`.
+    pub(crate) const fn new(lsn: u64, epoch: EpochId) -> Self {
+        Self { lsn, epoch }
+    }
+
+    /// The log position the group starts at, which the durable feed reads.
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+    pub(crate) const fn lsn(&self) -> u64 {
+        self.lsn
+    }
+
+    /// The group's epoch.
+    #[must_use]
+    pub const fn epoch(&self) -> EpochId {
+        self.epoch
+    }
+
+    /// The position as a token, `<lsn>:<epoch>`, which
+    /// [`from_token`](Self::from_token) reads back.
+    #[must_use]
+    pub fn to_token(&self) -> String {
+        format!("{}:{}", self.lsn, self.epoch.as_u64())
+    }
+
+    /// Reads a token [`to_token`](Self::to_token) wrote.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidValue`](grafeo_common::utils::error::Error::InvalidValue)
+    /// when `token` is not two decimal numbers joined by `:`.
+    pub fn from_token(token: &str) -> grafeo_common::utils::error::Result<Self> {
+        let number = |part: &str| {
+            (!part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+                .then(|| part.parse::<u64>().ok())
+                .flatten()
+        };
+        token
+            .split_once(':')
+            .and_then(|(lsn, epoch)| Some(Self::new(number(lsn)?, EpochId::new(number(epoch)?))))
+            .ok_or_else(|| {
+                grafeo_common::utils::error::Error::InvalidValue(format!(
+                    "{token:?} is not a change feed position: a position is <lsn>:<epoch>"
+                ))
+            })
+    }
+}
+
+impl std::fmt::Display for CdcPosition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_token())
+    }
+}
+
+/// One commit of the durable change feed: its position and its events, as
+/// the live log recorded them (see
+/// [`GrafeoDB::read_cdc_feed`](crate::GrafeoDB::read_cdc_feed)).
+///
+/// # Stability: Experimental
+///
+/// New in 0.6.4.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct CdcBatch {
+    /// The commit's position: acknowledging it moves the feed past it.
+    pub position: CdcPosition,
+    /// The commit's events, in the order it applied its writes. A commit
+    /// whose writes undid each other has none (see the net rule).
+    pub events: Vec<ChangeEvent>,
+}
+
 /// Configuration for CDC event retention.
 ///
 /// Controls how many events the CDC log keeps in memory. When limits are

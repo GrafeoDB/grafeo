@@ -1195,8 +1195,8 @@ impl super::GrafeoDB {
     ///
     /// A database opened read-only refuses the change. A database on a store
     /// of its own ([`with_store`](Self::with_store)) has no file to store it
-    /// in, and an open without the WAL cannot keep the WAL from the cursor
-    /// (below): both refuse it
+    /// in, and an open without the WAL keeps no durable feed (below): both
+    /// refuse it
     /// (turning capture on, for the second) with a configuration error
     /// (`GRAFEO-V001`) that names the remedy. While capture is stored on, a
     /// writable open without the WAL is refused the same way. A checkpoint
@@ -1207,11 +1207,12 @@ impl super::GrafeoDB {
     /// find it, and the call is refused until a reopen. The database-closed
     /// error after `close()`.
     ///
-    /// While the setting is stored on, the database keeps a cursor in its
+    /// While the setting is stored on, the database keeps the cursor of its
+    /// durable change feed ([`read_cdc_feed`](Self::read_cdc_feed)) in its
     /// WAL directory, and checkpoints and `close()` keep the WAL from it, up
     /// to [`Config::with_wal_retention_limit`](crate::Config::with_wal_retention_limit):
-    /// `<path>.wal` stays after `close()`. Turning it off removes the cursor
-    /// once the setting is stored:
+    /// `<path>.wal` stays after `close()`. Turning it off removes the feed's
+    /// cursor once the setting is stored:
     /// when that removal fails, the error is `GRAFEO-S007`
     /// ([`StorageError::CdcCursorPending`](grafeo_common::utils::error::StorageError::CdcCursorPending)).
     /// The setting is then stored off and the cursor keeps no log; the next

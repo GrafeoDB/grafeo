@@ -930,7 +930,8 @@ mod crash {
 fn the_truncated_feed_error_is_s006_and_names_the_first_position() {
     let error = Error::from(StorageError::CdcFeedTruncated {
         first_available: 4_242,
+        epoch: 19,
     });
     assert_eq!(error.error_code().as_str(), "GRAFEO-S006");
-    assert!(error.to_string().contains("4242"), "{error}");
+    assert!(error.to_string().contains("4242:19"), "{error}");
 }

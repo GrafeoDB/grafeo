@@ -190,7 +190,10 @@ GrafeoDatabase* grafeo_open_with_options(const char* path, const GrafeoOptions* 
 
 /* ---- Change Data Capture ------------------------------------------------- */
 
-/* Stores the setting with the database (an in-memory one keeps it while open). */
+/* Stores the setting with the database (an in-memory one keeps it while open).
+ * Stored on, it keeps the WAL for the durable change feed, which only the Rust
+ * API reads in 0.6.4, up to the retention limit (1 GiB by default): <path>.wal
+ * stays after grafeo_close. Turned off, that WAL goes at the next checkpoint. */
 GrafeoStatus grafeo_set_cdc(GrafeoDatabase* db, bool enabled);
 /* No error return: see "Error handling" above (closed: no change, false). */
 GRAFEO_DEPRECATED("changes the setting for this open only; use grafeo_set_cdc, which stores it and returns a status; removed in 0.7.0")

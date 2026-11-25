@@ -105,7 +105,7 @@ Once CDC is enabled, every mutation records a `ChangeEvent` with:
 | `kind`          | `Create`, `Update`, or `Delete`                                             |
 | `epoch`         | Commit epoch (monotonically increasing)                                     |
 | `timestamp`     | HLC timestamp (hybrid logical clock)                                        |
-| `before`        | Properties before the change; on a delete, the last properties              |
+| `before`        | Properties before the change; on a delete, the properties it had at the last commit |
 | `after`         | Properties after the change                                                 |
 | `labels`        | Nodes: the labels on create and delete, the labels after a label change     |
 | `before_labels` | Nodes: the labels before a label change                                     |
@@ -121,9 +121,20 @@ or removing a label is an `Update` event with `labels` and `before_labels`.
 Events gain fields only: a patch release can add a field (a key in Python and
 Node.js), never remove or rename one.
 
-A node or edge created in a transaction has one `Create` event that shows it as
-the transaction left it: property and label changes made later in the same
-transaction are part of that event rather than events of their own.
+A transaction reports its net changes:
+
+- A node or edge created in a transaction has one `Create` event that shows it
+  as the transaction left it: property and label changes made later in the same
+  transaction are part of that event rather than events of their own.
+- A node, edge or RDF triple created and deleted in the same transaction reports
+  no events, nor do the edges a `DETACH DELETE` removes with such a node.
+- A node or edge that existed before the transaction, changed and then deleted
+  in it, reports its `Delete` alone, with the properties and labels it had
+  before the transaction.
+- An RDF triple deleted and inserted again in the same transaction reports no
+  events.
+- Updates to a node or edge that exists before and after the transaction are not
+  folded: each write reports its own `Update`.
 
 A batch call (`batch_create_nodes`, `batch_create_nodes_with_props`,
 `batch_create_nodes_with_labels`, `batch_create_edges`) reports one `Create`

@@ -54,6 +54,7 @@ mod cdc_byte_bound;
 mod cdc_commit_order;
 mod cdc_crud_api;
 mod cdc_cursor_retention;
+mod cdc_net_changes;
 mod cdc_session_mutations;
 mod cdc_setting;
 mod cdc_timestamps;

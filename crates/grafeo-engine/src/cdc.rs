@@ -58,7 +58,9 @@
 //! A transaction's writes (statements, the direct API of a session or of
 //! the database, batches) are recorded in its change set; nothing reaches
 //! the log while it runs. Its commit builds its events from the change set
-//! (one per change, folded into the creates of the entities it created)
+//! (one per change, folded into its net changes: later changes fold into
+//! the create of an entity it created, and a create folded with its delete
+//! leaves nothing)
 //! and records them in the commit's ordered step, before its epoch is
 //! published: commits complete one at a time in epoch order, so the events
 //! carry the commit epoch and timestamps that follow the epochs, and a
@@ -1533,9 +1535,8 @@ impl CdcLog {
 /// from the write's op and before-image: a create carries its labels or type
 /// and endpoints and the values it was created with, a delete what the
 /// entity held, an update the value or the labels before and after. The
-/// transaction's later changes to an entity it created are then folded into
-/// the create (see [`fold_into_creates`]); a folded write's timestamp is
-/// used up.
+/// events are then folded into the transaction's net changes (see
+/// [`net_changes`]); a folded write's timestamp is used up.
 pub(crate) fn events_for_ops<'a>(
     ops: impl Iterator<
         Item = (
@@ -1700,7 +1701,7 @@ pub(crate) fn events_for_ops<'a>(
         }
         events.push(event);
     }
-    fold_into_creates(events)
+    net_changes(events)
 }
 
 /// The event of a triple entry of the graph with storage key `graph`
@@ -1738,57 +1739,232 @@ fn triple_event(
     }
 }
 
-/// Folds a transaction's changes to the entities it created into their
-/// create events, so a create event carries the entity as the transaction
-/// left it: its final labels and properties.
+/// What a transaction's earlier events did to an entity, for [`net_changes`].
+enum Earlier {
+    /// It created the entity: the create's place.
+    Created(usize),
+    /// It updated an entity that existed before: the updates' places.
+    Updated(Vec<usize>),
+    /// It deleted the entity: the delete's place.
+    Deleted(usize),
+}
+
+/// Folds a transaction's events into its net changes.
 ///
-/// Statements and the direct API both create an entity and then set its
-/// properties and labels one by one; without this, a consumer saw a create
-/// event without properties followed by one update per property.
-/// Changes to entities that existed before the transaction stay as they are.
-/// Entity ids repeat across graphs, so the folding stays within one graph.
-fn fold_into_creates(events: Vec<ChangeEvent>) -> Vec<ChangeEvent> {
-    let mut folded: Vec<ChangeEvent> = Vec::with_capacity(events.len());
-    let mut created: HashMap<(Option<String>, EntityId), usize> = HashMap::new();
-    for event in events {
+/// - Later changes to an entity the transaction created fold into the
+///   create, so it carries the entity as the transaction left it: its final
+///   labels and properties. Statements and the direct API both create an
+///   entity and then set its properties and labels one by one.
+/// - A create folded with its delete leaves nothing: an entity created and
+///   deleted in the transaction (its edges with it, through `DETACH DELETE`)
+///   existed at no committed epoch.
+/// - Updates to an entity that existed before fold into its delete, which
+///   then shows what it held before the transaction.
+/// - A triple deleted and inserted again leaves nothing: it is the same
+///   triple, there before and after.
+/// - Updates to an entity that exists before and after the transaction are
+///   not folded: each write reports its own update.
+///
+/// Entity ids repeat across graphs, so the folding stays within one graph. A
+/// triple's id is a 64-bit hash of its terms, so two events of one id fold
+/// only when their terms are equal too: two triples whose ids collide stay
+/// two.
+fn net_changes(events: Vec<ChangeEvent>) -> Vec<ChangeEvent> {
+    let mut net: Vec<Option<ChangeEvent>> = Vec::with_capacity(events.len());
+    let mut earlier: HashMap<(Option<String>, EntityId), Earlier> = HashMap::new();
+    for mut event in events {
         let key = (event.graph.clone(), event.entity_id);
-        let Some(&at) = created.get(&key) else {
-            if event.kind == ChangeKind::Create {
-                created.insert(key, folded.len());
-            }
-            folded.push(event);
-            continue;
-        };
-        if event.kind != ChangeKind::Update {
-            folded.push(event);
-            continue;
-        }
-        let create = &mut folded[at];
-        // A label change lists the labels after it.
-        if let Some(labels) = event.labels {
-            create.labels = Some(labels);
-        }
-        match (event.before, event.after) {
-            (_, Some(after)) => create.after.get_or_insert_with(HashMap::new).extend(after),
-            (Some(removed), None) => {
-                if let Some(properties) = create.after.as_mut() {
-                    for key in removed.keys() {
-                        properties.remove(key);
-                    }
+        let at = net.len();
+        match (earlier.get_mut(&key), &event.kind) {
+            (Some(Earlier::Created(create)), ChangeKind::Update) => {
+                if let Some(create) = net[*create].as_mut() {
+                    fold_update(create, event);
                 }
             }
-            (None, None) => {}
-        }
-        if create.after.as_ref().is_some_and(HashMap::is_empty) {
-            create.after = None;
+            (Some(Earlier::Created(create)), ChangeKind::Delete)
+                if same_entity(net[*create].as_ref(), &event) =>
+            {
+                net[*create] = None;
+                earlier.remove(&key);
+            }
+            (Some(Earlier::Deleted(delete)), ChangeKind::Create)
+                if event.entity_id.is_triple() && same_entity(net[*delete].as_ref(), &event) =>
+            {
+                net[*delete] = None;
+                earlier.remove(&key);
+            }
+            (Some(Earlier::Updated(updates)), ChangeKind::Update) => {
+                updates.push(at);
+                net.push(Some(event));
+            }
+            (Some(Earlier::Updated(updates)), ChangeKind::Delete) => {
+                let updates = updates.iter().filter_map(|&update| net[update].take());
+                restore_before(&mut event, updates);
+                earlier.insert(key, Earlier::Deleted(at));
+                net.push(Some(event));
+            }
+            (_, kind) => {
+                let next = match kind {
+                    ChangeKind::Create => Earlier::Created(at),
+                    ChangeKind::Update => Earlier::Updated(vec![at]),
+                    ChangeKind::Delete => Earlier::Deleted(at),
+                };
+                earlier.insert(key, next);
+                net.push(Some(event));
+            }
         }
     }
-    folded
+    net.into_iter().flatten().collect()
+}
+
+/// Whether `earlier`, an event of the same key as `event`, is of the same
+/// entity: always for a node or an edge (their ids are given out once), and
+/// for a triple when its terms are equal too.
+fn same_entity(earlier: Option<&ChangeEvent>, event: &ChangeEvent) -> bool {
+    earlier.is_some_and(|earlier| {
+        !event.entity_id.is_triple()
+            || (earlier.triple_subject == event.triple_subject
+                && earlier.triple_predicate == event.triple_predicate
+                && earlier.triple_object == event.triple_object
+                && earlier.triple_graph == event.triple_graph)
+    })
+}
+
+/// Gives `delete` what the entity held before the transaction: the first
+/// value each of `updates` changed, and the labels before the first label
+/// change.
+fn restore_before(delete: &mut ChangeEvent, updates: impl Iterator<Item = ChangeEvent>) {
+    let mut restored = std::collections::HashSet::new();
+    let mut labels_restored = false;
+    for update in updates {
+        if let Some(labels) = update.before_labels
+            && !labels_restored
+        {
+            delete.labels = Some(labels);
+            labels_restored = true;
+        }
+        let keys = update
+            .after
+            .iter()
+            .chain(&update.before)
+            .flat_map(HashMap::keys);
+        for key in keys.cloned().collect::<Vec<_>>() {
+            if !restored.insert(key.clone()) {
+                continue;
+            }
+            let properties = delete.before.get_or_insert_with(HashMap::new);
+            match update.before.as_ref().and_then(|before| before.get(&key)) {
+                Some(value) => properties.insert(key, value.clone()),
+                None => properties.remove(&key),
+            };
+        }
+    }
+    if delete.before.as_ref().is_some_and(HashMap::is_empty) {
+        delete.before = None;
+    }
+}
+
+/// Folds `update` into `create`, an event of the entity it changed.
+fn fold_update(create: &mut ChangeEvent, event: ChangeEvent) {
+    // A label change lists the labels after it.
+    if let Some(labels) = event.labels {
+        create.labels = Some(labels);
+    }
+    match (event.before, event.after) {
+        (_, Some(after)) => create.after.get_or_insert_with(HashMap::new).extend(after),
+        (Some(removed), None) => {
+            if let Some(properties) = create.after.as_mut() {
+                for key in removed.keys() {
+                    properties.remove(key);
+                }
+            }
+        }
+        (None, None) => {}
+    }
+    if create.after.as_ref().is_some_and(HashMap::is_empty) {
+        create.after = None;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A triple's event with the terms `object` names, under the id `id`.
+    fn triple(id: u64, object: &str, kind: ChangeKind) -> ChangeEvent {
+        ChangeEvent {
+            entity_id: EntityId::Triple(id),
+            graph: None,
+            kind,
+            epoch: EpochId(7),
+            timestamp: HlcTimestamp::new(1, 0),
+            before: None,
+            after: None,
+            labels: None,
+            before_labels: None,
+            edge_type: None,
+            src_id: None,
+            dst_id: None,
+            deleted_with: None,
+            triple_subject: Some("<http://ex.org/alix>".to_string()),
+            triple_predicate: Some("<http://ex.org/knows>".to_string()),
+            triple_object: Some(object.to_string()),
+            triple_graph: None,
+        }
+    }
+
+    /// Two triples whose 64-bit ids collide are two triples: a create of one
+    /// and a delete of the other in one transaction both stay, and a delete
+    /// and a create of one fold only when the terms are equal too.
+    #[test]
+    fn triples_fold_only_when_their_terms_are_equal() {
+        let gus = "<http://ex.org/gus>";
+        let mia = "<http://ex.org/mia>";
+        let kept = |events: Vec<ChangeEvent>| {
+            net_changes(events)
+                .into_iter()
+                .map(|event| (event.kind, event.triple_object.unwrap()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kept(vec![
+                triple(42, gus, ChangeKind::Create),
+                triple(42, mia, ChangeKind::Delete),
+            ]),
+            [
+                (ChangeKind::Create, gus.to_string()),
+                (ChangeKind::Delete, mia.to_string())
+            ],
+            "a create and a colliding delete"
+        );
+        assert_eq!(
+            kept(vec![
+                triple(42, gus, ChangeKind::Delete),
+                triple(42, mia, ChangeKind::Create),
+            ]),
+            [
+                (ChangeKind::Delete, gus.to_string()),
+                (ChangeKind::Create, mia.to_string())
+            ],
+            "a delete and a colliding create"
+        );
+        assert!(
+            kept(vec![
+                triple(42, gus, ChangeKind::Delete),
+                triple(42, gus, ChangeKind::Create),
+            ])
+            .is_empty(),
+            "the same triple deleted and inserted again"
+        );
+        assert!(
+            kept(vec![
+                triple(42, gus, ChangeKind::Create),
+                triple(42, gus, ChangeKind::Delete),
+            ])
+            .is_empty(),
+            "the same triple inserted and deleted"
+        );
+    }
 
     #[test]
     fn test_record_and_history() {
@@ -2405,6 +2581,61 @@ mod tests {
         assert!(
             populated_bytes > empty_bytes,
             "heap estimate must grow when events are recorded"
+        );
+    }
+
+    /// A node event of `graph` for the net fold.
+    fn node_event(kind: ChangeKind, graph: Option<&str>, id: u64) -> ChangeEvent {
+        ChangeEvent {
+            entity_id: EntityId::Node(NodeId::new(id)),
+            graph: graph.map(ToString::to_string),
+            kind,
+            epoch: EpochId(1),
+            timestamp: HlcTimestamp::new(1, 0),
+            before: None,
+            after: None,
+            labels: None,
+            before_labels: None,
+            edge_type: None,
+            src_id: None,
+            dst_id: None,
+            deleted_with: None,
+            triple_subject: None,
+            triple_predicate: None,
+            triple_object: None,
+            triple_graph: None,
+        }
+    }
+
+    /// The fold keys on the graph as well as the id: a create in one graph and a delete of the
+    /// same id in another are two changes; an LPG delete followed by a create of its id (which
+    /// the store never does) is not folded away, as a triple's is.
+    #[test]
+    fn the_net_fold_keeps_graphs_and_models_apart() {
+        let kinds = |events: Vec<ChangeEvent>| -> Vec<(ChangeKind, Option<String>)> {
+            events
+                .into_iter()
+                .map(|event| (event.kind, event.graph))
+                .collect()
+        };
+        let folded = net_changes(vec![
+            node_event(ChangeKind::Create, Some("g1"), 5),
+            node_event(ChangeKind::Delete, Some("g2"), 5),
+        ]);
+        assert_eq!(
+            kinds(folded),
+            [
+                (ChangeKind::Create, Some("g1".to_string())),
+                (ChangeKind::Delete, Some("g2".to_string()))
+            ]
+        );
+        let folded = net_changes(vec![
+            node_event(ChangeKind::Delete, None, 7),
+            node_event(ChangeKind::Create, None, 7),
+        ]);
+        assert_eq!(
+            kinds(folded),
+            [(ChangeKind::Delete, None), (ChangeKind::Create, None)]
         );
     }
 }

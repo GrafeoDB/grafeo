@@ -58,6 +58,7 @@ Performance and memory release, in progress: this section lists what has landed 
 - **Change data capture keeps the WAL from its cursor**: while the stored setting is on, checkpoints keep the log from the change data capture cursor up to `wal_retention_limit`, and `<path>.wal` stays after `close()`.
 - **Commits are refused after a checkpoint of unknown outcome or a failed restore**: a database without a WAL refuses commits with `GRAFEO-S008` once a checkpoint's outcome is unknown, and a failed restore refuses commits until a reopen (`GRAFEO-T008`, or S008 when its outcome is unknown); reads go on. `GRAFEO-T008` now names a commit or a restore that did not complete.
 - **`CdcRetentionConfig::unlimited()` keeps the byte bound**: the change log drops its oldest commits past a sixteenth of the memory limit, where it grew without bound.
+- **Change data capture folds creates and deletes within a transaction** ([#679](https://github.com/GrafeoDB/grafeo/issues/679)): a node, edge or RDF triple created and deleted in one transaction produces no events, nor does a triple deleted and inserted again, and an entity changed and then deleted reports its delete alone, with what it held before the transaction (0.6.3 reported each write). An entity that exists before and after the transaction still reports one update per write.
 
 ### Performance
 

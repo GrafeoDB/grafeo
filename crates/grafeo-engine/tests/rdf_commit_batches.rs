@@ -6,7 +6,8 @@
 //!
 //! - insert, delete, insert of one triple in a transaction: it is there;
 //! - a triple inserted twice: one event; one the store held: none;
-//! - inserts into g1, g2, g1 with a delete in g2 between: the events in order;
+//! - inserts into g1, g2, g1 with a delete in g2 between: the events in order, and none for
+//!   the g2 triple deleted and inserted again (a transaction reports its net changes);
 //! - a transaction of 5,000+ inserts (the parallel index build) and one below
 //!   4,096: the same store as single inserts, one event per new triple;
 //! - after a crash, the reopened store equals the store the commits left.
@@ -247,16 +248,8 @@ mod events {
             ["Create - held", "Create http://ex.org/g2 b0"]
         );
         run(&db, TRANSACTIONS[0]);
-        let first = events_after(&db, &mut seen);
-        // Insert, delete, insert of one triple: the net change is one
-        // insert; however the transaction records it, the events end with a
-        // Create and never repeat a kind.
-        assert_eq!(
-            first.last().map(String::as_str),
-            Some("Create - a"),
-            "{first:?}"
-        );
-        assert!(first.windows(2).all(|pair| pair[0] != pair[1]), "{first:?}");
+        // Insert, delete, insert of one triple: the net change, one insert.
+        assert_eq!(events_after(&db, &mut seen), ["Create - a"]);
         run(&db, TRANSACTIONS[1]);
         assert_eq!(
             events_after(&db, &mut seen),
@@ -270,9 +263,8 @@ mod events {
                 "Create http://ex.org/g1 a1",
                 "Create http://ex.org/g2 b1",
                 "Create http://ex.org/g1 a2",
-                "Delete http://ex.org/g2 b0",
-                "Create http://ex.org/g2 b0",
-            ]
+            ],
+            "b0 deleted and inserted again is no change"
         );
         assert_eq!(held(&db), expected_after_all());
     }

@@ -91,6 +91,7 @@ Performance and memory release, in progress: this section lists what has landed 
 ### Fixed
 
 - **GraphQL over RDF finds types and fields in any namespace**: `{ Person { name } }` matches the class and the predicate of the data whose local name is `Person` and `name` (such as `schema:Person` and `schema:name`), in the namespaces its predicates use, where only `http://example.org/` was searched. A name two IRIs of the data share is an error naming both; a name the data lacks, or holds under `http://example.org/`, reads `http://example.org/<name>` as before.
+- **GraphQL over RDF names nested columns as over a property graph**: a nested field's column is `<field>_<column>` (`{ person { name knows { name } } }` gives `name` and `knows_name`), where a nested field that repeated a parent field's name was refused with `GRAFEO-Q002` and an aliased one kept only its alias.
 - **GraphQL `EXPLAIN` returns the plan**: `EXPLAIN { ... }` ran the query in GraphQL over a property graph and was a syntax error in GraphQL over RDF.
 - **A snapshot restore refuses while other work is open**: `GrafeoDB::restore_snapshot` now fails with `GRAFEO-T004` while a transaction, a result stream, a node or edge iterator, a view or a running query is open; end the open work, then restore.
 - **Cypher binds a path variable on a node alone** ([#798](https://github.com/GrafeoDB/grafeo/issues/798)): `MATCH p = (a)`, `MERGE p = (a)` and a `WITH p` after them bind a path of no relationships, where `p` was an undefined variable. openCypher TCK: Match6 [1], Merge1 [13].

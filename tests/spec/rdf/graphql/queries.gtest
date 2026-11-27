@@ -76,14 +76,11 @@ tests:
         - [Alix, Gus]
         - [Alix, Mia]
 
-  # Today the nested `name` and its parent's `name` are two columns of one name, which is
-  # refused (GRAFEO-Q002); the cases above alias the nested field.
+  # A nested column is named `<field>_<column>`, as GraphQL on the property graph names it.
   - name: a_nested_field_may_repeat_a_parent_field_name
-    xfail:
-      spec: "GraphQL over RDF names a nested field's column as GraphQL on the property graph does"
-      issue: "fix in 0.6.4"
     query: "{ person(name: \"Alix\") { name knows { name } } }"
     expect:
+      columns: [name, knows_name]
       rows:
         - [Alix, Gus]
         - [Alix, Mia]

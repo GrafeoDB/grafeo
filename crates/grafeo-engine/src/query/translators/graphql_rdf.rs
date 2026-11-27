@@ -417,7 +417,12 @@ impl<'a> GraphQLRdfTranslator<'a> {
                         let (new_plan, nested_projections) =
                             self.translate_nested_field(field, plan, subject_var)?;
                         plan = new_plan;
-                        projections.extend(nested_projections);
+                        // `<field>_<column>`, as GraphQL over the property graph names them.
+                        let prefix = field.alias.as_ref().unwrap_or(&field.name);
+                        projections.extend(nested_projections.into_iter().map(|p| Projection {
+                            alias: p.alias.map(|column| format!("{prefix}_{column}")),
+                            ..p
+                        }));
                     } else {
                         // Scalar field - create a triple pattern to fetch the property
                         let (new_plan, prop_var) =

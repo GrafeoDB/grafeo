@@ -252,3 +252,43 @@ fn a_predicate_deleted_after_the_snapshot_falls_back() {
     assert!(plan.contains("http://example.org/name"), "{plan}");
     assert!(!plan.contains("https://schema.org/name"), "{plan}");
 }
+
+#[test]
+fn a_nested_column_is_named_after_its_field_as_over_lpg() {
+    let db = db_with(PEOPLE);
+    for (query, columns) in [
+        // The nested `name` repeats its parent's: two columns, no clash.
+        (
+            "{ person { name worksAt { name } } }",
+            ["name", "worksAt_name"],
+        ),
+        (
+            "{ person { name worksAt { company: name } } }",
+            ["name", "worksAt_company"],
+        ),
+        (
+            "{ person { name employer: worksAt { name } } }",
+            ["name", "employer_name"],
+        ),
+    ] {
+        let result = db
+            .session()
+            .execute_graphql_rdf(query)
+            .unwrap_or_else(|error| panic!("`{query}`: {error}"));
+        assert_eq!(result.columns, columns, "`{query}`");
+        assert_eq!(result.rows().len(), 2, "`{query}`");
+    }
+    let mut rows = strings(&db, "{ person { name worksAt { name } } }");
+    rows.sort();
+    assert_eq!(
+        rows,
+        [
+            ["Bertram Gilfoyle", "Pied Piper"]
+                .map(String::from)
+                .to_vec(),
+            ["Richard Hendricks", "Pied Piper"]
+                .map(String::from)
+                .to_vec(),
+        ]
+    );
+}

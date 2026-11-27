@@ -5185,7 +5185,6 @@ impl SessionInner {
     fn execute_graphql_untimed(&self, query: &str) -> Result<QueryResult> {
         use crate::query::{binder::Binder, processor::substitute_params, translators::graphql};
 
-        #[cfg(feature = "metrics")]
         let start_time = Instant::now();
 
         let mut logical_plan =
@@ -5207,6 +5206,14 @@ impl SessionInner {
         let has_mutations = writes.any;
         if has_mutations {
             self.require_permission(crate::auth::StatementKind::Write)?;
+        }
+        if let Some(answer) = self.explain_or_profile(
+            &optimized_plan,
+            &active,
+            grafeo_common::types::StatementLanguage::GraphQl,
+            start_time,
+        ) {
+            return answer;
         }
 
         let result = self.with_auto_commit(writes, || {
@@ -5253,7 +5260,6 @@ impl SessionInner {
     ) -> Result<QueryResult> {
         use crate::query::{binder::Binder, processor::substitute_params, translators::graphql};
 
-        #[cfg(feature = "metrics")]
         let start_time = Instant::now();
 
         // Parse and translate the query to a logical plan
@@ -5283,6 +5289,14 @@ impl SessionInner {
         let has_mutations = writes.any;
         if has_mutations {
             self.require_permission(crate::auth::StatementKind::Write)?;
+        }
+        if let Some(answer) = self.explain_or_profile(
+            &optimized_plan,
+            &active,
+            grafeo_common::types::StatementLanguage::GraphQl,
+            start_time,
+        ) {
+            return answer;
         }
 
         let result = self.with_auto_commit(writes, || {
@@ -6350,9 +6364,12 @@ impl SessionInner {
                 &self.plan_options.parse_limits,
             )?,
             #[cfg(all(feature = "graphql", feature = "triple-store"))]
+            // Whether it writes, which no name changes.
             "graphql-rdf" => crate::query::translators::graphql_rdf::translate(
                 query,
-                "http://example.org/",
+                &crate::query::translators::graphql_rdf::Namespace(
+                    crate::query::translators::graphql_rdf::DEFAULT_NAMESPACE,
+                ),
                 &self.plan_options.parse_limits,
             )?,
             #[cfg(feature = "sql-pgq")]
@@ -7039,7 +7056,7 @@ impl SessionInner {
             .with_equal_across_kinds(language.equal_across_kinds())
     }
 
-    #[cfg(any(feature = "gql", feature = "gremlin"))]
+    #[cfg(any(feature = "gql", feature = "gremlin", feature = "graphql"))]
     /// Plans `plan` physically and drops the operators without running them, so `EXPLAIN` refuses
     /// what planning refuses (a procedure's arguments, a `YIELD` column) as the statement would.
     /// It plans in a read context at the session's snapshot: it begins no transaction, also for
@@ -7081,7 +7098,7 @@ impl SessionInner {
     /// prefixes answers them here. `language` is the statement's (see
     /// [`create_planner_for_store`](Self::create_planner_for_store)), and
     /// `started` when the statement began, for the profile's total time.
-    #[cfg(any(feature = "gql", feature = "gremlin"))]
+    #[cfg(any(feature = "gql", feature = "gremlin", feature = "graphql"))]
     fn explain_or_profile(
         &self,
         plan: &crate::query::plan::LogicalPlan,

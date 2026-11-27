@@ -37,28 +37,7 @@ pub fn translate(
 ) -> Result<LogicalPlan> {
     // The statement's length is its text's, the `EXPLAIN` included.
     limits.check_query(query)?;
-    let trimmed = query.trim_start();
-    let (explain, profile, actual_query) = if trimmed
-        .get(..7)
-        .is_some_and(|s| s.eq_ignore_ascii_case("EXPLAIN"))
-        && trimmed
-            .as_bytes()
-            .get(7)
-            .is_some_and(u8::is_ascii_whitespace)
-    {
-        let rest = trimmed[7..].trim_start();
-        if rest
-            .get(..7)
-            .is_some_and(|s| s.eq_ignore_ascii_case("ANALYZE"))
-            && rest.as_bytes().get(7).is_some_and(u8::is_ascii_whitespace)
-        {
-            (false, true, rest[7..].trim_start())
-        } else {
-            (true, false, rest)
-        }
-    } else {
-        (false, false, query)
-    };
+    let (explain, profile, actual_query) = explain_prefix(query);
 
     let doc = graphql::parse_with(actual_query, limits)?;
     let translator = GraphQLTranslator::new();
@@ -67,6 +46,29 @@ pub fn translate(
     plan.explain = explain;
     plan.profile = profile;
     Ok(plan)
+}
+
+/// The `EXPLAIN` or `EXPLAIN ANALYZE` prefix of a GraphQL query (case-insensitive, a
+/// non-standard extension): `(explain, profile, the query after the prefix)`.
+pub(crate) fn explain_prefix(query: &str) -> (bool, bool, &str) {
+    let word = |text: &str, word: &str| {
+        text.get(..word.len())
+            .is_some_and(|s| s.eq_ignore_ascii_case(word))
+            && text
+                .as_bytes()
+                .get(word.len())
+                .is_some_and(u8::is_ascii_whitespace)
+    };
+    let trimmed = query.trim_start();
+    if !word(trimmed, "EXPLAIN") {
+        return (false, false, query);
+    }
+    let rest = trimmed[7..].trim_start();
+    if word(rest, "ANALYZE") {
+        (false, true, rest[7..].trim_start())
+    } else {
+        (true, false, rest)
+    }
 }
 
 /// Mutation type for GraphQL mutations.

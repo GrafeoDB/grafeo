@@ -774,8 +774,15 @@ impl QueryProcessor {
             #[cfg(all(feature = "graphql", feature = "triple-store"))]
             QueryLanguage::GraphQLRdf => {
                 use crate::query::translators::graphql_rdf;
-                // Default namespace for GraphQL-RDF queries
-                graphql_rdf::translate(query, "http://example.org/", &ParseLimits::default())
+                let store = self.rdf_store.as_ref().ok_or_else(|| {
+                    Error::Internal("RDF store not configured for this processor".to_string())
+                })?;
+                // The newest committed state, as this processor runs the query.
+                let view = grafeo_core::graph::rdf::RdfView::latest(
+                    grafeo_core::graph::rdf::LatestUse::Test,
+                );
+                let names = graphql_rdf::StoreNames::new(store, &view);
+                graphql_rdf::translate(query, &names, &ParseLimits::default())
             }
             // Only a build with a property graph language has other ones.
             #[cfg(lpg_language)]
@@ -1227,7 +1234,7 @@ pub(crate) fn refuse_deep_params(
 /// Whether `plan` still names a parameter no value fills (an `EXPLAIN` given no values):
 /// substituting no values fails exactly then, by the one walk that fills them. `EXPLAIN` asks
 /// it, in the languages that answer `EXPLAIN` (see the session's `explain_or_profile`).
-#[cfg(any(feature = "gql", feature = "gremlin"))]
+#[cfg(any(feature = "gql", feature = "gremlin", feature = "graphql"))]
 #[must_use]
 pub(crate) fn has_unresolved_parameters(plan: &LogicalPlan) -> bool {
     substitute_params(&mut plan.clone(), &QueryParams::new()).is_err()

@@ -193,6 +193,7 @@ mod graph_copy;
 mod graph_handles;
 mod graph_type_in_use;
 mod graphql;
+mod graphql_rdf_names;
 mod gremlin;
 mod group_by_keys_beside_aggregates;
 mod group_by_labels;

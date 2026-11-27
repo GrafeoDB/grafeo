@@ -89,6 +89,8 @@ Performance and memory release, in progress: this section lists what has landed 
 
 ### Fixed
 
+- **GraphQL over RDF finds types and fields in any namespace**: `{ Person { name } }` matches the class and the predicate of the data whose local name is `Person` and `name` (such as `schema:Person` and `schema:name`), in the namespaces its predicates use, where only `http://example.org/` was searched. A name two IRIs of the data share is an error naming both; a name the data lacks, or holds under `http://example.org/`, reads `http://example.org/<name>` as before.
+- **GraphQL `EXPLAIN` returns the plan**: `EXPLAIN { ... }` ran the query in GraphQL over a property graph and was a syntax error in GraphQL over RDF.
 - **A snapshot restore refuses while other work is open**: `GrafeoDB::restore_snapshot` now fails with `GRAFEO-T004` while a transaction, a result stream, a node or edge iterator, a view or a running query is open; end the open work, then restore.
 - **Cypher binds a path variable on a node alone** ([#798](https://github.com/GrafeoDB/grafeo/issues/798)): `MATCH p = (a)`, `MERGE p = (a)` and a `WITH p` after them bind a path of no relationships, where `p` was an undefined variable. openCypher TCK: Match6 [1], Merge1 [13].
 - **An aggregate may read a grouping key inside a map** ([#798](https://github.com/GrafeoDB/grafeo/issues/798)): `RETURN a.name, {foo: a.name = 'A', kids: collect(c.name)}` runs, where it was refused as not a grouping key. openCypher TCK: With1 [4].

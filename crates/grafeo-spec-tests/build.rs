@@ -389,9 +389,24 @@ fn generate_body(output: &mut String, spec: &TestSpec<'_>, language: &str, model
     // WAL-wrapped store path that `GrafeoDB::open()` always produces, so
     // regressions in wrapper delegation (e.g. #308) fail here instead of
     // slipping past the in-memory-only suite.
+    // A case's `config:` settings, applied on the Config it opens with.
+    let settings: String = tc
+        .config
+        .iter()
+        .map(|setting| match setting {
+            Setting::PathSearchBudget(bytes) => format!(".with_path_search_budget({bytes})"),
+        })
+        .collect();
     match db_source {
-        DbSource::InMemory => {
+        DbSource::InMemory if settings.is_empty() => {
             writeln!(output, "        let db = GrafeoDB::new_in_memory();").unwrap();
+        }
+        DbSource::InMemory => {
+            writeln!(
+                output,
+                "        let db = GrafeoDB::with_config(grafeo_engine::config::Config::in_memory(){settings}).expect(\"open the case's configured GrafeoDB\");"
+            )
+            .unwrap();
         }
         DbSource::Persistent => {
             writeln!(
@@ -399,9 +414,16 @@ fn generate_body(output: &mut String, spec: &TestSpec<'_>, language: &str, model
                 "        let _tmp = tempfile::tempdir().expect(\"tempdir for persistent spec test\");"
             )
             .unwrap();
+            let open = if settings.is_empty() {
+                "GrafeoDB::open(_tmp.path().join(\"spec.grafeo\"))".to_string()
+            } else {
+                format!(
+                    "GrafeoDB::with_config(grafeo_engine::config::Config::persistent(_tmp.path().join(\"spec.grafeo\")){settings})"
+                )
+            };
             writeln!(
                 output,
-                "        let db = GrafeoDB::open(_tmp.path().join(\"spec.grafeo\")).expect(\"open persistent GrafeoDB for spec test\");"
+                "        let db = {open}.expect(\"open persistent GrafeoDB for spec test\");"
             )
             .unwrap();
         }

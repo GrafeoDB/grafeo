@@ -14,7 +14,7 @@ import { afterAll, describe, it, expect, vi } from 'vitest'
 vi.setConfig({ testTimeout: 60_000 })
 import { readFileSync, readdirSync, statSync, existsSync } from 'fs'
 import { join, relative, resolve } from 'path'
-import { parseGtestFile, coerceParams, paramValue } from '../node/parser.mjs'
+import { parseGtestFile, coerceParams, paramValue, configOptions } from '../node/parser.mjs'
 import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, describeError, assertGqlStatus, assertTerms , assertValueRows, assertSideEffects, observation} from '../node/comparator.mjs'
 import { SpecFailure, runMarkedSync, runProbe, specRoot, summary, summaryLine } from '../node/xfail.mjs'
 import { caseCellType, cellTypeAt, matches as matchCell, parse as parseCell, toNeutral } from '../node/tck_values.mjs'
@@ -225,7 +225,7 @@ for (const filePath of gtestFiles) {
               summary.skipped++
               return ctx.skip()
             }
-            const db = new Database()
+            const db = new Database(configOptions(tc.config))
             try {
               if (!isAvailable(db, lang)) return ctx.skip()
               // Check the file's and the test's requires, as single tests do
@@ -262,7 +262,8 @@ for (const filePath of gtestFiles) {
           return ctx.skip()
         }
 
-        const db = new Database()
+        // The case's settings (`config:`), the defaults without one
+        const db = new Database(configOptions(tc.config))
         try {
           // Check language availability (file-level and per-test)
           if (!isAvailable(db, meta.language)) return ctx.skip()

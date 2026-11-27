@@ -184,6 +184,36 @@ def _runner_gap(raw: dict) -> RunnerGap:
     return gap
 
 
+#: The keys a ``config:`` may set: Config settings every binding exposes, named as the
+#: ``GrafeoDB`` keyword that sets each.
+CONFIG_KEYS = ("path_search_budget",)
+
+
+def parse_config(text: str) -> dict[str, int]:
+    """A ``config:`` value as the file writes it: an inline map of ``CONFIG_KEYS`` to
+    positive integers (``{path_search_budget: 1048576}``). An unknown or repeated key is
+    refused, never ignored."""
+    inner = text.strip()
+    if not (inner.startswith("{") and inner.endswith("}")) or not inner[1:-1].strip():
+        raise ValueError(f"config must be an inline map of settings, got {text!r}")
+    settings: dict[str, int] = {}
+    for entry in inner[1:-1].split(","):
+        key, colon, value = entry.partition(":")
+        key, value = key.strip(), value.strip()
+        if not colon or not key:
+            raise ValueError(f"config entry {entry.strip()!r} is not 'key: value'")
+        if key in settings:
+            raise ValueError(f"config sets {key!r} twice")
+        if key not in CONFIG_KEYS:
+            raise ValueError(
+                f"unknown config key {key!r} (known: {', '.join(CONFIG_KEYS)})"
+            )
+        if not (value.isascii() and value.isdigit()) or int(value) == 0:
+            raise ValueError(f"config {key!r} needs a positive integer, got {value!r}")
+        settings[key] = int(value)
+    return settings
+
+
 #: The runner probes a ``probe:`` key may name, only in a file under ``spec-probes``.
 PROBES = {"runner_error"}
 
@@ -205,6 +235,8 @@ class TestCase:
     skip: str | None = None
     xfail: Xfail | None = None
     runner_gap: RunnerGap | None = None
+    # The settings the case's database opens with (``config:``), by GrafeoDB keyword.
+    config: dict[str, int] = field(default_factory=dict)
     probe: str | None = None
     expect: Expect = field(default_factory=Expect)
     variants: dict[str, str] = field(default_factory=dict)
@@ -288,10 +320,13 @@ def _parse_with_yaml(content: str, path: Path) -> GtestFile:
     meta = _parse_meta_dict(data.get("meta", {}))
     raw_tests = data.get("tests", [])
     param_texts = _yaml_param_texts(content)
+    config_texts = _yaml_config_texts(content)
     tests: list[TestCase] = []
     for position, raw in enumerate(raw_tests):
         tc = _parse_test_dict(raw)
         tc.params = param_texts[position]
+        if config_texts[position] is not None:
+            tc.config = parse_config(config_texts[position])
         tests.append(tc)
     return GtestFile(meta=meta, tests=tests)
 
@@ -318,6 +353,25 @@ def _yaml_param_texts(content: str) -> list[dict[str, str]]:
                 end = value_node.end_mark.index
                 params[str(key_node.value)] = content[start:end].strip()
         texts.append(params)
+    return texts
+
+
+def _yaml_config_texts(content: str) -> list[str | None]:
+    """The ``config:`` of each test as the file writes it, or None: read as text, as
+    ``parse_config`` and the other runners read it (``safe_load`` keeps one of two
+    repeated keys)."""
+    root = _yaml.compose(content, Loader=_yaml.SafeLoader)
+    tests_node = _mapping_value(root, "tests")
+    if not isinstance(tests_node, _yaml.SequenceNode):
+        return []
+    texts: list[str | None] = []
+    for test_node in tests_node.value:
+        node = _mapping_value(test_node, "config")
+        texts.append(
+            None
+            if node is None
+            else content[node.start_mark.index : node.end_mark.index].strip()
+        )
     return texts
 
 
@@ -575,6 +629,9 @@ def _lb_parse_single_test(lines: list[str], idx: int) -> tuple:
             if "runners" in raw_gap:
                 raw_gap["runners"] = _lb_parse_yaml_list(raw_gap["runners"])
             tc.runner_gap = _runner_gap(raw_gap)
+        elif key == "config":
+            tc.config = parse_config(value)
+            idx += 1
         elif key == "probe":
             tc.probe = _unquote(value)
             idx += 1

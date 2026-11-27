@@ -219,6 +219,8 @@ public static class GtestParser
                     ctx.Idx++; tc.SetupGql = ParseStringList(ctx); break;
                 case "runner_gap":
                     tc.RunnerGap = ParseRunnerGap(ctx); break;
+                case "config":
+                    tc.Config = ParseConfig(value); ctx.Idx++; break;
                 case "statements":
                     ctx.Idx++; tc.Statements = ParseStringList(ctx); break;
                 case "tags":
@@ -314,6 +316,37 @@ public static class GtestParser
 
     /// <summary>The runners a <c>runner_gap:</c> or <c>passes_in:</c> may name.</summary>
     private static readonly HashSet<string> Runners = ["rust", "python", "node", "wasm", "go", "csharp", "dart"];
+
+    /// <summary>The keys a <c>config:</c> may set: Config settings every binding exposes.</summary>
+    internal static readonly string[] ConfigKeys = ["path_search_budget"];
+
+    /// <summary>A <c>config:</c> value as the file writes it: an inline map of
+    /// <see cref="ConfigKeys"/> to positive integers (<c>{path_search_budget: 1048576}</c>).
+    /// An unknown or repeated key is refused, never ignored.</summary>
+    internal static Dictionary<string, long> ParseConfig(string text)
+    {
+        var inner = text.Trim();
+        if (!inner.StartsWith('{') || !inner.EndsWith('}') || inner[1..^1].Trim().Length == 0)
+            throw new FormatException($"config must be an inline map of settings, got '{text}'");
+        var settings = new Dictionary<string, long>();
+        foreach (var entry in inner[1..^1].Split(','))
+        {
+            var colon = entry.IndexOf(':');
+            var key = colon < 0 ? "" : entry[..colon].Trim();
+            var value = colon < 0 ? "" : entry[(colon + 1)..].Trim();
+            if (key.Length == 0)
+                throw new FormatException($"config entry '{entry.Trim()}' is not 'key: value'");
+            if (settings.ContainsKey(key))
+                throw new FormatException($"config sets '{key}' twice");
+            if (!ConfigKeys.Contains(key))
+                throw new FormatException($"unknown config key '{key}' (known: {string.Join(", ", ConfigKeys)})");
+            if (value.Length == 0 || !value.All(char.IsAsciiDigit)
+                || !long.TryParse(value, out var number) || number == 0)
+                throw new FormatException($"config '{key}' needs a positive integer, got '{value}'");
+            settings[key] = number;
+        }
+        return settings;
+    }
 
     /// <summary>The keys of <c>side_effects:</c>, as the openCypher TCK names them.</summary>
     private static readonly HashSet<string> SideEffectKeys =

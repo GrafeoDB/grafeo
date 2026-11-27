@@ -171,8 +171,8 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
             }
         }
 
-        // Create fresh database
-        _db = GrafeoDB.Memory();
+        // Create fresh database, with the case's settings (config:)
+        _db = tc.Config.Count == 0 ? GrafeoDB.Memory() : GrafeoDB.Open(null, Options(tc.Config));
 
         try
         {
@@ -1035,6 +1035,21 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
     // Setup helpers
     // =========================================================================
 
+    /// <summary>The binding options of a case's parsed <c>config:</c>.</summary>
+    private static GrafeoOptions Options(Dictionary<string, long> config)
+    {
+        var options = new GrafeoOptions();
+        foreach (var (key, value) in config)
+        {
+            switch (key)
+            {
+                case "path_search_budget": options.SetPathSearchBudget(value); break;
+                default: throw new FormatException($"unknown config key '{key}'");
+            }
+        }
+        return options;
+    }
+
     private static HashSet<string> LoadCompiledFeatures()
     {
         // A native library that does not load throws here and fails the test: it
@@ -1072,6 +1087,29 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
         return Path.GetFullPath(Path.Combine(
             AppContext.BaseDirectory, "..", "..", "..", "..", "..", "..", ".."));
     }
+}
+
+/// <summary>A case's <c>config:</c>, by the rule every runner applies: an unknown or repeated
+/// key is refused, never ignored.</summary>
+public class ConfigTests
+{
+    [Fact]
+    public void AConfigNamesTheSettingsTheCaseOpensWith()
+    {
+        Assert.Equal(new Dictionary<string, long> { ["path_search_budget"] = 1048576 },
+            GtestParser.ParseConfig("{path_search_budget: 1048576}"));
+    }
+
+    [Theory]
+    [InlineData("{path_budget: 1048576}")]
+    [InlineData("{path_search_budget: 0}")]
+    [InlineData("{path_search_budget: big}")]
+    [InlineData("{path_search_budget: +1048576}")]
+    [InlineData("{path_search_budget: 1048576, path_search_budget: 2}")]
+    [InlineData("path_search_budget: 1048576")]
+    [InlineData("{}")]
+    public void AConfigTheRunnersCannotApplyIsRefused(string text) =>
+        Assert.Throws<FormatException>(() => GtestParser.ParseConfig(text));
 }
 
 /// <summary>

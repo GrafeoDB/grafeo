@@ -682,6 +682,10 @@ class _TestCase {
   /// Runners that skip the case for a gap of their binding (`runner_gap:`).
   _RunnerGap? runnerGap;
 
+  /// The settings the case's database opens with (`config:`), by their gtest
+  /// key; the defaults when empty.
+  Map<String, int> config = {};
+
   /// The spec and the issue of a case expected to fail (`xfail:`), null otherwise.
   _Xfail? xfail;
 
@@ -741,6 +745,59 @@ class _RunnerGap {
 
 /// The runners a `runner_gap:` or `passes_in:` may name.
 const _knownRunners = {'rust', 'python', 'node', 'wasm', 'go', 'csharp', 'dart'};
+
+/// The keys a `config:` may set: Config settings every binding exposes.
+const _configKeys = ['path_search_budget'];
+
+/// A `config:` value as the file writes it: an inline map of [_configKeys] to
+/// positive integers (`{path_search_budget: 1048576}`). An unknown or repeated
+/// key is refused, never ignored.
+Map<String, int> _parseConfig(String text) {
+  final inner = text.trim();
+  if (!inner.startsWith('{') ||
+      !inner.endsWith('}') ||
+      inner.substring(1, inner.length - 1).trim().isEmpty) {
+    throw FormatException("config must be an inline map of settings, got '$text'");
+  }
+  final settings = <String, int>{};
+  for (final entry in inner.substring(1, inner.length - 1).split(',')) {
+    final colon = entry.indexOf(':');
+    final key = colon < 0 ? '' : entry.substring(0, colon).trim();
+    final value = colon < 0 ? '' : entry.substring(colon + 1).trim();
+    if (key.isEmpty) {
+      throw FormatException("config entry '${entry.trim()}' is not 'key: value'");
+    }
+    if (settings.containsKey(key)) {
+      throw FormatException("config sets '$key' twice");
+    }
+    if (!_configKeys.contains(key)) {
+      throw FormatException("unknown config key '$key' (known: ${_configKeys.join(', ')})");
+    }
+    final number = RegExp(r'^[0-9]+$').hasMatch(value) ? int.tryParse(value) : null;
+    if (number == null || number == 0) {
+      throw FormatException("config '$key' needs a positive integer, got '$value'");
+    }
+    settings[key] = number;
+  }
+  return settings;
+}
+
+/// A case's fresh in-memory database, with its `config:` settings when it has
+/// any.
+GrafeoDB _openCase(Map<String, int> config) {
+  if (config.isEmpty) return GrafeoDB.memory();
+  int? pathSearchBudget;
+  for (final MapEntry(:key, :value) in config.entries) {
+    switch (key) {
+      case 'path_search_budget':
+        pathSearchBudget = value;
+      default:
+        throw FormatException("unknown config key '$key'");
+    }
+  }
+  return GrafeoDB.openWithOptions(
+      null, GrafeoOptions(pathSearchBudget: pathSearchBudget));
+}
 
 /// The keys of `side_effects:`, as the openCypher TCK names them.
 const _sideEffectKeys = {
@@ -1027,6 +1084,9 @@ _TestCase _parseSingleTest(_ParseContext ctx) {
         tc.setupGql = _parseStringList(ctx);
       case 'runner_gap':
         tc.runnerGap = _parseRunnerGap(ctx);
+      case 'config':
+        tc.config = _parseConfig(value);
+        ctx.idx++;
       case 'statements':
         ctx.idx++;
         tc.statements = _parseStringList(ctx);
@@ -1613,6 +1673,27 @@ void _runErrorTest(
 
 void main() {
   _sharedValueCases();
+  // A case's `config:`, by the rule every runner applies: an unknown or
+  // repeated key is refused, never ignored.
+  group('config:', () {
+    test('names the settings the case opens with', () {
+      expect(_parseConfig('{path_search_budget: 1048576}'),
+          {'path_search_budget': 1048576});
+    });
+    for (final text in [
+      '{path_budget: 1048576}',
+      '{path_search_budget: 0}',
+      '{path_search_budget: big}',
+      '{path_search_budget: +1048576}',
+      '{path_search_budget: 1048576, path_search_budget: 2}',
+      'path_search_budget: 1048576',
+      '{}',
+    ]) {
+      test('refuses $text', () {
+        expect(() => _parseConfig(text), throwsFormatException);
+      });
+    }
+  });
   // The typing of parameter values that no .gtest file can hold: a number
   // past the f64 range fails the Rust runner's build, so it is tested here.
   group('parameter values', () {
@@ -1696,7 +1777,7 @@ void main() {
                 markTestSkipped('Language "$lang" not available');
                 return;
               }
-              final db = GrafeoDB.memory();
+              final db = _openCase(tc.config);
               try {
                 final effectiveDataset = tc.dataset ?? meta.dataset;
                 if (effectiveDataset.isNotEmpty && effectiveDataset != 'empty') {
@@ -1768,7 +1849,7 @@ void main() {
             }
           }
 
-          final db = GrafeoDB.memory();
+          final db = _openCase(tc.config);
           try {
             // Load dataset (per-test override takes priority)
             final effectiveDataset = tc.dataset ?? meta.dataset;

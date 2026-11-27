@@ -243,8 +243,8 @@ class GtestItem(pytest.Item):
         if tc.runner_gap is not None and "python" in tc.runner_gap.runners:
             pytest.skip(f"runner gap: {tc.runner_gap.reason} ({tc.runner_gap.issue})")
 
-        # Fresh database per test
-        db = grafeo.GrafeoDB()
+        # Fresh database per test, with the case's settings (``config:``)
+        db = grafeo.GrafeoDB(**tc.config)
 
         # Load dataset (per-test override takes priority over file-level)
         effective_dataset = tc.dataset or meta.dataset

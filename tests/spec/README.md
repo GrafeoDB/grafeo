@@ -72,6 +72,7 @@ The `skip:` field keeps CI green while documenting the expected behavior. When t
 | `setup` | List of queries to run before the test (always in the file's `language`) |
 | `setup_gql` | List of GQL statements run before `setup`, whatever the file's language (the openCypher TCK's test procedures as `CREATE PROCEDURE`) |
 | `runner_gap` | A gap of some runners' bindings: `runners:` (any of `rust`, `python`, `node`, `wasm`, `go`, `csharp`, `dart`), `issue:` (`#N` or `fix in X.Y.Z`) and `reason:`. The runners named skip the case with that reason; the others run it. Counts as a skip |
+| `config` | The settings the case's database opens with, an inline map such as `{path_search_budget: 1048576}`. Keys are Config settings every binding exposes, today `path_search_budget`; each value a positive integer. Every runner applies it, and an unknown or repeated key fails the file, never ignored. Without it, the defaults |
 | `skip` | Reason string: test is ignored with this message (the Rust runner runs it with `--ignored`) |
 | `xfail` | A strict expected failure: `spec:` (what the expected result is held against) and `issue:` (`#N` or `fix in X.Y.Z`). The case must fail on an assertion or a statement error; a pass fails the run. `passes_in:` lists runners where it passes all the same and must (their binding cannot show what fails it, as JavaScript's one number type) |
 | `params` | Key-value map for parameterized queries (see "Parameter values") |

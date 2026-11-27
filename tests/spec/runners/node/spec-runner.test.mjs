@@ -12,7 +12,7 @@ import { afterAll, describe, it, expect, vi } from 'vitest'
 vi.setConfig({ testTimeout: 60_000 })
 import { readFileSync, readdirSync, statSync, existsSync } from 'fs'
 import { join, relative, resolve } from 'path'
-import { parseGtestFile, coerceParams, paramValue } from './parser.mjs'
+import { parseGtestFile, coerceParams, paramValue, configOptions, parseConfig } from './parser.mjs'
 import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, describeError, assertGqlStatus, assertTerms, assertValues, assertSideEffects, observation } from './comparator.mjs'
 import { SpecFailure, runMarked, runProbe, specRoot, summary, summaryLine } from './xfail.mjs'
 import { caseCellType, matches as matchCell, parse as parseCell, toNeutral } from './tck_values.mjs'
@@ -197,7 +197,7 @@ for (const filePath of gtestFiles) {
               summary.skipped++
               return ctx.skip()
             }
-            const db = GrafeoDB.create()
+            const db = GrafeoDB.create(null, configOptions(tc.config))
             try {
               if (!isAvailable(db, lang)) return ctx.skip()
               // Check the file's and the test's requires, as single tests do
@@ -229,7 +229,8 @@ for (const filePath of gtestFiles) {
           return ctx.skip()
         }
 
-        const db = GrafeoDB.create()
+        // The case's settings (`config:`), the defaults without one
+        const db = GrafeoDB.create(null, configOptions(tc.config))
         try {
           // Check language availability (file-level and per-test)
           if (!isAvailable(db, meta.language)) return ctx.skip()
@@ -433,6 +434,19 @@ async function nativeValue(db, actual) {
     default: throw new Error(`unknown neutral kind ${kind}`)
   }
 }
+
+// A case's `config:`, by the rule every runner applies: an unknown or repeated key is refused
+describe('config:', () => {
+  it('names the settings the case opens with', () => {
+    expect(configOptions(parseConfig('{path_search_budget: 1048576}'))).toEqual({ pathSearchBudget: 1048576 })
+  })
+  for (const text of [
+    '{path_budget: 1048576}', '{path_search_budget: 0}', '{path_search_budget: big}', '{path_search_budget: +1048576}',
+    '{path_search_budget: 1048576, path_search_budget: 2}', 'path_search_budget: 1048576', '{}', '{toString: 1}',
+  ]) {
+    it(`refuses ${text}`, () => expect(() => parseConfig(text)).toThrow())
+  }
+})
 
 describe('values_cases.json', () => {
   for (const c of CASE_FILE.cases) {

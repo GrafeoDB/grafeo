@@ -67,6 +67,8 @@ pub struct TestCase {
     pub xfail: Option<Xfail>,
     /// The runners that skip the case for a gap of their binding (`runner_gap:`).
     pub runner_gap: Option<RunnerGap>,
+    /// The settings the case's database opens with (`config:`), the defaults when empty.
+    pub config: Vec<Setting>,
     /// A probe of the runner itself (`probe:`), only in a file under `spec-probes`.
     pub probe: Option<Probe>,
     /// What the case must give.
@@ -99,6 +101,17 @@ pub struct RunnerGap {
     /// What the bindings lack.
     pub reason: String,
 }
+
+/// A database setting a case opens with (`config:`): a `Config` setting every binding
+/// exposes, so every runner applies it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Setting {
+    /// `path_search_budget`: the bytes one path search may hold.
+    PathSearchBudget(usize),
+}
+
+/// The keys a `config:` may set.
+pub const CONFIG_KEYS: [&str; 1] = ["path_search_budget"];
 
 /// The runners a `runner_gap:` may name.
 pub const RUNNERS: [&str; 7] = ["rust", "python", "node", "wasm", "go", "csharp", "dart"];
@@ -312,6 +325,7 @@ fn parse_single_test(path: &str, lines: &[&str], idx: &mut usize) -> Result<Test
         skip: None,
         xfail: None,
         runner_gap: None,
+        config: Vec::new(),
         probe: None,
         expect: Expect::default(),
         variants: std::collections::HashMap::new(),
@@ -371,6 +385,11 @@ fn parse_single_test(path: &str, lines: &[&str], idx: &mut usize) -> Result<Test
                         parse_runner_gap(lines, idx)
                             .map_err(|e| format!("test '{}': {e}", tc.name))?,
                     );
+                }
+                "config" => {
+                    tc.config =
+                        parse_config(value).map_err(|e| format!("test '{}': {e}", tc.name))?;
+                    *idx += 1;
                 }
                 "probe" => {
                     if !in_spec_probes(path) {
@@ -453,6 +472,43 @@ fn parse_single_test(path: &str, lines: &[&str], idx: &mut usize) -> Result<Test
         ));
     }
     Ok(tc)
+}
+
+/// A `config:` value, an inline map of [`CONFIG_KEYS`] to positive integers
+/// (`{path_search_budget: 1048576}`); an unknown or repeated key is refused, never ignored.
+fn parse_config(value: &str) -> Result<Vec<Setting>, String> {
+    let inner = value
+        .trim()
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+        .filter(|inner| !inner.trim().is_empty())
+        .ok_or_else(|| format!("config must be an inline map of settings, got '{value}'"))?;
+    let mut settings = Vec::new();
+    let mut seen = Vec::new();
+    for entry in inner.split(',') {
+        let (key, number) = parse_kv(entry.trim())
+            .ok_or_else(|| format!("config entry '{}' is not 'key: value'", entry.trim()))?;
+        if seen.contains(&key) {
+            return Err(format!("config sets '{key}' twice"));
+        }
+        seen.push(key);
+        let digits = number.trim();
+        let number = Some(digits)
+            .filter(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|digits| digits.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .ok_or_else(|| format!("config '{key}' needs a positive integer, got '{number}'"))?;
+        settings.push(match key {
+            "path_search_budget" => Setting::PathSearchBudget(number),
+            other => {
+                return Err(format!(
+                    "unknown config key '{other}' (known: {})",
+                    CONFIG_KEYS.join(", ")
+                ));
+            }
+        });
+    }
+    Ok(settings)
 }
 
 /// The `spec:` and `issue:` of an `xfail:` whose line is `lines[*idx]`, both required; leaves

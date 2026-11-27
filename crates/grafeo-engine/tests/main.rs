@@ -205,6 +205,7 @@ mod history_survives_compact_and_crash;
 mod home_graph;
 mod hybrid_pushdown_coverage;
 mod hybrid_query;
+mod identity_return;
 mod import_nodes;
 mod in_list_index_compound;
 mod in_list_set;

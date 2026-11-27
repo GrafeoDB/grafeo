@@ -215,7 +215,6 @@ const PINNED: &[(&str, &[&str])] = &[
         "intersection closing",
         &[
             "SimpleAggregate",
-            "SimpleAggregate",
             "Filter",
             "Filter",
             "IntersectExpand",

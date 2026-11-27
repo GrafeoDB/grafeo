@@ -74,7 +74,7 @@ const TODAY: &[(Language, &str, &str)] = &[
     (
         Language::Gql,
         "MATCH (c:City) RETURN count(c) AS cities",
-        "Return (cities AS cities)\n  LabelCount (c:City, aggs: [countnonnull(...) AS cities])\n",
+        "LabelCount (c:City, aggs: [countnonnull(...) AS cities])\n",
     ),
     (
         Language::Gql,

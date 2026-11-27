@@ -21,6 +21,7 @@ mod intersect_hops;
 mod join_search;
 mod pinned_far_end;
 pub(crate) use pinned_far_end::far_end_variable;
+mod identity_return;
 #[cfg(feature = "triple-store")]
 mod rdf_order;
 mod rules;
@@ -434,9 +435,12 @@ impl Optimizer {
     /// Returns an error if optimization fails.
     pub fn optimize(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
         let _span = grafeo_debug_span!("grafeo::query::optimize");
+        // A last RETURN that gives its aggregates as they are adds nothing, and every pass after
+        // would walk it.
+        let root = identity_return::without_identity_return(plan.root);
         // An EXISTS over the rows' variables runs once over their distinct
         // values (before the cycles: an expand into a shared variable is one).
-        let root = delim::decorrelate_exists(plan.root);
+        let root = delim::decorrelate_exists(root);
         // A `sameTerm` between two RDF columns is enforced where they first meet: a scan's
         // repeated variable or a join key, not a filter above the join.
         #[cfg(any(feature = "sparql", feature = "triple-store"))]

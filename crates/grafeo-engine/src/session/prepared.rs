@@ -711,13 +711,16 @@ mod tests {
         }
     }
 
-    /// The aggregate at the top of `plan`, under its RETURN.
+    /// The aggregate at the top of `plan`, under its RETURN, or the root itself when the RETURN
+    /// gave its aggregates as they are (the optimizer drops that one).
     fn aggregate_of(plan: &crate::query::plan::LogicalPlan) -> &crate::query::plan::AggregateOp {
-        let crate::query::plan::LogicalOperator::Return(ret) = &plan.root else {
-            panic!("expected a RETURN: {:?}", plan.root);
+        use crate::query::plan::LogicalOperator;
+        let top = match &plan.root {
+            LogicalOperator::Return(ret) => ret.input.as_ref(),
+            other => other,
         };
-        let crate::query::plan::LogicalOperator::Aggregate(agg) = ret.input.as_ref() else {
-            panic!("expected an aggregate: {:?}", ret.input);
+        let LogicalOperator::Aggregate(agg) = top else {
+            panic!("expected an aggregate: {top:?}");
         };
         agg
     }

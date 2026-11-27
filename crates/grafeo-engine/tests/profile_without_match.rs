@@ -210,11 +210,13 @@ fn profile_of_a_standalone_aggregate() {
         } else {
             "SimpleAggregate"
         };
-        assert_profile(
-            &LANGUAGES,
-            query,
-            &[(0, aggregate, 1), (1, aggregate, 1), (2, "SingleRow", 1)],
-        );
+        // A lone count's RETURN gives it as it is, so it has no line; a key keeps it.
+        let expected: &[(usize, &str, u64)] = if query.contains("x,") {
+            &[(0, aggregate, 1), (1, aggregate, 1), (2, "SingleRow", 1)]
+        } else {
+            &[(0, aggregate, 1), (1, "SingleRow", 1)]
+        };
+        assert_profile(&LANGUAGES, query, expected);
     }
 }
 

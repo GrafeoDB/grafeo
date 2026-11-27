@@ -1808,10 +1808,9 @@ impl RdfPlanner {
             }
         }
 
-        if projections.is_empty() {
-            return Ok((input_op, input_columns, input_types));
-        }
-        // The input's columns in their order: only the names change.
+        // The input's columns in their order: only the names change. No
+        // projection is a solution with no variable (`SELECT *` over blank
+        // nodes alone): the rows with no column.
         let identity = projections.len() == input_columns.len()
             && projections
                 .iter()

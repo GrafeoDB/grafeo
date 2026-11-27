@@ -48,11 +48,6 @@
 "projexp03" = { issue = "fix in 0.6.4", note = "a projection expression cannot use an earlier alias" }
 
 ["property-path"]
-"pp01" = { issue = "fix in 0.6.4", note = "SELECT * returns the hidden variables of a path" }
-"pp03" = { issue = "fix in 0.6.4", note = "SELECT * returns the hidden variables of a path" }
-"pp09" = { issue = "fix in 0.6.4", note = "SELECT * returns the hidden variables of a path" }
-"pp10" = { issue = "fix in 0.6.4", note = "SELECT * returns the hidden variables of a path" }
-"pp11" = { issue = "fix in 0.6.4", note = "SELECT * returns the hidden variables of a path" }
 "pp37" = { issue = "fix in 0.6.5", note = "nested quantified paths are refused" }
 
 [service]

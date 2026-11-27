@@ -86,6 +86,10 @@ const _runnerCapabilities = {'int64-safe'};
 bool _isAvailable(String requirement) {
   final key = _normaliseLanguage(requirement).replaceAll('_', '-');
   if (key == 'gql' || key.isEmpty) return true;
+  // Compound language key: "graphql-rdf" requires both "graphql" and "rdf"
+  if (key == 'graphql-rdf') {
+    return _getCompiledFeatures().containsAll(['graphql', 'rdf']);
+  }
   return _getCompiledFeatures().contains(key) || _runnerCapabilities.contains(key);
 }
 

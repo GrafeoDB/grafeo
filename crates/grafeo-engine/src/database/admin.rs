@@ -827,7 +827,7 @@ impl super::Open {
                             .is_some_and(|record| record.enabled)
                             && super::cdc_cursor::default_exists(wal.dir())) =>
                 {
-                    super::cdc_cursor::write_default(wal.dir(), wal.end_lsn())?;
+                    super::cdc_cursor::write_default(wal.dir(), wal.end_lsn(), false)?;
                     true
                 }
                 _ => false,

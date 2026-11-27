@@ -183,6 +183,10 @@ impl Open {
         let _open = self.hold_open()?;
         let log = self.feed_log()?;
         let cursor = cdc_cursor::read_default(&log.dir)?;
+        // A feed restarted at an open lost the commits before: say so.
+        if cursor.restarted {
+            return Err(log.truncated());
+        }
         // No checkpoint removes the log the read goes through.
         let Some(_pin) = self.wal_retention.pin(cursor.lsn) else {
             return Err(log.truncated());
@@ -230,9 +234,13 @@ impl Open {
         let _ack = self.cdc_ack.lock();
         let cursor = cdc_cursor::read_default(&log.dir)?;
         let pin = self.wal_retention.pin(cursor.lsn.min(position.lsn()));
-        if pin.is_none() || log.first_lsn()?.is_some_and(|first| cursor.lsn < first) {
-            // The log at the cursor is gone: the position the error names
-            // goes on from the first commit still there.
+        if cursor.restarted
+            || pin.is_none()
+            || log.first_lsn()?.is_some_and(|first| cursor.lsn < first)
+        {
+            // The log at the cursor is gone (or the feed was restarted at an
+            // open): the position the error names goes on from the first
+            // commit still there.
             let restart = log.restart()?;
             if position != restart {
                 return Err(log.truncated());
@@ -242,6 +250,7 @@ impl Open {
                 CdcCursor {
                     lsn: restart.lsn(),
                     epoch: EpochId::new(restart.epoch().as_u64().saturating_sub(1)),
+                    restarted: false,
                 },
             );
         }
@@ -283,6 +292,7 @@ impl Open {
             CdcCursor {
                 lsn: group.end,
                 epoch: group.begin.epoch,
+                restarted: false,
             },
         )
     }
@@ -312,8 +322,9 @@ impl crate::GrafeoDB {
     /// on ([`Config::with_cdc`](crate::Config::with_cdc) captures for one
     /// open only and keeps no feed). `GRAFEO-S006`
     /// ([`StorageError::CdcFeedTruncated`]) when a checkpoint removed the log
-    /// at the cursor (past [`Config::with_wal_retention_limit`](crate::Config::with_wal_retention_limit)):
-    /// it names the position of the first commit still there, which
+    /// at the cursor (past [`Config::with_wal_retention_limit`](crate::Config::with_wal_retention_limit)),
+    /// or when the open found the WAL gone and started the feed again at the
+    /// file's checkpoint: it names the position of the first commit still there, which
     /// [`acknowledge_cdc_feed`](Self::acknowledge_cdc_feed) accepts to go on
     /// from it. The errors of reading the WAL.
     pub fn read_cdc_feed(&self, limit: NonZeroUsize) -> Result<Vec<CdcBatch>> {

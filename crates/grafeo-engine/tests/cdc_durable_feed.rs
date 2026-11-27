@@ -899,3 +899,88 @@ fn bulk_writes_read_back_as_live_reported_them() {
         "after the close"
     );
 }
+
+/// The S006 a read fails with: the position it names.
+fn truncated_at(result: grafeo_common::utils::error::Result<Vec<CdcBatch>>) -> CdcPosition {
+    use grafeo_common::utils::error::{Error, StorageError};
+    match result {
+        Err(Error::Storage(storage)) => match *storage {
+            StorageError::CdcFeedTruncated {
+                first_available,
+                epoch,
+            } => CdcPosition::from_token(&format!("{first_available}:{epoch}")).unwrap(),
+            other => panic!("the read is not S006: {other}"),
+        },
+        Err(other) => panic!("the read is not S006: {other}"),
+        Ok(batches) => panic!("the read gave {} batches, not S006", batches.len()),
+    }
+}
+
+/// A WAL directory removed while the database was closed (as a 0.6.3 close removes it, cursor
+/// included) leaves the stored setting on: the next open starts the feed again at the file's
+/// checkpoint and marks it restarted, so the first read fails with S006 naming where it goes on
+/// from, as for a log cut past the retention limit. Acknowledging that position goes on; the
+/// commits that were not acknowledged before went with the log.
+#[test]
+fn a_removed_wal_directory_restarts_the_feed_with_s006() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, db) = file_with_cdc(&dir);
+    three_groups(&db);
+    let first = db.read_cdc_feed(ALL).unwrap();
+    db.acknowledge_cdc_feed(first[0].position).unwrap();
+    db.close().unwrap();
+    drop(db);
+    assert!(sidecar_wal(&path).exists(), "the feed kept its log");
+    std::fs::remove_dir_all(sidecar_wal(&path)).unwrap();
+
+    let reopened = open(&path);
+    assert!(
+        reopened.is_cdc_enabled(),
+        "the setting is stored in the file"
+    );
+    reopened
+        .execute("INSERT (:Person {name: 'Shosanna'})")
+        .unwrap();
+    let restart = truncated_at(reopened.read_cdc_feed(ALL));
+    assert_eq!(
+        truncated_at(reopened.read_cdc_feed(ALL)),
+        restart,
+        "a read does not clear it"
+    );
+    reopened.acknowledge_cdc_feed(restart).unwrap();
+    let batches = reopened.read_cdc_feed(ALL).unwrap();
+    assert_eq!(
+        positions(&batches),
+        [restart],
+        "the feed goes on from the first commit after the restart"
+    );
+    reopened.acknowledge_cdc_feed(batches[0].position).unwrap();
+    assert!(reopened.read_cdc_feed(ALL).unwrap().is_empty());
+    reopened.close().unwrap();
+    drop(reopened);
+    assert!(
+        open(&path).read_cdc_feed(ALL).unwrap().is_empty(),
+        "the acknowledgement cleared the restart for good"
+    );
+}
+
+/// A feed that `set_cdc(true)` starts, and one a reopen finds with its cursor, is not restarted:
+/// its reads give the commits.
+#[test]
+fn an_ordinary_start_is_not_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, db) = file_with_cdc(&dir);
+    three_groups(&db);
+    assert_eq!(
+        db.read_cdc_feed(ALL).unwrap().len(),
+        3,
+        "after set_cdc(true)"
+    );
+    db.close().unwrap();
+    drop(db);
+    assert_eq!(
+        open(&path).read_cdc_feed(ALL).unwrap().len(),
+        3,
+        "after a reopen with the cursor there"
+    );
+}

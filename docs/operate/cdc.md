@@ -149,6 +149,14 @@ event per node or edge it creates. The bulk loads report none: the imports
 `batch_insert_rdf` write their rows to the store and the WAL as they go,
 without events.
 
+SPARQL graph operations (`CREATE`, `DROP`, `CLEAR`, `COPY`, `MOVE`, `ADD`)
+report no events on their own: a consumer does not see the triples a `CLEAR` or
+`DROP` removes. Inside a transaction, `COPY`, `MOVE` and `ADD` record each
+triple they copy as an insert, so each reports a `Create` in the target graph;
+the clear of the target and the drop of a moved source report nothing. A
+triple's net changes come from its own writes: an `INSERT DATA` followed by a
+`CLEAR` of its graph in one transaction still reports the `Create`.
+
 Node and edge IDs repeat across named graphs, so an ID names an entity only
 together with its graph. `history` on the database reads the default graph, and
 on a session the session's current graph; `changes_between` returns the events
@@ -252,6 +260,17 @@ its properties (`before` is `None`).
 
 The feed is experimental: new in 0.6.4, its calls and the position's token may
 change in a patch release until it is stable.
+
+While change data capture is on, the WAL holds records that 0.6.3 does not
+read. After a clean close, 0.6.3 opens the database, since the closing
+checkpoint holds every commit; it then removes the WAL the feed kept. After a
+crash, or any stop without a clean close, 0.6.3 refuses the WAL: open and close
+the database once with 0.6.4 first. When the WAL is gone at an open (0.6.3
+removed it, or something outside did) while the setting is stored on, the feed
+starts again at the file's checkpoint, and the commits not yet acknowledged
+before are not in it. The first read then fails with
+[`GRAFEO-S006`](error-codes.md#storage-s), naming the first commit still in the
+log; acknowledging that position goes on from it.
 
 ## Transaction semantics
 

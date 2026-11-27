@@ -57,6 +57,7 @@ mod cdc_crud_api;
 mod cdc_cursor_retention;
 mod cdc_durable_feed;
 mod cdc_net_changes;
+mod cdc_rdf_feed;
 mod cdc_session_mutations;
 mod cdc_setting;
 mod cdc_timestamps;

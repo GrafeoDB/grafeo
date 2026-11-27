@@ -12,7 +12,7 @@ import { afterAll, describe, it, expect, vi } from 'vitest'
 vi.setConfig({ testTimeout: 60_000 })
 import { readFileSync, readdirSync, statSync, existsSync } from 'fs'
 import { join, relative, resolve } from 'path'
-import { parseGtestFile, coerceParams, paramValue, configOptions, parseConfig } from './parser.mjs'
+import { parseGtestFile, coerceParams, paramValue, configOptions, parseConfig, datasetFile } from './parser.mjs'
 import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, describeError, assertGqlStatus, assertTerms, assertValues, assertSideEffects, observation } from './comparator.mjs'
 import { SpecFailure, runMarked, runProbe, specRoot, summary, summaryLine } from './xfail.mjs'
 import { caseCellType, matches as matchCell, parse as parseCell, toNeutral } from './tck_values.mjs'
@@ -53,17 +53,14 @@ function findGtestFiles(dir) {
   return results.sort()
 }
 
-/** Load a .setup file and execute each line as GQL. */
+/** Load a dataset, one statement per line: GQL from a `.setup` file, SPARQL Update from a `.ru` file. */
 async function loadDataset(db, datasetName) {
-  const setupPath = join(DATASETS_DIR, `${datasetName}.setup`)
-  if (!existsSync(setupPath)) {
-    throw new Error(`Dataset file not found: ${setupPath}`)
-  }
-  const content = readFileSync(setupPath, 'utf-8')
+  const { path, language } = datasetFile(DATASETS_DIR, datasetName)
+  const content = readFileSync(path, 'utf-8')
   for (const line of content.split(/\r?\n/)) {
     const trimmed = line.trim()
     if (!trimmed || trimmed.startsWith('#')) continue
-    await db.execute(trimmed)
+    await executeQuery(db, language, trimmed)
   }
 }
 
@@ -90,7 +87,7 @@ async function executeQuery(db, language, query, params) {
       if (!db.executeSql) throw new Error('SQL/PGQ not available')
       return params ? db.executeSql(query, params) : db.executeSql(query)
     default:
-      if (db.executeLanguage) return db.executeLanguage(language, query)
+      if (db.executeLanguage) return db.executeLanguage(language, query, params)
       throw new Error(`Unsupported language: ${language}`)
   }
 }

@@ -1,0 +1,17 @@
+# GraphQL in a `model: rdf` file that is not `graphql-rdf`: the parser refuses the file,
+# naming the case. Run, the case would pass, so a runner that skips the rule passes the run.
+
+meta:
+  language: graphql
+  model: rdf
+  section: probes
+  title: "parse probe: graphql on model rdf"
+  dataset: empty
+  requires: [graphql]
+
+tests:
+
+  - name: probe_graphql_on_rdf
+    query: "{ person { name } }"
+    expect:
+      empty: true

@@ -1,403 +1,109 @@
-# GraphQL queries on RDF-like data
+# GraphQL over RDF: queries on triples
 #
-# Covers: type-based queries, field selection, shorthand syntax,
-# filters, pagination (first/skip), ordering (orderBy),
-# nested traversals, multi-label queries.
+# Covers: a root field as an rdf:type, scalar fields as predicates, an
+# argument as a filter, nested fields as links between resources, variables,
+# and mutation rejection. The data is triples in the example.org vocabulary,
+# which GraphQL over RDF reads by default.
 
 meta:
-  language: graphql
+  language: graphql-rdf
   model: rdf
   section: queries
-  title: GraphQL queries on RDF data
-  dataset: rdf_social
-  requires: [graphql]
+  title: GraphQL queries on RDF triples
+  dataset: example_people
+  requires: [graphql, sparql, rdf]
 
 tests:
 
   # ---------------------------------------------------------------------------
-  # Basic type queries
+  # Types and fields
   # ---------------------------------------------------------------------------
 
-  - name: query_all_resources
-    query: "query { resource { uri name } }"
-    expect:
-      count: 6
-
-  - name: query_all_persons
-    query: "query { person { name age } }"
-    expect:
-      count: 5
-
-  - name: query_all_organizations
-    query: "query { organization { name founded } }"
-    expect:
-      count: 1
-
-  - name: query_single_field
-    query: "query { person { name } }"
-    expect:
-      count: 5
-
-  - name: query_multiple_fields
-    query: "query { person { name age city email } }"
-    expect:
-      count: 5
-
-  # ---------------------------------------------------------------------------
-  # Shorthand query syntax (no "query" keyword)
-  # ---------------------------------------------------------------------------
-
-  - name: shorthand_query
+  - name: root_field_selects_by_type
     query: "{ person { name } }"
     expect:
-      count: 5
-
-  - name: shorthand_with_filter
-    query: "{ person(name: \"Alix\") { name age } }"
-    expect:
-      rows:
-        - [Alix, 30]
-
-  # ---------------------------------------------------------------------------
-  # Equality filters
-  # ---------------------------------------------------------------------------
-
-  - name: filter_by_name
-    query: "{ person(name: \"Alix\") { name age } }"
-    expect:
-      rows:
-        - [Alix, 30]
-
-  - name: filter_by_age
-    query: "{ person(age: 25) { name } }"
-    expect:
-      rows:
-        - [Gus]
-
-  - name: filter_by_city
-    query: "{ person(city: \"Amsterdam\") { name } }"
-    expect:
-      count: 2
-
-  - name: filter_resource_by_uri
-    query: |
-      query {
-        resource(uri: "http://example.org/person/alix") {
-          name
-          age
-        }
-      }
-    expect:
-      rows:
-        - [Alix, 30]
-
-  - name: filter_no_match
-    query: "{ person(name: \"Nobody\") { name } }"
-    expect:
-      empty: true
-
-  # ---------------------------------------------------------------------------
-  # Filter object syntax
-  # ---------------------------------------------------------------------------
-
-  - name: filter_object_by_age
-    query: "query { person(filter: { age: 30 }) { name } }"
-    expect:
-      rows:
-        - [Alix]
-
-  - name: filter_object_by_city
-    query: "query { person(filter: { city: \"Berlin\" }) { name } }"
-    expect:
-      rows:
-        - [Gus]
-
-  # ---------------------------------------------------------------------------
-  # Pagination
-  # ---------------------------------------------------------------------------
-
-  - name: first_limits_results
-    query: "{ person(first: 2) { name } }"
-    expect:
-      count: 2
-
-  - name: limit_alias
-    query: "{ person(limit: 3) { name } }"
-    expect:
-      count: 3
-
-  - name: skip_offsets_results
-    query: "{ person(first: 2, skip: 2) { name } }"
-    expect:
-      count: 2
-
-  - name: offset_alias
-    query: "{ person(limit: 2, offset: 1) { name } }"
-    expect:
-      count: 2
-
-  - name: first_exceeds_total
-    query: "{ person(first: 100) { name } }"
-    expect:
-      count: 5
-
-  # ---------------------------------------------------------------------------
-  # Ordering
-  # ---------------------------------------------------------------------------
-
-  - name: order_by_name_asc
-    query: |
-      query {
-        person(orderBy: { name: ASC }) {
-          name
-        }
-      }
-    expect:
-      ordered: true
       rows:
         - [Alix]
         - [Gus]
-        - [Jules]
         - [Mia]
-        - [Vincent]
 
-  - name: order_by_age_desc
-    query: |
-      query {
-        person(orderBy: { age: DESC }) {
-          name
-          age
-        }
-      }
+  - name: scalar_fields_read_their_predicates
+    query: "{ person { name age } }"
     expect:
-      ordered: true
+      columns: [name, age]
       rows:
-        - [Vincent, 35]
+        - [Alix, 30]
+        - [Gus, 25]
         - [Mia, 32]
-        - [Alix, 30]
-        - [Jules, 28]
-        - [Gus, 25]
 
-  - name: order_by_with_first
-    query: |
-      query {
-        person(orderBy: { age: ASC }, first: 3) {
-          name
-          age
-        }
-      }
+  - name: another_type_reads_its_own_resources
+    query: "{ organization { name city } }"
     expect:
-      ordered: true
       rows:
-        - [Gus, 25]
-        - [Jules, 28]
-        - [Alix, 30]
+        - [Grafeo OSS, Amsterdam]
 
-  - name: order_by_with_skip_and_first
-    query: |
-      query {
-        person(orderBy: { age: ASC }, skip: 1, first: 2) {
-          name
-          age
-        }
-      }
-    expect:
-      ordered: true
-      rows:
-        - [Jules, 28]
-        - [Alix, 30]
-
-  # ---------------------------------------------------------------------------
-  # Nested traversals
-  # ---------------------------------------------------------------------------
-
-  - name: nested_knows_traversal
-    query: |
-      query {
-        person {
-          name
-          knows {
-            name
-          }
-        }
-      }
-    expect:
-      count: 5
-
-  - name: nested_knows_with_parent_filter
-    query: |
-      query {
-        person(name: "Alix") {
-          name
-          knows {
-            name
-          }
-        }
-      }
-    expect:
-      count: 2
-
-  - name: nested_works_at_traversal
-    query: |
-      query {
-        person(name: "Alix") {
-          name
-          works_at {
-            name
-          }
-        }
-      }
-    expect:
-      count: 1
-
-  - name: nested_with_filter_on_target
-    query: |
-      query {
-        person(name: "Alix") {
-          name
-          knows(age: 25) {
-            name
-            age
-          }
-        }
-      }
-    expect:
-      count: 1
-
-  - name: nested_no_relationships
-    # Mia has no outgoing knows edges
-    query: |
-      query {
-        person(name: "Mia") {
-          name
-          knows {
-            name
-          }
-        }
-      }
+  - name: a_type_with_no_resources_is_empty
+    query: "{ city { name } }"
     expect:
       empty: true
 
   # ---------------------------------------------------------------------------
-  # Fragment spreads
+  # Arguments and variables
   # ---------------------------------------------------------------------------
 
-  - name: fragment_spread_basic
-    query: |
-      fragment PersonFields on Person { name age }
-      query { person { ...PersonFields } }
+  - name: an_argument_filters_on_its_predicate
+    query: "{ person(name: \"Gus\") { name age } }"
     expect:
-      count: 5
-
-  - name: fragment_spread_subset
-    query: |
-      fragment NameOnly on Person { name }
-      query { person { ...NameOnly } }
-    expect:
-      count: 5
-
-  # ---------------------------------------------------------------------------
-  # Inline fragments with type condition
-  # ---------------------------------------------------------------------------
-
-  - name: inline_fragment_with_type
-    query: "query { person { ... on Person { name age } } }"
-    expect:
-      count: 5
-
-  # ---------------------------------------------------------------------------
-  # Field aliases
-  # ---------------------------------------------------------------------------
-
-  - name: field_alias_single
-    query: "{ person(name: \"Alix\") { personName: name } }"
-    expect:
-      columns: [personName]
-      rows:
-        - [Alix]
-
-  - name: field_alias_multiple
-    query: "{ person(name: \"Gus\") { n: name a: age } }"
-    expect:
-      columns: [n, a]
       rows:
         - [Gus, 25]
 
-  # ---------------------------------------------------------------------------
-  # Named query syntax
-  # ---------------------------------------------------------------------------
-
-  - name: named_query_syntax
-    query: "query GetPeople { person { name } }"
-    expect:
-      count: 5
-
-  # ---------------------------------------------------------------------------
-  # Shorthand with multiple fields
-  # ---------------------------------------------------------------------------
-
-  - name: shorthand_multiple_fields
-    query: "{ person { name age city } }"
-    expect:
-      count: 5
-
-  # ---------------------------------------------------------------------------
-  # Nested traversal with alias
-  # ---------------------------------------------------------------------------
-
-  - name: nested_traversal_alias
-    query: |
-      query {
-        person(name: "Alix") {
-          name
-          friends: knows {
-            name
-          }
-        }
-      }
-    expect:
-      count: 2
-
-  # ---------------------------------------------------------------------------
-  # Empty result cases
-  # ---------------------------------------------------------------------------
-
-  - name: nonexistent_type
-    query: "{ animal { name } }"
-    expect:
-      empty: true
-
-  - name: filter_no_match_django
-    query: "{ person(name: \"Django\") { name } }"
-    expect:
-      empty: true
-
-  # ---------------------------------------------------------------------------
-  # Multiple operations (first used)
-  # ---------------------------------------------------------------------------
-
-  - name: multiple_operations_first_used
-    query: "query A { person { name } } query B { organization { name } }"
-    expect:
-      count: 5
-
-  # ---------------------------------------------------------------------------
-  # Block string in query
-  # ---------------------------------------------------------------------------
-
-  - name: block_string_in_query
-    statements:
-      - "mutation { createPerson(name: \"Hans\", age: 33, city: \"Berlin\", bio: \"A long bio\") { name } }"
-      - "{ person(name: \"Hans\") { name bio } }"
+  - name: a_variable_fills_an_argument
+    query: "query ByName($who: String!) { person(name: $who) { name city } }"
+    params:
+      who: "Mia"
     expect:
       rows:
-        - [Hans, A long bio]
+        - [Mia, Prague]
 
   # ---------------------------------------------------------------------------
-  # Additional empty result cases
+  # Nested fields follow links
   # ---------------------------------------------------------------------------
 
-  - name: filter_no_match_age
-    query: "{ person(age: 999) { name } }"
+  - name: a_nested_field_follows_its_predicate
+    query: "{ person(name: \"Alix\") { name knows { friend: name } } }"
     expect:
-      empty: true
+      rows:
+        - [Alix, Gus]
+        - [Alix, Mia]
+
+  # Today the nested `name` and its parent's `name` are two columns of one name, which is
+  # refused (GRAFEO-Q002); the cases above alias the nested field.
+  - name: a_nested_field_may_repeat_a_parent_field_name
+    xfail:
+      spec: "GraphQL over RDF names a nested field's column as GraphQL on the property graph does"
+      issue: "fix in 0.6.4"
+    query: "{ person(name: \"Alix\") { name knows { name } } }"
+    expect:
+      rows:
+        - [Alix, Gus]
+        - [Alix, Mia]
+
+  - name: a_nested_field_keeps_only_linked_resources
+    query: "{ person { name worksAt { employer: name } } }"
+    expect:
+      rows:
+        - [Alix, Grafeo OSS]
+
+  # ---------------------------------------------------------------------------
+  # Mutations are refused
+  # ---------------------------------------------------------------------------
+
+  - name: rdf_create_mutation_rejected
+    query: "mutation { createPerson(name: \"Test\") { name } }"
+    expect:
+      error: "Only Query"
+
+  - name: rdf_delete_mutation_rejected
+    query: "mutation { deletePerson(name: \"Alix\") }"
+    expect:
+      error: "Only Query"

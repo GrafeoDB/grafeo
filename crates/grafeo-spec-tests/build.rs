@@ -276,7 +276,19 @@ fn generate_single_test(output: &mut String, spec: &TestSpec<'_>) {
             all_requires.push(req);
         }
     }
-    for fg in feature_gates {
+    // A SPARQL Update dataset loads through SPARQL.
+    let dataset = tc.dataset.as_deref().unwrap_or(&file.meta.dataset);
+    let sparql_update =
+        dataset_file(dataset).is_some_and(|f| Path::new(&f).extension().is_some_and(|e| e == "ru"));
+    let dataset_gates: &[&str] = if sparql_update {
+        &["sparql", "rdf"]
+    } else {
+        &[]
+    };
+    for fg in feature_gates
+        .into_iter()
+        .chain(dataset_gates.iter().copied())
+    {
         if !all_requires.contains(&fg) {
             all_requires.push(fg);
         }
@@ -366,6 +378,26 @@ fn generate_single_test(output: &mut String, spec: &TestSpec<'_>) {
     writeln!(output).unwrap();
 }
 
+/// The file of dataset `name` relative to the repository: `tests/spec/datasets/<name>.setup`
+/// (GQL) or `<name>.ru` (SPARQL Update), `None` for `empty`.
+///
+/// # Panics
+///
+/// When both files exist. With neither, the `.setup` path, so the case fails naming it.
+fn dataset_file(name: &str) -> Option<String> {
+    if name == "empty" {
+        return None;
+    }
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let setup = format!("tests/spec/datasets/{name}.setup");
+    let update = format!("tests/spec/datasets/{name}.ru");
+    match (repo.join(&setup).exists(), repo.join(&update).exists()) {
+        (true, true) => panic!("dataset '{name}' is both {setup} and {update}"),
+        (false, true) => Some(update),
+        _ => Some(setup),
+    }
+}
+
 /// The statements and assertions of one generated test.
 fn generate_body(output: &mut String, spec: &TestSpec<'_>, language: &str, model: &str) {
     let file = spec.file;
@@ -430,8 +462,7 @@ fn generate_body(output: &mut String, spec: &TestSpec<'_>, language: &str, model
     }
 
     let effective_dataset = tc.dataset.as_deref().unwrap_or(&file.meta.dataset);
-    if effective_dataset != "empty" {
-        let dataset_path = format!("tests/spec/datasets/{}.setup", effective_dataset);
+    if let Some(dataset_path) = dataset_file(effective_dataset) {
         writeln!(
             output,
             "        load_dataset(&db, \"{}\");",

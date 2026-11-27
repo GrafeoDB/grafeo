@@ -53,9 +53,9 @@ The `skip:` field keeps CI green while documenting the expected behavior. When t
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `language` | `gql` | Query language: `gql`, `cypher`, `gremlin`, `graphql`, `sparql`, `sql-pgq` |
+| `language` | `gql` | Query language: `gql`, `cypher`, `gremlin`, `graphql`, `graphql-rdf`, `sparql`, `sql-pgq`. `graphql` reads the property graph and `graphql-rdf` the triples, so a `model: rdf` file refuses a `graphql` case (also one from a case's `language:` or a variant) |
 | `model` | `lpg` | Data model: `lpg` (labeled property graph) or `rdf` |
-| `dataset` | `empty` | Dataset to load: `empty` or a name from `datasets/` (e.g. `social_network`) |
+| `dataset` | `empty` | Dataset to load: `empty` or a name from `datasets/` (e.g. `social_network`): `<name>.setup` holds GQL, `<name>.ru` SPARQL Update (loaded through SPARQL, so in a build with `sparql`), one statement per line; a name with both files fails the run |
 | `requires` | `[]` | Feature gates: `[cypher]`, `[sparql, rdf]`, `[algos]`, etc. |
 | `section` | | Spec reference (e.g. `"14.4"` for GQL clause) |
 | `title` | | Human-readable file description |
@@ -225,7 +225,7 @@ Setup always runs in the file's declared `language`, not the variant language.
 
 ```
 tests/spec/
-  datasets/           # Shared .setup files (GQL INSERT statements)
+  datasets/           # Shared datasets: .setup (GQL) and .ru (SPARQL Update), one statement per line
   common/             # Language-agnostic tests (algorithms, search)
   lpg/                # Labeled Property Graph tests
     gql/              # GQL (ISO/IEC 39075:2024)
@@ -235,7 +235,7 @@ tests/spec/
     sql_pgq/          # SQL/PGQ (SQL:2023 GRAPH_TABLE)
   rdf/                # RDF model tests
     sparql/           # SPARQL 1.1
-    graphql/          # GraphQL over RDF
+    graphql/          # GraphQL over RDF (`language: graphql-rdf`)
   regression/         # Issue-mapped regression tests
   rosetta/            # Cross-language equivalence tests
   runners/            # Per-language test runners

@@ -210,9 +210,20 @@ Map<String, dynamic>? _coerceParams(Map<String, String>? raw) {
   return raw.map((key, text) => MapEntry(key, _paramValue(text)));
 }
 
-/// Load a .setup dataset file into [db] using GQL.
+/// Load a dataset, one statement per line: GQL from a `.setup` file, SPARQL Update from a
+/// `.ru` file.
 void _loadDataset(GrafeoDB db, String datasetName) {
-  final setupFile = File('${_datasetsDir.path}/$datasetName.setup');
+  var setupFile = File('${_datasetsDir.path}/$datasetName.setup');
+  final updateFile = File('${_datasetsDir.path}/$datasetName.ru');
+  var language = 'gql';
+  if (updateFile.existsSync()) {
+    if (setupFile.existsSync()) {
+      throw _RunnerFault(
+          "Dataset '$datasetName' is both ${setupFile.path} and ${updateFile.path}");
+    }
+    setupFile = updateFile;
+    language = 'sparql';
+  }
   if (!setupFile.existsSync()) {
     throw _RunnerFault('Dataset file not found: ${setupFile.path}');
   }
@@ -220,7 +231,7 @@ void _loadDataset(GrafeoDB db, String datasetName) {
   for (final line in content.split(RegExp(r'\r?\n'))) {
     final trimmed = line.trim();
     if (trimmed.isEmpty || trimmed.startsWith('#')) continue;
-    db.execute(trimmed);
+    _executeQuery(db, language, trimmed);
   }
 }
 
@@ -611,6 +622,9 @@ class _Meta {
   /// temporal by its Cypher toString().
   String valuesDialect = 'strict';
 
+  /// The data model, `lpg` or `rdf`.
+  String model = '';
+
   _Meta({
     this.language = 'gql',
     this.dataset = 'empty',
@@ -904,8 +918,20 @@ _GtestFile _parseGtestFile(File file) {
   for (final tc in tests) {
     _checkMarks(tc, file.path);
   }
+  if (meta.model == 'rdf') {
+    for (final tc in tests) {
+      if ((tc.language ?? meta.language) == 'graphql' || tc.variants.containsKey('graphql')) {
+        throw FormatException("test '${tc.name}': $_graphqlOnRdf");
+      }
+    }
+  }
   return _GtestFile(meta, tests);
 }
+
+/// Why a `graphql` case in a `model: rdf` file is refused: `graphql` reads the property graph.
+/// Every runner says the same.
+const _graphqlOnRdf =
+    '`language: graphql` reads the property graph; on `model: rdf` write `language: graphql-rdf`';
 
 /// The rules of the marks, as every runner checks them: an `xfail:` names its spec and its
 /// issue, a case is never both `skip:` and `xfail:`, and `probe:` is for the runner probes
@@ -988,6 +1014,8 @@ _Meta _parseMeta(_ParseContext ctx) {
     switch (key) {
       case 'language':
         meta.language = value;
+      case 'model':
+        meta.model = value;
       case 'dataset':
         meta.dataset = value;
       case 'requires':

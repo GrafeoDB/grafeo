@@ -381,8 +381,15 @@ class GtestItem(pytest.Item):
 
 
 def _load_dataset(db, dataset_name: str) -> None:
-    """Load a .setup dataset file into the database using GQL."""
-    dataset_path = _REPO_ROOT / "tests" / "spec" / "datasets" / f"{dataset_name}.setup"
+    """Load a dataset into the database, one statement per line: GQL from a ``.setup``
+    file, SPARQL Update from a ``.ru`` file."""
+    datasets = _REPO_ROOT / "tests" / "spec" / "datasets"
+    setup, update = datasets / f"{dataset_name}.setup", datasets / f"{dataset_name}.ru"
+    if setup.exists() and update.exists():
+        raise RunnerFault(f"Dataset '{dataset_name}' is both {setup} and {update}")
+    dataset_path, execute = (
+        (update, db.execute_sparql) if update.exists() else (setup, db.execute)
+    )
     if not dataset_path.exists():
         raise RunnerFault(f"Dataset file not found: {dataset_path}")
 
@@ -391,7 +398,7 @@ def _load_dataset(db, dataset_name: str) -> None:
         trimmed = line.strip()
         if not trimmed or trimmed.startswith("#"):
             continue
-        db.execute(trimmed)
+        execute(trimmed)
 
 
 def _describe(expected_substr: str | None, expected_status: str | None) -> str:

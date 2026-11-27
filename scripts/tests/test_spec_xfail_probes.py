@@ -71,6 +71,7 @@ def test_a_runner_error_fails_the_run_with_the_runners_own_error(runner):
     [
         ("parse_skip_and_xfail", "probe_skip_and_xfail"),
         ("parse_xfail_without_issue", "probe_xfail_without_issue"),
+        ("parse_graphql_on_rdf", "probe_graphql_on_rdf: `language: graphql-rdf`"),
         (
             "runner_error_outside",
             "runner_error.gtest: `probe:` only under `spec-probes`",
@@ -109,6 +110,7 @@ def test_the_fixtures_hold_the_cases_the_judge_expects():
     )
     assert every == [
         "assertion/assertion.gtest",
+        "parse_graphql_on_rdf/parse_graphql_on_rdf.gtest",
         "parse_skip_and_xfail/parse_skip_and_xfail.gtest",
         "parse_xfail_without_issue/parse_xfail_without_issue.gtest",
         "runner_error/runner_error.gtest",
@@ -135,6 +137,9 @@ def test_the_fixtures_hold_the_cases_the_judge_expects():
         "probe_xfail_without_issue"
     ]
     assert "spec:" in no_issue and "issue:" not in no_issue
+    on_rdf = texts["parse_graphql_on_rdf"]
+    assert "  language: graphql\n  model: rdf\n" in on_rdf
+    assert "probe_graphql_on_rdf" in gtest_cases(on_rdf)
     # Only the runner_error probe uses the probe-only key.
     keyed = [name for name, text in texts.items() if "\n    probe: " in text]
     assert keyed == ["runner_error"]

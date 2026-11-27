@@ -14,7 +14,7 @@ import { afterAll, describe, it, expect, vi } from 'vitest'
 vi.setConfig({ testTimeout: 60_000 })
 import { readFileSync, readdirSync, statSync, existsSync } from 'fs'
 import { join, relative, resolve } from 'path'
-import { parseGtestFile, coerceParams, paramValue, configOptions } from '../node/parser.mjs'
+import { parseGtestFile, coerceParams, paramValue, configOptions, datasetFile } from '../node/parser.mjs'
 import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, describeError, assertGqlStatus, assertTerms , assertValueRows, assertSideEffects, observation} from '../node/comparator.mjs'
 import { SpecFailure, runMarkedSync, runProbe, specRoot, summary, summaryLine } from '../node/xfail.mjs'
 import { caseCellType, cellTypeAt, matches as matchCell, parse as parseCell, toNeutral } from '../node/tck_values.mjs'
@@ -97,17 +97,14 @@ function findGtestFiles(dir) {
   return results.sort()
 }
 
-/** Load a .setup file and execute each line as GQL. */
+/** Load a dataset, one statement per line: GQL from a `.setup` file, SPARQL Update from a `.ru` file. */
 function loadDataset(db, datasetName) {
-  const setupPath = join(DATASETS_DIR, `${datasetName}.setup`)
-  if (!existsSync(setupPath)) {
-    throw new Error(`Dataset file not found: ${setupPath}`)
-  }
-  const content = readFileSync(setupPath, 'utf-8')
+  const { path, language } = datasetFile(DATASETS_DIR, datasetName)
+  const content = readFileSync(path, 'utf-8')
   for (const line of content.split(/\r?\n/)) {
     const trimmed = line.trim()
     if (!trimmed || trimmed.startsWith('#')) continue
-    db.execute(trimmed)
+    executeQuery(db, language, trimmed)
   }
 }
 

@@ -1,14 +1,14 @@
-# GraphQL error handling on RDF-like data
+# GraphQL error handling on Resource nodes (property graph)
 #
 # Covers: syntax errors, semantic errors, invalid mutations,
 # unsupported operations.
 
 meta:
   language: graphql
-  model: rdf
+  model: lpg
   section: errors
-  title: GraphQL error handling on RDF data
-  dataset: rdf_social
+  title: GraphQL error handling on Resource nodes
+  dataset: resource_social
   requires: [graphql]
 
 tests:

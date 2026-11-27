@@ -274,7 +274,17 @@ def parse_gtest_file(path: Path) -> GtestFile:
         parsed = _parse_line_based(content, path)
     for tc in parsed.tests:
         _check_marks(tc, path)
+    if parsed.meta.model == "rdf":
+        for tc in parsed.tests:
+            language = tc.language or parsed.meta.language
+            if language == "graphql" or "graphql" in tc.variants:
+                raise ValueError(f"test '{tc.name}': {GRAPHQL_ON_RDF}")
     return parsed
+
+
+#: Why a ``graphql`` case in a ``model: rdf`` file is refused: ``graphql`` reads the property
+#: graph. Every runner says the same.
+GRAPHQL_ON_RDF = "`language: graphql` reads the property graph; on `model: rdf` write `language: graphql-rdf`"
 
 
 def _check_marks(tc: TestCase, path: Path) -> None:

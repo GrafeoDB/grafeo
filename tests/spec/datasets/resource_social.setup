@@ -1,6 +1,6 @@
-# RDF Social Network Dataset
+# Resource Social Network Dataset (property graph nodes with RDF-style URIs)
 # 5 Resource/Person nodes, 1 Resource/Organization, 5 KNOWS edges, 1 WORKS_AT edge
-# Used by: rdf/graphql/*
+# Used by: lpg/graphql/resource_*
 
 INSERT (:Resource:Person {uri: 'http://example.org/person/alix', name: 'Alix', age: 30, city: 'Amsterdam', email: 'alix@example.org'})
 INSERT (:Resource:Person {uri: 'http://example.org/person/gus', name: 'Gus', age: 25, city: 'Berlin', email: 'gus@example.org'})

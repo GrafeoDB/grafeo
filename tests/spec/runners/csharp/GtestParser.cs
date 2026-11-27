@@ -31,8 +31,22 @@ public static class GtestParser
         var file = Parse(content);
         foreach (var tc in file.Tests)
             CheckMarks(tc, path);
+        if (file.Meta.Model == "rdf")
+        {
+            var lpg = file.Tests.FirstOrDefault(tc =>
+                (tc.Language ?? file.Meta.Language) == "graphql" || tc.Variants.ContainsKey("graphql"));
+            if (lpg is not null)
+                throw new FormatException($"test '{lpg.Name}': {GraphqlOnRdf}");
+        }
         return file;
     }
+
+    /// <summary>
+    /// Why a <c>graphql</c> case in a <c>model: rdf</c> file is refused: <c>graphql</c> reads the
+    /// property graph. Every runner says the same.
+    /// </summary>
+    public const string GraphqlOnRdf =
+        "`language: graphql` reads the property graph; on `model: rdf` write `language: graphql-rdf`";
 
     /// <summary>
     /// The rules of the marks, as every runner checks them: an <c>xfail:</c> names its spec and

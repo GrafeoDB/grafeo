@@ -5,7 +5,8 @@
  * in crates/grafeo-spec-tests/build.rs.
  */
 
-import { readFileSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
+import { join } from 'path'
 
 /**
  * @typedef {Object} Meta
@@ -136,8 +137,29 @@ export function parseGtestFile(filePath) {
   skipBlankAndComments(ctx)
   const tests = parseTests(ctx)
   for (const tc of tests) checkMarks(tc, filePath)
+  if (meta.model === 'rdf') {
+    const lpg = tests.find((tc) => (tc.language || meta.language) === 'graphql' || 'graphql' in tc.variants)
+    if (lpg) throw new Error(`test '${lpg.name}': ${GRAPHQL_ON_RDF}`)
+  }
   return { meta, tests }
 }
+
+/**
+ * The file of dataset `name` in `datasetsDir` and the language of its lines: `<name>.setup`
+ * (GQL) or `<name>.ru` (SPARQL Update). Throws when both exist, or neither.
+ */
+export function datasetFile(datasetsDir, name) {
+  const setup = join(datasetsDir, `${name}.setup`)
+  const update = join(datasetsDir, `${name}.ru`)
+  if (existsSync(setup) && existsSync(update)) throw new Error(`Dataset '${name}' is both ${setup} and ${update}`)
+  if (existsSync(update)) return { path: update, language: 'sparql' }
+  if (existsSync(setup)) return { path: setup, language: 'gql' }
+  throw new Error(`Dataset file not found: ${setup}`)
+}
+
+/** Why a `graphql` case in a `model: rdf` file is refused: `graphql` reads the property graph. */
+export const GRAPHQL_ON_RDF =
+  '`language: graphql` reads the property graph; on `model: rdf` write `language: graphql-rdf`'
 
 /** The runner probes a `probe:` key may name. */
 const PROBES = new Set(['runner_error'])

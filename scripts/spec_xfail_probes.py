@@ -9,7 +9,8 @@ how each run ends:
   unsupported statement is an expected failure, not a skip);
 - xpass: fails, and the output says XPASS with the case's spec and issue;
 - runner_error: fails with the runner's ordinary error, counting no xfail;
-- parse_skip_and_xfail, parse_xfail_without_issue: fail, naming the case;
+- parse_skip_and_xfail, parse_xfail_without_issue, parse_graphql_on_rdf: fail,
+  naming the case;
 - runner_error outside spec-probes: fails, naming the file (the `probe` key is
   accepted only under a spec-probes directory).
 
@@ -131,6 +132,7 @@ def judge(probe: str, runner: str, code: int, output: str) -> list[str]:
         "runner_error": [RUNNER_ERRORS[runner]],
         "parse_skip_and_xfail": ["probe_skip_and_xfail"],
         "parse_xfail_without_issue": ["probe_xfail_without_issue"],
+        "parse_graphql_on_rdf": ["probe_graphql_on_rdf", "`language: graphql-rdf`"],
         # A case the runner cannot run (no dataset, no query) fails as a fault, xfail or not.
         "runner_fault": ["probe_fault_missing_dataset", "probe_fault_no_query"],
         # The parser's own refusal of the key, which names `probe:` and `spec-probes`, not a
@@ -174,6 +176,7 @@ def main(argv: list[str]) -> int:
     expected = sorted(
         [
             "assertion",
+            "parse_graphql_on_rdf",
             "parse_skip_and_xfail",
             "parse_xfail_without_issue",
             "runner_error",

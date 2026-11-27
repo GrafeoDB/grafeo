@@ -703,9 +703,21 @@ func sortRows(rows [][]string) {
 // Dataset loading
 // ---------------------------------------------------------------------------
 
+// loadDataset loads a dataset, one statement per line: GQL from a `.setup` file, SPARQL
+// Update from a `.ru` file.
 func loadDataset(t specT, db *grafeo.Database, datasetName string, datasetsDir string) {
 	t.Helper()
 	setupPath := filepath.Join(datasetsDir, datasetName+".setup")
+	updatePath := filepath.Join(datasetsDir, datasetName+".ru")
+	_, setupErr := os.Stat(setupPath)
+	_, updateErr := os.Stat(updatePath)
+	language := "gql"
+	if updateErr == nil {
+		if setupErr == nil {
+			fault(t, "Dataset '%s' is both %s and %s", datasetName, setupPath, updatePath)
+		}
+		setupPath, language = updatePath, "sparql"
+	}
 	f, err := os.Open(setupPath)
 	if err != nil {
 		fault(t, "Dataset file not found: %s", setupPath)
@@ -718,7 +730,7 @@ func loadDataset(t specT, db *grafeo.Database, datasetName string, datasetsDir s
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if _, err := db.Execute(line); err != nil {
+		if _, err := executeQuery(db, language, line); err != nil {
 			t.Fatalf("Failed to load dataset line %q: %v", line, err)
 		}
 	}
@@ -812,8 +824,23 @@ func parseGtestFile(path string) (*GtestFile, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing tests in %s: %w", path, err)
 	}
+	if meta.Model == "rdf" {
+		for _, tc := range tests {
+			language := tc.Language
+			if language == "" {
+				language = meta.Language
+			}
+			if _, variant := tc.Variants["graphql"]; language == "graphql" || variant {
+				return nil, fmt.Errorf("parsing tests in %s: test '%s': %s", path, tc.Name, graphqlOnRDF)
+			}
+		}
+	}
 	return &GtestFile{Meta: meta, Tests: tests}, nil
 }
+
+// Why a `graphql` case in a `model: rdf` file is refused: `graphql` reads the property graph.
+// Every runner says the same.
+const graphqlOnRDF = "`language: graphql` reads the property graph; on `model: rdf` write `language: graphql-rdf`"
 
 // ---------------------------------------------------------------------------
 // Meta block

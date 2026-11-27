@@ -193,16 +193,30 @@ pub const SIDE_EFFECT_KEYS: [&str; 8] = [
 ///
 /// The first thing the file gets wrong, naming the case where there is one: a missing
 /// `meta:` or `tests:` block, an unknown `expect:` key, a block-scalar param, an `xfail:`
-/// without its `spec:` or `issue:`, a case both `skip:` and `xfail:`, or a `probe:` outside a
-/// `spec-probes` directory.
+/// without its `spec:` or `issue:`, a case both `skip:` and `xfail:`, a `probe:` outside a
+/// `spec-probes` directory, or a GraphQL case in a `model: rdf` file that is not `graphql-rdf`.
 pub fn parse_gtest_text(path: &str, text: &str) -> Result<GtestFile, String> {
     let lines: Vec<&str> = text.lines().collect();
     let mut idx = 0;
     skip_blank_and_comments(&lines, &mut idx);
     let meta = parse_meta(&lines, &mut idx)?;
     let tests = parse_tests(path, &lines, &mut idx)?;
+    if meta.model == "rdf" {
+        // `graphql` reads the property graph, so on RDF data it would test nothing RDF.
+        let lpg_graphql = tests.iter().find(|tc| {
+            tc.language.as_deref().unwrap_or(&meta.language) == "graphql"
+                || tc.variants.contains_key("graphql")
+        });
+        if let Some(tc) = lpg_graphql {
+            return Err(format!("test '{}': {GRAPHQL_ON_RDF}", tc.name));
+        }
+    }
     Ok(GtestFile { meta, tests })
 }
+
+/// Why a `graphql` case in a `model: rdf` file is refused; every runner says the same.
+pub const GRAPHQL_ON_RDF: &str =
+    "`language: graphql` reads the property graph; on `model: rdf` write `language: graphql-rdf`";
 
 /// Whether `path` lies under a directory named exactly `spec-probes`.
 fn in_spec_probes(path: &str) -> bool {

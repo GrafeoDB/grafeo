@@ -17,7 +17,7 @@ use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind, panic_any};
 
 use grafeo_engine::GrafeoDB;
-use grafeo_spec_tests::gtest::parse_gtest_text;
+use grafeo_spec_tests::gtest::{GRAPHQL_ON_RDF, parse_gtest_text};
 use grafeo_spec_tests::{
     SpecFailure, assert_rows_sorted, assert_warnings, execute_query, run_xfail, spec_failure,
 };
@@ -269,5 +269,41 @@ fn the_runner_error_probe_parses_only_under_spec_probes() {
     ] {
         let error = parse_gtest_text(path, &text).expect_err(path);
         assert!(error.contains(path), "names the file: {error}");
+    }
+}
+
+/// `language: graphql` reads the property graph, so a GraphQL case in a `model: rdf` file is
+/// refused, naming the case, whether the language comes from the meta, the case or a variant;
+/// `graphql-rdf` there, and `graphql` on `model: lpg`, parse.
+#[test]
+fn graphql_on_rdf_data_must_be_graphql_rdf() {
+    let file = |meta: &str, case: &str| {
+        format!("meta:\n{meta}  section: probes\n\ntests:\n  - name: a_case\n{case}")
+    };
+    let query = "    query: \"{ person { name } }\"\n";
+    let refused = [
+        file("  language: graphql\n  model: rdf\n", query),
+        file("  model: rdf\n", &format!("    language: graphql\n{query}")),
+        file(
+            "  language: sparql\n  model: rdf\n",
+            "    variants:\n      graphql: \"{ person { name } }\"\n",
+        ),
+    ];
+    for text in &refused {
+        let error = parse_gtest_text("tests/spec/rdf/graphql/probe.gtest", text).expect_err(text);
+        assert_eq!(error, format!("test 'a_case': {GRAPHQL_ON_RDF}"), "{text}");
+    }
+    let accepted = [
+        file("  language: graphql-rdf\n  model: rdf\n", query),
+        file(
+            "  model: rdf\n",
+            &format!("    language: graphql-rdf\n{query}"),
+        ),
+        file("  language: graphql\n  model: lpg\n", query),
+        file("  language: graphql\n", query),
+    ];
+    for text in &accepted {
+        parse_gtest_text("tests/spec/rdf/graphql/probe.gtest", text)
+            .unwrap_or_else(|error| panic!("{text}: {error}"));
     }
 }

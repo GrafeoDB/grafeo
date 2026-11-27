@@ -502,10 +502,21 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
     // Dataset loading
     // =========================================================================
 
-    /// <summary>Load a .setup dataset file, executing each line as GQL.</summary>
+    /// <summary>
+    /// Load a dataset, one statement per line: GQL from a <c>.setup</c> file, SPARQL Update from
+    /// a <c>.ru</c> file.
+    /// </summary>
     private static void LoadDataset(GrafeoDB db, string datasetName)
     {
         var setupPath = Path.Combine(DatasetsDir, $"{datasetName}.setup");
+        var updatePath = Path.Combine(DatasetsDir, $"{datasetName}.ru");
+        var language = "gql";
+        if (File.Exists(updatePath))
+        {
+            if (File.Exists(setupPath))
+                throw new RunnerFault($"Dataset '{datasetName}' is both {setupPath} and {updatePath}");
+            (setupPath, language) = (updatePath, "sparql");
+        }
         if (!File.Exists(setupPath))
             throw new RunnerFault($"Dataset file not found: {setupPath}");
 
@@ -515,7 +526,7 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
             var trimmed = line.Trim();
             if (string.IsNullOrEmpty(trimmed) || trimmed.StartsWith('#'))
                 continue;
-            db.Execute(trimmed);
+            ExecuteQuery(db, language, trimmed);
         }
     }
 

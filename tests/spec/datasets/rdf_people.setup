@@ -1,7 +1,0 @@
-# RDF People Dataset
-# 2 Resource/Person nodes with URIs, 1 knows edge
-# Used by: rdf/graphql/*
-
-INSERT (:Resource:Person {uri: 'http://example.org/person/alix', name: 'Alix', age: 30})
-INSERT (:Resource:Person {uri: 'http://example.org/person/gus', name: 'Gus', age: 25})
-MATCH (a:Person {name: 'Alix'}), (g:Person {name: 'Gus'}) INSERT (a)-[:knows]->(g)

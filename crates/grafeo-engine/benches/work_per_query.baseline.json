@@ -20,8 +20,8 @@
     },
     "changed graphalytics_wcc": {
       "adjacency_reads": 10000,
-      "allocated_bytes": 9437885,
-      "allocations": 38823,
+      "allocated_bytes": 9437107,
+      "allocations": 38807,
       "chunks_built": 1,
       "deadline_checks": 146,
       "plan_cache_hits": 1,
@@ -34,8 +34,8 @@
     },
     "changed hop_1": {
       "adjacency_reads": 1,
-      "allocated_bytes": 360480,
-      "allocations": 265,
+      "allocated_bytes": 360000,
+      "allocations": 254,
       "chunks_built": 1,
       "column_reads": 665,
       "deadline_checks": 3,
@@ -49,8 +49,8 @@
     },
     "changed hop_1_sql": {
       "adjacency_reads": 1,
-      "allocated_bytes": 292195,
-      "allocations": 312,
+      "allocated_bytes": 291270,
+      "allocations": 294,
       "chunks_built": 1,
       "column_reads": 665,
       "deadline_checks": 3,
@@ -65,8 +65,8 @@
     },
     "changed hop_2": {
       "adjacency_reads": 664,
-      "allocated_bytes": 10279598,
-      "allocations": 4205,
+      "allocated_bytes": 10279118,
+      "allocations": 4194,
       "chunks_built": 1,
       "column_reads": 53859,
       "deadline_checks": 61,
@@ -80,8 +80,8 @@
     },
     "changed hop_2_sql": {
       "adjacency_reads": 664,
-      "allocated_bytes": 5904960,
-      "allocations": 3939,
+      "allocated_bytes": 5904035,
+      "allocations": 3921,
       "chunks_built": 1,
       "column_reads": 53859,
       "deadline_checks": 46,
@@ -96,8 +96,8 @@
     },
     "changed hop_var": {
       "adjacency_reads": 2000,
-      "allocated_bytes": 4751975,
-      "allocations": 9028,
+      "allocated_bytes": 4751042,
+      "allocations": 9009,
       "chunks_built": 1,
       "column_reads": 4001,
       "deadline_checks": 6,
@@ -112,8 +112,8 @@
     },
     "changed hop_var_sql": {
       "adjacency_reads": 2001,
-      "allocated_bytes": 4713598,
-      "allocations": 9109,
+      "allocated_bytes": 4712673,
+      "allocations": 9091,
       "chunks_built": 1,
       "column_reads": 4001,
       "deadline_checks": 6,
@@ -128,8 +128,8 @@
     },
     "changed pattern_common": {
       "adjacency_reads": 1,
-      "allocated_bytes": 320308,
-      "allocations": 617,
+      "allocated_bytes": 319832,
+      "allocations": 606,
       "chunks_built": 1,
       "column_reads": 217,
       "deadline_checks": 9,
@@ -143,8 +143,8 @@
     },
     "changed pattern_common_sql": {
       "adjacency_reads": 1,
-      "allocated_bytes": 301645,
-      "allocations": 657,
+      "allocated_bytes": 300727,
+      "allocations": 639,
       "chunks_built": 1,
       "column_reads": 217,
       "deadline_checks": 7,
@@ -195,8 +195,8 @@
     },
     "changed pattern_square": {
       "adjacency_reads": 325,
-      "allocated_bytes": 847074,
-      "allocations": 945,
+      "allocated_bytes": 846598,
+      "allocations": 934,
       "chunks_built": 1,
       "column_reads": 3867,
       "deadline_checks": 168,
@@ -209,8 +209,8 @@
     },
     "changed pattern_square_sql": {
       "adjacency_reads": 7287,
-      "allocated_bytes": 2226322,
-      "allocations": 4788,
+      "allocated_bytes": 2225404,
+      "allocations": 4770,
       "chunks_built": 1,
       "column_reads": 26242,
       "deadline_checks": 3657,
@@ -224,8 +224,8 @@
     },
     "changed pattern_triangle": {
       "adjacency_reads": 37,
-      "allocated_bytes": 270765,
-      "allocations": 376,
+      "allocated_bytes": 270277,
+      "allocations": 365,
       "chunks_built": 1,
       "column_reads": 102,
       "deadline_checks": 28,
@@ -238,8 +238,8 @@
     },
     "changed pattern_triangle_all": {
       "adjacency_reads": 71999,
-      "allocated_bytes": 30411745,
-      "allocations": 70204,
+      "allocated_bytes": 30411200,
+      "allocations": 70189,
       "chunks_built": 1,
       "column_reads": 551548,
       "deadline_checks": 35380,
@@ -252,8 +252,8 @@
     },
     "changed pattern_triangle_hub": {
       "adjacency_reads": 1327,
-      "allocated_bytes": 1394413,
-      "allocations": 2454,
+      "allocated_bytes": 1393925,
+      "allocations": 2443,
       "chunks_built": 1,
       "column_reads": 20226,
       "deadline_checks": 685,
@@ -266,8 +266,8 @@
     },
     "changed pattern_triangle_sql": {
       "adjacency_reads": 37,
-      "allocated_bytes": 276624,
-      "allocations": 459,
+      "allocated_bytes": 275685,
+      "allocations": 441,
       "chunks_built": 1,
       "column_reads": 127,
       "deadline_checks": 26,
@@ -280,8 +280,8 @@
       "visibility_tests": 351
     },
     "changed pm_two_hop_count": {
-      "allocated_bytes": 349896,
-      "allocations": 183,
+      "allocated_bytes": 349371,
+      "allocations": 168,
       "deadline_checks": 5,
       "plan_cache_hits": 1,
       "plans_built": 1,
@@ -350,8 +350,8 @@
       "visibility_tests": 204946
     },
     "changed scan_filter_avg": {
-      "allocated_bytes": 6469,
-      "allocations": 140,
+      "allocated_bytes": 5174,
+      "allocations": 114,
       "chunks_built": 1,
       "column_reads": 199000,
       "deadline_checks": 98,
@@ -362,8 +362,8 @@
       "visibility_tests": 199927
     },
     "changed scan_filter_avg_sql": {
-      "allocated_bytes": 7405,
-      "allocations": 150,
+      "allocated_bytes": 6118,
+      "allocations": 125,
       "chunks_built": 1,
       "column_reads": 199000,
       "deadline_checks": 98,
@@ -439,8 +439,8 @@
       "visibility_tests": 299829
     },
     "changed sem_trail_self_loop": {
-      "allocated_bytes": 21966,
-      "allocations": 163,
+      "allocated_bytes": 21441,
+      "allocations": 148,
       "deadline_checks": 1,
       "plan_cache_hits": 1,
       "plans_built": 1,
@@ -466,8 +466,8 @@
     },
     "loaded graphalytics_wcc": {
       "adjacency_reads": 10000,
-      "allocated_bytes": 9512133,
-      "allocations": 39391,
+      "allocated_bytes": 9509585,
+      "allocations": 39364,
       "chunks_built": 1,
       "deadline_checks": 147,
       "parses": 1,
@@ -480,8 +480,8 @@
     },
     "loaded hop_1": {
       "adjacency_reads": 1,
-      "allocated_bytes": 404124,
-      "allocations": 717,
+      "allocated_bytes": 400607,
+      "allocations": 683,
       "chunks_built": 1,
       "column_reads": 672,
       "deadline_checks": 3,
@@ -495,8 +495,8 @@
     },
     "loaded hop_1_sql": {
       "adjacency_reads": 1,
-      "allocated_bytes": 341931,
-      "allocations": 815,
+      "allocated_bytes": 337240,
+      "allocations": 778,
       "chunks_built": 1,
       "column_reads": 672,
       "deadline_checks": 3,
@@ -511,8 +511,8 @@
     },
     "loaded hop_2": {
       "adjacency_reads": 671,
-      "allocated_bytes": 10602738,
-      "allocations": 5132,
+      "allocated_bytes": 10599221,
+      "allocations": 5098,
       "chunks_built": 1,
       "column_reads": 55338,
       "deadline_checks": 61,
@@ -526,8 +526,8 @@
     },
     "loaded hop_2_sql": {
       "adjacency_reads": 671,
-      "allocated_bytes": 6105092,
-      "allocations": 4762,
+      "allocated_bytes": 6101201,
+      "allocations": 4726,
       "chunks_built": 1,
       "column_reads": 55338,
       "deadline_checks": 46,
@@ -542,8 +542,8 @@
     },
     "loaded hop_var": {
       "adjacency_reads": 2000,
-      "allocated_bytes": 4894839,
-      "allocations": 9630,
+      "allocated_bytes": 4890940,
+      "allocations": 9593,
       "chunks_built": 1,
       "column_reads": 4001,
       "deadline_checks": 6,
@@ -558,8 +558,8 @@
     },
     "loaded hop_var_sql": {
       "adjacency_reads": 2001,
-      "allocated_bytes": 4871042,
-      "allocations": 9870,
+      "allocated_bytes": 4866351,
+      "allocations": 9833,
       "chunks_built": 1,
       "column_reads": 4001,
       "deadline_checks": 6,
@@ -574,8 +574,8 @@
     },
     "loaded pattern_common": {
       "adjacency_reads": 1,
-      "allocated_bytes": 441871,
-      "allocations": 1687,
+      "allocated_bytes": 438361,
+      "allocations": 1653,
       "chunks_built": 1,
       "column_reads": 423,
       "deadline_checks": 9,
@@ -589,8 +589,8 @@
     },
     "loaded pattern_common_sql": {
       "adjacency_reads": 1,
-      "allocated_bytes": 402009,
-      "allocations": 1628,
+      "allocated_bytes": 398127,
+      "allocations": 1592,
       "chunks_built": 1,
       "column_reads": 423,
       "deadline_checks": 7,
@@ -641,8 +641,8 @@
     },
     "loaded pattern_square": {
       "adjacency_reads": 325,
-      "allocated_bytes": 1096043,
-      "allocations": 4387,
+      "allocated_bytes": 1090669,
+      "allocations": 4352,
       "chunks_built": 1,
       "column_reads": 3923,
       "deadline_checks": 168,
@@ -655,8 +655,8 @@
     },
     "loaded pattern_square_sql": {
       "adjacency_reads": 7373,
-      "allocated_bytes": 2476976,
-      "allocations": 7895,
+      "allocated_bytes": 2471230,
+      "allocations": 7858,
       "chunks_built": 1,
       "column_reads": 26651,
       "deadline_checks": 3700,
@@ -670,8 +670,8 @@
     },
     "loaded pattern_triangle": {
       "adjacency_reads": 37,
-      "allocated_bytes": 470618,
-      "allocations": 3018,
+      "allocated_bytes": 466807,
+      "allocations": 2984,
       "chunks_built": 1,
       "column_reads": 102,
       "deadline_checks": 28,
@@ -684,8 +684,8 @@
     },
     "loaded pattern_triangle_all": {
       "adjacency_reads": 74001,
-      "allocated_bytes": 32722923,
-      "allocations": 76436,
+      "allocated_bytes": 32719128,
+      "allocations": 76403,
       "chunks_built": 1,
       "column_reads": 589272,
       "deadline_checks": 36407,
@@ -698,8 +698,8 @@
     },
     "loaded pattern_triangle_hub": {
       "adjacency_reads": 1341,
-      "allocated_bytes": 1526829,
-      "allocations": 2522,
+      "allocated_bytes": 1526341,
+      "allocations": 2511,
       "chunks_built": 1,
       "column_reads": 20778,
       "deadline_checks": 695,
@@ -711,8 +711,8 @@
     },
     "loaded pattern_triangle_sql": {
       "adjacency_reads": 37,
-      "allocated_bytes": 413920,
-      "allocations": 2042,
+      "allocated_bytes": 409731,
+      "allocations": 2006,
       "chunks_built": 1,
       "column_reads": 127,
       "deadline_checks": 26,
@@ -725,8 +725,8 @@
       "visibility_tests": 351
     },
     "loaded pm_two_hop_count": {
-      "allocated_bytes": 396641,
-      "allocations": 655,
+      "allocated_bytes": 393154,
+      "allocations": 622,
       "deadline_checks": 5,
       "parses": 1,
       "plan_cache_misses": 2,
@@ -797,8 +797,8 @@
       "visibility_tests": 8172
     },
     "loaded scan_filter_avg": {
-      "allocated_bytes": 31040,
-      "allocations": 441,
+      "allocated_bytes": 27564,
+      "allocations": 402,
       "chunks_built": 1,
       "column_reads": 200000,
       "deadline_checks": 98,
@@ -809,8 +809,8 @@
       "visibility_tests": 3126
     },
     "loaded scan_filter_avg_sql": {
-      "allocated_bytes": 36132,
-      "allocations": 481,
+      "allocated_bytes": 33072,
+      "allocations": 444,
       "chunks_built": 1,
       "column_reads": 200000,
       "deadline_checks": 98,
@@ -886,8 +886,8 @@
       "visibility_tests": 103500
     },
     "loaded sem_trail_self_loop": {
-      "allocated_bytes": 68705,
-      "allocations": 635,
+      "allocated_bytes": 65218,
+      "allocations": 602,
       "deadline_checks": 1,
       "parses": 1,
       "plan_cache_misses": 2,

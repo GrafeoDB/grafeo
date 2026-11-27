@@ -386,6 +386,7 @@ mod same_value_deciders;
 mod sampled_degrees;
 mod savepoint_undo;
 mod scalar_similarity_functions;
+mod scan_grants;
 mod schema_ddl_followups;
 mod schema_graph_type_entries;
 mod schema_hierarchy;

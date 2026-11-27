@@ -16,6 +16,7 @@
 //! the property index's maybe-equal lookups without a view: every node the
 //! index holds that a reader may find (see `index`).
 
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -35,7 +36,7 @@ use crate::graph::Direction;
 use crate::graph::lpg::{CompareOp, Edge, Node};
 use crate::graph::traits::GraphStore;
 use crate::graph::traits::{
-    CommonEdge, EdgeTypeFilter, FilteredHop, HopFrom, KeyColumnGroup, ResolvedEdgeTypes,
+    CommonEdge, EdgeTypeFilter, FilteredHop, HopFrom, IdCursor, KeyColumnGroup, ResolvedEdgeTypes,
 };
 #[cfg(feature = "vector-index")]
 use crate::index::vector::{DistanceMetric, HnswConfig};
@@ -349,6 +350,82 @@ impl Inner {
             });
         }
         ids
+    }
+
+    /// Appends the nodes `read` sees from id `start` to below `end` with at
+    /// least one of `label_ids` (every node for `None`), ascending and each
+    /// once, until `into` holds `target`: a word of rows at a time, so a page
+    /// passes `target` by at most 63, but in a row group with label chains,
+    /// which gives the rest of the group (its rows are collected, sorted and
+    /// deduplicated). Returns whether it stopped at `target` before `end`.
+    fn node_ids_after(
+        &self,
+        label_ids: Option<&[u32]>,
+        read: Read,
+        (start, end): (u64, u64),
+        target: usize,
+        into: &mut Vec<NodeId>,
+    ) -> bool {
+        for (&index, group) in self.nodes.range(start / ROWS_PER_GROUP..) {
+            let base = index * ROWS_PER_GROUP;
+            if base >= end {
+                break;
+            }
+            // The group's rows from `start` to below `end`.
+            let from = usize::try_from(start.saturating_sub(base)).unwrap_or(usize::MAX);
+            let stop = usize::try_from((end - base).min(ROWS_PER_GROUP)).unwrap_or(usize::MAX);
+            let push = |word: usize, mut bits: u64| {
+                let first = word * 64;
+                if stop - first < 64 {
+                    bits &= (1_u64 << (stop - first)) - 1;
+                }
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    into.push(NodeId::new(base + (first + bit) as u64));
+                }
+                if into.len() >= target || first + 64 >= stop {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            };
+            match label_ids {
+                None => {
+                    let words = group.versions.words().min(stop.div_ceil(64));
+                    let _stopped =
+                        group
+                            .versions
+                            .for_each_visible_word(words, |_| u64::MAX, from, read, push);
+                }
+                Some(label_ids) if group.label_updates.is_empty() => {
+                    let rows: SmallVec<[&super::bitset::Bitset; 4]> = label_ids
+                        .iter()
+                        .filter_map(|label| group.labels.get(label))
+                        .collect();
+                    let words = rows
+                        .iter()
+                        .map(|rows| rows.words().len())
+                        .max()
+                        .unwrap_or(0)
+                        .min(stop.div_ceil(64));
+                    let asked =
+                        |word: usize| rows.iter().fold(0, |any, rows| any | rows.word(word));
+                    let _stopped = group
+                        .versions
+                        .for_each_visible_word(words, asked, from, read, push);
+                }
+                Some(label_ids) => for_each_row_with_labels(group, label_ids, read, |row| {
+                    if (from..stop).contains(&row) {
+                        into.push(NodeId::new(base + row as u64));
+                    }
+                }),
+            }
+            if into.len() >= target {
+                return true;
+            }
+        }
+        false
     }
 
     /// Every node row `read` sees whose values meet `conditions`, ascending.
@@ -1645,6 +1722,49 @@ impl GraphStore for RowGroupStore {
         Ok(inner.nodes_with_labels_at(&label_ids, Read::view(view)))
     }
 
+    /// A word of rows at a time from the cursor, so a page holds at most
+    /// `want + 63` ids, but in a row group with label chains (the rest of
+    /// the group); the end is the next node id at the first call.
+    fn node_ids_after(
+        &self,
+        labels: &[&str],
+        view: ReadView,
+        cursor: &mut IdCursor,
+        want: usize,
+        into: &mut Vec<NodeId>,
+    ) -> Result<()> {
+        let inner = self.inner.read();
+        let end = cursor
+            .end
+            .get_or_insert_with(|| NodeId::new(self.next_node_id()))
+            .as_u64();
+        let start = cursor.after.map_or(0, |after| after.as_u64() + 1);
+        if start >= end {
+            return Ok(());
+        }
+        let mut label_ids: SmallVec<[u32; 4]> = labels
+            .iter()
+            .filter_map(|label| inner.label_id(label))
+            .collect();
+        label_ids.sort_unstable();
+        label_ids.dedup();
+        let stopped = (labels.is_empty() || !label_ids.is_empty())
+            && inner.node_ids_after(
+                (!labels.is_empty()).then_some(label_ids.as_slice()),
+                Read::view(view),
+                (start, end),
+                into.len().saturating_add(want.max(1)),
+                into,
+            );
+        // Stopped at the page's end, or every id left is appended.
+        cursor.after = if stopped {
+            into.last().copied()
+        } else {
+            Some(NodeId::new(end - 1))
+        };
+        Ok(())
+    }
+
     /// From the count the store keeps when it answers for `view` (see
     /// `counts_answer`), by a scan otherwise.
     fn nodes_by_label_count(&self, label: &str, view: ReadView) -> Result<usize> {
@@ -2490,5 +2610,283 @@ mod tests {
                 .contains(&Value::from("Gus")),
             "no order between them"
         );
+    }
+
+    /// The paged read of node ids (`node_ids_after`): its pages, at one view,
+    /// list what one call lists at that view.
+    mod paged_ids {
+        use grafeo_common::change::DataOp;
+        use grafeo_common::types::{EpochId, NodeId, ReadView};
+
+        use crate::graph::conformance::{Tx, labels as label_set};
+        use crate::graph::rowgroup::{ROWS_PER_GROUP, RowGroupStore};
+        use crate::graph::traits::GraphStore;
+        use crate::graph::{GraphBackend, IdCursor};
+
+        /// The label shapes a scan asks for: one, several, none, one no node
+        /// has, and several with one no node has.
+        const SHAPES: [&[&str]; 5] = [
+            &["Person"],
+            &["Person", "City"],
+            &[],
+            &["Missing"],
+            &["Director", "Missing", "Person"],
+        ];
+
+        /// What a scan asks a page for: one id, a word short, a word, a word
+        /// over, and a chunk.
+        const WANTS: [usize; 5] = [1, 63, 64, 65, 2048];
+
+        /// The id the store reserved among its first nodes and never made.
+        const RESERVED: u64 = 100;
+
+        /// The first id of the nodes made across the row groups' boundary.
+        const ACROSS: u64 = ROWS_PER_GROUP - 40;
+
+        /// The labels of the `i`th node made: a Person, a City, a Person and
+        /// Director, none.
+        fn labels_of(i: u64) -> &'static [&'static str] {
+            match i % 4 {
+                0 => &["Person"],
+                1 => &["City"],
+                2 => &["Person", "Director"],
+                _ => &[],
+            }
+        }
+
+        /// A store of 300 nodes at ids 0 to 300 but [`RESERVED`], and 80 from
+        /// [`ACROSS`], 40 in each row group; with the epoch at which its
+        /// first 150 nodes were made.
+        fn store() -> (RowGroupStore, EpochId) {
+            let store = RowGroupStore::new();
+            let mut early = EpochId::INITIAL;
+            for i in 0..300 {
+                if i == RESERVED {
+                    store.reserve_node_ids(1).unwrap();
+                }
+                store.create_node(labels_of(i));
+                if i == 149 {
+                    early = store.committed_epoch();
+                }
+            }
+            store.reserve_node_ids(ACROSS - 301).unwrap();
+            for i in 0..80 {
+                store.create_node(labels_of(i));
+            }
+            (store, early)
+        }
+
+        /// What one call lists for `labels` at `view`.
+        fn listed(store: &RowGroupStore, labels: &[&str], view: ReadView) -> Vec<NodeId> {
+            match labels {
+                [] => store.node_ids(view),
+                [label] => store.nodes_by_label(label, view),
+                labels => store.nodes_with_any_label(labels, view),
+            }
+            .unwrap()
+        }
+
+        /// Every page of `labels` at `view`, `want` at a time, `between` run
+        /// with the last id of each: each page above the one before, of at
+        /// most `most` ids when given, and short of `want` only at the end.
+        fn paged(
+            store: &RowGroupStore,
+            labels: &[&str],
+            view: ReadView,
+            want: usize,
+            most: Option<usize>,
+            mut between: impl FnMut(NodeId),
+        ) -> Vec<NodeId> {
+            let shape = format!("{labels:?}, want {want}");
+            let mut cursor = IdCursor::default();
+            let mut all: Vec<NodeId> = Vec::new();
+            let mut page = Vec::new();
+            let mut short = false;
+            loop {
+                page.clear();
+                store
+                    .node_ids_after(labels, view, &mut cursor, want, &mut page)
+                    .unwrap();
+                let Some(&last) = page.last() else {
+                    break;
+                };
+                assert!(!short, "{shape}: a page after a short one");
+                short = page.len() < want;
+                assert!(
+                    most.is_none_or(|most| page.len() <= most),
+                    "{shape}: a page of {}",
+                    page.len()
+                );
+                assert!(page.windows(2).all(|pair| pair[0] < pair[1]), "{shape}");
+                assert!(
+                    all.last().is_none_or(|prior| page[0] > *prior),
+                    "{shape}: above the page before"
+                );
+                assert!(cursor.after >= Some(last), "{shape}: the cursor moved");
+                all.extend_from_slice(&page);
+                between(last);
+            }
+            all
+        }
+
+        #[test]
+        fn pages_list_what_one_call_lists() {
+            let (store, _) = store();
+            let view = ReadView::committed(store.committed_epoch());
+            assert!(
+                listed(&store, &["Person"], view)
+                    .iter()
+                    .any(|id| id.as_u64() >= ROWS_PER_GROUP),
+                "the nodes cross into the second row group"
+            );
+            for labels in SHAPES {
+                let one = listed(&store, labels, view);
+                for want in WANTS {
+                    assert_eq!(
+                        paged(&store, labels, view, want, Some(want + 63), |_| {}),
+                        one,
+                        "{labels:?}, want {want}"
+                    );
+                }
+            }
+            let mut cursor = IdCursor::default();
+            store
+                .node_ids_after(&["Person"], view, &mut cursor, 1, &mut Vec::new())
+                .unwrap();
+            assert_eq!(
+                cursor.end,
+                Some(NodeId::new(store.next_node_id())),
+                "the end is the next id at the first call"
+            );
+        }
+
+        /// Rows with label chains (an open transaction's label changes in
+        /// both row groups) page as one call lists, at that transaction's
+        /// view and at a committed one.
+        #[test]
+        fn pages_of_chained_labels_list_what_one_call_lists() {
+            let (store, _) = store();
+            let committed = ReadView::committed(store.committed_epoch());
+            let mut tx = Tx::begin(&store, 7);
+            // Cities become Persons, Persons stop being ones, on both sides.
+            for id in [1, 5, ACROSS + 1, ACROSS + 41] {
+                tx.add_label(NodeId::new(id), "Person").unwrap();
+            }
+            for id in [0, 8, ACROSS, ACROSS + 44] {
+                tx.remove_label(NodeId::new(id), "Person").unwrap();
+            }
+            let own = ReadView::transaction(tx.id, tx.snapshot);
+            assert_ne!(
+                listed(&store, &["Person"], own),
+                listed(&store, &["Person"], committed),
+                "the views differ"
+            );
+            for view in [own, committed] {
+                for labels in [&["Person"][..], &["Person", "City"], &["City"], &[]] {
+                    let one = listed(&store, labels, view);
+                    for want in WANTS {
+                        assert_eq!(
+                            paged(&store, labels, view, want, None, |_| {}),
+                            one,
+                            "{view:?}, {labels:?}, want {want}"
+                        );
+                    }
+                }
+            }
+            tx.roll_back().unwrap();
+        }
+
+        /// Who pages, in [`writes_between_pages_leave_the_pages_at_their_view`].
+        #[derive(Clone, Copy, Debug)]
+        enum Reader {
+            Committed,
+            Transaction,
+            PastEpoch,
+        }
+
+        /// Writes between pages, committed or rolled back: a create at an id
+        /// reserved below the position and one past the end, deletes before
+        /// and past the position, a label added and one taken off past it.
+        /// The pages list what one call lists at their view, which the writes
+        /// do not change.
+        #[test]
+        fn writes_between_pages_leave_the_pages_at_their_view() {
+            for reader in [Reader::Committed, Reader::Transaction, Reader::PastEpoch] {
+                for commit in [true, false] {
+                    for labels in [&["Person"][..], &["Person", "City"], &[]] {
+                        let case = format!("{reader:?}, commit {commit}, {labels:?}");
+                        let (store, early) = store();
+                        let reading = Tx::begin(&store, 3);
+                        let view = match reader {
+                            Reader::Committed => ReadView::committed(store.committed_epoch()),
+                            Reader::Transaction => {
+                                ReadView::transaction(reading.id, reading.snapshot)
+                            }
+                            Reader::PastEpoch => ReadView::committed(early),
+                        };
+                        let one = listed(&store, labels, view);
+                        let latest = listed(&store, labels, ReadView::latest());
+                        let mut wrote = false;
+                        // The label writes give the first group a label chain, so its next
+                        // page is the rest of the group: no bound past the first page.
+                        let pages = paged(&store, labels, view, 64, None, |last| {
+                            if wrote || last.as_u64() < RESERVED {
+                                return;
+                            }
+                            wrote = true;
+                            let mut writer = Tx::begin(&store, 9);
+                            writer
+                                .change(DataOp::CreateNode {
+                                    id: NodeId::new(RESERVED),
+                                    labels: label_set(&["Person", "City"]),
+                                    properties: Vec::new(),
+                                })
+                                .unwrap();
+                            writer.create_node(&["Person", "City"], &[]).unwrap();
+                            writer.delete_node(NodeId::new(0)).unwrap();
+                            writer.delete_node(NodeId::new(ACROSS)).unwrap();
+                            writer.add_label(NodeId::new(ACROSS + 1), "Person").unwrap();
+                            writer
+                                .remove_label(NodeId::new(ACROSS + 4), "Person")
+                                .unwrap();
+                            if commit {
+                                writer.commit().unwrap();
+                            } else {
+                                writer.roll_back().unwrap();
+                            }
+                        });
+                        assert!(wrote, "{case}: the writes ran between pages");
+                        assert_eq!(pages, one, "{case}");
+                        assert_eq!(listed(&store, labels, view), one, "{case}: at the view");
+                        let now = listed(&store, labels, ReadView::latest());
+                        assert_eq!(commit, now != latest, "{case}: the writes show after");
+                        reading.roll_back().unwrap();
+                    }
+                }
+            }
+        }
+
+        /// A reader's own creates after its first call are past the end:
+        /// pages of one id, with a create after each, list the Persons there
+        /// were.
+        #[test]
+        fn pages_never_list_what_the_reader_creates_after_the_first_call() {
+            let (store, _) = store();
+            let mut tx = Tx::begin(&store, 5);
+            let view = ReadView::transaction(tx.id, tx.snapshot);
+            let one = listed(&store, &["Person"], view);
+            let mut created = 0;
+            let pages = paged(&store, &["Person"], view, 1, Some(64), |_| {
+                tx.create_node(&["Person"], &[]).unwrap();
+                created += 1;
+            });
+            assert_eq!(pages, one);
+            assert_eq!(
+                listed(&store, &["Person"], view).len(),
+                one.len() + created,
+                "the view sees the creates"
+            );
+            tx.roll_back().unwrap();
+        }
     }
 }

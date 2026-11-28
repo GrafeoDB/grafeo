@@ -1512,6 +1512,14 @@ List<File> _findGtestFiles(Directory dir) {
 var _skipped = 0;
 var _xfailed = 0;
 
+/// Skips the running case for [reason], counting it in the summary: every skip counts,
+/// whichever check skips the case (`skip:`, a runner gap, a language or feature the build
+/// lacks), so a runner that skips a whole language shows it.
+void _skipCase(String reason) {
+  _skipped++;
+  markTestSkipped(reason);
+}
+
 /// Whether [failure] is a spec case's failure, the only one an `xfail:` absorbs: a check that
 /// does not hold, or an error the binding raises. Any other error, a fault of the runner, goes
 /// on.
@@ -1795,18 +1803,16 @@ void main() {
             final variantQuery = entry.value;
             test('${tc.name}_$lang', () {
               if (tc.skip != null) {
-                _skipped++;
-                markTestSkipped('skipped in .gtest: ${tc.skip}');
+                _skipCase('skipped in .gtest: ${tc.skip}');
                 return;
               }
               final gap = tc.runnerGap;
               if (gap != null && gap.runners.contains('dart')) {
-                _skipped++;
-                markTestSkipped('runner gap: ${gap.reason} (${gap.issue})');
+                _skipCase('runner gap: ${gap.reason} (${gap.issue})');
                 return;
               }
               if (!_isAvailable(lang)) {
-                markTestSkipped('Language "$lang" not available');
+                _skipCase('Language "$lang" not available');
                 return;
               }
               final db = _openCase(tc.config);
@@ -1837,27 +1843,25 @@ void main() {
         test(tc.name, () {
           // Skip if test has a skip field
           if (tc.skip != null) {
-            _skipped++;
-            markTestSkipped('skipped in .gtest: ${tc.skip}');
+            _skipCase('skipped in .gtest: ${tc.skip}');
             return;
           }
           // A gap of this binding (`runner_gap:`) skips the case here, as `skip:` does
           final gap = tc.runnerGap;
           if (gap != null && gap.runners.contains('dart')) {
-            _skipped++;
-            markTestSkipped('runner gap: ${gap.reason} (${gap.issue})');
+            _skipCase('runner gap: ${gap.reason} (${gap.issue})');
             return;
           }
 
           // Check language availability (file-level and per-test)
           if (!_isAvailable(meta.language)) {
-            markTestSkipped(
+            _skipCase(
               'Language "${meta.language}" not available',
             );
             return;
           }
           if (tc.language != null && !_isAvailable(tc.language!)) {
-            markTestSkipped(
+            _skipCase(
               'Language "${tc.language}" not available',
             );
             return;
@@ -1866,7 +1870,7 @@ void main() {
           // Check requires
           for (final req in meta.requires) {
             if (!_isAvailable(req)) {
-              markTestSkipped(
+              _skipCase(
                 'Required capability "$req" not available',
               );
               return;
@@ -1874,7 +1878,7 @@ void main() {
           }
           for (final req in tc.requires) {
             if (!_isAvailable(req)) {
-              markTestSkipped(
+              _skipCase(
                 'Required capability "$req" not available',
               );
               return;

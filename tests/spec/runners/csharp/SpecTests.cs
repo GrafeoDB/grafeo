@@ -79,9 +79,24 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
         string? variantQuery,
         string? skipReason)
     {
+        try
+        {
+            RunMarked(filePath, testName, variantLang, variantQuery, skipReason);
+        }
+        catch (Xunit.SkipException)
+        {
+            // Every skip counts in the summary, whichever check skips the case
+            Interlocked.Increment(ref GtestSummary.Skipped);
+            throw;
+        }
+    }
+
+    /// <summary>One case with its marks: <c>skip:</c>, a runner gap, <c>xfail:</c>.</summary>
+    private void RunMarked(
+        string filePath, string testName, string? variantLang, string? variantQuery, string? skipReason)
+    {
         if (skipReason is not null)
         {
-            Interlocked.Increment(ref GtestSummary.Skipped);
             Skip.If(true, skipReason);
             return;
         }
@@ -93,7 +108,6 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
         // A gap of this binding (`runner_gap:`) skips the case here, as `skip:` does
         if (tc.RunnerGap is { } gap && gap.Runners.Contains("csharp"))
         {
-            Interlocked.Increment(ref GtestSummary.Skipped);
             Skip.If(true, $"runner gap: {gap.Reason} ({gap.Issue})");
             return;
         }

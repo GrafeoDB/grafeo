@@ -16,7 +16,7 @@ import { readFileSync, readdirSync, statSync, existsSync } from 'fs'
 import { join, relative, resolve } from 'path'
 import { parseGtestFile, coerceParams, paramValue, configOptions, datasetFile } from '../node/parser.mjs'
 import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, describeError, assertGqlStatus, assertTerms , assertValueRows, assertSideEffects, observation} from '../node/comparator.mjs'
-import { SpecFailure, runMarkedSync, runProbe, specRoot, summary, summaryLine } from '../node/xfail.mjs'
+import { SpecFailure, skipCase, runMarkedSync, runProbe, specRoot, summary, summaryLine } from '../node/xfail.mjs'
 import { caseCellType, cellTypeAt, matches as matchCell, parse as parseCell, toNeutral } from '../node/tck_values.mjs'
 
 // ---------------------------------------------------------------------------
@@ -219,15 +219,14 @@ for (const filePath of gtestFiles) {
         for (const [lang, query] of Object.entries(tc.variants)) {
           it(`${tc.name}_${lang}`, (ctx) => {
             if (tc.skip || tc.runnerGap?.runners.includes('wasm')) {
-              summary.skipped++
-              return ctx.skip()
+              return skipCase(ctx)
             }
             const db = new Database(configOptions(tc.config))
             try {
-              if (!isAvailable(db, lang)) return ctx.skip()
+              if (!isAvailable(db, lang)) return skipCase(ctx)
               // Check the file's and the test's requires, as single tests do
               for (const req of [...(meta.requires || []), ...(tc.requires || [])]) {
-                if (!isAvailable(db, req)) return ctx.skip()
+                if (!isAvailable(db, req)) return skipCase(ctx)
               }
               const effectiveDataset = tc.dataset || meta.dataset
               // The dataset loads inside the case, as in the other runners: a binding error there
@@ -240,7 +239,7 @@ for (const filePath of gtestFiles) {
                   runTestCase(db, { ...tc, query }, lang, meta.language || 'gql')
                 })
               } catch (err) {
-                if (err instanceof WebAssembly.RuntimeError) return ctx.skip()
+                if (err instanceof WebAssembly.RuntimeError) return skipCase(ctx)
                 throw err
               }
             } finally {
@@ -255,25 +254,24 @@ for (const filePath of gtestFiles) {
         // Skip by field
         // A gap of this binding (`runner_gap:`) skips the case here, as `skip:` does
         if (tc.skip || tc.runnerGap?.runners.includes('wasm')) {
-          summary.skipped++
-          return ctx.skip()
+          return skipCase(ctx)
         }
 
         // The case's settings (`config:`), the defaults without one
         const db = new Database(configOptions(tc.config))
         try {
           // Check language availability (file-level and per-test)
-          if (!isAvailable(db, meta.language)) return ctx.skip()
-          if (tc.language && !isAvailable(db, tc.language)) return ctx.skip()
+          if (!isAvailable(db, meta.language)) return skipCase(ctx)
+          if (tc.language && !isAvailable(db, tc.language)) return skipCase(ctx)
 
           // Check requires: skip if binding does not expose the required method
           for (const req of meta.requires) {
-            if (!isAvailable(db, req)) return ctx.skip()
+            if (!isAvailable(db, req)) return skipCase(ctx)
           }
 
           // Check per-test requires
           for (const req of (tc.requires || [])) {
-            if (!isAvailable(db, req)) return ctx.skip()
+            if (!isAvailable(db, req)) return skipCase(ctx)
           }
 
           // Load dataset (per-test override takes priority)
@@ -289,7 +287,7 @@ for (const filePath of gtestFiles) {
             })
           } catch (err) {
             // WASM panics (e.g. rand(), SystemTime) surface as RuntimeError: unreachable
-            if (err instanceof WebAssembly.RuntimeError) return ctx.skip()
+            if (err instanceof WebAssembly.RuntimeError) return skipCase(ctx)
             throw err
           }
         } finally {

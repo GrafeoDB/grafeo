@@ -7,6 +7,9 @@ how each run ends:
 
 - assertion: passes, and its summary line says `skipped=0 xfailed=3` (an
   unsupported statement is an expected failure, not a skip);
+- feature_skip: passes, and its summary line says `skipped=2 xfailed=0` (a
+  language and a feature the build lacks are skips the line counts, so a
+  runner that skips more than the build's expected skips shows it);
 - xpass: fails, and the output says XPASS with the case's spec and issue;
 - runner_error: fails with the runner's ordinary error, counting no xfail;
 - parse_skip_and_xfail, parse_xfail_without_issue, parse_graphql_on_rdf: fail,
@@ -123,6 +126,14 @@ def judge(probe: str, runner: str, code: int, output: str) -> list[str]:
                 f"summary {counted}, expected one line: skipped=0 xfailed=3"
             )
         return problems
+    if probe == "feature_skip":
+        if code != 0:
+            problems.append(f"exit status {code}, expected 0")
+        if counted != [(2, 0)]:
+            problems.append(
+                f"summary {counted}, expected one line: skipped=2 xfailed=0"
+            )
+        return problems
     if code == 0:
         problems.append("exit status 0, expected a failed run")
     if any(xfailed for _, xfailed in counted):
@@ -176,6 +187,7 @@ def main(argv: list[str]) -> int:
     expected = sorted(
         [
             "assertion",
+            "feature_skip",
             "parse_graphql_on_rdf",
             "parse_skip_and_xfail",
             "parse_xfail_without_issue",

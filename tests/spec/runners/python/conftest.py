@@ -89,8 +89,8 @@ class RunnerFault(Exception):
     fault of the gtest or the runner, which fails the case even when it is marked ``xfail:``."""
 
 
-#: The run's counts for the ``gtest summary`` line: the cases skipped by ``skip:`` and the
-#: ones that failed as expected.
+#: The run's counts for the ``gtest summary`` line: every skipped case (``skip:``, a runner
+#: gap, a language or feature the build lacks) and the ones that failed as expected.
 SUMMARY_KEY = pytest.StashKey[dict]()
 
 
@@ -186,12 +186,19 @@ class GtestItem(pytest.Item):
         self.variant_query = variant_query
 
     def runtest(self):
+        try:
+            self._run_marked()
+        except pytest.skip.Exception:
+            # Every skip counts in the summary, whichever check skips the case
+            summary_of(self.config)["skipped"] += 1
+            raise
+
+    def _run_marked(self):
         tc = self.test_case
         summary = summary_of(self.config)
 
         # Skip if test has a skip field
         if tc.skip is not None:
-            summary["skipped"] += 1
             pytest.skip(f"skipped in .gtest: {tc.skip}")
 
         # An xfail that names this runner in `passes_in` does not hold here: the case runs

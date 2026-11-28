@@ -55,6 +55,7 @@ use grafeo_common::utils::error::Result;
 use grafeo_core::execution::operators::Volatility;
 use grafeo_core::execution::operators::value_utils::EqualAcrossKinds;
 use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 
 /// Information about a join condition for join reordering.
 #[derive(Debug, Clone)]
@@ -1819,8 +1820,30 @@ impl Optimizer {
     /// a `WITH`, an aggregation). A `RETURN *` reads them in their order, and
     /// so do the set operations that line their inputs up.
     fn start_at_the_sought_end(&self, op: LogicalOperator, free: bool) -> LogicalOperator {
+        // A plan nests as deep as the plan depth limit, and every level runs
+        // this, `turn_at_the_sought_end` and `map_children`: the arms that do
+        // more than descend live in functions of their own, so their locals
+        // are not on the stack of each level (#573).
         match op {
-            LogicalOperator::Filter(_) => self.turn_at_the_sought_end(op, free),
+            LogicalOperator::Filter(_) if free => self.turn_at_the_sought_end(op),
+            LogicalOperator::Return(_)
+            | LogicalOperator::Project(_)
+            | LogicalOperator::Aggregate(_) => self.start_below_a_naming_operator(op, free),
+            op @ (LogicalOperator::Union(_)
+            | LogicalOperator::Except(_)
+            | LogicalOperator::Intersect(_)
+            | LogicalOperator::Otherwise(_)) => {
+                op.map_children(|child| self.start_at_the_sought_end(child, false))
+            }
+            other => other.map_children(|child| self.start_at_the_sought_end(child, free)),
+        }
+    }
+
+    /// [`Self::start_at_the_sought_end`] below a `RETURN`, a projection or an
+    /// aggregation, which decide whether the order of the columns is free.
+    #[inline(never)]
+    fn start_below_a_naming_operator(&self, op: LogicalOperator, free: bool) -> LogicalOperator {
+        match op {
             LogicalOperator::Return(mut ret) => {
                 let star = ret.items.iter().any(
                     |item| matches!(&item.expression, LogicalExpression::Variable(name) if name == "*"),
@@ -1837,12 +1860,6 @@ impl Optimizer {
                 aggregate.input = Box::new(self.start_at_the_sought_end(*aggregate.input, true));
                 LogicalOperator::Aggregate(aggregate)
             }
-            op @ (LogicalOperator::Union(_)
-            | LogicalOperator::Except(_)
-            | LogicalOperator::Intersect(_)
-            | LogicalOperator::Otherwise(_)) => {
-                op.map_children(|child| self.start_at_the_sought_end(child, false))
-            }
             other => other.map_children(|child| self.start_at_the_sought_end(child, free)),
         }
     }
@@ -1857,16 +1874,23 @@ impl Optimizer {
     /// before: the expand matches the same edges from either end, a
     /// self-loop as often from each. Otherwise `op` stays as it is, and its
     /// input goes on to [`Self::start_at_the_sought_end`].
-    fn turn_at_the_sought_end(&self, op: LogicalOperator, free: bool) -> LogicalOperator {
-        let unturned = |op: LogicalOperator| {
-            op.map_children(|child| self.start_at_the_sought_end(child, free))
-        };
-        if !free {
-            return unturned(op);
+    fn turn_at_the_sought_end(&self, op: LogicalOperator) -> LogicalOperator {
+        match self.turned(op) {
+            ControlFlow::Break(turned) => turned,
+            ControlFlow::Continue(op) => {
+                op.map_children(|child| self.start_at_the_sought_end(child, true))
+            }
         }
+    }
+
+    /// `op` turned (see [`Self::turn_at_the_sought_end`]) as the break, or `op`
+    /// as it was to descend into when it does not turn. Its own function, so
+    /// its locals are gone before an unturned `op` descends.
+    #[inline(never)]
+    fn turned(&self, op: LogicalOperator) -> ControlFlow<LogicalOperator, LogicalOperator> {
         let (filters, below) = peel_filters(op);
         let LogicalOperator::Expand(mut expand) = below else {
-            return unturned(wrap_filters(filters, below));
+            return ControlFlow::Continue(wrap_filters(filters, below));
         };
         let (checks, source) = peel_filters(std::mem::replace(
             expand.input.as_mut(),
@@ -1874,7 +1898,7 @@ impl Optimizer {
         ));
         let LogicalOperator::NodeScan(scan) = source else {
             *expand.input = wrap_filters(checks, source);
-            return unturned(wrap_filters(filters, LogicalOperator::Expand(expand)));
+            return ControlFlow::Continue(wrap_filters(filters, LogicalOperator::Expand(expand)));
         };
         // The conjuncts of the filters and of the checks, each in the order
         // they run: from the bottom filter up.
@@ -1890,7 +1914,7 @@ impl Optimizer {
             self.turned_direction(&written, &checked, &expand, &scan)
         else {
             *expand.input = wrap_filters(checks, LogicalOperator::NodeScan(scan));
-            return unturned(wrap_filters(filters, LogicalOperator::Expand(expand)));
+            return ControlFlow::Continue(wrap_filters(filters, LogicalOperator::Expand(expand)));
         };
 
         let (source, target) = (expand.from_variable, expand.to_variable);
@@ -1940,20 +1964,22 @@ impl Optimizer {
             path_mode: expand.path_mode,
             quantified: false,
         });
-        match conjunction(
-            source_label
-                .into_iter()
-                .chain(checked)
-                .chain(rest)
-                .collect(),
-        ) {
-            Some(predicate) => LogicalOperator::Filter(FilterOp {
-                predicate,
-                pushdown_hint: None,
-                input: Box::new(turned),
-            }),
-            None => turned,
-        }
+        ControlFlow::Break(
+            match conjunction(
+                source_label
+                    .into_iter()
+                    .chain(checked)
+                    .chain(rest)
+                    .collect(),
+            ) {
+                Some(predicate) => LogicalOperator::Filter(FilterOp {
+                    predicate,
+                    pushdown_hint: None,
+                    input: Box::new(turned),
+                }),
+                None => turned,
+            },
+        )
     }
 
     /// The direction of `expand` started at its target, and the variables

@@ -646,10 +646,9 @@ def rdf_path_budget(grafeo):
     return db
 
 
-def rdf_cycles(grafeo):
+def cycle_triples():
     """30 persons with an id each and up to four KNOWS links out of each, for the
     cycles of graph-bench's SPARQL twins, where each KNOWS step is `(v:KNOWS|^v:KNOWS)`."""
-    db = grafeo.GrafeoDB()
     triples = []
     for i in range(30):
         triples.append(f'v:p{i} a v:Person ; v:id "p{i}" .')
@@ -657,10 +656,27 @@ def rdf_cycles(grafeo):
             j = (i * 7 + k * 13 + 3) % 30
             if j != i:
                 triples.append(f"v:p{i} v:KNOWS v:p{j} .")
+    return " ".join(triples)
+
+
+def rdf_cycles(grafeo):
+    """The cycle triples (see `cycle_triples`) in the default graph."""
+    db = grafeo.GrafeoDB()
     db.execute_sparql(
         "PREFIX v: <http://graph-bench.example/v/> INSERT DATA { "
-        + " ".join(triples)
+        + cycle_triples()
         + " }"
+    )
+    return db
+
+
+def rdf_cycles_in_a_graph(grafeo):
+    """The cycle triples (see `cycle_triples`) in the named graph `<urn:g>` only."""
+    db = grafeo.GrafeoDB()
+    db.execute_sparql(
+        "PREFIX v: <http://graph-bench.example/v/> INSERT DATA { GRAPH <urn:g> { "
+        + cycle_triples()
+        + " } }"
     )
     return db
 
@@ -783,6 +799,7 @@ FIXTURES = {
     "rdf_path_budget": rdf_path_budget,
     "rdf_sort_limit": rdf_sort_limit,
     "rdf_cycles": rdf_cycles,
+    "rdf_cycles_in_a_graph": rdf_cycles_in_a_graph,
     "index_graphs": index_graphs,
     "listed_type": listed_type,
     "string_id_square": string_id_square,
@@ -3889,5 +3906,20 @@ for case_id, query in [
     ("FF3", "SELECT (COUNT(*) AS ?cycles) WHERE { VALUES ?personId { \"p0\" } ?a a v:Person ; v:id ?personId ; (v:KNOWS|^v:KNOWS) ?b . ?b a v:Person ; v:id ?bid ; (v:KNOWS|^v:KNOWS) ?c . ?c a v:Person ; v:id ?cid ; (v:KNOWS|^v:KNOWS) ?d . ?d a v:Person ; v:id ?did ; (v:KNOWS|^v:KNOWS) ?a . FILTER(?bid < ?did && ?cid != ?personId) }"),
 ]:
     case(case_id, "PREFIX v: <http://graph-bench.example/v/> " + query, SPARQL, "rdf_cycles")
+
+# FF4, FF5: the 4-cycle split in two halves at the person opposite the bound one (0.6.4): a
+#     repeated VALUES row multiplies its rows once, and a cycle in a named graph splits there too
+case(
+    "FF4",
+    "PREFIX v: <http://graph-bench.example/v/> SELECT ?b ?c ?d WHERE { VALUES ?personId { \"p0\" \"p0\" } ?a a v:Person ; v:id ?personId ; (v:KNOWS|^v:KNOWS) ?b . ?b a v:Person ; v:id ?bid ; (v:KNOWS|^v:KNOWS) ?c . ?c a v:Person ; v:id ?cid ; (v:KNOWS|^v:KNOWS) ?d . ?d a v:Person ; v:id ?did ; (v:KNOWS|^v:KNOWS) ?a . } ORDER BY ?b ?c ?d",
+    SPARQL,
+    "rdf_cycles",
+)
+case(
+    "FF5",
+    "PREFIX v: <http://graph-bench.example/v/> SELECT (COUNT(*) AS ?cycles) WHERE { GRAPH <urn:g> { VALUES ?personId { \"p3\" } ?a a v:Person ; v:id ?personId ; (v:KNOWS|^v:KNOWS) ?b . ?b a v:Person ; v:id ?bid ; (v:KNOWS|^v:KNOWS) ?c . ?c a v:Person ; v:id ?cid ; (v:KNOWS|^v:KNOWS) ?d . ?d a v:Person ; v:id ?did ; (v:KNOWS|^v:KNOWS) ?a . FILTER(?bid < ?did && ?cid != ?personId) } }",
+    SPARQL,
+    "rdf_cycles_in_a_graph",
+)
 
 # fmt: on

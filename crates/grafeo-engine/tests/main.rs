@@ -433,6 +433,7 @@ mod sparql_aggregate_expressions;
 mod sparql_alternative_inverse_paths;
 mod sparql_ask;
 mod sparql_correlated_exists;
+mod sparql_cycle_split;
 mod sparql_cycles;
 mod sparql_equality_pushdown;
 mod sparql_exists_per_row;

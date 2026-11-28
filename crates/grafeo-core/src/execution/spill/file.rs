@@ -306,18 +306,11 @@ impl SpillFileReader {
     ///
     /// # Errors
     ///
-    /// Returns an error if the read fails.
+    /// Returns an error if the read fails, also when the file ends before the
+    /// length it claims (nothing is allocated by the claim).
     pub fn read_bytes(&mut self) -> std::io::Result<Vec<u8>> {
-        let raw_len = self.read_u64_le()?;
-        let len = usize::try_from(raw_len).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("byte-prefix length {raw_len} exceeds addressable range"),
-            )
-        })?;
-        let mut buf = vec![0u8; len];
-        self.read_exact(&mut buf)?;
-        Ok(buf)
+        let len = self.read_u64_le()?;
+        super::read_claimed_bytes(&mut self.reader, len)
     }
 
     /// Seeks to a position in the file.
@@ -407,6 +400,21 @@ mod tests {
         let mut reader = file.reader().unwrap();
         assert_eq!(reader.read_bytes().unwrap(), b"short");
         assert_eq!(reader.read_bytes().unwrap(), b"longer string here");
+    }
+
+    /// A length prefix that claims more than the file holds fails the read,
+    /// without allocating by the claim.
+    #[test]
+    fn a_claimed_length_past_the_file_fails_the_read() {
+        let temp_dir = TempDir::new().unwrap();
+        // Past the address space, then past what any allocation can get.
+        for (i, claim) in [u64::MAX, 1 << 40].into_iter().enumerate() {
+            let mut file = SpillFile::new(temp_dir.path().join(format!("{i}.spill"))).unwrap();
+            file.write_u64_le(claim).unwrap();
+            file.write_all(b"abc").unwrap();
+            file.finish_write().unwrap();
+            assert!(file.reader().unwrap().read_bytes().is_err(), "{claim}");
+        }
     }
 
     #[test]

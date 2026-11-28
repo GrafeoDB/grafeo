@@ -169,6 +169,27 @@ fn a_merge_gives_the_in_memory_sort_at_every_run_count() {
     }
 }
 
+/// A run file whose row count differs from the rows the sort wrote fails the
+/// merge with an error: none of the run's rows is lost silently (a count of
+/// fewer) or read past its end (a count of more).
+#[test]
+fn a_run_claiming_other_rows_than_it_holds_fails_the_merge() {
+    for claim in [0, 7, 9, u64::MAX] {
+        let (dir, manager) = manager();
+        let sorted = runs_of(&manager, &input(16), 8);
+        for entry in std::fs::read_dir(dir.path().join("spill")).unwrap() {
+            let path = entry.unwrap().path();
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes[..8].copy_from_slice(&claim.to_le_bytes());
+            std::fs::write(&path, bytes).unwrap();
+        }
+        let merged = sorted
+            .merge(memory(&manager, usize::MAX), 100)
+            .and_then(|mut merge| drain(&mut merge, 100));
+        assert!(merged.is_err(), "runs claiming {claim} rows");
+    }
+}
+
 /// No runs: no rows.
 #[test]
 fn a_merge_of_no_runs_gives_nothing() {

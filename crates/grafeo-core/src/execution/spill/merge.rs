@@ -521,7 +521,15 @@ fn open_run<O: RowOrder>(
             .map_err(spill_error)?,
     );
     let rows = reader.0.read_u64_le().map_err(spill_error)?;
-    debug_assert_eq!(rows, run.rows);
+    if rows != run.rows {
+        return Err(spill_error(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "a sorted run's file claims {rows} rows, the sort wrote {}",
+                run.rows
+            ),
+        )));
+    }
     let mut open = OpenRun {
         reader,
         left: rows,

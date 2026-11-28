@@ -13,7 +13,9 @@ use grafeo_common::types::{DECIMAL_SUM_BYTES, DecimalSum, Value};
 
 use super::GroupState;
 use crate::execution::operators::accumulator::{AggregateFunction, AggregateState, HashableValue};
-use crate::execution::spill::{deserialize_value, serialize_value};
+use crate::execution::spill::{
+    deserialize_value, read_claimed_bytes, read_length, room_for, serialize_value,
+};
 
 /// The tag of each accumulator state in a record.
 mod tags {
@@ -62,12 +64,6 @@ fn write_len(w: &mut dyn Write, len: usize) -> std::io::Result<()> {
     w.write_all(&len.to_le_bytes())
 }
 
-fn read_u64(r: &mut dyn Read) -> std::io::Result<u64> {
-    let mut bytes = [0; 8];
-    r.read_exact(&mut bytes)?;
-    Ok(u64::from_le_bytes(bytes))
-}
-
 fn read_i64(r: &mut dyn Read) -> std::io::Result<i64> {
     let mut bytes = [0; 8];
     r.read_exact(&mut bytes)?;
@@ -100,8 +96,19 @@ fn read_flag(r: &mut dyn Read) -> std::io::Result<bool> {
     }
 }
 
-fn read_len(r: &mut dyn Read) -> std::io::Result<usize> {
-    usize::try_from(read_u64(r)?).map_err(|_| invalid("aggregate length exceeds usize"))
+/// Reads a count and that many items. The room set aside grows with the items read, so a
+/// damaged count fails at the file's end (every item takes at least one byte) instead of
+/// allocating by the count.
+fn read_list<T>(
+    r: &mut dyn Read,
+    mut item: impl FnMut(&mut dyn Read) -> std::io::Result<T>,
+) -> std::io::Result<Vec<T>> {
+    let len = read_length(r)?;
+    let mut items = Vec::with_capacity(room_for(len));
+    for _ in 0..len {
+        items.push(item(r)?);
+    }
+    Ok(items)
 }
 
 fn write_string(w: &mut dyn Write, value: &str) -> std::io::Result<()> {
@@ -110,9 +117,9 @@ fn write_string(w: &mut dyn Write, value: &str) -> std::io::Result<()> {
 }
 
 fn read_string(r: &mut dyn Read) -> std::io::Result<String> {
-    let mut bytes = vec![0; read_len(r)?];
-    r.read_exact(&mut bytes)?;
-    String::from_utf8(bytes).map_err(|_| invalid("aggregate string is not UTF-8"))
+    let len = read_length(r)?;
+    String::from_utf8(read_claimed_bytes(r, len)?)
+        .map_err(|_| invalid("aggregate string is not UTF-8"))
 }
 
 /// Writes a DISTINCT identity as its representative value, which the
@@ -134,8 +141,12 @@ fn write_seen(w: &mut dyn Write, seen: &HashSet<HashableValue>) -> std::io::Resu
 }
 
 fn read_seen(r: &mut dyn Read) -> std::io::Result<HashSet<HashableValue>> {
-    let len = read_len(r)?;
-    (0..len).map(|_| read_identity(r)).collect()
+    let len = read_length(r)?;
+    let mut seen = HashSet::with_capacity_and_hasher(room_for(len), Default::default());
+    for _ in 0..len {
+        seen.insert(read_identity(r)?);
+    }
+    Ok(seen)
 }
 
 fn bivariate_tag(kind: AggregateFunction) -> std::io::Result<u8> {
@@ -175,8 +186,7 @@ fn read_bivariate_kind(r: &mut dyn Read) -> std::io::Result<AggregateFunction> {
 }
 
 fn read_values(r: &mut dyn Read) -> std::io::Result<Vec<Value>> {
-    let len = read_len(r)?;
-    (0..len).map(|_| deserialize_value(r)).collect()
+    read_list(r, |r| deserialize_value(r))
 }
 
 /// Writes a group's key values and the live state of its accumulators.
@@ -355,11 +365,7 @@ fn write_accumulator(w: &mut dyn Write, accumulator: &AggregateState) -> std::io
 /// live, ready for more rows.
 pub(super) fn deserialize_group_state(r: &mut dyn Read) -> std::io::Result<GroupState> {
     let key_values = read_values(r)?;
-    let num_accumulators = read_len(r)?;
-    let mut accumulators = Vec::with_capacity(num_accumulators);
-    for _ in 0..num_accumulators {
-        accumulators.push(read_accumulator(r)?);
-    }
+    let accumulators = read_list(r, read_accumulator)?;
     Ok(GroupState {
         key_values,
         accumulators,
@@ -443,10 +449,7 @@ fn read_tagged_accumulator(r: &mut dyn Read, tag: u8) -> std::io::Result<Aggrega
             }
         }
         tags::GROUP_CONCAT | tags::GROUP_CONCAT_DISTINCT => {
-            let len = read_len(r)?;
-            let values = (0..len)
-                .map(|_| read_string(r))
-                .collect::<std::io::Result<Vec<_>>>()?;
+            let values = read_list(r, read_string)?;
             let separator = read_string(r)?;
             if tag == tags::GROUP_CONCAT {
                 AggregateState::GroupConcat(values, separator)
@@ -466,10 +469,7 @@ fn read_tagged_accumulator(r: &mut dyn Read, tag: u8) -> std::io::Result<Aggrega
             }
         }
         tags::PERCENTILE_DISC | tags::PERCENTILE_CONT => {
-            let len = read_len(r)?;
-            let values = (0..len)
-                .map(|_| read_f64(r))
-                .collect::<std::io::Result<Vec<_>>>()?;
+            let values = read_list(r, read_f64)?;
             let percentile = read_f64(r)?;
             if tag == tags::PERCENTILE_DISC {
                 AggregateState::PercentileDisc { values, percentile }
@@ -528,6 +528,55 @@ fn read_tagged_accumulator(r: &mut dyn Read, tag: u8) -> std::io::Result<Aggrega
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Concatenates the parts of a spill encoding.
+    fn encoded(parts: &[&[u8]]) -> Vec<u8> {
+        parts.concat()
+    }
+
+    /// A count or length a damaged spill file claims past what it holds fails
+    /// the group's reload at the file's end, wherever it sits: nothing is
+    /// allocated by the claim, so nothing panics or aborts.
+    #[test]
+    fn a_claimed_count_past_the_data_fails_the_reload() {
+        let zero = 0u64.to_le_bytes();
+        let one = 1u64.to_le_bytes();
+        let mut null = Vec::new();
+        serialize_value(&Value::Null, &mut null).unwrap();
+        // A group with no key values and the one accumulator `state`.
+        let group = |state: &[&[u8]]| encoded(&[&zero, &one, &state.concat()]);
+        // Past the address space, then past what any allocation can get.
+        for claim in [u64::MAX, 1 << 40] {
+            let len = claim.to_le_bytes();
+            let cases = [
+                ("key values", encoded(&[&len, &null, &null])),
+                ("accumulators", encoded(&[&zero, &len, &[tags::COUNT]])),
+                ("collected values", group(&[&[tags::COLLECT], &len, &null])),
+                (
+                    "distinct identities",
+                    group(&[&[tags::COLLECT_DISTINCT], &zero, &len, &null]),
+                ),
+                (
+                    "concatenated strings",
+                    group(&[&[tags::GROUP_CONCAT], &len, &zero]),
+                ),
+                (
+                    "a concatenated string",
+                    group(&[&[tags::GROUP_CONCAT], &one, &len, b"ab"]),
+                ),
+                (
+                    "percentile values",
+                    group(&[&[tags::PERCENTILE_DISC], &len, &[0; 8]]),
+                ),
+            ];
+            for (name, bytes) in cases {
+                assert!(
+                    deserialize_group_state(&mut bytes.as_slice()).is_err(),
+                    "{name} claiming {claim}"
+                );
+            }
+        }
+    }
 
     /// A duration sum or average, a failed operand, a SPARQL sum and a
     /// SPARQL sum that met an error spill and come back as they were.

@@ -229,14 +229,20 @@ impl AsyncSpillFileReader {
     ///
     /// # Errors
     ///
-    /// Returns an error if the read fails.
+    /// Returns an error if the read fails, also when the file ends before the
+    /// length it claims (the buffer grows with the bytes read, not by the claim).
     pub async fn read_bytes(&mut self) -> std::io::Result<Vec<u8>> {
-        // reason: spill buffer lengths fit usize on 64-bit targets
-        #[allow(clippy::cast_possible_truncation)]
-        let len = self.read_u64_le().await? as usize;
-        let mut buf = vec![0u8; len];
-        self.read_exact(&mut buf).await?;
-        Ok(buf)
+        let len = self.read_u64_le().await?;
+        let mut buf = Vec::new();
+        (&mut self.reader).take(len).read_to_end(&mut buf).await?;
+        if buf.len() as u64 == len {
+            Ok(buf)
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("spill data ends {} bytes into a value of {len}", buf.len()),
+            ))
+        }
     }
 
     /// Seeks to a position in the file.
@@ -326,6 +332,23 @@ mod tests {
         let mut reader = file.reader().await.unwrap();
         assert_eq!(reader.read_bytes().await.unwrap(), b"short");
         assert_eq!(reader.read_bytes().await.unwrap(), b"longer string here");
+    }
+
+    /// A length prefix that claims more than the file holds fails the read,
+    /// without allocating by the claim.
+    #[tokio::test]
+    async fn a_claimed_length_past_the_file_fails_the_read() {
+        let temp_dir = TempDir::new().unwrap();
+        // Past the address space, then past what any allocation can get.
+        for (i, claim) in [u64::MAX, 1 << 40].into_iter().enumerate() {
+            let path = temp_dir.path().join(format!("{i}.spill"));
+            let mut file = AsyncSpillFile::new(path).await.unwrap();
+            file.write_u64_le(claim).await.unwrap();
+            file.write_all(b"abc").await.unwrap();
+            file.finish_write().await.unwrap();
+            let read = file.reader().await.unwrap().read_bytes().await;
+            assert!(read.is_err(), "{claim}");
+        }
     }
 
     #[tokio::test]

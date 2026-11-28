@@ -7,6 +7,7 @@
 //! - Compact representation
 
 use arcstr::ArcStr;
+use grafeo_common::storage::MAX_VALUE_DEPTH;
 use grafeo_common::types::Value;
 use grafeo_common::types::rdf::Term;
 use std::collections::BTreeMap;
@@ -45,8 +46,19 @@ const RDF_LITERAL: u8 = 2;
 ///
 /// # Errors
 ///
-/// Returns an error if writing fails.
+/// Returns an error if writing fails, or if the value nests lists, maps and
+/// paths deeper than [`MAX_VALUE_DEPTH`] (as the storage codec refuses it),
+/// so a decode never meets a deeper value.
 pub fn serialize_value<W: Write + ?Sized>(value: &Value, w: &mut W) -> std::io::Result<usize> {
+    serialize_value_at(value, w, 0)
+}
+
+/// [`serialize_value`] at `depth` lists, maps and paths down.
+fn serialize_value_at<W: Write + ?Sized>(
+    value: &Value,
+    w: &mut W,
+    depth: usize,
+) -> std::io::Result<usize> {
     match value {
         Value::Null => {
             w.write_all(&[TAG_NULL])?;
@@ -87,15 +99,17 @@ pub fn serialize_value<W: Write + ?Sized>(value: &Value, w: &mut W) -> std::io::
             Ok(9)
         }
         Value::List(items) => {
+            let depth = one_deeper(depth, std::io::ErrorKind::InvalidInput)?;
             w.write_all(&[TAG_LIST])?;
             w.write_all(&(items.len() as u64).to_le_bytes())?;
             let mut total = 1 + 8;
             for item in items.iter() {
-                total += serialize_value(item, w)?;
+                total += serialize_value_at(item, w, depth)?;
             }
             Ok(total)
         }
         Value::Map(map) => {
+            let depth = one_deeper(depth, std::io::ErrorKind::InvalidInput)?;
             w.write_all(&[TAG_MAP])?;
             w.write_all(&(map.len() as u64).to_le_bytes())?;
             let mut total = 1 + 8;
@@ -106,7 +120,7 @@ pub fn serialize_value<W: Write + ?Sized>(value: &Value, w: &mut W) -> std::io::
                 w.write_all(key_bytes)?;
                 total += 8 + key_bytes.len();
                 // Serialize value
-                total += serialize_value(val, w)?;
+                total += serialize_value_at(val, w, depth)?;
             }
             Ok(total)
         }
@@ -144,16 +158,17 @@ pub fn serialize_value<W: Write + ?Sized>(value: &Value, w: &mut W) -> std::io::
             Ok(13)
         }
         Value::Path { nodes, edges } => {
+            let depth = one_deeper(depth, std::io::ErrorKind::InvalidInput)?;
             w.write_all(&[TAG_PATH])?;
             w.write_all(&(nodes.len() as u64).to_le_bytes())?;
             let mut total = 1 + 8;
             for node in nodes.iter() {
-                total += serialize_value(node, w)?;
+                total += serialize_value_at(node, w, depth)?;
             }
             w.write_all(&(edges.len() as u64).to_le_bytes())?;
             total += 8;
             for edge in edges.iter() {
-                total += serialize_value(edge, w)?;
+                total += serialize_value_at(edge, w, depth)?;
             }
             Ok(total)
         }
@@ -241,8 +256,15 @@ pub fn serialize_value<W: Write + ?Sized>(value: &Value, w: &mut W) -> std::io::
 ///
 /// # Errors
 ///
-/// Returns an error if reading fails or the format is invalid.
+/// Returns an error if reading fails or the format is invalid, including a
+/// value nested deeper than [`MAX_VALUE_DEPTH`] lists, maps and paths (which
+/// [`serialize_value`] never writes), before its recursion goes deeper.
 pub fn deserialize_value<R: Read + ?Sized>(r: &mut R) -> std::io::Result<Value> {
+    deserialize_value_at(r, 0)
+}
+
+/// [`deserialize_value`] at `depth` lists, maps and paths down.
+fn deserialize_value_at<R: Read + ?Sized>(r: &mut R, depth: usize) -> std::io::Result<Value> {
     let mut tag = [0u8; 1];
     r.read_exact(&mut tag)?;
 
@@ -263,27 +285,10 @@ pub fn deserialize_value<R: Read + ?Sized>(r: &mut R) -> std::io::Result<Value> 
             r.read_exact(&mut buf)?;
             Ok(Value::Float64(f64::from_le_bytes(buf)))
         }
-        TAG_STRING => {
-            let mut len_buf = [0u8; 8];
-            r.read_exact(&mut len_buf)?;
-            // reason: deserialized lengths are bounded by available data
-            #[allow(clippy::cast_possible_truncation)]
-            let len = u64::from_le_bytes(len_buf) as usize;
-            let mut str_buf = vec![0u8; len];
-            r.read_exact(&mut str_buf)?;
-            let s = String::from_utf8(str_buf)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-            Ok(Value::String(ArcStr::from(s)))
-        }
+        TAG_STRING => Ok(Value::String(ArcStr::from(read_spill_str(r)?))),
         TAG_BYTES => {
-            let mut len_buf = [0u8; 8];
-            r.read_exact(&mut len_buf)?;
-            // reason: deserialized lengths are bounded by available data
-            #[allow(clippy::cast_possible_truncation)]
-            let len = u64::from_le_bytes(len_buf) as usize;
-            let mut bytes_buf = vec![0u8; len];
-            r.read_exact(&mut bytes_buf)?;
-            Ok(Value::Bytes(Arc::from(bytes_buf)))
+            let len = read_length(r)?;
+            Ok(Value::Bytes(Arc::from(read_claimed_bytes(r, len)?)))
         }
         TAG_TIMESTAMP => {
             let mut buf = [0u8; 8];
@@ -294,49 +299,28 @@ pub fn deserialize_value<R: Read + ?Sized>(r: &mut R) -> std::io::Result<Value> 
             ))
         }
         TAG_LIST => {
-            let mut len_buf = [0u8; 8];
-            r.read_exact(&mut len_buf)?;
-            // reason: deserialized lengths are bounded by available data
-            #[allow(clippy::cast_possible_truncation)]
-            let len = u64::from_le_bytes(len_buf) as usize;
-            let mut items = Vec::with_capacity(len);
+            let depth = one_deeper(depth, std::io::ErrorKind::InvalidData)?;
+            let len = read_length(r)?;
+            let mut items = Vec::with_capacity(room_for(len));
             for _ in 0..len {
-                items.push(deserialize_value(r)?);
+                items.push(deserialize_value_at(r, depth)?);
             }
             Ok(Value::List(Arc::from(items)))
         }
         TAG_MAP => {
-            let mut len_buf = [0u8; 8];
-            r.read_exact(&mut len_buf)?;
-            // reason: deserialized lengths are bounded by available data
-            #[allow(clippy::cast_possible_truncation)]
-            let len = u64::from_le_bytes(len_buf) as usize;
+            let depth = one_deeper(depth, std::io::ErrorKind::InvalidData)?;
+            let len = read_length(r)?;
             let mut map = BTreeMap::new();
             for _ in 0..len {
-                // Read key
-                let mut key_len_buf = [0u8; 8];
-                r.read_exact(&mut key_len_buf)?;
-                // reason: deserialized key length is bounded by available data
-                #[allow(clippy::cast_possible_truncation)]
-                let key_len = u64::from_le_bytes(key_len_buf) as usize;
-                let mut key_buf = vec![0u8; key_len];
-                r.read_exact(&mut key_buf)?;
-                let key_str = String::from_utf8(key_buf).map_err(|e| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-                })?;
-                // Read value
-                let val = deserialize_value(r)?;
+                let key_str = read_spill_str(r)?;
+                let val = deserialize_value_at(r, depth)?;
                 map.insert(grafeo_common::types::PropertyKey::new(key_str), val);
             }
             Ok(Value::Map(Arc::new(map)))
         }
         TAG_VECTOR => {
-            let mut len_buf = [0u8; 8];
-            r.read_exact(&mut len_buf)?;
-            // reason: deserialized lengths are bounded by available data
-            #[allow(clippy::cast_possible_truncation)]
-            let len = u64::from_le_bytes(len_buf) as usize;
-            let mut floats = Vec::with_capacity(len);
+            let len = read_length(r)?;
+            let mut floats = Vec::with_capacity(room_for(len));
             let mut buf = [0u8; 4];
             for _ in 0..len {
                 r.read_exact(&mut buf)?;
@@ -394,22 +378,16 @@ pub fn deserialize_value<R: Read + ?Sized>(r: &mut R) -> std::io::Result<Value> 
             ))
         }
         TAG_PATH => {
-            let mut len_buf = [0u8; 8];
-            r.read_exact(&mut len_buf)?;
-            // reason: deserialized lengths are bounded by available data
-            #[allow(clippy::cast_possible_truncation)]
-            let nodes_len = u64::from_le_bytes(len_buf) as usize;
-            let mut nodes = Vec::with_capacity(nodes_len);
+            let depth = one_deeper(depth, std::io::ErrorKind::InvalidData)?;
+            let nodes_len = read_length(r)?;
+            let mut nodes = Vec::with_capacity(room_for(nodes_len));
             for _ in 0..nodes_len {
-                nodes.push(deserialize_value(r)?);
+                nodes.push(deserialize_value_at(r, depth)?);
             }
-            r.read_exact(&mut len_buf)?;
-            // reason: deserialized lengths are bounded by available data
-            #[allow(clippy::cast_possible_truncation)]
-            let edges_len = u64::from_le_bytes(len_buf) as usize;
-            let mut edges = Vec::with_capacity(edges_len);
+            let edges_len = read_length(r)?;
+            let mut edges = Vec::with_capacity(room_for(edges_len));
             for _ in 0..edges_len {
-                edges.push(deserialize_value(r)?);
+                edges.push(deserialize_value_at(r, depth)?);
             }
             Ok(Value::Path {
                 nodes: Arc::from(nodes),
@@ -418,21 +396,10 @@ pub fn deserialize_value<R: Read + ?Sized>(r: &mut R) -> std::io::Result<Value> 
         }
         TAG_GCOUNTER => {
             let mut u64_buf = [0u8; 8];
-            r.read_exact(&mut u64_buf)?;
-            // reason: deserialized counts are bounded by available data
-            #[allow(clippy::cast_possible_truncation)]
-            let count = u64::from_le_bytes(u64_buf) as usize;
-            let mut map = std::collections::HashMap::with_capacity(count);
+            let count = read_length(r)?;
+            let mut map = std::collections::HashMap::with_capacity(room_for(count));
             for _ in 0..count {
-                r.read_exact(&mut u64_buf)?;
-                // reason: deserialized key length is bounded by available data
-                #[allow(clippy::cast_possible_truncation)]
-                let key_len = u64::from_le_bytes(u64_buf) as usize;
-                let mut key_buf = vec![0u8; key_len];
-                r.read_exact(&mut key_buf)?;
-                let key = String::from_utf8(key_buf).map_err(|e| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-                })?;
+                let key = read_spill_str(r)?;
                 r.read_exact(&mut u64_buf)?;
                 let value = u64::from_le_bytes(u64_buf);
                 map.insert(key, value);
@@ -446,21 +413,10 @@ pub fn deserialize_value<R: Read + ?Sized>(r: &mut R) -> std::io::Result<Value> 
                 std::collections::HashMap::new(),
             ];
             for map in &mut maps {
-                r.read_exact(&mut u64_buf)?;
-                // reason: deserialized counts are bounded by available data
-                #[allow(clippy::cast_possible_truncation)]
-                let count = u64::from_le_bytes(u64_buf) as usize;
-                map.reserve(count);
+                let count = read_length(r)?;
+                map.reserve(room_for(count));
                 for _ in 0..count {
-                    r.read_exact(&mut u64_buf)?;
-                    // reason: deserialized key length is bounded by available data
-                    #[allow(clippy::cast_possible_truncation)]
-                    let key_len = u64::from_le_bytes(u64_buf) as usize;
-                    let mut key_buf = vec![0u8; key_len];
-                    r.read_exact(&mut key_buf)?;
-                    let key = String::from_utf8(key_buf).map_err(|e| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-                    })?;
+                    let key = read_spill_str(r)?;
                     r.read_exact(&mut u64_buf)?;
                     let value = u64::from_le_bytes(u64_buf);
                     map.insert(key, value);
@@ -529,14 +485,70 @@ fn write_spill_str<W: Write + ?Sized>(w: &mut W, text: &str) -> std::io::Result<
 
 /// Reads a string [`write_spill_str`] wrote.
 fn read_spill_str<R: Read + ?Sized>(r: &mut R) -> std::io::Result<String> {
-    let mut len_buf = [0u8; 8];
-    r.read_exact(&mut len_buf)?;
-    let len = usize::try_from(u64::from_le_bytes(len_buf))
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-    let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf)?;
-    String::from_utf8(buf)
+    let len = read_length(r)?;
+    String::from_utf8(read_claimed_bytes(r, len)?)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+}
+
+/// How many items, or bytes, a decoder makes room for before it reads them. A length read
+/// from a spill file is a claim until its items arrive: a damaged one sets aside at most this
+/// much before the file runs out, and past it the room grows with what is read. Every item
+/// takes at least one byte (a value its tag), so a claim past the file's end fails there.
+const ROOM_AHEAD: usize = 4096;
+
+/// The depth inside one more list, map or path, refused past
+/// [`MAX_VALUE_DEPTH`] (as `kind`: `InvalidInput` on write, `InvalidData` on
+/// read), so neither side recurses deeper than the storage codec does.
+fn one_deeper(depth: usize, kind: std::io::ErrorKind) -> std::io::Result<usize> {
+    let depth = depth + 1;
+    if depth > MAX_VALUE_DEPTH {
+        return Err(std::io::Error::new(
+            kind,
+            format!("spill values nest at most {MAX_VALUE_DEPTH} lists, maps and paths deep"),
+        ));
+    }
+    Ok(depth)
+}
+
+/// Room for `claimed` items, at most [`ROOM_AHEAD`].
+pub(crate) fn room_for(claimed: u64) -> usize {
+    usize::try_from(claimed).map_or(ROOM_AHEAD, |claimed| claimed.min(ROOM_AHEAD))
+}
+
+/// Reads a length or count (u64, little endian).
+pub(crate) fn read_length<R: Read + ?Sized>(r: &mut R) -> std::io::Result<u64> {
+    let mut bytes = [0u8; 8];
+    r.read_exact(&mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+/// Reads the `len` bytes a length claims. A file that ends first fails with
+/// [`std::io::ErrorKind::UnexpectedEof`], having allocated no more than it held.
+pub(crate) fn read_claimed_bytes<R: Read + ?Sized>(
+    r: &mut R,
+    len: u64,
+) -> std::io::Result<Vec<u8>> {
+    let room = room_for(len);
+    if room as u64 == len {
+        // Within the room ahead: one exact read, without `read_to_end`'s probe past the end.
+        let mut bytes = vec![0u8; room];
+        r.read_exact(&mut bytes)?;
+        return Ok(bytes);
+    }
+    let mut bytes = Vec::with_capacity(room);
+    // The reader itself, since `R` may be unsized.
+    Read::take(r, len).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 == len {
+        Ok(bytes)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            format!(
+                "spill data ends {} bytes into a value of {len}",
+                bytes.len()
+            ),
+        ))
+    }
 }
 
 /// Serializes a row (slice of Values) to bytes.
@@ -571,13 +583,9 @@ pub fn deserialize_row<R: Read + ?Sized>(
     r: &mut R,
     expected_columns: usize,
 ) -> std::io::Result<Vec<Value>> {
-    let mut len_buf = [0u8; 8];
-    r.read_exact(&mut len_buf)?;
-    // reason: column count is bounded by practical query sizes
-    #[allow(clippy::cast_possible_truncation)]
-    let num_columns = u64::from_le_bytes(len_buf) as usize;
+    let num_columns = read_length(r)?;
 
-    if expected_columns > 0 && num_columns != expected_columns {
+    if expected_columns > 0 && num_columns != expected_columns as u64 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
@@ -587,7 +595,7 @@ pub fn deserialize_row<R: Read + ?Sized>(
         ));
     }
 
-    let mut row = Vec::with_capacity(num_columns);
+    let mut row = Vec::with_capacity(room_for(num_columns));
     for _ in 0..num_columns {
         row.push(deserialize_value(r)?);
     }
@@ -912,5 +920,153 @@ mod tests {
         // String "hi": 11 bytes (tag + 8 length + 2)
         serialize_value(&Value::String(ArcStr::from("hi")), &mut buf).unwrap();
         assert_eq!(buf.len(), 11);
+    }
+
+    /// Concatenates the parts of a spill encoding.
+    fn encoded(parts: &[&[u8]]) -> Vec<u8> {
+        parts.concat()
+    }
+
+    /// A length a damaged spill file claims past what it holds fails the
+    /// decoding at the file's end, for every encoding that has a length:
+    /// nothing is allocated by the claim, so nothing panics or aborts. A list
+    /// or map that claims more items than the few it holds stops there too.
+    #[test]
+    fn a_claimed_length_past_the_data_fails_the_decoding() {
+        let one = 1u64.to_le_bytes();
+        let zero = 0u64.to_le_bytes();
+        let nulls = [TAG_NULL; 3];
+        // Past the address space, past what any allocation can get, then within the room
+        // ahead but past the data.
+        for claim in [u64::MAX, 1 << 40, 9] {
+            let len = claim.to_le_bytes();
+            let cases = [
+                ("string", encoded(&[&[TAG_STRING], &len, b"abc"])),
+                ("bytes", encoded(&[&[TAG_BYTES], &len, b"abc"])),
+                ("list", encoded(&[&[TAG_LIST], &len, &nulls])),
+                // One entry (an empty key and a null), then the end.
+                ("map", encoded(&[&[TAG_MAP], &len, &zero, &[TAG_NULL]])),
+                ("map key", encoded(&[&[TAG_MAP], &one, &len, b"k"])),
+                ("vector", encoded(&[&[TAG_VECTOR], &len, &[0; 8]])),
+                ("path nodes", encoded(&[&[TAG_PATH], &len, &nulls])),
+                ("path edges", encoded(&[&[TAG_PATH], &zero, &len, &nulls])),
+                ("gcounter", encoded(&[&[TAG_GCOUNTER], &len])),
+                (
+                    "gcounter key",
+                    encoded(&[&[TAG_GCOUNTER], &one, &len, b"k"]),
+                ),
+                ("pncounter", encoded(&[&[TAG_PNCOUNTER], &len])),
+                (
+                    "pncounter key",
+                    encoded(&[&[TAG_PNCOUNTER], &one, &len, b"k"]),
+                ),
+                ("rdf iri", encoded(&[&[TAG_RDF_TERM, RDF_IRI], &len, b"x"])),
+            ];
+            for (name, data) in cases {
+                assert!(
+                    deserialize_value(&mut data.as_slice()).is_err(),
+                    "{name} claiming {claim}"
+                );
+            }
+            let row = encoded(&[&len, &nulls]);
+            assert!(
+                deserialize_row(&mut row.as_slice(), 0).is_err(),
+                "a row claiming {claim} columns"
+            );
+            assert!(
+                deserialize_row(&mut row.as_slice(), 3).is_err(),
+                "a row claiming {claim} of 3 columns"
+            );
+        }
+    }
+
+    /// A value whose lengths are whole decodes as it did, also past the room
+    /// a decoder makes ahead of the data.
+    #[test]
+    fn values_past_the_room_ahead_decode_whole() {
+        let long = "x".repeat(ROOM_AHEAD * 3 + 1);
+        let values = [
+            Value::String(ArcStr::from(long.as_str())),
+            Value::Bytes(Arc::from(long.as_bytes())),
+            Value::List(Arc::from(vec![Value::Int64(7); ROOM_AHEAD + 1])),
+            Value::Vector(Arc::from(vec![0.5f32; ROOM_AHEAD * 2])),
+            Value::String(ArcStr::from("")),
+        ];
+        for value in values {
+            let mut buf = Vec::new();
+            serialize_value(&value, &mut buf).unwrap();
+            let decoded = deserialize_value(&mut buf.as_slice()).unwrap();
+            assert_eq!(decoded, value);
+        }
+    }
+
+    /// Spill data nested past [`MAX_VALUE_DEPTH`] lists, maps or paths fails
+    /// the decoding before its recursion goes deeper: far past it, such as
+    /// in a damaged file, it would otherwise overflow the stack, which aborts
+    /// the process.
+    #[test]
+    fn data_nested_past_the_depth_bound_fails_the_decoding() {
+        let one = 1u64.to_le_bytes();
+        let zero = 0u64.to_le_bytes();
+        let all = u64::MAX.to_le_bytes();
+        // One level of each, holding the next: a list or a path's nodes of one (or claiming
+        // every item), a map of one entry with an empty key.
+        let levels: [(&str, Vec<u8>); 6] = [
+            ("list", encoded(&[&[TAG_LIST], &one])),
+            ("list claiming u64::MAX", encoded(&[&[TAG_LIST], &all])),
+            ("map", encoded(&[&[TAG_MAP], &one, &zero])),
+            ("map claiming u64::MAX", encoded(&[&[TAG_MAP], &all, &zero])),
+            ("path", encoded(&[&[TAG_PATH], &one])),
+            ("path claiming u64::MAX", encoded(&[&[TAG_PATH], &all])),
+        ];
+        for (name, level) in &levels {
+            for depth in [MAX_VALUE_DEPTH + 1, 100_000] {
+                let mut data = level.repeat(depth);
+                data.push(TAG_NULL);
+                let error = deserialize_value(&mut data.as_slice()).unwrap_err();
+                assert_eq!(
+                    error.kind(),
+                    std::io::ErrorKind::InvalidData,
+                    "{name} {depth} deep: {error}"
+                );
+            }
+        }
+    }
+
+    /// A value nested [`MAX_VALUE_DEPTH`] deep spills and reloads; one level
+    /// deeper is refused on write, as the storage codec refuses it, so no
+    /// spilled value is refused on reload.
+    #[test]
+    fn a_value_at_the_depth_bound_round_trips_and_a_deeper_one_is_refused() {
+        let nest = |depth: usize, wrap: fn(Value) -> Value| {
+            (0..depth).fold(Value::Int64(7), |inner, _| wrap(inner))
+        };
+        let wraps: [(&str, fn(Value) -> Value); 3] = [
+            ("list", |inner| Value::List(Arc::from(vec![inner]))),
+            ("map", |inner| {
+                Value::Map(Arc::new(BTreeMap::from([(
+                    grafeo_common::types::PropertyKey::new("k"),
+                    inner,
+                )])))
+            }),
+            ("path", |inner| Value::Path {
+                nodes: Arc::from(vec![inner]),
+                edges: Arc::from(Vec::new()),
+            }),
+        ];
+        for (name, wrap) in wraps {
+            let at_bound = nest(MAX_VALUE_DEPTH, wrap);
+            let mut buf = Vec::new();
+            serialize_value(&at_bound, &mut buf).unwrap();
+            assert_eq!(
+                deserialize_value(&mut buf.as_slice()).unwrap(),
+                at_bound,
+                "{name}"
+            );
+            let deeper = nest(MAX_VALUE_DEPTH + 1, wrap);
+            let mut written = Vec::new();
+            let error = serialize_value(&deeper, &mut written).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{name}");
+        }
     }
 }

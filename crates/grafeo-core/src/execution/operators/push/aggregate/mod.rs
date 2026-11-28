@@ -2621,26 +2621,6 @@ mod tests {
     mod grouped_query_memory {
         use super::*;
 
-        /// A strict expected failure: `body` panics today with a message that
-        /// holds `today` (the behavior `spec` names is not there yet, `issue`
-        /// tracks it). If it passes, the test fails so the mark is removed; a
-        /// panic of another kind fails it too.
-        fn xfail(spec: &str, issue: &str, today: &str, body: impl FnOnce()) {
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
-            let Err(panic) = outcome else {
-                panic!("XPASS: {spec} ({issue}) holds now; remove the xfail");
-            };
-            let message = panic
-                .downcast_ref::<String>()
-                .map(String::as_str)
-                .or_else(|| panic.downcast_ref::<&str>().copied())
-                .unwrap_or_default();
-            assert!(
-                message.contains(today),
-                "{spec} ({issue}) fails for another reason: {message}"
-            );
-        }
-
         /// A pipeline source of given chunks.
         struct Given(std::vec::IntoIter<DataChunk>);
 
@@ -2832,9 +2812,8 @@ mod tests {
         }
 
         /// A spill file whose entry count claims more than it holds fails the
-        /// reload of its groups. Today the reload sizes its map by the count
-        /// before reading: a count past the address space panics there (a lower
-        /// one that still fails to allocate aborts the process).
+        /// reload of its groups, without a panic: the count is checked against
+        /// the groups the partition spilled before anything is sized by it.
         #[test]
         fn a_spill_file_claiming_more_entries_than_it_holds_fails_the_reload() {
             let directory = tempfile::tempdir().unwrap();
@@ -2842,18 +2821,11 @@ mod tests {
             let mut damaged = std::fs::read(&path).unwrap();
             damaged[..8].copy_from_slice(&u64::MAX.to_le_bytes());
             std::fs::write(&path, damaged).unwrap();
-            xfail(
-                "#674 truncated spill data: a damaged spill file fails the reload, without a panic",
-                "fix in 0.6.4",
-                "capacity overflow",
-                move || {
-                    let reloaded = aggregate.push(
-                        create_two_column_chunk(&[7], &[30]),
-                        &mut CollectorSink::new(),
-                    );
-                    assert!(reloaded.is_err(), "a reload of a damaged count");
-                },
+            let reloaded = aggregate.push(
+                create_two_column_chunk(&[7], &[30]),
+                &mut CollectorSink::new(),
             );
+            assert!(reloaded.is_err(), "a reload of a damaged count");
         }
 
         /// A SPARQL SUM or AVG, DISTINCT or not, that saw only unbound values

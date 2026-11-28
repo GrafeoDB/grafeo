@@ -200,6 +200,7 @@ mod group_by_keys_beside_aggregates;
 mod group_by_labels;
 mod group_by_names;
 mod group_order_is_first_seen;
+mod grouped_query_memory;
 mod guarded_subqueries;
 mod history_retention;
 mod history_retention_limit;

@@ -801,6 +801,19 @@ mod tests {
         }
     }
 
+    /// The saved vector indexes are derived: a reader that does not know
+    /// their section may skip it, and builds the indexes from the data.
+    #[test]
+    fn a_writer_sets_the_optional_bit_for_the_saved_vector_indexes() {
+        for kind in [ChunkKind::Meta, ChunkKind::Column, ChunkKind::Stream] {
+            assert_eq!(
+                DirectoryEntry::flags_for(SectionType::VectorStore, kind),
+                ENTRY_SECTION_OPTIONAL,
+                "{kind:?}"
+            );
+        }
+    }
+
     #[test]
     fn an_entry_round_trips_and_names_its_pages() {
         let original = entry(19);

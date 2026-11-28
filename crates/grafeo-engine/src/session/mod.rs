@@ -3824,7 +3824,14 @@ impl SessionInner {
                 change.hold(grant);
             }
             let index = crate::database::index::vector_index_from_data(
-                &*store, label, property, dimensions, metric, None, None, None,
+                &*store,
+                label,
+                property,
+                dimensions,
+                metric,
+                None,
+                None,
+                grafeo_core::index::vector::QuantizationType::None,
             )?;
             let record = crate::database::index::vector_index_record(
                 graph.as_deref(),

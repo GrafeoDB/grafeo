@@ -98,6 +98,8 @@ pub use self::compress::CompressReport;
 pub use self::diagnostics::RowGroupMemory;
 #[cfg(any(feature = "text-index", feature = "vector-index"))]
 pub use self::index::IndexSearch;
+#[cfg(feature = "vector-index")]
+pub use self::index::saved;
 pub use self::key_column::KeyColumnQuery;
 pub use self::spill::{ColumnSpill, ColumnSpillReport};
 use self::updates::Updates;

@@ -45,7 +45,6 @@ unicode-normalization.workspace = true
 
 # Vector index (optional)
 ordered-float = { workspace = true, optional = true }
-rand = { workspace = true, optional = true }
 crc32fast.workspace = true
 
 [dev-dependencies]
@@ -75,7 +74,7 @@ succinct-indexes = []  # Enable succinct data structures (rank/select bitvectors
 compact-store = []  # Deprecated since 0.6.0: enables nothing (a build that opens files reads a compacted 0.5.x one); removed in 0.7.0
 ring-index = ["succinct-indexes", "triple-store"]  # Ring Index for RDF (3x space reduction, requires succinct-indexes and triple-store)
 shacl = ["triple-store"]  # SHACL shapes constraint language (W3C validation)
-vector-index = ["ordered-float", "rand"]  # HNSW vector index for approximate nearest neighbor search
+vector-index = ["ordered-float"]  # HNSW vector index for approximate nearest neighbor search
 text-index = []  # BM25 inverted index for full-text search
 hybrid-search = ["text-index", "vector-index"]  # Combined text + vector search with score fusion
 

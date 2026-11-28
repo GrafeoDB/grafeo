@@ -165,7 +165,7 @@ impl QuantizationType {
 /// let dist = quantizer.distance_squared_u8(&quantized, &q2);
 /// assert!(dist < 1000.0);
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScalarQuantizer {
     /// Minimum value per dimension.
     min: Vec<f32>,
@@ -275,6 +275,35 @@ impl ScalarQuantizer {
     #[must_use]
     pub fn min_values(&self) -> &[f32] {
         &self.min
+    }
+
+    /// Returns the scale factor per dimension: 255 / (max - min), or 1 where
+    /// the samples held one value.
+    #[must_use]
+    pub fn scales(&self) -> &[f32] {
+        &self.scale
+    }
+
+    /// Returns the inverse scale per dimension: (max - min) / 255, or 1 where
+    /// the samples held one value. Kept apart from [`scales`](Self::scales),
+    /// since `1 / scale` does not give it bit for bit.
+    #[must_use]
+    pub fn inverse_scales(&self) -> &[f32] {
+        &self.inv_scale
+    }
+
+    /// The quantizer with these values per dimension, as
+    /// [`min_values`](Self::min_values), [`scales`](Self::scales) and
+    /// [`inverse_scales`](Self::inverse_scales) give them: `None` unless the
+    /// three have the same length.
+    #[must_use]
+    pub fn from_parts(min: Vec<f32>, scale: Vec<f32>, inv_scale: Vec<f32>) -> Option<Self> {
+        (min.len() == scale.len() && min.len() == inv_scale.len()).then_some(Self {
+            dimensions: min.len(),
+            min,
+            scale,
+            inv_scale,
+        })
     }
 
     /// Quantizes an f32 vector to u8.
@@ -532,7 +561,7 @@ impl BinaryQuantizer {
 /// let reconstructed = quantizer.reconstruct(&codes);
 /// assert_eq!(reconstructed.len(), 16);
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProductQuantizer {
     /// Number of subvectors (M).
     num_subvectors: usize,
@@ -746,6 +775,40 @@ impl ProductQuantizer {
     #[must_use]
     pub fn subvector_dim(&self) -> usize {
         self.subvector_dim
+    }
+
+    /// Returns the centroids: subvector by subvector, centroid by centroid,
+    /// `subvector_dim` values each.
+    #[must_use]
+    pub fn centroids(&self) -> &[f32] {
+        &self.centroids
+    }
+
+    /// The quantizer with these parts, as the accessors give them: `None`
+    /// unless there is at least one subvector of at least one dimension, 1
+    /// to 256 centroids, and `num_subvectors * num_centroids *
+    /// subvector_dim` centroid values.
+    #[must_use]
+    pub fn from_parts(
+        num_subvectors: usize,
+        num_centroids: usize,
+        subvector_dim: usize,
+        centroids: Vec<f32>,
+    ) -> Option<Self> {
+        let values = num_subvectors
+            .checked_mul(num_centroids)?
+            .checked_mul(subvector_dim)?;
+        let valid = num_subvectors > 0
+            && subvector_dim > 0
+            && (1..=256).contains(&num_centroids)
+            && centroids.len() == values;
+        valid.then(|| Self {
+            num_subvectors,
+            num_centroids,
+            subvector_dim,
+            dimensions: num_subvectors * subvector_dim,
+            centroids,
+        })
     }
 
     /// Returns the memory footprint in bytes for a quantized vector.

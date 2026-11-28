@@ -60,7 +60,6 @@ use grafeo_common::utils::error::Result;
 use grafeo_common::utils::hash::FxHashSet;
 use ordered_float::OrderedFloat;
 use parking_lot::RwLock;
-use rand::{RngExt, SeedableRng};
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -212,6 +211,25 @@ pub(crate) struct BrokenLink {
     /// The levels the node listed has, `None` when it is not a node of the
     /// topology.
     pub neighbor_levels: Option<usize>,
+}
+
+/// A member of an [`HnswIndex`] as a saved index holds it (see
+/// [`HnswIndex::saved_form`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SavedNode {
+    /// A node of the graph: the hash of its vector's bits and its neighbor
+    /// lists, level 0 first.
+    Graph {
+        /// The hash of the node's vector, as the index keeps it.
+        hash: u64,
+        /// The neighbor lists, level 0 first.
+        levels: Vec<Vec<NodeId>>,
+    },
+    /// An exact duplicate of a graph node's vector, outside the graph.
+    Alias {
+        /// The graph node it duplicates.
+        representative: NodeId,
+    },
 }
 
 /// Node data stored in the HNSW index (topology only, no vector data).
@@ -367,8 +385,8 @@ pub struct HnswIndex {
     entry_point: RwLock<Option<NodeId>>,
     /// Current maximum layer in the index.
     max_level: RwLock<usize>,
-    /// Random number generator for level selection.
-    rng: RwLock<rand::rngs::StdRng>,
+    /// The seed node levels are drawn with (see [`level_of`](Self::level_of)).
+    seed: u64,
     /// The exact duplicates of the graph's vectors (see [`Duplicates`]).
     /// Locked after the topology, entry point and level.
     duplicates: RwLock<Duplicates>,
@@ -609,9 +627,10 @@ fn reset_entry_point(
     }
 }
 
-/// The seed of the generator that draws node levels, unless an index is
-/// built [`with_seed`](HnswIndex::with_seed): a fixed one, as hnswlib's
-/// default (100), so that a rebuild gives the same graph.
+/// The seed node levels are drawn with, unless an index is built
+/// [`with_seed`](HnswIndex::with_seed): a fixed one, as hnswlib's default
+/// (100), so that a rebuild gives the same graph. Every index the engine
+/// builds has it, so a saved index records no seed.
 const DEFAULT_SEED: u64 = 100;
 
 /// What a layer search measures against: the topology it walks, the vectors and the query.
@@ -646,10 +665,11 @@ pub(crate) fn infallible<T>(found: std::result::Result<T, std::convert::Infallib
 impl HnswIndex {
     /// Creates a new empty HNSW index with the given configuration.
     ///
-    /// Node levels are drawn from a generator with a fixed seed (100, as
-    /// hnswlib's default), so the same vectors inserted in the same order
-    /// build the same graph: an index built again from a database's data (as
-    /// an open does) answers a search as before, ties included (#619).
+    /// Node levels are drawn with a fixed seed (100, as hnswlib's default)
+    /// from each node's id (a geometric draw from a hash of the two), so the same
+    /// vectors inserted in the same order build the same graph: an index
+    /// built again from a database's data (as an open does) answers a search
+    /// as before, ties included (#619).
     #[must_use]
     pub fn new(config: HnswConfig) -> Self {
         Self::with_seed(config, DEFAULT_SEED)
@@ -668,7 +688,7 @@ impl HnswIndex {
             nodes: RwLock::new(nodes),
             entry_point: RwLock::new(None),
             max_level: RwLock::new(0),
-            rng: RwLock::new(rand::rngs::StdRng::seed_from_u64(DEFAULT_SEED)),
+            seed: DEFAULT_SEED,
             duplicates: RwLock::new(Duplicates::default()),
             node_bytes: AtomicUsize::new(0),
             counted,
@@ -685,7 +705,7 @@ impl HnswIndex {
             nodes: RwLock::new(nodes),
             entry_point: RwLock::new(None),
             max_level: RwLock::new(0),
-            rng: RwLock::new(rand::rngs::StdRng::seed_from_u64(seed)),
+            seed,
             duplicates: RwLock::new(Duplicates::default()),
             node_bytes: AtomicUsize::new(0),
             counted,
@@ -906,6 +926,128 @@ impl HnswIndex {
         self.publish(&nodes, duplicate_bytes);
     }
 
+    /// The ids of the index's members, ascending: its graph nodes and their
+    /// exact duplicates (aliases).
+    #[must_use]
+    pub fn member_ids(&self) -> Vec<NodeId> {
+        let nodes = self.nodes.read();
+        let duplicates = self.duplicates.read();
+        let mut ids: Vec<NodeId> = match &*nodes {
+            TopologyBackend::Heap(map) => map.keys().copied().collect(),
+            TopologyBackend::Mmap(topo) => topo.iter_node_ids().collect(),
+        };
+        ids.extend(duplicates.representative.keys().copied());
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Member `id` as a saved index holds it: a graph node with its
+    /// vector's hash and its lists, or an alias with its representative.
+    /// `None` when `id` is no member.
+    ///
+    /// A graph node restored without its hash (by
+    /// [`restore_topology`](Self::restore_topology),
+    /// [`adopt_mmap_topology`](Self::adopt_mmap_topology) or the readers of
+    /// the older sections) has hash 0, which a check of its vector against
+    /// the hash takes as changed.
+    #[must_use]
+    pub fn saved_form(&self, id: NodeId) -> Option<SavedNode> {
+        let nodes = self.nodes.read();
+        let duplicates = self.duplicates.read();
+        if let Some(&representative) = duplicates.representative.get(&id) {
+            return Some(SavedNode::Alias { representative });
+        }
+        let levels = match &*nodes {
+            TopologyBackend::Heap(map) => map.get(&id)?.neighbors.clone(),
+            TopologyBackend::Mmap(topo) => {
+                if !topo.contains(id) {
+                    return None;
+                }
+                let mut levels: Vec<Vec<NodeId>> = Vec::new();
+                while let Some(neighbors) = topo.neighbors_at(id, levels.len()) {
+                    levels.push(neighbors.collect());
+                }
+                levels
+            }
+        };
+        Some(SavedNode::Graph {
+            hash: duplicates.hash_of.get(&id).copied().unwrap_or(0),
+            levels,
+        })
+    }
+
+    /// Restores member `id` as [`saved_form`](Self::saved_form) gave it,
+    /// into a topology begun with [`begin_restore`](Self::begin_restore): a
+    /// graph node with its lists and its vector's hash, or an alias of its
+    /// representative (which may be restored before or after it).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the topology is mmap-backed: call
+    /// [`begin_restore`](Self::begin_restore) first.
+    pub fn restore_saved(&self, id: NodeId, node: SavedNode) {
+        match node {
+            SavedNode::Graph { hash, levels } => {
+                let mut nodes = self.nodes.write();
+                let node = HnswNode { neighbors: levels };
+                let added = node_bytes(&node);
+                let replaced = nodes.as_heap_mut().insert(id, node);
+                self.grow_lists(added.wrapping_sub(replaced.as_ref().map_or(0, node_bytes)));
+                let mut duplicates = self.duplicates.write();
+                duplicates.unindex_node(id);
+                duplicates.index_node(id, hash);
+                self.publish(&nodes, duplicates.counted_bytes());
+            }
+            SavedNode::Alias { representative } => {
+                let nodes = self.nodes.read();
+                let mut duplicates = self.duplicates.write();
+                duplicates.remove_alias(id);
+                duplicates.add_alias(representative, id);
+                self.publish(&nodes, duplicates.counted_bytes());
+            }
+        }
+    }
+
+    /// The first alias, by id, whose representative is no graph node, with
+    /// that representative: `None` when every alias has one.
+    pub(crate) fn first_stray_alias(&self) -> Option<(NodeId, NodeId)> {
+        let nodes = self.nodes.read();
+        let duplicates = self.duplicates.read();
+        duplicates
+            .representative
+            .iter()
+            .filter(|(_, representative)| !nodes.contains(**representative))
+            .map(|(&alias, &representative)| (alias, representative))
+            .min()
+    }
+
+    /// Makes the graph node with the most levels (the lowest id among them)
+    /// the entry point, its top level the index's: after a restore whose
+    /// saved entry point is re-derived.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the topology is mmap-backed.
+    pub(crate) fn repick_entry_point(&self) {
+        let mut nodes = self.nodes.write();
+        let mut entry_point = self.entry_point.write();
+        let mut max_level = self.max_level.write();
+        reset_entry_point(nodes.as_heap_mut(), &mut entry_point, &mut max_level);
+    }
+
+    /// The entry point and the top level.
+    #[must_use]
+    pub fn entry_and_top(&self) -> (Option<NodeId>, usize) {
+        let _nodes = self.nodes.read();
+        (*self.entry_point.read(), *self.max_level.read())
+    }
+
+    /// The seed node levels are drawn with.
+    #[must_use]
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
     /// The first neighbor reference, by node id and then level (and in list
     /// order within a list), that breaks the rules [`insert`](Self::insert)
     /// and [`remove`](Self::remove) keep: every node listed at a level is a
@@ -916,6 +1058,16 @@ impl HnswIndex {
     /// nothing: one pass over every list, and a lookup of each node listed
     /// (in an mmap topology, a search of its page index per level).
     pub(crate) fn first_broken_link(&self) -> Option<BrokenLink> {
+        self.first_broken_link_unless(|_| false)
+    }
+
+    /// [`first_broken_link`](Self::first_broken_link), where a reference to
+    /// a node `listed` says yes to is never broken: a restore re-derives
+    /// those nodes after it.
+    pub(crate) fn first_broken_link_unless(
+        &self,
+        listed: impl Fn(NodeId) -> bool,
+    ) -> Option<BrokenLink> {
         let nodes = self.nodes.read();
         let backend = &*nodes;
         let mut first: Option<BrokenLink> = None;
@@ -926,7 +1078,8 @@ impl HnswIndex {
                 }
                 for neighbor in neighbors {
                     let neighbor_levels = backend.level_count(neighbor);
-                    if neighbor == node || neighbor_levels.is_none_or(|levels| levels <= level) {
+                    let missing = neighbor_levels.is_none_or(|levels| levels <= level);
+                    if neighbor == node || (missing && !listed(neighbor)) {
                         first = Some(BrokenLink {
                             node,
                             level,
@@ -1049,7 +1202,7 @@ impl HnswIndex {
         let duplicate_bytes = duplicates.counted_bytes();
         drop(duplicates);
 
-        let level = self.random_level();
+        let level = self.level_of(id);
 
         // Create the new node (topology only)
         let node = HnswNode {
@@ -1748,13 +1901,26 @@ impl HnswIndex {
         nodes.contains(id) || self.duplicates.read().representative.contains_key(&id)
     }
 
-    /// Generates a random level for a new node.
-    fn random_level(&self) -> usize {
-        let mut rng = self.rng.write();
-        let r: f64 = rng.random();
-        // reason: HNSW level is non-negative (r in [0,1), -ln(r) >= 0), fits usize
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let level = (-r.ln() * self.config.ml).floor() as usize;
+    /// The level of node `id`: a geometric draw, `P(level >= l) = e^(-l / ml)`,
+    /// from value `id + 1` of the SplitMix64 stream at the index's seed,
+    /// mapped to `(0, 1]`. It depends on the seed and the id only, so the
+    /// same nodes get the same levels in any insert order, from any thread,
+    /// in an index built again or restored, and a node inserted again keeps
+    /// its level. The top level is at most `53 * ln 2 * ml` (13 at `m` 16).
+    pub(crate) fn level_of(&self, id: NodeId) -> usize {
+        let bits =
+            grafeo_common::utils::random::splitmix64_at(self.seed, id.as_u64().wrapping_add(1));
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a value of at most 2^53 is exact in a double"
+        )]
+        let unit = ((bits >> 11) + 1) as f64 / (1u64 << 53) as f64;
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "unit is in (0, 1], so -ln(unit) * ml is finite, at least 0 and at most 53 * ln 2 * ml"
+        )]
+        let level = (-unit.ln() * self.config.ml).floor() as usize;
         level
     }
 
@@ -2311,6 +2477,118 @@ mod tests {
     /// Builds an accessor backed by a HashMap.
     fn make_accessor(map: &HashMap<NodeId, Arc<[f32]>>) -> impl VectorAccessor + '_ {
         move |id: NodeId| -> Option<Arc<[f32]>> { map.get(&id).cloned() }
+    }
+
+    /// The level of every graph node of `index` by id.
+    fn levels(index: &HnswIndex) -> Vec<(NodeId, usize)> {
+        index
+            .member_ids()
+            .into_iter()
+            .map(|id| match index.saved_form(id) {
+                Some(SavedNode::Graph { levels, .. }) => (id, levels.len()),
+                other => panic!("node {id:?} is {other:?}"),
+            })
+            .collect()
+    }
+
+    /// Node levels follow the geometric law of `ml`: over 1,000,000
+    /// consecutive ids and three seeds, the share of each of levels 0 to 3
+    /// is within five standard deviations of `(1 - q) q^l` (`q` is
+    /// `e^(-1 / ml)`, 1/16 at `m` 16), and no level passes `53 ln 2 ml`.
+    #[test]
+    fn node_levels_follow_the_geometric_law() {
+        let config = HnswConfig::new(4, DistanceMetric::Euclidean);
+        let q = (-1.0 / config.ml).exp();
+        let cap = 53.0 * std::f64::consts::LN_2 * config.ml;
+        let n = 1_000_000_u64;
+        for seed in [1, 42, 100] {
+            let index = HnswIndex::with_seed(config.clone(), seed);
+            let mut counts = [0_u64; 64];
+            for id in 0..n {
+                let level = index.level_of(NodeId::new(id));
+                assert!(
+                    f64::from(u32::try_from(level).expect("a level fits in u32")) <= cap,
+                    "seed {seed}, id {id}: level {level} over {cap}"
+                );
+                counts[level] += 1;
+            }
+            for (level, &count) in (0_i32..4).zip(&counts) {
+                let p = (1.0 - q) * q.powi(level);
+                let expected = n as f64 * p;
+                let deviation = (n as f64 * p * (1.0 - p)).sqrt();
+                let seen = count as f64;
+                assert!(
+                    (seen - expected).abs() <= 5.0 * deviation + 1.0,
+                    "seed {seed}, level {level}: {seen} where {expected:.0} +- {deviation:.0}"
+                );
+            }
+        }
+    }
+
+    /// The levels of ids 0 to 63 at seed 42 and `m` 16, as an independent
+    /// reimplementation of the draw (SplitMix64 value `id + 1`, its top 53
+    /// bits plus one over 2^53, `floor(-ln(u) / ln 16)`) gives them.
+    #[test]
+    fn the_levels_of_the_first_ids_at_seed_42_are_pinned() {
+        let index = HnswIndex::with_seed(HnswConfig::new(4, DistanceMetric::Euclidean), 42);
+        let levels: Vec<usize> = (0..64).map(|id| index.level_of(NodeId::new(id))).collect();
+        let mut expected = vec![0; 64];
+        for id in [4, 54, 59, 63] {
+            expected[id] = 1;
+        }
+        assert_eq!(levels, expected);
+    }
+
+    /// A node's level does not depend on the order or the thread of the
+    /// inserts: the same nodes inserted in id order, in reverse, and from
+    /// two threads at once get the same level each, the one `level_of`
+    /// gives.
+    #[test]
+    fn node_levels_do_not_depend_on_insert_order_or_thread() {
+        let config = HnswConfig::new(8, DistanceMetric::Euclidean);
+        let vectors: Vec<(NodeId, Arc<[f32]>)> = create_test_vectors(300, 8)
+            .into_iter()
+            .enumerate()
+            .map(|(i, vector)| (NodeId::new(i as u64 * 7), Arc::from(vector)))
+            .collect();
+        let map: HashMap<NodeId, Arc<[f32]>> = vectors.iter().cloned().collect();
+        let accessor = make_accessor(&map);
+        let forward = HnswIndex::with_seed(config.clone(), 42);
+        for (id, vector) in &vectors {
+            forward.insert(*id, vector, &accessor);
+        }
+        let reverse = HnswIndex::with_seed(config.clone(), 42);
+        for (id, vector) in vectors.iter().rev() {
+            reverse.insert(*id, vector, &accessor);
+        }
+        let threaded = HnswIndex::with_seed(config, 42);
+        let (even, odd): (Vec<_>, Vec<_>) =
+            vectors.iter().enumerate().partition(|(i, _)| i % 2 == 0);
+        std::thread::scope(|scope| {
+            for half in [&even, &odd] {
+                let (threaded, accessor) = (&threaded, &accessor);
+                scope.spawn(move || {
+                    for (_, (id, vector)) in half {
+                        threaded.insert(*id, vector, accessor);
+                    }
+                });
+            }
+        });
+        let expected: Vec<(NodeId, usize)> = vectors
+            .iter()
+            .map(|(id, _)| (*id, forward.level_of(*id) + 1))
+            .collect();
+        assert_eq!(levels(&forward), expected);
+        assert_eq!(levels(&reverse), expected);
+        assert_eq!(levels(&threaded), expected);
+    }
+
+    /// An index made without a seed draws as one made with the default.
+    #[test]
+    fn an_index_without_a_seed_draws_with_the_default_one() {
+        let config = HnswConfig::new(4, DistanceMetric::Euclidean);
+        assert_eq!(HnswIndex::new(config.clone()).seed(), DEFAULT_SEED);
+        assert_eq!(HnswIndex::with_capacity(config, 10).seed(), DEFAULT_SEED);
     }
 
     /// A search reads each vector it returns once: the read that gives a

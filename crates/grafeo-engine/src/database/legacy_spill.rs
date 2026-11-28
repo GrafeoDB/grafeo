@@ -550,9 +550,7 @@ fn rebuild_index<S: RootStore>(
     label: &str,
     property: &str,
 ) -> grafeo_common::utils::error::Result<()> {
-    use grafeo_core::index::vector::{
-        PropertyVectorAccessor, QuantizationType, VectorAccessor, VectorIndexKind,
-    };
+    use grafeo_core::index::vector::{PropertyVectorAccessor, QuantizationType, VectorAccessor};
 
     let Some(old) = store.get_vector_index(label, property) else {
         return Ok(());
@@ -579,18 +577,9 @@ fn rebuild_index<S: RootStore>(
         old.quantization_type().unwrap_or(QuantizationType::None),
         vectors.len(),
     );
-    match &index {
-        VectorIndexKind::Hnsw(_) => {
-            for (id, vector) in &vectors {
-                index.insert(*id, vector, &accessor);
-                accessor.check()?;
-            }
-        }
-        VectorIndexKind::Quantized(quantized) => {
-            for (id, vector) in &vectors {
-                quantized.insert(*id, vector);
-            }
-        }
+    for (id, vector) in &vectors {
+        index.insert(*id, vector, &accessor);
+        accessor.check()?;
     }
     store.add_vector_index(label, property, std::sync::Arc::new(index));
     Ok(())

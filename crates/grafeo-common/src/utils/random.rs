@@ -37,6 +37,14 @@ pub fn next_f64() -> f64 {
     (next_u64() >> 11) as f64 / (1u64 << 53) as f64
 }
 
+/// Value `n` of the SplitMix64 stream that starts at `seed` (the stream
+/// [`next_u64`] draws from, at a seed of its own): a fixed function of the
+/// two, for draws that must not depend on the order they are made in.
+#[must_use]
+pub const fn splitmix64_at(seed: u64, n: u64) -> u64 {
+    mix(seed.wrapping_add(n.wrapping_mul(GOLDEN_GAMMA)))
+}
+
 /// The finalizer of SplitMix64 (Steele, Lea and Flood): a bijection that
 /// spreads every input bit over the output.
 const fn mix(mut z: u64) -> u64 {

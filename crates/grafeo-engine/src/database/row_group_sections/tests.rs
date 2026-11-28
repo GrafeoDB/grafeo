@@ -367,7 +367,7 @@ fn travels(database: &Database) -> Travellers {
             Some("cosine"),
             None,
             None,
-            None,
+            grafeo_core::index::vector::QuantizationType::None,
         )
         .unwrap();
         trips.add_vector_index("Doc", "embedding", Arc::new(index));

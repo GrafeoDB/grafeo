@@ -1365,8 +1365,12 @@ mod tests {
             QuantizationType::Scalar,
             19,
         );
+        let vectors: HashMap<NodeId, Arc<[f32]>> = (1..=50u64)
+            .map(|i| (NodeId::new(i * 88), vector_of(i).into()))
+            .collect();
+        let accessor = |id: NodeId| -> Option<Arc<[f32]>> { vectors.get(&id).cloned() };
         for i in 1..=50u64 {
-            index.insert(NodeId::new(i * 88), &vector_of(i));
+            index.insert(NodeId::new(i * 88), &vector_of(i), &accessor);
         }
         Arc::new(VectorIndexKind::Quantized(index))
     }

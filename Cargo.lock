@@ -1682,7 +1682,6 @@ dependencies = [
  "ordered-float",
  "parking_lot 0.13.0",
  "parquet",
- "rand 0.10.4",
  "rayon",
  "regex",
  "regex-lite",

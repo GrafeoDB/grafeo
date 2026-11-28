@@ -143,7 +143,9 @@ pub(super) fn restore_row_group_indexes(root: &Arc<RowGroupStore>, graphs: Vec<G
         }
         #[cfg(feature = "vector-index")]
         for def in &graph.vector {
-            let quantization = def.quantization.and_then(super::index::quantization_name);
+            let quantization = def
+                .quantization
+                .unwrap_or(grafeo_core::index::vector::QuantizationType::None);
             match super::index::vector_index_from_data(
                 &*target,
                 &def.label,

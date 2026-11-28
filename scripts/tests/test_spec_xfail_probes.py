@@ -45,6 +45,19 @@ def test_the_assertion_probe_passes_with_three_xfails(runner):
 
 
 @pytest.mark.parametrize("runner", RUNNERS)
+def test_the_feature_skip_probe_passes_counting_both_skips(runner):
+    good = "gtest summary: skipped=2 xfailed=0\n"
+    assert probes.judge("feature_skip", runner, 0, good) == []
+    assert probes.judge("feature_skip", runner, 1, good) != []
+    # A runner that skips without counting, or counts only one kind
+    for line in ("skipped=0 xfailed=0", "skipped=1 xfailed=0", "skipped=3 xfailed=0"):
+        assert probes.judge("feature_skip", runner, 0, f"gtest summary: {line}") != []
+    assert probes.judge("feature_skip", runner, 0, good + good) != [], (
+        "one summary line"
+    )
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
 def test_an_xpass_fails_the_run_and_names_its_spec_and_issue(runner):
     said = f"XPASS probe_xpass: {probes.XPASS_SPEC} ({probes.XPASS_ISSUE})"
     assert probes.judge("xpass", runner, 1, said) == []
@@ -71,6 +84,7 @@ def test_a_runner_error_fails_the_run_with_the_runners_own_error(runner):
     [
         ("parse_skip_and_xfail", "probe_skip_and_xfail"),
         ("parse_xfail_without_issue", "probe_xfail_without_issue"),
+        ("parse_graphql_on_rdf", "probe_graphql_on_rdf: `language: graphql-rdf`"),
         (
             "runner_error_outside",
             "runner_error.gtest: `probe:` only under `spec-probes`",
@@ -109,6 +123,8 @@ def test_the_fixtures_hold_the_cases_the_judge_expects():
     )
     assert every == [
         "assertion/assertion.gtest",
+        "feature_skip/feature_skip.gtest",
+        "parse_graphql_on_rdf/parse_graphql_on_rdf.gtest",
         "parse_skip_and_xfail/parse_skip_and_xfail.gtest",
         "parse_xfail_without_issue/parse_xfail_without_issue.gtest",
         "runner_error/runner_error.gtest",
@@ -135,6 +151,17 @@ def test_the_fixtures_hold_the_cases_the_judge_expects():
         "probe_xfail_without_issue"
     ]
     assert "spec:" in no_issue and "issue:" not in no_issue
+    skips = gtest_cases(texts["feature_skip"])
+    assert sorted(skips) == [
+        "probe_feature_absent",
+        "probe_language_absent",
+        "probe_runs",
+    ]
+    assert "language: probe-absent-language" in skips["probe_language_absent"]
+    assert "requires: [probe-absent-feature]" in skips["probe_feature_absent"]
+    on_rdf = texts["parse_graphql_on_rdf"]
+    assert "  language: graphql\n  model: rdf\n" in on_rdf
+    assert "probe_graphql_on_rdf" in gtest_cases(on_rdf)
     # Only the runner_error probe uses the probe-only key.
     keyed = [name for name, text in texts.items() if "\n    probe: " in text]
     assert keyed == ["runner_error"]

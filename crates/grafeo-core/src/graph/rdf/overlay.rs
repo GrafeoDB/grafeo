@@ -751,7 +751,9 @@ pub enum LatestUse {
     Recovery,
     /// A checkpoint, copy or export that holds commits off while it reads.
     Checkpoint,
-    /// Optimizer statistics and memory accounting: estimates, not answers.
+    /// Optimizer statistics, memory accounting and the predicates GraphQL names
+    /// are matched against: reads of what the store holds overall, not of a
+    /// query's snapshot.
     Statistics,
     /// A test, or a caller of the store outside any database.
     Test,

@@ -1,14 +1,14 @@
-# GraphQL advanced features on RDF-like data
+# GraphQL advanced features on Resource nodes (property graph)
 #
 # Covers: variable substitution, directives (@skip/@include), multiple root
-# fields, aggregation, deep nesting, variable defaults, and mutation rejection.
+# fields, aggregation, deep nesting and variable defaults.
 
 meta:
   language: graphql
-  model: rdf
+  model: lpg
   section: gaps
-  title: Known GraphQL gaps on RDF data
-  dataset: rdf_social
+  title: Known GraphQL gaps on Resource nodes
+  dataset: resource_social
   requires: [graphql]
 
 tests:
@@ -135,19 +135,3 @@ tests:
     query: "{ person(name: \"Alix\") { name } organization { name } }"
     expect:
       count: 2
-
-  # ---------------------------------------------------------------------------
-  # RDF mutation rejection (routed through RDF translator via per-test language)
-  # ---------------------------------------------------------------------------
-
-  - name: rdf_create_mutation_rejected
-    language: graphql-rdf
-    query: "mutation { createPerson(name: \"Test\") { name } }"
-    expect:
-      error: "Only Query"
-
-  - name: rdf_delete_mutation_rejected
-    language: graphql-rdf
-    query: "mutation { deletePerson(name: \"Alix\") }"
-    expect:
-      error: "Only Query"

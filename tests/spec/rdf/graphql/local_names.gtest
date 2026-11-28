@@ -1,0 +1,88 @@
+# GraphQL over RDF: types and fields by their local name
+#
+# Covers: a type and its fields matching the data's classes and predicates by
+# local name in any namespace, a nested field following a link in another
+# namespace, a local name of two IRIs as an error naming both, example.org
+# winning when it is one of them, and the example.org fallback for a name the
+# data does not hold.
+
+meta:
+  language: graphql-rdf
+  model: rdf
+  section: local_names
+  title: GraphQL over RDF names by local name
+  dataset: sv_people
+  requires: [graphql, sparql, rdf]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Local names in schema.org
+  # ---------------------------------------------------------------------------
+
+  - name: a_type_and_its_field_match_schema_org_by_local_name
+    query: "{ person { name } }"
+    expect:
+      rows:
+        - [Bertram Gilfoyle]
+        - [Richard Hendricks]
+
+  - name: a_capitalised_type_matches_its_class
+    query: "{ Organization { name } }"
+    expect:
+      rows:
+        - [Pied Piper]
+
+  - name: a_nested_field_follows_a_link_in_another_namespace
+    query: "{ person { name worksAt { company: name } } }"
+    expect:
+      rows:
+        - [Bertram Gilfoyle, Pied Piper]
+        - [Richard Hendricks, Pied Piper]
+
+  # ---------------------------------------------------------------------------
+  # A local name of two IRIs
+  # ---------------------------------------------------------------------------
+
+  - name: a_local_name_of_two_iris_names_the_first
+    dataset: sv_people_foaf_name
+    query: "{ person { name } }"
+    expect:
+      error: "<https://schema.org/name>"
+
+  - name: a_local_name_of_two_iris_names_the_second
+    dataset: sv_people_foaf_name
+    query: "{ person { name } }"
+    expect:
+      error: "<http://xmlns.com/foaf/0.1/name>"
+
+  - name: a_local_name_of_two_iris_points_to_sparql
+    dataset: sv_people_foaf_name
+    query: "{ person { name } }"
+    expect:
+      error: "query it through SPARQL"
+
+  - name: example_org_wins_when_it_is_one_of_the_iris
+    dataset: sv_people_ex_name
+    query: "{ person { name } }"
+    expect:
+      rows:
+        - [Richard (ex)]
+
+  # ---------------------------------------------------------------------------
+  # The example.org fallback
+  # ---------------------------------------------------------------------------
+
+  - name: a_name_only_example_org_holds_reads_example_org
+    dataset: example_people
+    query: "{ person { name } }"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Mia]
+
+  - name: a_name_the_data_does_not_hold_matches_nothing
+    query: "{ robot { serial } }"
+    expect:
+      empty: true

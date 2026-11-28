@@ -2,8 +2,10 @@
 #
 # Paths multiply with every hop on a graph with cycles. A variable-length
 # pattern whose search would hold more paths at once than a path search may
-# (256 MiB) fails with an error that names what to do instead: an upper
-# bound, DISTINCT targets, or a shortest path search. Before 0.6.0 the search
+# (256 MiB by default; 1 MiB in the first case, so its budget trips after the
+# same small amount of work in every build, well before the query timeout)
+# fails with an error that names what to do instead: an upper bound, DISTINCT
+# targets, or a shortest path search. Before 0.6.0 the search
 # held them all until the process ran out of memory and aborted. The distinct
 # targets and an EXISTS over the same pattern search each node once, and
 # answer.
@@ -21,6 +23,7 @@ meta:
 tests:
 
   - name: an_unbounded_pattern_over_parallel_cycles_fails_with_advice
+    config: {path_search_budget: 1048576}
     setup:
       - "INSERT (:Hub {name: 'Alix'}), (:Hub {name: 'Gus'})"
       - "MATCH (a:Hub {name: 'Alix'}), (g:Hub {name: 'Gus'}) FOR i IN range(1, 12) INSERT (a)-[:KNOWS]->(g), (g)-[:KNOWS]->(a)"

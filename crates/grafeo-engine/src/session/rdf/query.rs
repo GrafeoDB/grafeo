@@ -56,9 +56,9 @@ impl SessionInner {
     }
 
     /// Runs `read`, a read of the RDF store outside a query plan (SHACL
-    /// validation), at one view: in the open transaction at its snapshot, or
-    /// in a pinned read at the published epoch.
-    #[cfg(feature = "shacl")]
+    /// validation, GraphQL's name lookup), at one view: in the open
+    /// transaction at its snapshot, or in a pinned read at the published epoch.
+    #[cfg(any(feature = "shacl", feature = "graphql"))]
     pub(crate) fn with_rdf_view<T>(
         &self,
         read: impl FnOnce(&grafeo_core::graph::rdf::RdfView) -> Result<T>,
@@ -106,11 +106,13 @@ impl SessionInner {
     fn execute_graphql_rdf_untimed(&self, query: &str) -> Result<QueryResult> {
         use crate::query::{optimizer::Optimizer, translators::graphql_rdf};
 
-        let mut logical_plan = self.translated(graphql_rdf::translate(
-            query,
-            "http://example.org/",
-            &self.plan_options.parse_limits,
-        )?)?;
+        let mut logical_plan = self.translated(self.with_rdf_view(|view| {
+            graphql_rdf::translate(
+                query,
+                &graphql_rdf::StoreNames::new(&self.rdf_store, view),
+                &self.plan_options.parse_limits,
+            )
+        })?)?;
         crate::query::processor::substitute_with_defaults(&mut logical_plan, None)?;
         let active = self.active_store();
         let optimizer = Optimizer::from_graph_store(&*active);
@@ -139,11 +141,13 @@ impl SessionInner {
         };
 
         // Parse and translate the query to a logical plan
-        let mut logical_plan = self.translated(graphql_rdf::translate(
-            query,
-            "http://example.org/",
-            &self.plan_options.parse_limits,
-        )?)?;
+        let mut logical_plan = self.translated(self.with_rdf_view(|view| {
+            graphql_rdf::translate(
+                query,
+                &graphql_rdf::StoreNames::new(&self.rdf_store, view),
+                &self.plan_options.parse_limits,
+            )
+        })?)?;
 
         // The query's own defaults, then the parameters given
         substitute_with_defaults(&mut logical_plan, Some(&params))?;

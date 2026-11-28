@@ -155,6 +155,8 @@ struct Counted {
     grant: OperatorGrant,
     /// What the operator counts it holds.
     bytes: usize,
+    /// A source every read needs (see [`OperatorMemory::forced`]).
+    forced: bool,
 }
 
 impl OperatorMemory {
@@ -166,8 +168,22 @@ impl OperatorMemory {
                 ctx,
                 grant: OperatorGrant::default(),
                 bytes: 0,
+                forced: false,
             }),
         }
+    }
+
+    /// The memory of a source every read needs (a scan's list of IDs): its
+    /// grant is the exact bytes it counts, taken once, not grown by steps; it
+    /// binds at the query memory limit and is forced against the memory
+    /// limit, counted there but never refused, so reads of a database over
+    /// its memory limit answer.
+    #[must_use]
+    pub fn forced(mut self) -> Self {
+        if let Some(counted) = &mut self.counted {
+            counted.forced = true;
+        }
+        self
     }
 
     /// The memory of an operator that counts nothing (built outside a
@@ -305,6 +321,12 @@ impl Counted {
     /// Counts `bytes` in all.
     fn set(&mut self, bytes: usize) -> Result<(), crate::execution::operators::OperatorError> {
         self.bytes = bytes;
+        if self.forced {
+            return self
+                .ctx
+                .settle_forced(&mut self.grant, bytes)
+                .map_err(Into::into);
+        }
         if bytes <= self.grant.size() {
             return Ok(());
         }
@@ -437,6 +459,41 @@ impl OperatorMemoryContext {
         };
         grant.held += granted;
         grant.query.get_or_insert_with(|| Arc::clone(&self.query));
+        Ok(())
+    }
+
+    /// Brings `grant` to exactly `counted` bytes, for a source every read
+    /// needs (see [`OperatorMemory::forced`]): bytes more are taken from the
+    /// statement's cap, then forced on the buffer manager whatever its limit;
+    /// bytes less are given back to both.
+    ///
+    /// # Errors
+    ///
+    /// The refusal of [`LimitBound::QueryMemoryLimit`] (`GRAFEO-S001`); the
+    /// grant is as it was.
+    pub fn settle_forced(&self, grant: &mut OperatorGrant, counted: usize) -> Result<(), Error> {
+        if counted > grant.held {
+            let more = counted - grant.held;
+            self.query.take(more)?;
+            grant
+                .grant
+                .get_or_insert_with(|| {
+                    self.buffer_manager
+                        .empty_grant(MemoryRegion::ExecutionBuffers)
+                })
+                .grow_forced(more);
+            grant.held = counted;
+            grant.query.get_or_insert_with(|| Arc::clone(&self.query));
+        } else if counted < grant.held {
+            let extra = grant.held - counted;
+            if let Some(held) = &mut grant.grant {
+                held.shrink(extra);
+            }
+            if let Some(query) = &grant.query {
+                query.give_back(extra);
+            }
+            grant.held = counted;
+        }
         Ok(())
     }
 

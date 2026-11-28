@@ -426,3 +426,59 @@ mod after_a_reopen {
         db.close().unwrap();
     }
 }
+
+/// Every vector index the engine builds draws its node levels with the
+/// default seed (the API with each quantization, DDL, a rebuild, the build
+/// at open), so a saved index needs no seed of its own to be restored.
+#[test]
+fn every_engine_index_draws_levels_with_the_default_seed() {
+    use grafeo_core::index::vector::{DistanceMetric, HnswConfig, HnswIndex};
+
+    let default = HnswIndex::new(HnswConfig::new(3, DistanceMetric::Cosine)).seed();
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("seeds.grafeo");
+    let seed_of = |db: &GrafeoDB, label: &str| {
+        db.store()
+            .unwrap()
+            .get_vector_index(label, "emb")
+            .unwrap_or_else(|| panic!("no index on {label}"))
+            .hnsw()
+            .seed()
+    };
+    let labels = ["Plain", "Scalar", "Binary", "Product"];
+    {
+        let db = GrafeoDB::open(&path).unwrap();
+        for (i, label) in labels.iter().chain(["Ddl"].iter()).enumerate() {
+            let node = db.create_node(&[label]).unwrap();
+            db.set_node_property(node, "emb", vec3(1.0, i as f32, 0.5))
+                .unwrap();
+        }
+        for (label, quantization) in
+            labels
+                .iter()
+                .zip([None, Some("scalar"), Some("binary"), Some("product")])
+        {
+            db.create_vector_index(
+                label,
+                "emb",
+                Some(3),
+                Some("cosine"),
+                None,
+                None,
+                quantization,
+            )
+            .unwrap();
+            assert_eq!(seed_of(&db, label), default, "{label}");
+        }
+        db.execute("CREATE VECTOR INDEX ddl_emb ON :Ddl(emb) DIMENSION 3 METRIC 'cosine'")
+            .unwrap();
+        assert_eq!(seed_of(&db, "Ddl"), default, "DDL");
+        db.rebuild_vector_index("Scalar", "emb").unwrap();
+        assert_eq!(seed_of(&db, "Scalar"), default, "a rebuild");
+        db.close().unwrap();
+    }
+    let db = GrafeoDB::open(&path).unwrap();
+    for label in labels.iter().chain(["Ddl"].iter()) {
+        assert_eq!(seed_of(&db, label), default, "{label} after a reopen");
+    }
+}

@@ -79,13 +79,22 @@ impl OperatorProfile {
         let stats = node.stats.lock().clone();
         Self {
             operator: node.name.clone(),
-            detail: node.label.clone(),
+            detail: detail(&node.label, stats.note.as_deref()),
             rows: stats.rows_out,
             calls: stats.calls,
             self_time_ms: nanos_to_ms(self_time_ns(node)),
             time_ms: nanos_to_ms(stats.time_ns),
             children: node.children.iter().map(Self::of).collect(),
         }
+    }
+}
+
+/// An operator's label, with the note on a choice it made while it ran.
+fn detail(label: &str, note: Option<&str>) -> String {
+    match note {
+        Some(note) if label.is_empty() => note.to_string(),
+        Some(note) => format!("{label}; {note}"),
+        None => label.to_string(),
     }
 }
 
@@ -291,9 +300,13 @@ fn format_node(out: &mut String, node: &ProfileNode, depth: usize) {
     // Compute self-time before locking stats (self_time_ns also locks).
     let self_time_ms = nanos_to_ms(self_time_ns(node));
 
-    let (rows_out, work) = {
+    let (rows_out, work, label) = {
         let stats = node.stats.lock();
-        (stats.rows_out, stats.work.describe())
+        (
+            stats.rows_out,
+            stats.work.describe(),
+            detail(&node.label, stats.note.as_deref()),
+        )
     };
     let work = if work.is_empty() {
         work
@@ -305,7 +318,6 @@ fn format_node(out: &mut String, node: &ProfileNode, depth: usize) {
         out,
         "{indent}{name} ({label})  rows={rows}  time={time:.2}ms{work}",
         name = node.name,
-        label = node.label,
         rows = rows_out,
         time = self_time_ms,
     );

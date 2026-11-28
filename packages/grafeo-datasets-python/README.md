@@ -28,6 +28,10 @@ Everything lives in `grafeo_datasets.silicon_valley`.
 | `gql()`                      | GQL script as text, one statement per line         |
 | `cypher()`                   | Cypher script as text, one statement per line      |
 | `turtle()`                   | Turtle text                                        |
+| `rdfs()`                     | Turtle text with its vocabulary in RDFS            |
+| `owl()`                      | Turtle text with its vocabulary in OWL             |
+| `lpg_import()`               | The `importLpg` payload of `@grafeo-db/wasm`       |
+| `rdf_import()`               | The `importRdf` payload of `@grafeo-db/wasm`       |
 | `vectors()`                  | `VectorSet` with `model`, `dimension` and `by_key` |
 | `load(db, *, vectors=False)` | number of statements run on `db`                   |
 

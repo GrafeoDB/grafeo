@@ -5,7 +5,8 @@
  * in crates/grafeo-spec-tests/build.rs.
  */
 
-import { readFileSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
+import { join } from 'path'
 
 /**
  * @typedef {Object} Meta
@@ -136,8 +137,29 @@ export function parseGtestFile(filePath) {
   skipBlankAndComments(ctx)
   const tests = parseTests(ctx)
   for (const tc of tests) checkMarks(tc, filePath)
+  if (meta.model === 'rdf') {
+    const lpg = tests.find((tc) => (tc.language || meta.language) === 'graphql' || 'graphql' in tc.variants)
+    if (lpg) throw new Error(`test '${lpg.name}': ${GRAPHQL_ON_RDF}`)
+  }
   return { meta, tests }
 }
+
+/**
+ * The file of dataset `name` in `datasetsDir` and the language of its lines: `<name>.setup`
+ * (GQL) or `<name>.ru` (SPARQL Update). Throws when both exist, or neither.
+ */
+export function datasetFile(datasetsDir, name) {
+  const setup = join(datasetsDir, `${name}.setup`)
+  const update = join(datasetsDir, `${name}.ru`)
+  if (existsSync(setup) && existsSync(update)) throw new Error(`Dataset '${name}' is both ${setup} and ${update}`)
+  if (existsSync(update)) return { path: update, language: 'sparql' }
+  if (existsSync(setup)) return { path: setup, language: 'gql' }
+  throw new Error(`Dataset file not found: ${setup}`)
+}
+
+/** Why a `graphql` case in a `model: rdf` file is refused: `graphql` reads the property graph. */
+export const GRAPHQL_ON_RDF =
+  '`language: graphql` reads the property graph; on `model: rdf` write `language: graphql-rdf`'
 
 /** The runner probes a `probe:` key may name. */
 const PROBES = new Set(['runner_error'])
@@ -255,7 +277,7 @@ function parseTests(ctx) {
 function parseSingleTest(ctx) {
   const tc = {
     name: '', query: null, statements: [], setup: [], setupGql: [],
-    params: {}, tags: [], skip: null, xfail: null, runnerGap: null, probe: null, language: null,
+    params: {}, tags: [], skip: null, xfail: null, runnerGap: null, config: {}, probe: null, language: null,
     expect: makeExpect(), variants: {}, requires: [],
   }
 
@@ -288,6 +310,8 @@ function parseSingleTest(ctx) {
         tc.probe = unquote(value); ctx.idx++; break
       case 'runner_gap':
         tc.runnerGap = parseRunnerGap(ctx); break
+      case 'config':
+        tc.config = parseConfig(value); ctx.idx++; break
       case 'setup':
         ctx.idx++; tc.setup = parseStringList(ctx); break
       case 'setup_gql':
@@ -329,6 +353,45 @@ function makeExpect() {
 
 /** The runners a `runner_gap:` may name. */
 export const RUNNERS = ['rust', 'python', 'node', 'wasm', 'go', 'csharp', 'dart']
+
+/**
+ * The keys a `config:` may set: Config settings every binding exposes, each with its option
+ * name in the JavaScript bindings (Node.js `GrafeoDB.create` and the WASM `Database`).
+ */
+export const CONFIG_KEYS = { path_search_budget: 'pathSearchBudget' }
+
+/**
+ * A `config:` value as the file writes it: an inline map of `CONFIG_KEYS` to positive
+ * integers (`{path_search_budget: 1048576}`). An unknown or repeated key is refused, never
+ * ignored.
+ */
+export function parseConfig(text) {
+  const inner = text.trim()
+  if (!inner.startsWith('{') || !inner.endsWith('}') || !inner.slice(1, -1).trim()) {
+    throw new Error(`config must be an inline map of settings, got '${text}'`)
+  }
+  const settings = {}
+  for (const entry of inner.slice(1, -1).split(',')) {
+    const colon = entry.indexOf(':')
+    const key = colon < 0 ? '' : entry.slice(0, colon).trim()
+    const value = colon < 0 ? '' : entry.slice(colon + 1).trim()
+    if (!key) throw new Error(`config entry '${entry.trim()}' is not 'key: value'`)
+    if (Object.hasOwn(settings, key)) throw new Error(`config sets '${key}' twice`)
+    if (!Object.hasOwn(CONFIG_KEYS, key)) {
+      throw new Error(`unknown config key '${key}' (known: ${Object.keys(CONFIG_KEYS).join(', ')})`)
+    }
+    if (!/^[0-9]+$/.test(value) || Number(value) === 0) {
+      throw new Error(`config '${key}' needs a positive integer, got '${value}'`)
+    }
+    settings[key] = Number(value)
+  }
+  return settings
+}
+
+/** The JavaScript binding options of a case's parsed `config:`. */
+export function configOptions(config) {
+  return Object.fromEntries(Object.entries(config).map(([key, value]) => [CONFIG_KEYS[key], value]))
+}
 
 /** The keys of `side_effects:`, as the openCypher TCK names them. */
 export const SIDE_EFFECT_KEYS = [

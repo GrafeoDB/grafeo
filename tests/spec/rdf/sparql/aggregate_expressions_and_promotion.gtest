@@ -196,6 +196,22 @@ tests:
     expect:
       empty: true
 
+  - name: distinct_sum_and_avg_of_no_values_are_zero
+    query: |
+      SELECT (SUM(DISTINCT ?x) AS ?s) (AVG(DISTINCT ?x) AS ?a) WHERE { VALUES ?x { } }
+    expect:
+      rows:
+        - [0, 0]
+
+  # A group whose values are all unbound aggregates no value: its sums and
+  # averages, DISTINCT or not, are 0.
+  - name: a_group_of_unbound_values_sums_and_averages_to_zero
+    query: |
+      SELECT ?g (SUM(?x) AS ?s) (AVG(?x) AS ?a) (SUM(DISTINCT ?x) AS ?ds) (AVG(DISTINCT ?x) AS ?da) WHERE { VALUES (?g ?x) { (1 UNDEF) (1 UNDEF) } } GROUP BY ?g
+    expect:
+      rows:
+        - [1, 0, 0, 0, 0]
+
   - name: sum_with_a_non_numeric_value_is_unbound
     # A value that is no number makes SUM and AVG an error (18.5), so the
     # variable is unbound. An unbound value is skipped, so SUM of 1 and UNDEF

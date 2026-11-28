@@ -247,7 +247,10 @@ impl CheckpointSources {
         // under one lock (see `pin_history_checkpoint`).
         let (history_from, pin) = match self.transaction_manager.pin_history_checkpoint() {
             Some(pin) => (Some(pin.epoch()), pin),
-            None => (None, self.transaction_manager.pin_read_at(epoch)?),
+            None => (
+                None,
+                self.transaction_manager.pin_checkpoint_at(epoch, commits)?,
+            ),
         };
         let mut held: Vec<Box<dyn Section>> = Vec::new();
         let mut after: Vec<Box<dyn Section>> = Vec::new();
@@ -909,7 +912,9 @@ impl super::Open {
     fn build_indexes(&self, indexes: GraphIndexes) {
         #[cfg(feature = "vector-index")]
         for def in indexes.vector {
-            let quantization = def.quantization.and_then(super::index::quantization_name);
+            let quantization = def
+                .quantization
+                .unwrap_or(grafeo_core::index::vector::QuantizationType::None);
             if let Err(err) = self.create_vector_index_in(
                 indexes.graph.as_deref(),
                 &def.label,

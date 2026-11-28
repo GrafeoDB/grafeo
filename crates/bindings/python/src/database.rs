@@ -4400,6 +4400,12 @@ impl PyGrafeoDB {
     /// database: a reopen has it on. An in-memory database keeps it while it
     /// is open.
     ///
+    /// While the setting is stored on, the database keeps its WAL for the
+    /// durable change feed, which only the Rust API reads in 0.6.4, up to
+    /// ``wal_retention_limit`` (1 GiB by default): ``<path>.wal`` stays after
+    /// ``close()``. ``disable_cdc()`` releases that WAL at the next
+    /// checkpoint.
+    ///
     /// Existing sessions are not affected. Raises when the setting cannot be
     /// stored (a read-only open, a failed checkpoint); it stays as it was.
     #[cfg(feature = "cdc")]
@@ -4408,7 +4414,8 @@ impl PyGrafeoDB {
     }
 
     /// Disable CDC for all future sessions, and store the setting with the
-    /// database: a reopen has it off.
+    /// database: a reopen has it off. The WAL kept for the change feed is
+    /// released at the next checkpoint.
     ///
     /// Existing sessions are not affected. Raises when the setting cannot be
     /// stored (a read-only open, a failed checkpoint); it stays as it was.

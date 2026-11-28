@@ -272,6 +272,9 @@ fn kind_of(record: &LogRecord) -> String {
     match record {
         LogRecord::GroupBegin(_) => "GroupBegin".to_string(),
         LogRecord::Data { op, .. } => format!("Data/{}", shown(format!("{op:?}"), 1)),
+        LogRecord::DataWithBefore { op, .. } => {
+            format!("DataWithBefore/{}", shown(format!("{op:?}"), 1))
+        }
         LogRecord::Standalone(op) => {
             let debug = format!("{op:?}");
             let nested = ["PutCatalog", "DropCatalog", "RdfGraph"]

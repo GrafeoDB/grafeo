@@ -632,7 +632,10 @@ r = grafeo_execute_as_of(db, "MATCH (p:Person) RETURN count(p)", NULL, GRAFEO_PO
 Requires the `cdc` feature.
 
 ```c
-/* Stores the setting with the database: a reopen has it as it was. */
+/* Stores the setting with the database: a reopen has it as it was. Stored on,
+ * it keeps the WAL for the durable change feed (read by the Rust API only in
+ * 0.6.4) up to the retention limit; turned off, that WAL goes at the next
+ * checkpoint. */
 GrafeoStatus grafeo_set_cdc(GrafeoDatabase* db, bool enabled);
 bool grafeo_is_cdc_enabled(GrafeoDatabase* db);
 /* Deprecated since 0.6.4, removed in 0.7.0: changes the setting for this open only. */

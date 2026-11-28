@@ -9,6 +9,14 @@
 //! - Field arguments → Additional triple patterns for filtering
 //! - Nested selections → Predicate-object traversals
 //! - Scalar fields → Select variables from triple bindings
+//!
+//! # Names
+//!
+//! A type or field name becomes an IRI through [`RdfNames`]. Against a store
+//! ([`StoreNames`]) a name matches the class or predicate of the data whose local
+//! name (after its last `#` or `/`) it is, in any namespace: `Person` finds
+//! `schema:Person`, `worksAt` finds `sv:worksAt`. Two such IRIs are an error naming
+//! both; none falls back to [`DEFAULT_NAMESPACE`].
 
 use super::common::{
     VarGen, capitalize_first, graphql_directives_allow, wrap_filter, wrap_limit, wrap_skip,
@@ -24,6 +32,169 @@ use std::collections::HashMap;
 /// RDF namespace constants.
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 
+/// The namespace of a type or field name the data does not hold.
+pub const DEFAULT_NAMESPACE: &str = "http://example.org/";
+
+/// How GraphQL type and field names become RDF IRIs.
+pub trait RdfNames {
+    /// The class IRI of type `name` (`Person`, or `person` for a root field).
+    ///
+    /// # Errors
+    ///
+    /// When the name is ambiguous.
+    fn type_iri(&self, name: &str) -> Result<String>;
+
+    /// The predicate IRI of field `name`.
+    ///
+    /// # Errors
+    ///
+    /// When the name is ambiguous.
+    fn predicate_iri(&self, name: &str) -> Result<String>;
+}
+
+/// Every name in one namespace: `<namespace>Person`, `<namespace>name`.
+pub struct Namespace<'a>(pub &'a str);
+
+impl RdfNames for Namespace<'_> {
+    fn type_iri(&self, name: &str) -> Result<String> {
+        Ok(format!("{}{}", self.0, capitalize_first(name)))
+    }
+
+    fn predicate_iri(&self, name: &str) -> Result<String> {
+        Ok(format!("{}{name}", self.0))
+    }
+}
+
+/// The namespace of `iri` (up to its last `#` or `/`) and its local name after it.
+fn split_iri(iri: &str) -> (&str, &str) {
+    let at = iri.rfind(['#', '/']).map_or(0, |i| i + 1);
+    (&iri[..at], &iri[at..])
+}
+
+/// Names as the data in an RDF store uses them: a field matches the committed
+/// predicates whose local name it is, a type the classes (objects of `rdf:type`
+/// at the query's view) whose local name it is, in the namespaces those
+/// predicates use. A predicate first written in the open transaction is matched
+/// by name once it commits (listing the predicates at a view with changes reads
+/// every triple), one deleted by a commit after the query's snapshot is no
+/// longer matched, and a class whose namespace holds no predicate of the data is
+/// not found: both fall back to [`DEFAULT_NAMESPACE`].
+pub struct StoreNames<'a> {
+    store: &'a grafeo_core::graph::rdf::RdfStore,
+    view: &'a grafeo_core::graph::rdf::RdfView,
+    predicates: std::cell::OnceCell<Vec<String>>,
+}
+
+impl<'a> StoreNames<'a> {
+    /// Names of the data `view` sees in `store`.
+    #[must_use]
+    pub fn new(
+        store: &'a grafeo_core::graph::rdf::RdfStore,
+        view: &'a grafeo_core::graph::rdf::RdfView,
+    ) -> Self {
+        Self {
+            store,
+            view,
+            predicates: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// The committed predicate IRIs, sorted, read once per query.
+    fn predicates(&self) -> &[String] {
+        self.predicates.get_or_init(|| {
+            // The committed state: one entry per predicate, from its index.
+            let committed = grafeo_core::graph::rdf::RdfView::latest(
+                grafeo_core::graph::rdf::LatestUse::Statistics,
+            );
+            let mut iris: Vec<String> = self
+                .store
+                .predicates(&committed)
+                .into_iter()
+                .filter_map(|term| term.as_iri().map(|iri| iri.as_str().to_string()))
+                .collect();
+            iris.sort_unstable();
+            iris.dedup();
+            iris
+        })
+    }
+
+    /// The one IRI of `found`; `default` when there is none or it is one of
+    /// them (as 0.6.3 read every name there); an error naming them when there
+    /// are more.
+    fn pick(kind: &str, name: &str, found: Vec<String>, default: String) -> Result<String> {
+        if found.contains(&default) {
+            return Ok(default);
+        }
+        let mut found = found.into_iter();
+        match (found.next(), found.next()) {
+            (None, _) => Ok(default),
+            (Some(one), None) => Ok(one),
+            (Some(first), Some(second)) => {
+                let all: Vec<String> = [first, second]
+                    .into_iter()
+                    .chain(found)
+                    .map(|iri| format!("<{iri}>"))
+                    .collect();
+                Err(Error::from(QueryError::new(
+                    QueryErrorKind::Semantic,
+                    format!(
+                        "GraphQL {kind} '{name}' matches {} IRIs in the data: {}; query it through SPARQL, which names the IRI",
+                        all.len(),
+                        all.join(", ")
+                    ),
+                )))
+            }
+        }
+    }
+}
+
+impl RdfNames for StoreNames<'_> {
+    fn type_iri(&self, name: &str) -> Result<String> {
+        use grafeo_core::graph::rdf::{Term, TriplePattern};
+        let local = capitalize_first(name);
+        let mut namespaces: Vec<&str> = self
+            .predicates()
+            .iter()
+            .map(|iri| split_iri(iri).0)
+            .collect();
+        namespaces.sort_unstable();
+        namespaces.dedup();
+        let found = namespaces
+            .into_iter()
+            .map(|namespace| format!("{namespace}{local}"))
+            .filter(|class| {
+                let pattern = TriplePattern {
+                    subject: None,
+                    predicate: Some(Term::iri(RDF_TYPE)),
+                    object: Some(Term::iri(class.as_str())),
+                };
+                self.store.count_at(self.view, &pattern) > 0
+            })
+            .collect();
+        Self::pick(
+            "type",
+            name,
+            found,
+            Namespace(DEFAULT_NAMESPACE).type_iri(name)?,
+        )
+    }
+
+    fn predicate_iri(&self, name: &str) -> Result<String> {
+        let found = self
+            .predicates()
+            .iter()
+            .filter(|iri| split_iri(iri).1 == name)
+            .cloned()
+            .collect();
+        Self::pick(
+            "field",
+            name,
+            found,
+            Namespace(DEFAULT_NAMESPACE).predicate_iri(name)?,
+        )
+    }
+}
+
 /// Translates a GraphQL query string to an RDF logical plan.
 ///
 /// # Errors
@@ -31,32 +202,38 @@ const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 /// Returns an error if the query cannot be parsed or translated.
 pub fn translate(
     query: &str,
-    namespace: &str,
+    names: &dyn RdfNames,
     limits: &grafeo_adapters::query::limits::ParseLimits,
 ) -> Result<LogicalPlan> {
+    // The statement's length is its text's, the `EXPLAIN` included.
+    limits.check_query(query)?;
+    let (explain, profile, query) = super::graphql::explain_prefix(query);
     let doc = graphql::parse_with(query, limits)?;
-    let translator = GraphQLRdfTranslator::new(namespace);
+    let translator = GraphQLRdfTranslator::new(names);
     let plan = translator.translate_document(&doc)?;
-    crate::query::limits::check_plan_depth(plan)
+    let mut plan = crate::query::limits::check_plan_depth(plan)?;
+    plan.explain = explain;
+    plan.profile = profile;
+    Ok(plan)
 }
 
 /// Translator from GraphQL AST to RDF LogicalPlan.
-struct GraphQLRdfTranslator {
+struct GraphQLRdfTranslator<'a> {
     /// Generator for anonymous variable names.
     var_gen: VarGen,
-    /// Base namespace for type IRIs.
-    namespace: String,
+    /// How type and field names become IRIs.
+    names: &'a dyn RdfNames,
     /// Fragment definitions for resolution.
     fragments: HashMap<String, ast::FragmentDefinition>,
     /// Default values from variable declarations (e.g., `query($limit: Int = 2)`).
     variable_defaults: HashMap<String, grafeo_common::types::Value>,
 }
 
-impl GraphQLRdfTranslator {
-    fn new(namespace: &str) -> Self {
+impl<'a> GraphQLRdfTranslator<'a> {
+    fn new(names: &'a dyn RdfNames) -> Self {
         Self {
             var_gen: VarGen::new(),
-            namespace: namespace.to_string(),
+            names,
             fragments: HashMap::new(),
             variable_defaults: HashMap::new(),
         }
@@ -108,7 +285,7 @@ impl GraphQLRdfTranslator {
         // Create translator with fragments and variable defaults
         let translator = GraphQLRdfTranslator {
             var_gen: VarGen::new(),
-            namespace: self.namespace.clone(),
+            names: self.names,
             fragments,
             variable_defaults,
         };
@@ -168,7 +345,7 @@ impl GraphQLRdfTranslator {
     fn translate_root_field(&self, field: &ast::Field) -> Result<LogicalOperator> {
         // Root field name becomes the RDF type
         let subject_var = self.var_gen.next();
-        let type_iri = self.make_type_iri(&field.name);
+        let type_iri = self.make_type_iri(&field.name)?;
 
         // Create triple pattern: ?subject rdf:type <Type>
         let mut plan = LogicalOperator::TripleScan(TripleScanOp {
@@ -240,7 +417,12 @@ impl GraphQLRdfTranslator {
                         let (new_plan, nested_projections) =
                             self.translate_nested_field(field, plan, subject_var)?;
                         plan = new_plan;
-                        projections.extend(nested_projections);
+                        // `<field>_<column>`, as GraphQL over the property graph names them.
+                        let prefix = field.alias.as_ref().unwrap_or(&field.name);
+                        projections.extend(nested_projections.into_iter().map(|p| Projection {
+                            alias: p.alias.map(|column| format!("{prefix}_{column}")),
+                            ..p
+                        }));
                     } else {
                         // Scalar field - create a triple pattern to fetch the property
                         let (new_plan, prop_var) =
@@ -275,7 +457,7 @@ impl GraphQLRdfTranslator {
                     // Inline fragment with type condition
                     if let Some(type_cond) = &inline.type_condition {
                         // Add type check as a triple pattern
-                        let type_iri = self.make_type_iri(type_cond);
+                        let type_iri = self.make_type_iri(type_cond)?;
                         let type_check = LogicalOperator::TripleScan(TripleScanOp {
                             subject: TripleComponent::Variable(subject_var.to_string()),
                             predicate: TripleComponent::Iri(RDF_TYPE.to_string()),
@@ -306,7 +488,7 @@ impl GraphQLRdfTranslator {
         subject_var: &str,
     ) -> Result<(LogicalOperator, String)> {
         let object_var = self.var_gen.next();
-        let predicate_iri = self.make_predicate_iri(&field.name);
+        let predicate_iri = self.make_predicate_iri(&field.name)?;
 
         // Create triple pattern: ?subject <predicate> ?object
         let triple = LogicalOperator::TripleScan(TripleScanOp {
@@ -329,7 +511,7 @@ impl GraphQLRdfTranslator {
         from_var: &str,
     ) -> Result<(LogicalOperator, Vec<Projection>)> {
         let to_var = self.var_gen.next();
-        let predicate_iri = self.make_predicate_iri(&field.name);
+        let predicate_iri = self.make_predicate_iri(&field.name)?;
 
         // Create triple pattern: ?from <predicate> ?to
         let triple = LogicalOperator::TripleScan(TripleScanOp {
@@ -411,7 +593,7 @@ impl GraphQLRdfTranslator {
         for arg in args {
             // Each argument creates a filter
             // First, create a triple pattern for the property
-            let predicate_iri = self.make_predicate_iri(&arg.name);
+            let predicate_iri = self.make_predicate_iri(&arg.name)?;
             let object_var = self.var_gen.next();
 
             let triple = LogicalOperator::TripleScan(TripleScanOp {
@@ -449,7 +631,7 @@ impl GraphQLRdfTranslator {
         subject_var: &str,
     ) -> Result<(LogicalOperator, Vec<Projection>)> {
         // Add type condition if present
-        let type_iri = self.make_type_iri(&frag.type_condition);
+        let type_iri = self.make_type_iri(&frag.type_condition)?;
         let type_check = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable(subject_var.to_string()),
             predicate: TripleComponent::Iri(RDF_TYPE.to_string()),
@@ -481,12 +663,12 @@ impl GraphQLRdfTranslator {
         })
     }
 
-    fn make_type_iri(&self, type_name: &str) -> String {
-        format!("{}{}", self.namespace, capitalize_first(type_name))
+    fn make_type_iri(&self, type_name: &str) -> Result<String> {
+        self.names.type_iri(type_name)
     }
 
-    fn make_predicate_iri(&self, name: &str) -> String {
-        format!("{}{}", self.namespace, name)
+    fn make_predicate_iri(&self, name: &str) -> Result<String> {
+        self.names.predicate_iri(name)
     }
 }
 
@@ -498,7 +680,7 @@ mod tests {
     fn translate(query: &str, namespace: &str) -> Result<LogicalPlan> {
         super::translate(
             query,
-            namespace,
+            &Namespace(namespace),
             &grafeo_adapters::query::limits::ParseLimits::default(),
         )
     }

@@ -423,9 +423,10 @@ fn release_covered_log(
     #[cfg(feature = "cdc")]
     if cdc_cursors.iter().any(|&cursor| floor.cuts(cursor)) && retention.first_cdc_limited() {
         grafeo_common::grafeo_warn!(
-            "the WAL kept for the change data capture cursor of {} passed the retention \
-             limit of {} bytes, so a checkpoint removed its oldest part (raise the limit \
-             with Config::with_wal_retention_limit)",
+            "the WAL kept for the change data capture feed of {} passed the retention \
+             limit of {} bytes, so a checkpoint removed its oldest part: the feed cannot go \
+             on from its cursor and fails with GRAFEO-S006 naming the first commit still \
+             there (raise the limit with Config::with_wal_retention_limit)",
             wal.dir().display(),
             retention.limit
         );

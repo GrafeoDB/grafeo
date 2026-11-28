@@ -1,7 +1,7 @@
 {
   "name": "@grafeo-db/datasets",
   "version": "0.6.3",
-  "description": "The Silicon Valley demo dataset for Grafeo: nodes and edges, a timeline, GQL, Cypher, Turtle and MiniLM vectors.",
+  "description": "The Silicon Valley demo dataset for Grafeo: nodes and edges, a timeline, GQL, Cypher, Turtle (also with its RDFS or OWL vocabulary), import payloads and MiniLM vectors.",
   "license": "Apache-2.0",
   "type": "module",
   "repository": {
@@ -41,6 +41,22 @@
     "./silicon-valley/turtle": {
       "types": "./types/silicon-valley/turtle.d.ts",
       "default": "./dist/silicon-valley/turtle.js"
+    },
+    "./silicon-valley/rdfs": {
+      "types": "./types/silicon-valley/rdfs.d.ts",
+      "default": "./dist/silicon-valley/rdfs.js"
+    },
+    "./silicon-valley/owl": {
+      "types": "./types/silicon-valley/owl.d.ts",
+      "default": "./dist/silicon-valley/owl.js"
+    },
+    "./silicon-valley/lpg-import": {
+      "types": "./types/silicon-valley/lpg-import.d.ts",
+      "default": "./dist/silicon-valley/lpg-import.js"
+    },
+    "./silicon-valley/rdf-import": {
+      "types": "./types/silicon-valley/rdf-import.d.ts",
+      "default": "./dist/silicon-valley/rdf-import.js"
     },
     "./silicon-valley/vectors": {
       "types": "./types/silicon-valley/vectors.d.ts",

@@ -112,6 +112,8 @@ impl Open {
     #[doc(hidden)]
     #[must_use]
     pub(crate) fn rdf_overlay_len(&self) -> usize {
+        // A snapshot restore waits for it, or it for the restore.
+        let _read = self.transaction_manager.hold_direct_read();
         self.rdf_store.overlay().len()
     }
 

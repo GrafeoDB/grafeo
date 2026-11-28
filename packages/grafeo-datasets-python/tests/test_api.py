@@ -28,6 +28,23 @@ def test_nodes_and_edges_match_graph_json():
     assert len(sv.timeline()) > 0
 
 
+def test_variants_match_the_derived_files():
+    derived = GRAPH.parent
+    assert sv.rdfs() == (derived / "silicon-valley.rdfs.ttl").read_text(
+        encoding="utf-8"
+    )
+    assert sv.owl() == (derived / "silicon-valley.owl.ttl").read_text(encoding="utf-8")
+    lpg = sv.lpg_import()
+    assert lpg == json.loads(
+        (derived / "silicon-valley.lpg.json").read_text(encoding="utf-8")
+    )
+    assert len(lpg["nodes"]) == len(sv.nodes())
+    rdf = sv.rdf_import()
+    assert rdf == json.loads(
+        (derived / "silicon-valley.rdf.json").read_text(encoding="utf-8")
+    )
+
+
 def test_vectors_shape():
     vs = sv.vectors()
     assert vs.dimension == 384
@@ -130,6 +147,10 @@ def test_wheel_contains_exactly_the_expected_files(tmp_path):
         data + "silicon-valley.gql",
         data + "silicon-valley.cypher",
         data + "silicon-valley.ttl",
+        data + "silicon-valley.rdfs.ttl",
+        data + "silicon-valley.owl.ttl",
+        data + "silicon-valley.lpg.json",
+        data + "silicon-valley.rdf.json",
         data + "silicon-valley.vectors.gql",
         data + "vectors.f32",
         data + "vectors.json",

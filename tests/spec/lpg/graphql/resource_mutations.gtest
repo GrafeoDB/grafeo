@@ -1,14 +1,14 @@
-# GraphQL mutations on RDF-like data
+# GraphQL mutations on Resource nodes (property graph)
 #
 # Covers: create, update, delete mutations on Resource/Person nodes.
 # Uses multi-statement tests: mutation first, then a verification query.
 
 meta:
   language: graphql
-  model: rdf
+  model: lpg
   section: mutations
-  title: GraphQL mutations on RDF data
-  dataset: rdf_social
+  title: GraphQL mutations on Resource nodes
+  dataset: resource_social
   requires: [graphql]
 
 tests:

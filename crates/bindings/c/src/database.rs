@@ -334,6 +334,11 @@ pub extern "C" fn grafeo_version() -> *const c_char {
 /// the setting with the database: a reopen has it as it was. An in-memory
 /// database keeps it while it is open.
 ///
+/// While the setting is stored on, the database keeps its WAL for the
+/// durable change feed, which only the Rust API reads in 0.6.4, up to the
+/// retention limit (1 GiB by default): `<path>.wal` stays after
+/// `grafeo_close`. Turning it off releases that WAL at the next checkpoint.
+///
 /// Does not affect sessions that were already created. Returns an error
 /// status when the setting cannot be stored (a read-only open, a failed
 /// checkpoint); it stays as it was.

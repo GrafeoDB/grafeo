@@ -19,7 +19,7 @@
 //! deletes met for a few words, not for its 2,048 rows, and allocates no
 //! array for them.
 
-use std::ops::Range;
+use std::ops::{ControlFlow, Range};
 
 use smallvec::SmallVec;
 
@@ -154,6 +154,16 @@ impl Deletes {
                 DeleteStamps::Few(_) => 0,
                 DeleteStamps::PerRow(stamps) => std::mem::size_of_val::<[u64]>(stamps),
             }
+    }
+}
+
+/// Calls `seen` with each row word `index`'s `bits` name, ascending.
+#[inline]
+fn each_row(index: usize, mut bits: u64, seen: &mut impl FnMut(usize)) {
+    while bits != 0 {
+        let bit = bits.trailing_zeros() as usize;
+        bits &= bits - 1;
+        seen(index * 64 + bit);
     }
 }
 
@@ -584,27 +594,66 @@ impl Versions {
     /// The loop is internal, so a scan compiles to two plain loops: an
     /// external iterator here cost a scan of 10k rows about 10 us.
     pub(super) fn for_each_visible(&self, rows: &Bitset, read: Read, mut seen: impl FnMut(usize)) {
-        for (index, &asked) in rows.words().iter().enumerate() {
-            let mut bits = self.visible_word(index, asked, read);
-            while bits != 0 {
-                let bit = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                seen(index * 64 + bit);
-            }
-        }
+        let words = rows.words();
+        let _all = self.for_each_visible_word(
+            words.len(),
+            |index| words[index],
+            0,
+            read,
+            |index, bits| {
+                each_row(index, bits, &mut seen);
+                ControlFlow::Continue(())
+            },
+        );
     }
 
     /// Calls `seen` with every row `read` sees, ascending, a word of rows
     /// at a time.
     pub(super) fn for_each_visible_row(&self, read: Read, mut seen: impl FnMut(usize)) {
-        for index in 0..self.vectors.len() * WORDS {
-            let mut bits = self.visible_word(index, u64::MAX, read);
-            while bits != 0 {
-                let bit = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                seen(index * 64 + bit);
+        let _all = self.for_each_visible_word(
+            self.words(),
+            |_| u64::MAX,
+            0,
+            read,
+            |index, bits| {
+                each_row(index, bits, &mut seen);
+                ControlFlow::Continue(())
+            },
+        );
+    }
+
+    /// How many 64-row words its vectors cover.
+    pub(super) fn words(&self) -> usize {
+        self.vectors.len() * WORDS
+    }
+
+    /// Calls `seen` with each word of the first `words` from the one holding
+    /// row `from`, as the mask of the rows at or past `from` that
+    /// `asked(index)` names and `read` sees (see
+    /// [`visible_word`](Self::visible_word)), ascending and skipping a word
+    /// with none, until `seen` breaks: a paged read starts at its position
+    /// and stops at a word's end.
+    #[inline]
+    pub(super) fn for_each_visible_word(
+        &self,
+        words: usize,
+        asked: impl Fn(usize) -> u64,
+        from: usize,
+        read: Read,
+        mut seen: impl FnMut(usize, u64) -> ControlFlow<()>,
+    ) -> ControlFlow<()> {
+        let first = from / 64;
+        for index in first..words {
+            let mut mask = asked(index);
+            if index == first {
+                mask &= u64::MAX << (from % 64);
+            }
+            let bits = self.visible_word(index, mask, read);
+            if bits != 0 {
+                seen(index, bits)?;
             }
         }
+        ControlFlow::Continue(())
     }
 
     /// How many rows `read` sees.

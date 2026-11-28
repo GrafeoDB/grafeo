@@ -35,6 +35,8 @@
 #[cfg(any(feature = "text-index", feature = "vector-index"))]
 mod key;
 mod property;
+#[cfg(feature = "vector-index")]
+pub mod saved;
 #[cfg(feature = "text-index")]
 mod text;
 #[cfg(feature = "vector-index")]

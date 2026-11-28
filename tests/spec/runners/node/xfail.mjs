@@ -29,6 +29,16 @@ export function isExpectedFailure(err) {
 /** The run's counts for the `gtest summary` line. */
 export const summary = { skipped: 0, xfailed: 0 }
 
+/**
+ * Skips the case of the test context `ctx`, counting it in the summary: every skip counts,
+ * whichever check skips the case (`skip:`, a runner gap, a language or feature the build
+ * lacks), so a runner that skips a whole language shows it.
+ */
+export function skipCase(ctx) {
+  summary.skipped++
+  return ctx.skip()
+}
+
 /** The `gtest summary` line. */
 export function summaryLine() {
   return `gtest summary: skipped=${summary.skipped} xfailed=${summary.xfailed}`

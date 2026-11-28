@@ -450,30 +450,15 @@ pub(crate) fn convert_vector_lists(
     Ok(())
 }
 
-/// The name [`create_vector_index`](super::GrafeoDB::create_vector_index)
-/// takes for a quantization.
-#[cfg(feature = "vector-index")]
-pub(super) fn quantization_name(
-    quantization: grafeo_core::index::vector::QuantizationType,
-) -> Option<&'static str> {
-    use grafeo_core::index::vector::QuantizationType;
-    match quantization {
-        QuantizationType::Scalar => Some("scalar"),
-        QuantizationType::Binary => Some("binary"),
-        QuantizationType::Product { .. } => Some("product"),
-        _ => None,
-    }
-}
-
 /// A vector index of `property` on the nodes of `graph` that have `label`,
 /// built from their vectors, for `create_vector_index` and `CREATE VECTOR
 /// INDEX`: `dimensions` from the first vector when `None`, `metric` cosine
 /// when `None`, `m` and `ef_construction` the HNSW defaults when `None`,
-/// `quantization` a name `create_vector_index` takes.
+/// quantized as `quantization` says.
 ///
 /// # Errors
 ///
-/// An unknown metric or quantization, 0 dimensions, a vector of other
+/// An unknown metric, 0 dimensions, a vector of other
 /// dimensions or with a NaN or infinite value, or no vector and no
 /// dimensions.
 #[cfg(feature = "vector-index")]
@@ -489,7 +474,7 @@ pub(crate) fn vector_index_from_data(
     metric: Option<&str>,
     m: Option<usize>,
     ef_construction: Option<usize>,
-    quantization: Option<&str>,
+    quantization: grafeo_core::index::vector::QuantizationType,
 ) -> Result<grafeo_core::index::vector::VectorIndexKind> {
     // The index holds each node's newest vector: it reads every commit so
     // far, and every search rechecks its candidates at the reader's view.
@@ -520,15 +505,13 @@ fn vector_index_at(
     metric: Option<&str>,
     m: Option<usize>,
     ef_construction: Option<usize>,
-    quantization: Option<&str>,
+    quantization: grafeo_core::index::vector::QuantizationType,
     latest: ReadView,
 ) -> Result<grafeo_core::index::vector::VectorIndexKind> {
     use grafeo_common::types::Value;
-    use grafeo_core::index::vector::VectorIndexKind;
 
     let metric = vector_index_metric(metric)?;
     check_vector_index_dimensions(dimensions)?;
-    let quantization = super::Open::parse_quantization(quantization)?;
 
     let nodes = graph.nodes_by_label(label, latest)?;
     let vector_of = |node_id| -> Result<Option<std::sync::Arc<[f32]>>> {
@@ -557,23 +540,11 @@ fn vector_index_at(
 
     let index =
         super::Open::build_vector_index(dims, metric, m, ef_construction, quantization, count);
-    match &index {
-        VectorIndexKind::Hnsw(_) => {
-            let accessor =
-                grafeo_core::index::vector::PropertyVectorAccessor::new(graph, property, latest);
-            for &node_id in &nodes {
-                if let Some(v) = vector_of(node_id)? {
-                    index.insert(node_id, &v, &accessor);
-                    accessor.check()?;
-                }
-            }
-        }
-        VectorIndexKind::Quantized(quantized) => {
-            for &node_id in &nodes {
-                if let Some(v) = vector_of(node_id)? {
-                    quantized.insert(node_id, &v);
-                }
-            }
+    let accessor = grafeo_core::index::vector::PropertyVectorAccessor::new(graph, property, latest);
+    for &node_id in &nodes {
+        if let Some(v) = vector_of(node_id)? {
+            index.insert(node_id, &v, &accessor);
+            accessor.check()?;
         }
     }
     grafeo_info!(
@@ -682,7 +653,9 @@ pub(crate) fn built_for_commit(
     };
     #[cfg(feature = "vector-index")]
     if let Some(def) = indexes.vector.into_iter().next() {
-        let quantization = def.quantization.and_then(quantization_name);
+        let quantization = def
+            .quantization
+            .unwrap_or(grafeo_core::index::vector::QuantizationType::None);
         return vector_index_at(
             store,
             &def.label,
@@ -923,6 +896,8 @@ impl super::Open {
 
     #[must_use]
     pub(crate) fn has_property_index(&self, property: &str) -> bool {
+        // A snapshot restore waits for it, or it for the restore.
+        let _read = self.transaction_manager.hold_direct_read();
         // A backend of its own has no index.
         self.current_lpg_store()
             .is_ok_and(|store| store.has_property_index(property))
@@ -933,6 +908,8 @@ impl super::Open {
         property: &str,
         value: &grafeo_common::types::Value,
     ) -> Result<Vec<grafeo_common::types::NodeId>> {
+        // A snapshot restore waits for it, or it for the restore.
+        let _read = self.transaction_manager.hold_direct_read();
         // The index also holds nodes created by transactions that have not
         // committed yet; return only what a reader at the current epoch sees.
         let epoch = self.read_epoch();
@@ -957,16 +934,8 @@ impl super::Open {
     ) -> Result<()> {
         #[cfg(feature = "vector-index")]
         {
-            self.check_index_change()?;
-            // On the current graph, as the other direct calls (#677).
-            let key = self.current_graph_key();
-            let (graph, store) = self.index_target(key.as_deref())?;
-            self.convert_vector_lists(&store, key.as_deref(), label, property, dimensions)?;
-            // Held until the index is in: the store counts it then.
-            let _reserved =
-                reserve_index_build(&store, label, vector_index_bytes_per_node(dimensions))?;
-            let index = vector_index_from_data(
-                &*graph,
+            let quantization = Self::parse_quantization(quantization)?;
+            self.create_vector_index_with(
                 label,
                 property,
                 dimensions,
@@ -974,15 +943,7 @@ impl super::Open {
                 m,
                 ef_construction,
                 quantization,
-            )?;
-            let record = vector_index_record(key.as_deref(), label, property, &index)?;
-            let held = self.hold_for_standalone(false)?;
-            let mut change = StandaloneChange::new();
-            change.push_built(
-                StandaloneOp::PutCatalog(CatalogRecord::Index(record)),
-                BuiltIndex::Vector(index),
-            );
-            self.commit_standalone(change, &held)
+            )
         }
         #[cfg(not(feature = "vector-index"))]
         {
@@ -1001,6 +962,51 @@ impl super::Open {
                 ),
             ))
         }
+    }
+
+    /// [`create_vector_index`](Self::create_vector_index) with the
+    /// quantization parsed.
+    #[cfg(feature = "vector-index")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the arguments of create_vector_index, the quantization typed"
+    )]
+    fn create_vector_index_with(
+        &self,
+        label: &str,
+        property: &str,
+        dimensions: Option<usize>,
+        metric: Option<&str>,
+        m: Option<usize>,
+        ef_construction: Option<usize>,
+        quantization: grafeo_core::index::vector::QuantizationType,
+    ) -> Result<()> {
+        self.check_index_change()?;
+        // On the current graph, as the other direct calls (#677).
+        let key = self.current_graph_key();
+        let (graph, store) = self.index_target(key.as_deref())?;
+        self.convert_vector_lists(&store, key.as_deref(), label, property, dimensions)?;
+        // Held until the index is in: the store counts it then.
+        let _reserved =
+            reserve_index_build(&store, label, vector_index_bytes_per_node(dimensions))?;
+        let index = vector_index_from_data(
+            &*graph,
+            label,
+            property,
+            dimensions,
+            metric,
+            m,
+            ef_construction,
+            quantization,
+        )?;
+        let record = vector_index_record(key.as_deref(), label, property, &index)?;
+        let held = self.hold_for_standalone(false)?;
+        let mut change = StandaloneChange::new();
+        change.push_built(
+            StandaloneOp::PutCatalog(CatalogRecord::Index(record)),
+            BuiltIndex::Vector(index),
+        );
+        self.commit_standalone(change, &held)
     }
 
     /// The graph an index reads and the store that holds it, for the graph
@@ -1052,7 +1058,7 @@ impl super::Open {
         metric: Option<&str>,
         m: Option<usize>,
         ef_construction: Option<usize>,
-        quantization: Option<&str>,
+        quantization: grafeo_core::index::vector::QuantizationType,
     ) -> Result<()> {
         self.check_index_change()?;
         let (read, _) = self.index_target(graph)?;
@@ -1177,23 +1183,18 @@ impl super::Open {
         // Preserve config and quantization type from existing index if available
         let existing = self.current_lpg_store()?.get_vector_index(label, property);
 
-        let (config, quantization_name) = if let Some(ref idx) = existing {
-            let qt = idx.quantization_type().and_then(quantization_name);
-            (Some(idx.config().clone()), qt)
-        } else {
-            (None, None)
-        };
-
         // The new index replaces the old one when it is installed.
-        if let Some(config) = config {
-            self.create_vector_index(
+        if let Some(idx) = existing {
+            let config = idx.config();
+            self.create_vector_index_with(
                 label,
                 property,
                 Some(config.dimensions),
                 Some(config.metric.name()),
                 Some(config.m),
                 Some(config.ef_construction),
-                quantization_name,
+                idx.quantization_type()
+                    .unwrap_or(grafeo_core::index::vector::QuantizationType::None),
             )
         } else {
             // Index was already dropped: infer dimensions from data

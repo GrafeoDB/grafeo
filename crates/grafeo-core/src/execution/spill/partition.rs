@@ -16,7 +16,7 @@
 
 use super::file::SpillFile;
 use super::manager::SpillManager;
-use super::serializer::{deserialize_row, serialize_row};
+use super::serializer::{deserialize_row, read_claimed_bytes, read_length, serialize_row};
 use grafeo_common::types::Value;
 use grafeo_common::utils::hash::FxHashMap;
 use std::io::{Read, Write};
@@ -31,10 +31,12 @@ pub const DEFAULT_NUM_PARTITIONS: usize = 256;
 struct SerializedKey(Vec<u8>);
 
 impl SerializedKey {
-    fn from_values(values: &[Value]) -> Self {
+    /// The key's bytes; fails for a value the spill format refuses (nested
+    /// deeper than it writes, see [`serialize_row`]).
+    fn from_values(values: &[Value]) -> std::io::Result<Self> {
         let mut buf = Vec::new();
-        serialize_row(values, &mut buf).expect("serialization should not fail");
-        Self(buf)
+        serialize_row(values, &mut buf)?;
+        Ok(Self(buf))
     }
 
     fn to_values(&self, num_columns: usize) -> std::io::Result<Vec<Value>> {
@@ -137,7 +139,9 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
     ///
     /// # Errors
     ///
-    /// Returns an error if reading from disk fails.
+    /// Returns an error if reading from disk fails. The partition stays
+    /// spilled then, its file kept: a later access fails again instead of
+    /// finding its groups gone.
     fn get_partition_mut(&mut self, partition_idx: usize) -> std::io::Result<&mut Partition<V>> {
         self.touch(partition_idx);
 
@@ -151,7 +155,14 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
 
         // Load from disk
         if let Some(spill_file) = self.spill_files[partition_idx].take() {
-            let loaded = self.load_partition(&spill_file)?;
+            let loaded = match self.load_partition(&spill_file, self.partition_sizes[partition_idx])
+            {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    self.spill_files[partition_idx] = Some(spill_file);
+                    return Err(error);
+                }
+            };
             // Delete the spill file after loading
             let bytes = spill_file.bytes_written();
             let _ = spill_file.delete();
@@ -168,30 +179,36 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
             .expect("partition is Some: set to Some in if/else branches above"))
     }
 
-    /// Loads a partition from a spill file.
-    fn load_partition(&self, spill_file: &SpillFile) -> std::io::Result<Partition<V>> {
+    /// Loads a partition of `groups` groups from a spill file. A file that
+    /// holds another number of groups, or ends inside one, fails the load.
+    fn load_partition(
+        &self,
+        spill_file: &SpillFile,
+        groups: usize,
+    ) -> std::io::Result<Partition<V>> {
         let mut reader = spill_file.reader()?;
         let mut adapter = SpillReaderAdapter(&mut reader);
 
-        // reason: deserialized counts are bounded by available data
-        #[allow(clippy::cast_possible_truncation)]
-        let num_entries = read_u64(&mut adapter)? as usize;
-        let mut partition = Partition::with_capacity_and_hasher(num_entries, Default::default());
+        let num_entries = read_length(&mut adapter)?;
+        if num_entries != groups as u64 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("a spill file claims {num_entries} groups, its partition held {groups}"),
+            ));
+        }
+        let mut partition = Partition::with_capacity_and_hasher(groups, Default::default());
 
-        for _ in 0..num_entries {
-            // Read key
-            // reason: deserialized lengths are bounded by available data
-            #[allow(clippy::cast_possible_truncation)]
-            let key_len = read_u64(&mut adapter)? as usize;
-            let mut key_buf = vec![0u8; key_len];
-            adapter.read_exact(&mut key_buf)?;
-            let serialized_key = SerializedKey(key_buf);
+        for _ in 0..groups {
+            let key_len = read_length(&mut adapter)?;
+            let serialized_key = SerializedKey(read_claimed_bytes(&mut adapter, key_len)?);
 
-            // Read number of key columns
-            // reason: deserialized counts are bounded by available data
-            #[allow(clippy::cast_possible_truncation)]
-            let num_key_columns = read_u64(&mut adapter)? as usize;
-            let first_seen = read_u64(&mut adapter)?;
+            let num_key_columns = usize::try_from(read_length(&mut adapter)?).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "a spill file's key column count exceeds usize",
+                )
+            })?;
+            let first_seen = read_length(&mut adapter)?;
 
             // Read value
             let value = (self.value_deserializer)(&mut adapter)?;
@@ -352,7 +369,7 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
     pub fn insert(&mut self, key: Vec<Value>, value: V) -> std::io::Result<Option<V>> {
         let partition_idx = self.partition_for(&key);
         let num_key_columns = key.len();
-        let serialized_key = SerializedKey::from_values(&key);
+        let serialized_key = SerializedKey::from_values(&key)?;
         let first_seen = self.next_first_seen;
         let partition = self.get_partition_mut(partition_idx)?;
 
@@ -379,7 +396,7 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
     /// Returns an error if loading from disk fails.
     pub fn get(&mut self, key: &[Value]) -> std::io::Result<Option<&V>> {
         let partition_idx = self.partition_for(key);
-        let serialized_key = SerializedKey::from_values(key);
+        let serialized_key = SerializedKey::from_values(key)?;
         let partition = self.get_partition_mut(partition_idx)?;
         Ok(partition.get(&serialized_key).map(|e| &e.value))
     }
@@ -399,7 +416,7 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
     {
         let partition_idx = self.partition_for(&key);
         let num_key_columns = key.len();
-        let serialized_key = SerializedKey::from_values(&key);
+        let serialized_key = SerializedKey::from_values(&key)?;
         let first_seen = self.next_first_seen;
 
         let was_new;
@@ -615,13 +632,6 @@ fn hash_key(key: &[Value]) -> u64 {
     }
 
     hasher.finish()
-}
-
-/// Helper to read u64 in little endian.
-fn read_u64<R: Read>(reader: &mut R) -> std::io::Result<u64> {
-    let mut buf = [0u8; 8];
-    reader.read_exact(&mut buf)?;
-    Ok(u64::from_le_bytes(buf))
 }
 
 /// Helper to write u64 in little endian.
@@ -969,6 +979,61 @@ mod tests {
         assert_eq!(state.get(&key(&[1])).unwrap(), Some(&200));
     }
 
+    /// A state whose one group (key 7, value 70) is spilled, with the spill
+    /// file's path and its bytes.
+    fn spilled_seven(
+        manager: Arc<SpillManager>,
+    ) -> (PartitionedState<i64>, std::path::PathBuf, Vec<u8>) {
+        let mut state = PartitionedState::new(manager, 4, serialize_i64, deserialize_i64);
+        state.insert(key(&[7]), 70).unwrap();
+        let partition = state.partition_for(&key(&[7]));
+        state.spill_partition(partition).unwrap();
+        let path = state.spill_files[partition]
+            .as_ref()
+            .unwrap()
+            .path()
+            .to_path_buf();
+        let bytes = std::fs::read(&path).unwrap();
+        (state, path, bytes)
+    }
+
+    /// A spill file whose group count differs from the partition's, or whose
+    /// key length claims more than the file holds, fails the reload with an
+    /// error: nothing is allocated by the claim, and nothing panics or aborts.
+    #[test]
+    fn a_damaged_count_fails_the_reload() {
+        // (offset, claim): the group count (more, past the address space,
+        // fewer, none), then the key's length (past the address space, past
+        // what any allocation can get).
+        for (at, claim) in [(0, 2), (0, u64::MAX), (0, 0), (8, u64::MAX), (8, 1 << 40)] {
+            let (_temp_dir, manager) = create_manager();
+            let (mut state, path, mut bytes) = spilled_seven(manager);
+            bytes[at..at + 8].copy_from_slice(&claim.to_le_bytes());
+            std::fs::write(&path, &bytes).unwrap();
+            assert!(state.get(&key(&[7])).is_err(), "{claim} at byte {at}");
+        }
+    }
+
+    /// A reload that fails keeps the partition's spill file and its bytes'
+    /// registration: the next access fails again instead of finding the
+    /// groups gone, and once the file is whole again its groups come back.
+    #[test]
+    fn a_failed_reload_keeps_the_spill_file() {
+        let (_temp_dir, manager) = create_manager();
+        let (mut state, path, bytes) = spilled_seven(Arc::clone(&manager));
+        let spilled = manager.spilled_bytes();
+        assert!(spilled > 0);
+        std::fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
+        assert!(state.get(&key(&[7])).is_err());
+        assert!(state.get(&key(&[7])).is_err(), "the group is not gone");
+        assert!(path.exists());
+        assert_eq!(manager.spilled_bytes(), spilled);
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(state.get(&key(&[7])).unwrap(), Some(&70));
+        assert!(!path.exists());
+        assert_eq!(manager.spilled_bytes(), 0);
+    }
+
     #[test]
     fn hash_key_tells_rdf_terms_and_decimals_apart() {
         use grafeo_common::types::Decimal;
@@ -985,5 +1050,29 @@ mod tests {
         let decimal = |text: &str| hash_key(&[Value::Decimal(Decimal::parse(text).unwrap())]);
         assert_eq!(decimal("1.50"), decimal("1.5"));
         assert_ne!(decimal("1.5"), decimal("2.5"));
+    }
+
+    /// A group key nested past what the spill format writes (see
+    /// `serialize_value`) fails the insert and the lookups with an error, not a
+    /// panic; a key at the bound groups and is found again.
+    #[test]
+    fn a_key_nested_past_the_depth_bound_fails_without_a_panic() {
+        use grafeo_common::storage::MAX_VALUE_DEPTH;
+
+        let nested = |depth: usize| {
+            vec![(0..depth).fold(Value::Int64(7), |inner, _| {
+                Value::List(Arc::from(vec![inner]))
+            })]
+        };
+        let (_temp_dir, manager) = create_manager();
+        let mut state = PartitionedState::new(manager, 4, serialize_i64, deserialize_i64);
+        let too_deep = nested(MAX_VALUE_DEPTH + 1);
+        assert!(state.insert(too_deep.clone(), 1).is_err());
+        assert!(state.get(&too_deep).is_err());
+        assert!(state.get_or_insert_with(too_deep, || 1).is_err());
+        assert_eq!(state.total_size(), 0);
+        let at_bound = nested(MAX_VALUE_DEPTH);
+        state.insert(at_bound.clone(), 70).unwrap();
+        assert_eq!(state.get(&at_bound).unwrap(), Some(&70));
     }
 }

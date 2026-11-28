@@ -47,6 +47,8 @@ pub use merge::{
 pub use partition::{DEFAULT_NUM_PARTITIONS, PartitionedState};
 #[cfg(feature = "spill")]
 pub use serializer::{deserialize_row, deserialize_value, serialize_row, serialize_value};
+#[cfg(feature = "spill")]
+pub(crate) use serializer::{read_claimed_bytes, read_length, room_for};
 
 /// The spill I/O error `error` as an operator's error: a refusal of the
 /// spill account (carried by the `io::Error` of a write it refused) becomes

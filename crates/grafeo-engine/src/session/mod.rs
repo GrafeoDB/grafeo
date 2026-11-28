@@ -832,6 +832,12 @@ impl SessionInner {
         crate::transaction::CommitGuard<'a>,
         Option<crate::database::wal_log::Logged>,
     )> {
+        // A session that reports to change data capture reserves its
+        // commit's timestamps with its group, under the commit lock.
+        #[cfg(feature = "cdc")]
+        let clock = self.records_cdc.then(|| self.cdc_log.clock().as_ref());
+        #[cfg(not(feature = "cdc"))]
+        let clock = None;
         match (self.wal(), changes) {
             (Some(wal), Some(changes)) => crate::database::wal_log::write_commit(
                 wal,
@@ -840,6 +846,7 @@ impl SessionInner {
                 changes,
                 schema,
                 grafeo_common::storage::log_record::Origin::Transaction,
+                clock,
             ),
             _ => Ok((commit, None)),
         }
@@ -3817,7 +3824,14 @@ impl SessionInner {
                 change.hold(grant);
             }
             let index = crate::database::index::vector_index_from_data(
-                &*store, label, property, dimensions, metric, None, None, None,
+                &*store,
+                label,
+                property,
+                dimensions,
+                metric,
+                None,
+                None,
+                grafeo_core::index::vector::QuantizationType::None,
             )?;
             let record = crate::database::index::vector_index_record(
                 graph.as_deref(),
@@ -5178,7 +5192,6 @@ impl SessionInner {
     fn execute_graphql_untimed(&self, query: &str) -> Result<QueryResult> {
         use crate::query::{binder::Binder, processor::substitute_params, translators::graphql};
 
-        #[cfg(feature = "metrics")]
         let start_time = Instant::now();
 
         let mut logical_plan =
@@ -5200,6 +5213,14 @@ impl SessionInner {
         let has_mutations = writes.any;
         if has_mutations {
             self.require_permission(crate::auth::StatementKind::Write)?;
+        }
+        if let Some(answer) = self.explain_or_profile(
+            &optimized_plan,
+            &active,
+            grafeo_common::types::StatementLanguage::GraphQl,
+            start_time,
+        ) {
+            return answer;
         }
 
         let result = self.with_auto_commit(writes, || {
@@ -5246,7 +5267,6 @@ impl SessionInner {
     ) -> Result<QueryResult> {
         use crate::query::{binder::Binder, processor::substitute_params, translators::graphql};
 
-        #[cfg(feature = "metrics")]
         let start_time = Instant::now();
 
         // Parse and translate the query to a logical plan
@@ -5276,6 +5296,14 @@ impl SessionInner {
         let has_mutations = writes.any;
         if has_mutations {
             self.require_permission(crate::auth::StatementKind::Write)?;
+        }
+        if let Some(answer) = self.explain_or_profile(
+            &optimized_plan,
+            &active,
+            grafeo_common::types::StatementLanguage::GraphQl,
+            start_time,
+        ) {
+            return answer;
         }
 
         let result = self.with_auto_commit(writes, || {
@@ -5797,9 +5825,21 @@ impl SessionInner {
         // unpublished, which poisons the database until a reopen decides from
         // the log.
         #[cfg(feature = "wal")]
-        if let (Some(wal), Some(logged)) = (self.wal(), logged) {
+        if let (Some(wal), Some(logged)) = (self.wal(), &logged) {
             crate::database::wal_log::sync_commit(wal, logged)?;
         }
+
+        // The timestamps the commit reserved with its group, if it wrote one,
+        // with the image rule's verdicts.
+        #[cfg(all(feature = "cdc", feature = "wal"))]
+        let captured = logged
+            .as_ref()
+            .and_then(|logged| logged.clock.map(|first| (first, logged.refused.clone())));
+        #[cfg(all(feature = "cdc", not(feature = "wal")))]
+        let captured: Option<(
+            grafeo_common::types::HlcTimestamp,
+            Vec<(usize, grafeo_common::storage::log_record::ImageLogged)>,
+        )> = None;
 
         // In the commit's turn, after every commit below it is published:
         // what must follow the epochs.
@@ -5856,9 +5896,10 @@ impl SessionInner {
                 && let Some(changes) = &changes
             {
                 changes.read(|set| {
-                    if let Some(stamps) = self.cdc_log.reserve_for(set) {
-                        self.cdc_log.record_commit(set, commit_epoch, stamps);
-                    }
+                    let logged = captured
+                        .as_ref()
+                        .map(|(first, refused)| (*first, refused.as_slice()));
+                    self.cdc_log.record_commit_at(set, commit_epoch, logged);
                 });
             }
 
@@ -6330,9 +6371,12 @@ impl SessionInner {
                 &self.plan_options.parse_limits,
             )?,
             #[cfg(all(feature = "graphql", feature = "triple-store"))]
+            // Whether it writes, which no name changes.
             "graphql-rdf" => crate::query::translators::graphql_rdf::translate(
                 query,
-                "http://example.org/",
+                &crate::query::translators::graphql_rdf::Namespace(
+                    crate::query::translators::graphql_rdf::DEFAULT_NAMESPACE,
+                ),
                 &self.plan_options.parse_limits,
             )?,
             #[cfg(feature = "sql-pgq")]
@@ -7019,7 +7063,7 @@ impl SessionInner {
             .with_equal_across_kinds(language.equal_across_kinds())
     }
 
-    #[cfg(any(feature = "gql", feature = "gremlin"))]
+    #[cfg(any(feature = "gql", feature = "gremlin", feature = "graphql"))]
     /// Plans `plan` physically and drops the operators without running them, so `EXPLAIN` refuses
     /// what planning refuses (a procedure's arguments, a `YIELD` column) as the statement would.
     /// It plans in a read context at the session's snapshot: it begins no transaction, also for
@@ -7061,7 +7105,7 @@ impl SessionInner {
     /// prefixes answers them here. `language` is the statement's (see
     /// [`create_planner_for_store`](Self::create_planner_for_store)), and
     /// `started` when the statement began, for the profile's total time.
-    #[cfg(any(feature = "gql", feature = "gremlin"))]
+    #[cfg(any(feature = "gql", feature = "gremlin", feature = "graphql"))]
     fn explain_or_profile(
         &self,
         plan: &crate::query::plan::LogicalPlan,

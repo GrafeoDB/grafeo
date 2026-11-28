@@ -12,9 +12,9 @@ import { afterAll, describe, it, expect, vi } from 'vitest'
 vi.setConfig({ testTimeout: 60_000 })
 import { readFileSync, readdirSync, statSync, existsSync } from 'fs'
 import { join, relative, resolve } from 'path'
-import { parseGtestFile, coerceParams, paramValue } from './parser.mjs'
+import { parseGtestFile, coerceParams, paramValue, configOptions, parseConfig, datasetFile } from './parser.mjs'
 import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, describeError, assertGqlStatus, assertTerms, assertValues, assertSideEffects, observation } from './comparator.mjs'
-import { SpecFailure, runMarked, runProbe, specRoot, summary, summaryLine } from './xfail.mjs'
+import { SpecFailure, skipCase, runMarked, runProbe, specRoot, summary, summaryLine } from './xfail.mjs'
 import { caseCellType, matches as matchCell, parse as parseCell, toNeutral } from './tck_values.mjs'
 
 // ---------------------------------------------------------------------------
@@ -53,17 +53,14 @@ function findGtestFiles(dir) {
   return results.sort()
 }
 
-/** Load a .setup file and execute each line as GQL. */
+/** Load a dataset, one statement per line: GQL from a `.setup` file, SPARQL Update from a `.ru` file. */
 async function loadDataset(db, datasetName) {
-  const setupPath = join(DATASETS_DIR, `${datasetName}.setup`)
-  if (!existsSync(setupPath)) {
-    throw new Error(`Dataset file not found: ${setupPath}`)
-  }
-  const content = readFileSync(setupPath, 'utf-8')
+  const { path, language } = datasetFile(DATASETS_DIR, datasetName)
+  const content = readFileSync(path, 'utf-8')
   for (const line of content.split(/\r?\n/)) {
     const trimmed = line.trim()
     if (!trimmed || trimmed.startsWith('#')) continue
-    await db.execute(trimmed)
+    await executeQuery(db, language, trimmed)
   }
 }
 
@@ -90,7 +87,7 @@ async function executeQuery(db, language, query, params) {
       if (!db.executeSql) throw new Error('SQL/PGQ not available')
       return params ? db.executeSql(query, params) : db.executeSql(query)
     default:
-      if (db.executeLanguage) return db.executeLanguage(language, query)
+      if (db.executeLanguage) return db.executeLanguage(language, query, params)
       throw new Error(`Unsupported language: ${language}`)
   }
 }
@@ -194,15 +191,14 @@ for (const filePath of gtestFiles) {
         for (const [lang, query] of Object.entries(tc.variants)) {
           it(`${tc.name}_${lang}`, async (ctx) => {
             if (tc.skip || tc.runnerGap?.runners.includes('node')) {
-              summary.skipped++
-              return ctx.skip()
+              return skipCase(ctx)
             }
-            const db = GrafeoDB.create()
+            const db = GrafeoDB.create(null, configOptions(tc.config))
             try {
-              if (!isAvailable(db, lang)) return ctx.skip()
+              if (!isAvailable(db, lang)) return skipCase(ctx)
               // Check the file's and the test's requires, as single tests do
               for (const req of [...(meta.requires || []), ...(tc.requires || [])]) {
-                if (!isAvailable(db, req)) return ctx.skip()
+                if (!isAvailable(db, req)) return skipCase(ctx)
               }
               const effectiveDataset = tc.dataset || meta.dataset
               // The dataset loads inside the case, as in the other runners: a binding error there
@@ -225,24 +221,24 @@ for (const filePath of gtestFiles) {
         // Skip by field
         // A gap of this binding (`runner_gap:`) skips the case here, as `skip:` does
         if (tc.skip || tc.runnerGap?.runners.includes('node')) {
-          summary.skipped++
-          return ctx.skip()
+          return skipCase(ctx)
         }
 
-        const db = GrafeoDB.create()
+        // The case's settings (`config:`), the defaults without one
+        const db = GrafeoDB.create(null, configOptions(tc.config))
         try {
           // Check language availability (file-level and per-test)
-          if (!isAvailable(db, meta.language)) return ctx.skip()
-          if (tc.language && !isAvailable(db, tc.language)) return ctx.skip()
+          if (!isAvailable(db, meta.language)) return skipCase(ctx)
+          if (tc.language && !isAvailable(db, tc.language)) return skipCase(ctx)
 
           // Check requires: skip if the compiled build lacks the feature
           for (const req of meta.requires) {
-            if (!isAvailable(db, req)) return ctx.skip()
+            if (!isAvailable(db, req)) return skipCase(ctx)
           }
 
           // Check per-test requires
           for (const req of (tc.requires || [])) {
-            if (!isAvailable(db, req)) return ctx.skip()
+            if (!isAvailable(db, req)) return skipCase(ctx)
           }
 
           // Load dataset (per-test override takes priority)
@@ -433,6 +429,19 @@ async function nativeValue(db, actual) {
     default: throw new Error(`unknown neutral kind ${kind}`)
   }
 }
+
+// A case's `config:`, by the rule every runner applies: an unknown or repeated key is refused
+describe('config:', () => {
+  it('names the settings the case opens with', () => {
+    expect(configOptions(parseConfig('{path_search_budget: 1048576}'))).toEqual({ pathSearchBudget: 1048576 })
+  })
+  for (const text of [
+    '{path_budget: 1048576}', '{path_search_budget: 0}', '{path_search_budget: big}', '{path_search_budget: +1048576}',
+    '{path_search_budget: 1048576, path_search_budget: 2}', 'path_search_budget: 1048576', '{}', '{toString: 1}',
+  ]) {
+    it(`refuses ${text}`, () => expect(() => parseConfig(text)).toThrow())
+  }
+})
 
 describe('values_cases.json', () => {
   for (const c of CASE_FILE.cases) {

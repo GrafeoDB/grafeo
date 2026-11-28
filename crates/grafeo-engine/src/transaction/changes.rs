@@ -1450,6 +1450,8 @@ impl StreamedLog<'_> {
                 epoch: self.epoch,
                 timestamp_ms: crate::database::wal_log::now_ms(),
                 origin: Origin::Bulk,
+                // An import reports no change events.
+                clock: None,
             })
             .encode_framed(&mut self.scratch)?;
             group.push(&self.scratch).map_err(commit_error)?;

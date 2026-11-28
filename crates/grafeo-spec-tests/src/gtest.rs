@@ -67,6 +67,8 @@ pub struct TestCase {
     pub xfail: Option<Xfail>,
     /// The runners that skip the case for a gap of their binding (`runner_gap:`).
     pub runner_gap: Option<RunnerGap>,
+    /// The settings the case's database opens with (`config:`), the defaults when empty.
+    pub config: Vec<Setting>,
     /// A probe of the runner itself (`probe:`), only in a file under `spec-probes`.
     pub probe: Option<Probe>,
     /// What the case must give.
@@ -99,6 +101,17 @@ pub struct RunnerGap {
     /// What the bindings lack.
     pub reason: String,
 }
+
+/// A database setting a case opens with (`config:`): a `Config` setting every binding
+/// exposes, so every runner applies it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Setting {
+    /// `path_search_budget`: the bytes one path search may hold.
+    PathSearchBudget(usize),
+}
+
+/// The keys a `config:` may set.
+pub const CONFIG_KEYS: [&str; 1] = ["path_search_budget"];
 
 /// The runners a `runner_gap:` may name.
 pub const RUNNERS: [&str; 7] = ["rust", "python", "node", "wasm", "go", "csharp", "dart"];
@@ -180,16 +193,30 @@ pub const SIDE_EFFECT_KEYS: [&str; 8] = [
 ///
 /// The first thing the file gets wrong, naming the case where there is one: a missing
 /// `meta:` or `tests:` block, an unknown `expect:` key, a block-scalar param, an `xfail:`
-/// without its `spec:` or `issue:`, a case both `skip:` and `xfail:`, or a `probe:` outside a
-/// `spec-probes` directory.
+/// without its `spec:` or `issue:`, a case both `skip:` and `xfail:`, a `probe:` outside a
+/// `spec-probes` directory, or a GraphQL case in a `model: rdf` file that is not `graphql-rdf`.
 pub fn parse_gtest_text(path: &str, text: &str) -> Result<GtestFile, String> {
     let lines: Vec<&str> = text.lines().collect();
     let mut idx = 0;
     skip_blank_and_comments(&lines, &mut idx);
     let meta = parse_meta(&lines, &mut idx)?;
     let tests = parse_tests(path, &lines, &mut idx)?;
+    if meta.model == "rdf" {
+        // `graphql` reads the property graph, so on RDF data it would test nothing RDF.
+        let lpg_graphql = tests.iter().find(|tc| {
+            tc.language.as_deref().unwrap_or(&meta.language) == "graphql"
+                || tc.variants.contains_key("graphql")
+        });
+        if let Some(tc) = lpg_graphql {
+            return Err(format!("test '{}': {GRAPHQL_ON_RDF}", tc.name));
+        }
+    }
     Ok(GtestFile { meta, tests })
 }
+
+/// Why a `graphql` case in a `model: rdf` file is refused; every runner says the same.
+pub const GRAPHQL_ON_RDF: &str =
+    "`language: graphql` reads the property graph; on `model: rdf` write `language: graphql-rdf`";
 
 /// Whether `path` lies under a directory named exactly `spec-probes`.
 fn in_spec_probes(path: &str) -> bool {
@@ -312,6 +339,7 @@ fn parse_single_test(path: &str, lines: &[&str], idx: &mut usize) -> Result<Test
         skip: None,
         xfail: None,
         runner_gap: None,
+        config: Vec::new(),
         probe: None,
         expect: Expect::default(),
         variants: std::collections::HashMap::new(),
@@ -371,6 +399,11 @@ fn parse_single_test(path: &str, lines: &[&str], idx: &mut usize) -> Result<Test
                         parse_runner_gap(lines, idx)
                             .map_err(|e| format!("test '{}': {e}", tc.name))?,
                     );
+                }
+                "config" => {
+                    tc.config =
+                        parse_config(value).map_err(|e| format!("test '{}': {e}", tc.name))?;
+                    *idx += 1;
                 }
                 "probe" => {
                     if !in_spec_probes(path) {
@@ -453,6 +486,43 @@ fn parse_single_test(path: &str, lines: &[&str], idx: &mut usize) -> Result<Test
         ));
     }
     Ok(tc)
+}
+
+/// A `config:` value, an inline map of [`CONFIG_KEYS`] to positive integers
+/// (`{path_search_budget: 1048576}`); an unknown or repeated key is refused, never ignored.
+fn parse_config(value: &str) -> Result<Vec<Setting>, String> {
+    let inner = value
+        .trim()
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+        .filter(|inner| !inner.trim().is_empty())
+        .ok_or_else(|| format!("config must be an inline map of settings, got '{value}'"))?;
+    let mut settings = Vec::new();
+    let mut seen = Vec::new();
+    for entry in inner.split(',') {
+        let (key, number) = parse_kv(entry.trim())
+            .ok_or_else(|| format!("config entry '{}' is not 'key: value'", entry.trim()))?;
+        if seen.contains(&key) {
+            return Err(format!("config sets '{key}' twice"));
+        }
+        seen.push(key);
+        let digits = number.trim();
+        let number = Some(digits)
+            .filter(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|digits| digits.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .ok_or_else(|| format!("config '{key}' needs a positive integer, got '{number}'"))?;
+        settings.push(match key {
+            "path_search_budget" => Setting::PathSearchBudget(number),
+            other => {
+                return Err(format!(
+                    "unknown config key '{other}' (known: {})",
+                    CONFIG_KEYS.join(", ")
+                ));
+            }
+        });
+    }
+    Ok(settings)
 }
 
 /// The `spec:` and `issue:` of an `xfail:` whose line is `lines[*idx]`, both required; leaves

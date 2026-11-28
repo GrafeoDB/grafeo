@@ -76,9 +76,13 @@ fn execute(
 }
 
 fn on_small_stack<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    on_stack(STACK, work)
+}
+
+fn on_stack<T: Send + 'static>(stack: usize, work: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new()
         .name("statement on a small stack".to_string())
-        .stack_size(STACK)
+        .stack_size(stack)
         .spawn(work)
         .expect("spawn the statement thread")
         .join()
@@ -496,6 +500,12 @@ fn sparql_queries_nest_up_to_their_limits_and_no_deeper() {
 }
 
 #[cfg(feature = "gremlin")]
+fn gremlin_has_chain(size: usize) -> String {
+    let steps = joined(size, "", |i| format!(".has('p{i}', {i})"));
+    format!("g.V(){steps}")
+}
+
+#[cfg(feature = "gremlin")]
 #[test]
 fn gremlin_traversals_nest_up_to_their_limits_and_no_deeper() {
     // A nested traversal nests two levels.
@@ -532,10 +542,7 @@ fn gremlin_traversals_nest_up_to_their_limits_and_no_deeper() {
         ),
         (
             "has chain",
-            |size| {
-                let steps = joined(size, "", |i| format!(".has('p{i}', {i})"));
-                format!("g.V(){steps}")
-            },
+            gremlin_has_chain,
             MAX_PLAN_DEPTH,
             MAX_PLAN_DEPTH / 2 - 8,
         ),
@@ -1117,6 +1124,23 @@ fn plan_length(statement: &str) -> usize {
     .root
     .explain_tree()
     .len()
+}
+
+/// The longest chain of Gremlin `has()` steps the plan depth limit accepts
+/// runs on three quarters of [`STACK`], so the rest is left for what a loaded
+/// machine takes of it (the allocator's and the system's slower paths). Every
+/// step is a filter, a level of the optimizer's passes over the plan; at 4.9 KB
+/// a level the chain once took 609 KB of the 640 KiB, and overflowed under load.
+#[cfg(feature = "gremlin")]
+#[test]
+fn the_longest_gremlin_has_chain_leaves_a_quarter_of_the_stack() {
+    let largest = largest_accepted(Language::Gremlin, gremlin_has_chain, MAX_PLAN_DEPTH);
+    let statement = gremlin_has_chain(largest);
+    let rows = on_stack(STACK / 4 * 3, move || {
+        let db = GrafeoDB::new_in_memory();
+        execute(&db, Language::Gremlin, &statement).map(|rows| rows.len())
+    });
+    assert_eq!(rows.map_err(|e| e.to_string()), Ok(0), "size {largest}");
 }
 
 #[cfg(feature = "gremlin")]

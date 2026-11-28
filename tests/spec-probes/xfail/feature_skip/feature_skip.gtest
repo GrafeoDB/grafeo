@@ -1,0 +1,31 @@
+# Cases a build cannot run: a language and a feature no build has. Both are skips, and the
+# summary line counts them, so a runner that skips a whole language shows it.
+
+meta:
+  language: gql
+  model: lpg
+  section: probes
+  title: "skip probe: a missing language and a missing feature count as skips"
+  dataset: empty
+
+tests:
+
+  - name: probe_language_absent
+    language: probe-absent-language
+    query: "RETURN 1 AS v"
+    expect:
+      rows:
+        - [1]
+
+  - name: probe_feature_absent
+    requires: [probe-absent-feature]
+    query: "RETURN 1 AS v"
+    expect:
+      rows:
+        - [1]
+
+  - name: probe_runs
+    query: "RETURN 1 AS v"
+    expect:
+      rows:
+        - [1]

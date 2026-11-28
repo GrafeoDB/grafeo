@@ -58,7 +58,9 @@
 //! A transaction's writes (statements, the direct API of a session or of
 //! the database, batches) are recorded in its change set; nothing reaches
 //! the log while it runs. Its commit builds its events from the change set
-//! (one per change, folded into the creates of the entities it created)
+//! (one per change, folded into its net changes: later changes fold into
+//! the create of an entity it created, and a create folded with its delete
+//! leaves nothing)
 //! and records them in the commit's ordered step, before its epoch is
 //! published: commits complete one at a time in epoch order, so the events
 //! carry the commit epoch and timestamps that follow the epochs, and a
@@ -231,7 +233,15 @@ pub struct ChangeEvent {
     /// (lower 16 bits) into a `u64`. Backward-compatible: plain wall-clock
     /// values have logical counter = 0.
     pub timestamp: HlcTimestamp,
-    /// Properties before the change (None for Create and for triple events).
+    /// Properties before the change: the old value of an update (None when
+    /// the property was not there), and for a delete what the entity held, a
+    /// map that is empty when it held none. None for a create and a triple,
+    /// and when the write's before-image is too large for the WAL record that
+    /// holds it (past `MAX_RECORD_BYTES` or the list rule): the record then
+    /// leaves the properties out. A delete's event still has its labels, or its
+    /// edge type and endpoints, which the record keeps, unless those alone
+    /// pass the limits (labels of about 1 GiB); then the record has no
+    /// image and the event has neither, as the durable feed reads it back.
     pub before: Option<HashMap<String, Value>>,
     /// Properties after the change (None for Delete and for triple events).
     pub after: Option<HashMap<String, Value>>,
@@ -270,6 +280,93 @@ pub struct ChangeEvent {
     /// Present only on triple events.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub triple_graph: Option<String>,
+}
+
+/// Where a commit stands in the durable change feed: the log position its
+/// group starts at, and its epoch. [`CdcBatch::position`] gives it, and
+/// [`GrafeoDB::acknowledge_cdc_feed`](crate::GrafeoDB::acknowledge_cdc_feed)
+/// moves the feed past it. Its token, `<lsn>:<epoch>`, is what a consumer
+/// keeps between runs.
+///
+/// # Stability: Experimental
+///
+/// New in 0.6.4; its token and the feed's calls may change in a patch
+/// release until the feed is stable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CdcPosition {
+    lsn: u64,
+    epoch: EpochId,
+}
+
+impl CdcPosition {
+    /// The position of the group that starts at `lsn` and commits at `epoch`.
+    pub(crate) const fn new(lsn: u64, epoch: EpochId) -> Self {
+        Self { lsn, epoch }
+    }
+
+    /// The log position the group starts at, which the durable feed reads.
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+    pub(crate) const fn lsn(&self) -> u64 {
+        self.lsn
+    }
+
+    /// The group's epoch.
+    #[must_use]
+    pub const fn epoch(&self) -> EpochId {
+        self.epoch
+    }
+
+    /// The position as a token, `<lsn>:<epoch>`, which
+    /// [`from_token`](Self::from_token) reads back.
+    #[must_use]
+    pub fn to_token(&self) -> String {
+        format!("{}:{}", self.lsn, self.epoch.as_u64())
+    }
+
+    /// Reads a token [`to_token`](Self::to_token) wrote.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidValue`](grafeo_common::utils::error::Error::InvalidValue)
+    /// when `token` is not two decimal numbers joined by `:`.
+    pub fn from_token(token: &str) -> grafeo_common::utils::error::Result<Self> {
+        let number = |part: &str| {
+            (!part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+                .then(|| part.parse::<u64>().ok())
+                .flatten()
+        };
+        token
+            .split_once(':')
+            .and_then(|(lsn, epoch)| Some(Self::new(number(lsn)?, EpochId::new(number(epoch)?))))
+            .ok_or_else(|| {
+                grafeo_common::utils::error::Error::InvalidValue(format!(
+                    "{token:?} is not a change feed position: a position is <lsn>:<epoch>"
+                ))
+            })
+    }
+}
+
+impl std::fmt::Display for CdcPosition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_token())
+    }
+}
+
+/// One commit of the durable change feed: its position and its events, as
+/// the live log recorded them (see
+/// [`GrafeoDB::read_cdc_feed`](crate::GrafeoDB::read_cdc_feed)).
+///
+/// # Stability: Experimental
+///
+/// New in 0.6.4.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct CdcBatch {
+    /// The commit's position: acknowledging it moves the feed past it.
+    pub position: CdcPosition,
+    /// The commit's events, in the order it applied its writes. A commit
+    /// whose writes undid each other has none (see the net rule).
+    pub events: Vec<ChangeEvent>,
 }
 
 /// Configuration for CDC event retention.
@@ -1505,6 +1602,38 @@ impl CdcLog {
         })
     }
 
+    /// [`record_commit`](Self::record_commit) with the timestamps the commit
+    /// reserved when it wrote its log group (`first`), or, without one,
+    /// reserved now: a commit without a log group reserves in its publish
+    /// turn, where commits are serialized in epoch order too.
+    /// The verdicts of the log's image rule come with the timestamps
+    /// (`logged`: the first one and the entries whose whole image is
+    /// refused, with what the log keeps of each, see
+    /// [`ChangeSet::refused_images`](grafeo_common::change::ChangeSet::refused_images)),
+    /// or, without a log group, are taken here once: what the log leaves
+    /// out, the events leave out.
+    pub(crate) fn record_commit_at(
+        &self,
+        set: &grafeo_common::change::ChangeSet,
+        epoch: EpochId,
+        logged: Option<(
+            HlcTimestamp,
+            &[(usize, grafeo_common::storage::log_record::ImageLogged)],
+        )>,
+    ) {
+        match logged {
+            Some((first, refused)) => {
+                let writes = set.ops().count();
+                self.record_commit(set, epoch, CommitStamps { first, writes }, refused);
+            }
+            None => {
+                if let Some(stamps) = self.reserve_for(set) {
+                    self.record_commit(set, epoch, stamps, &set.refused_images());
+                }
+            }
+        }
+    }
+
     /// Records the events of a commit at `epoch` that changed what `set`
     /// holds, with the timestamps `stamps` (from
     /// [`reserve_for`](Self::reserve_for)); see [`events_for_ops`].
@@ -1513,10 +1642,11 @@ impl CdcLog {
         set: &grafeo_common::change::ChangeSet,
         epoch: EpochId,
         stamps: CommitStamps,
+        refused: &[(usize, grafeo_common::storage::log_record::ImageLogged)],
     ) {
-        let ops = set.ops().map(|(slot, op, before)| {
+        let ops = set.ops_logged(refused).map(|(slot, op, before, logged)| {
             let graph = set.graph(slot).and_then(|graph| graph.key.as_deref());
-            (graph, op, before)
+            (graph, op, before, logged)
         });
         self.record_batch(events_for_ops(ops, stamps.writes, epoch, stamps.first));
     }
@@ -1530,18 +1660,20 @@ impl CdcLog {
 /// timestamped `first.plus(i)`; `writes` is how many there are (the room the
 /// events take). A triple's event names its RDF graph as
 /// `triple_graph`, as the RDF bulk writes report theirs. An event is built
-/// from the write's op and before-image: a create carries its labels or type
-/// and endpoints and the values it was created with, a delete what the
-/// entity held, an update the value or the labels before and after. The
-/// transaction's later changes to an entity it created are then folded into
-/// the create (see [`fold_into_creates`]); a folded write's timestamp is
-/// used up.
+/// from the write's op and before-image, as much of it as the log keeps
+/// (`logged`): a create carries its labels or type and endpoints and the
+/// values it was created with, a delete what the entity held (its labels or
+/// type and endpoints alone when the log leaves its properties out), an
+/// update the value or the labels before and after. The
+/// events are then folded into the transaction's net changes (see
+/// [`net_changes`]); a folded write's timestamp is used up.
 pub(crate) fn events_for_ops<'a>(
     ops: impl Iterator<
         Item = (
             Option<&'a str>,
             &'a grafeo_common::change::DataOp,
             &'a grafeo_common::change::Before,
+            grafeo_common::storage::log_record::ImageLogged,
         ),
     >,
     writes: usize,
@@ -1549,6 +1681,7 @@ pub(crate) fn events_for_ops<'a>(
     first: HlcTimestamp,
 ) -> Vec<ChangeEvent> {
     use grafeo_common::change::{Before, DataOp};
+    use grafeo_common::storage::log_record::ImageLogged;
 
     let values = |properties: &[(grafeo_common::types::PropertyKey, Value)]| {
         (!properties.is_empty()).then(|| {
@@ -1566,7 +1699,7 @@ pub(crate) fn events_for_ops<'a>(
     };
     let mut events = Vec::with_capacity(writes);
     let mut timestamp = first;
-    for (graph, op, before) in ops {
+    for (graph, op, before, logged) in ops {
         let stamp = timestamp;
         timestamp = timestamp.plus(1);
         let (entity_id, kind) = match op {
@@ -1651,15 +1784,19 @@ pub(crate) fn events_for_ops<'a>(
                 event.dst_id = Some(dst.as_u64());
                 event.after = values(properties);
             }
+            // A delete's `before` is what the entity held, an empty map
+            // for none, and `None` when the log left the properties out.
             (DataOp::DeleteNode { .. }, Before::Node(image)) => {
                 event.labels = Some(names(&image.labels));
-                event.before = values(&image.properties);
+                event.before = (logged == ImageLogged::Whole)
+                    .then(|| values(&image.properties).unwrap_or_default());
             }
             (DataOp::DeleteEdge { .. }, Before::Edge(image)) => {
                 event.edge_type = Some(image.edge_type.to_string());
                 event.src_id = Some(image.src.as_u64());
                 event.dst_id = Some(image.dst.as_u64());
-                event.before = values(&image.properties);
+                event.before = (logged == ImageLogged::Whole)
+                    .then(|| values(&image.properties).unwrap_or_default());
                 event.deleted_with = image.deleted_with.map(|node| node.as_u64());
             }
             (
@@ -1668,6 +1805,14 @@ pub(crate) fn events_for_ops<'a>(
                 Before::Value(old),
             ) => {
                 event.before = old.as_ref().and_then(|old| one(key, old));
+                event.after = one(key, value);
+            }
+            // A set whose old value was too large to log: the new value.
+            (
+                DataOp::SetNodeProperty { key, value, .. }
+                | DataOp::SetEdgeProperty { key, value, .. },
+                Before::Absent,
+            ) => {
                 event.after = one(key, value);
             }
             (
@@ -1700,7 +1845,7 @@ pub(crate) fn events_for_ops<'a>(
         }
         events.push(event);
     }
-    fold_into_creates(events)
+    net_changes(events)
 }
 
 /// The event of a triple entry of the graph with storage key `graph`
@@ -1738,57 +1883,234 @@ fn triple_event(
     }
 }
 
-/// Folds a transaction's changes to the entities it created into their
-/// create events, so a create event carries the entity as the transaction
-/// left it: its final labels and properties.
+/// What a transaction's earlier events did to an entity, for [`net_changes`].
+enum Earlier {
+    /// It created the entity: the create's place.
+    Created(usize),
+    /// It updated an entity that existed before: the updates' places.
+    Updated(Vec<usize>),
+    /// It deleted the entity: the delete's place.
+    Deleted(usize),
+}
+
+/// Folds a transaction's events into its net changes.
 ///
-/// Statements and the direct API both create an entity and then set its
-/// properties and labels one by one; without this, a consumer saw a create
-/// event without properties followed by one update per property.
-/// Changes to entities that existed before the transaction stay as they are.
-/// Entity ids repeat across graphs, so the folding stays within one graph.
-fn fold_into_creates(events: Vec<ChangeEvent>) -> Vec<ChangeEvent> {
-    let mut folded: Vec<ChangeEvent> = Vec::with_capacity(events.len());
-    let mut created: HashMap<(Option<String>, EntityId), usize> = HashMap::new();
-    for event in events {
+/// - Later changes to an entity the transaction created fold into the
+///   create, so it carries the entity as the transaction left it: its final
+///   labels and properties. Statements and the direct API both create an
+///   entity and then set its properties and labels one by one.
+/// - A create folded with its delete leaves nothing: an entity created and
+///   deleted in the transaction (its edges with it, through `DETACH DELETE`)
+///   existed at no committed epoch.
+/// - Updates to an entity that existed before fold into its delete, which
+///   then shows what it held before the transaction.
+/// - A triple deleted and inserted again leaves nothing: it is the same
+///   triple, there before and after.
+/// - Updates to an entity that exists before and after the transaction are
+///   not folded: each write reports its own update.
+///
+/// Entity ids repeat across graphs, so the folding stays within one graph. A
+/// triple's id is a 64-bit hash of its terms, so two events of one id fold
+/// only when their terms are equal too: two triples whose ids collide stay
+/// two.
+fn net_changes(events: Vec<ChangeEvent>) -> Vec<ChangeEvent> {
+    let mut net: Vec<Option<ChangeEvent>> = Vec::with_capacity(events.len());
+    let mut earlier: HashMap<(Option<String>, EntityId), Earlier> = HashMap::new();
+    for mut event in events {
         let key = (event.graph.clone(), event.entity_id);
-        let Some(&at) = created.get(&key) else {
-            if event.kind == ChangeKind::Create {
-                created.insert(key, folded.len());
-            }
-            folded.push(event);
-            continue;
-        };
-        if event.kind != ChangeKind::Update {
-            folded.push(event);
-            continue;
-        }
-        let create = &mut folded[at];
-        // A label change lists the labels after it.
-        if let Some(labels) = event.labels {
-            create.labels = Some(labels);
-        }
-        match (event.before, event.after) {
-            (_, Some(after)) => create.after.get_or_insert_with(HashMap::new).extend(after),
-            (Some(removed), None) => {
-                if let Some(properties) = create.after.as_mut() {
-                    for key in removed.keys() {
-                        properties.remove(key);
-                    }
+        let at = net.len();
+        match (earlier.get_mut(&key), &event.kind) {
+            (Some(Earlier::Created(create)), ChangeKind::Update) => {
+                if let Some(create) = net[*create].as_mut() {
+                    fold_update(create, event);
                 }
             }
-            (None, None) => {}
-        }
-        if create.after.as_ref().is_some_and(HashMap::is_empty) {
-            create.after = None;
+            (Some(Earlier::Created(create)), ChangeKind::Delete)
+                if same_entity(net[*create].as_ref(), &event) =>
+            {
+                net[*create] = None;
+                earlier.remove(&key);
+            }
+            (Some(Earlier::Deleted(delete)), ChangeKind::Create)
+                if event.entity_id.is_triple() && same_entity(net[*delete].as_ref(), &event) =>
+            {
+                net[*delete] = None;
+                earlier.remove(&key);
+            }
+            (Some(Earlier::Updated(updates)), ChangeKind::Update) => {
+                updates.push(at);
+                net.push(Some(event));
+            }
+            (Some(Earlier::Updated(updates)), ChangeKind::Delete) => {
+                let updates = updates.iter().filter_map(|&update| net[update].take());
+                restore_before(&mut event, updates);
+                earlier.insert(key, Earlier::Deleted(at));
+                net.push(Some(event));
+            }
+            (_, kind) => {
+                let next = match kind {
+                    ChangeKind::Create => Earlier::Created(at),
+                    ChangeKind::Update => Earlier::Updated(vec![at]),
+                    ChangeKind::Delete => Earlier::Deleted(at),
+                };
+                earlier.insert(key, next);
+                net.push(Some(event));
+            }
         }
     }
-    folded
+    net.into_iter().flatten().collect()
+}
+
+/// Whether `earlier`, an event of the same key as `event`, is of the same
+/// entity: always for a node or an edge (their ids are given out once), and
+/// for a triple when its terms are equal too.
+fn same_entity(earlier: Option<&ChangeEvent>, event: &ChangeEvent) -> bool {
+    earlier.is_some_and(|earlier| {
+        !event.entity_id.is_triple()
+            || (earlier.triple_subject == event.triple_subject
+                && earlier.triple_predicate == event.triple_predicate
+                && earlier.triple_object == event.triple_object
+                && earlier.triple_graph == event.triple_graph)
+    })
+}
+
+/// Gives `delete` what the entity held before the transaction: the first
+/// value each of `updates` changed, and the labels before the first label
+/// change. A delete whose properties the log left out (`before` is `None`)
+/// keeps them left out: the updates' old values alone would be a partial
+/// image.
+fn restore_before(delete: &mut ChangeEvent, updates: impl Iterator<Item = ChangeEvent>) {
+    let mut restored = std::collections::HashSet::new();
+    let mut labels_restored = false;
+    for update in updates {
+        if let Some(labels) = update.before_labels
+            && !labels_restored
+        {
+            delete.labels = Some(labels);
+            labels_restored = true;
+        }
+        let Some(properties) = delete.before.as_mut() else {
+            continue;
+        };
+        let keys = update
+            .after
+            .iter()
+            .chain(&update.before)
+            .flat_map(HashMap::keys);
+        for key in keys.cloned().collect::<Vec<_>>() {
+            if !restored.insert(key.clone()) {
+                continue;
+            }
+            match update.before.as_ref().and_then(|before| before.get(&key)) {
+                Some(value) => properties.insert(key, value.clone()),
+                None => properties.remove(&key),
+            };
+        }
+    }
+    // A delete's `before` stays a map, empty when the entity held nothing.
+}
+
+/// Folds `update` into `create`, an event of the entity it changed.
+fn fold_update(create: &mut ChangeEvent, event: ChangeEvent) {
+    // A label change lists the labels after it.
+    if let Some(labels) = event.labels {
+        create.labels = Some(labels);
+    }
+    match (event.before, event.after) {
+        (_, Some(after)) => create.after.get_or_insert_with(HashMap::new).extend(after),
+        (Some(removed), None) => {
+            if let Some(properties) = create.after.as_mut() {
+                for key in removed.keys() {
+                    properties.remove(key);
+                }
+            }
+        }
+        (None, None) => {}
+    }
+    if create.after.as_ref().is_some_and(HashMap::is_empty) {
+        create.after = None;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A triple's event with the terms `object` names, under the id `id`.
+    fn triple(id: u64, object: &str, kind: ChangeKind) -> ChangeEvent {
+        ChangeEvent {
+            entity_id: EntityId::Triple(id),
+            graph: None,
+            kind,
+            epoch: EpochId(7),
+            timestamp: HlcTimestamp::new(1, 0),
+            before: None,
+            after: None,
+            labels: None,
+            before_labels: None,
+            edge_type: None,
+            src_id: None,
+            dst_id: None,
+            deleted_with: None,
+            triple_subject: Some("<http://ex.org/alix>".to_string()),
+            triple_predicate: Some("<http://ex.org/knows>".to_string()),
+            triple_object: Some(object.to_string()),
+            triple_graph: None,
+        }
+    }
+
+    /// Two triples whose 64-bit ids collide are two triples: a create of one
+    /// and a delete of the other in one transaction both stay, and a delete
+    /// and a create of one fold only when the terms are equal too.
+    #[test]
+    fn triples_fold_only_when_their_terms_are_equal() {
+        let gus = "<http://ex.org/gus>";
+        let mia = "<http://ex.org/mia>";
+        let kept = |events: Vec<ChangeEvent>| {
+            net_changes(events)
+                .into_iter()
+                .map(|event| (event.kind, event.triple_object.unwrap()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kept(vec![
+                triple(42, gus, ChangeKind::Create),
+                triple(42, mia, ChangeKind::Delete),
+            ]),
+            [
+                (ChangeKind::Create, gus.to_string()),
+                (ChangeKind::Delete, mia.to_string())
+            ],
+            "a create and a colliding delete"
+        );
+        assert_eq!(
+            kept(vec![
+                triple(42, gus, ChangeKind::Delete),
+                triple(42, mia, ChangeKind::Create),
+            ]),
+            [
+                (ChangeKind::Delete, gus.to_string()),
+                (ChangeKind::Create, mia.to_string())
+            ],
+            "a delete and a colliding create"
+        );
+        assert!(
+            kept(vec![
+                triple(42, gus, ChangeKind::Delete),
+                triple(42, gus, ChangeKind::Create),
+            ])
+            .is_empty(),
+            "the same triple deleted and inserted again"
+        );
+        assert!(
+            kept(vec![
+                triple(42, gus, ChangeKind::Create),
+                triple(42, gus, ChangeKind::Delete),
+            ])
+            .is_empty(),
+            "the same triple inserted and deleted"
+        );
+    }
 
     #[test]
     fn test_record_and_history() {
@@ -2405,6 +2727,149 @@ mod tests {
         assert!(
             populated_bytes > empty_bytes,
             "heap estimate must grow when events are recorded"
+        );
+    }
+
+    /// A node event of `graph` for the net fold.
+    fn node_event(kind: ChangeKind, graph: Option<&str>, id: u64) -> ChangeEvent {
+        ChangeEvent {
+            entity_id: EntityId::Node(NodeId::new(id)),
+            graph: graph.map(ToString::to_string),
+            kind,
+            epoch: EpochId(1),
+            timestamp: HlcTimestamp::new(1, 0),
+            before: None,
+            after: None,
+            labels: None,
+            before_labels: None,
+            edge_type: None,
+            src_id: None,
+            dst_id: None,
+            deleted_with: None,
+            triple_subject: None,
+            triple_predicate: None,
+            triple_object: None,
+            triple_graph: None,
+        }
+    }
+
+    /// An event of node 3 of `kind`, with `before` and `after` of one key `x`
+    /// and the labels `labels`.
+    fn valued_node_event(
+        kind: ChangeKind,
+        before: Option<i64>,
+        after: Option<i64>,
+        labels: Option<&[&str]>,
+    ) -> ChangeEvent {
+        let one = |value: Option<i64>| {
+            value.map(|value| HashMap::from([("x".to_string(), Value::Int64(value))]))
+        };
+        ChangeEvent {
+            entity_id: EntityId::Node(NodeId::new(3)),
+            graph: None,
+            kind,
+            epoch: EpochId(7),
+            timestamp: HlcTimestamp::new(1, 0),
+            before: one(before),
+            after: one(after),
+            labels: labels.map(|labels| labels.iter().map(ToString::to_string).collect()),
+            before_labels: None,
+            edge_type: None,
+            src_id: None,
+            dst_id: None,
+            deleted_with: None,
+            triple_subject: None,
+            triple_predicate: None,
+            triple_object: None,
+            triple_graph: None,
+        }
+    }
+
+    /// An update and then a delete of a node whose delete left its
+    /// properties out (`before` is `None`: the log kept its identity alone)
+    /// folds into the delete with its properties still left out, not the
+    /// update's old values as a partial image; a delete with its whole image
+    /// takes the updates' old values back.
+    #[test]
+    fn a_delete_without_its_properties_keeps_them_left_out_after_updates() {
+        let update = valued_node_event(ChangeKind::Update, Some(1), Some(2), None);
+        let left_out = valued_node_event(ChangeKind::Delete, None, None, Some(&["Person"]));
+        let net = net_changes(vec![update.clone(), left_out]);
+        assert_eq!(net.len(), 1, "{net:?}");
+        assert_eq!(net[0].kind, ChangeKind::Delete);
+        assert_eq!(net[0].before, None, "the properties stay left out");
+        assert_eq!(net[0].labels, Some(vec!["Person".to_string()]));
+        let whole = valued_node_event(ChangeKind::Delete, Some(2), None, Some(&["Person"]));
+        let net = net_changes(vec![update, whole]);
+        assert_eq!(
+            net[0].before,
+            Some(HashMap::from([("x".to_string(), Value::Int64(1))])),
+            "the whole image takes the old value back"
+        );
+    }
+
+    /// The `Nothing` verdict through `events_for_ops`: the log kept no image,
+    /// so a delete reports neither labels nor properties, and a set keeps its
+    /// new value with no old one.
+    #[test]
+    fn a_write_logged_without_its_image_reports_without_it() {
+        use grafeo_common::change::{Before, DataOp};
+        use grafeo_common::storage::log_record::ImageLogged;
+        let delete = DataOp::DeleteNode { id: NodeId::new(3) };
+        let set = DataOp::SetNodeProperty {
+            id: NodeId::new(4),
+            key: "x".into(),
+            value: Value::Int64(2),
+        };
+        let absent = Before::Absent;
+        let ops = [
+            (None, &delete, &absent, ImageLogged::Nothing),
+            (None, &set, &absent, ImageLogged::Nothing),
+        ];
+        let events = events_for_ops(ops.into_iter(), 2, EpochId(7), HlcTimestamp::new(1, 0));
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(events[0].kind, ChangeKind::Delete);
+        assert_eq!(
+            (events[0].labels.is_none(), events[0].before.is_none()),
+            (true, true)
+        );
+        assert_eq!(events[1].kind, ChangeKind::Update);
+        assert_eq!(events[1].before, None);
+        assert_eq!(
+            events[1].after,
+            Some(HashMap::from([("x".to_string(), Value::Int64(2))]))
+        );
+    }
+
+    /// The fold keys on the graph as well as the id: a create in one graph and a delete of the
+    /// same id in another are two changes; an LPG delete followed by a create of its id (which
+    /// the store never does) is not folded away, as a triple's is.
+    #[test]
+    fn the_net_fold_keeps_graphs_and_models_apart() {
+        let kinds = |events: Vec<ChangeEvent>| -> Vec<(ChangeKind, Option<String>)> {
+            events
+                .into_iter()
+                .map(|event| (event.kind, event.graph))
+                .collect()
+        };
+        let folded = net_changes(vec![
+            node_event(ChangeKind::Create, Some("g1"), 5),
+            node_event(ChangeKind::Delete, Some("g2"), 5),
+        ]);
+        assert_eq!(
+            kinds(folded),
+            [
+                (ChangeKind::Create, Some("g1".to_string())),
+                (ChangeKind::Delete, Some("g2".to_string()))
+            ]
+        );
+        let folded = net_changes(vec![
+            node_event(ChangeKind::Delete, None, 7),
+            node_event(ChangeKind::Create, None, 7),
+        ]);
+        assert_eq!(
+            kinds(folded),
+            [(ChangeKind::Delete, None), (ChangeKind::Create, None)]
         );
     }
 }

@@ -276,7 +276,19 @@ fn generate_single_test(output: &mut String, spec: &TestSpec<'_>) {
             all_requires.push(req);
         }
     }
-    for fg in feature_gates {
+    // A SPARQL Update dataset loads through SPARQL.
+    let dataset = tc.dataset.as_deref().unwrap_or(&file.meta.dataset);
+    let sparql_update =
+        dataset_file(dataset).is_some_and(|f| Path::new(&f).extension().is_some_and(|e| e == "ru"));
+    let dataset_gates: &[&str] = if sparql_update {
+        &["sparql", "rdf"]
+    } else {
+        &[]
+    };
+    for fg in feature_gates
+        .into_iter()
+        .chain(dataset_gates.iter().copied())
+    {
         if !all_requires.contains(&fg) {
             all_requires.push(fg);
         }
@@ -366,6 +378,26 @@ fn generate_single_test(output: &mut String, spec: &TestSpec<'_>) {
     writeln!(output).unwrap();
 }
 
+/// The file of dataset `name` relative to the repository: `tests/spec/datasets/<name>.setup`
+/// (GQL) or `<name>.ru` (SPARQL Update), `None` for `empty`.
+///
+/// # Panics
+///
+/// When both files exist. With neither, the `.setup` path, so the case fails naming it.
+fn dataset_file(name: &str) -> Option<String> {
+    if name == "empty" {
+        return None;
+    }
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let setup = format!("tests/spec/datasets/{name}.setup");
+    let update = format!("tests/spec/datasets/{name}.ru");
+    match (repo.join(&setup).exists(), repo.join(&update).exists()) {
+        (true, true) => panic!("dataset '{name}' is both {setup} and {update}"),
+        (false, true) => Some(update),
+        _ => Some(setup),
+    }
+}
+
 /// The statements and assertions of one generated test.
 fn generate_body(output: &mut String, spec: &TestSpec<'_>, language: &str, model: &str) {
     let file = spec.file;
@@ -389,9 +421,24 @@ fn generate_body(output: &mut String, spec: &TestSpec<'_>, language: &str, model
     // WAL-wrapped store path that `GrafeoDB::open()` always produces, so
     // regressions in wrapper delegation (e.g. #308) fail here instead of
     // slipping past the in-memory-only suite.
+    // A case's `config:` settings, applied on the Config it opens with.
+    let settings: String = tc
+        .config
+        .iter()
+        .map(|setting| match setting {
+            Setting::PathSearchBudget(bytes) => format!(".with_path_search_budget({bytes})"),
+        })
+        .collect();
     match db_source {
-        DbSource::InMemory => {
+        DbSource::InMemory if settings.is_empty() => {
             writeln!(output, "        let db = GrafeoDB::new_in_memory();").unwrap();
+        }
+        DbSource::InMemory => {
+            writeln!(
+                output,
+                "        let db = GrafeoDB::with_config(grafeo_engine::config::Config::in_memory(){settings}).expect(\"open the case's configured GrafeoDB\");"
+            )
+            .unwrap();
         }
         DbSource::Persistent => {
             writeln!(
@@ -399,17 +446,23 @@ fn generate_body(output: &mut String, spec: &TestSpec<'_>, language: &str, model
                 "        let _tmp = tempfile::tempdir().expect(\"tempdir for persistent spec test\");"
             )
             .unwrap();
+            let open = if settings.is_empty() {
+                "GrafeoDB::open(_tmp.path().join(\"spec.grafeo\"))".to_string()
+            } else {
+                format!(
+                    "GrafeoDB::with_config(grafeo_engine::config::Config::persistent(_tmp.path().join(\"spec.grafeo\")){settings})"
+                )
+            };
             writeln!(
                 output,
-                "        let db = GrafeoDB::open(_tmp.path().join(\"spec.grafeo\")).expect(\"open persistent GrafeoDB for spec test\");"
+                "        let db = {open}.expect(\"open persistent GrafeoDB for spec test\");"
             )
             .unwrap();
         }
     }
 
     let effective_dataset = tc.dataset.as_deref().unwrap_or(&file.meta.dataset);
-    if effective_dataset != "empty" {
-        let dataset_path = format!("tests/spec/datasets/{}.setup", effective_dataset);
+    if let Some(dataset_path) = dataset_file(effective_dataset) {
         writeln!(
             output,
             "        load_dataset(&db, \"{}\");",

@@ -1808,10 +1808,9 @@ impl RdfPlanner {
             }
         }
 
-        if projections.is_empty() {
-            return Ok((input_op, input_columns, input_types));
-        }
-        // The input's columns in their order: only the names change.
+        // The input's columns in their order: only the names change. No
+        // projection is a solution with no variable (`SELECT *` over blank
+        // nodes alone): the rows with no column.
         let identity = projections.len() == input_columns.len()
             && projections
                 .iter()
@@ -2337,8 +2336,8 @@ impl RdfPlanner {
         // A triple pattern with a variable the other side binds: a lookup
         // per row of that side (the scan planned as an input reads nothing
         // until it runs, and is dropped). Of two patterns, the one estimated
-        // to match more triples is looked up; a wrong guess costs at most
-        // `LOOKUP_ROWS` lookups before the join hashes the scan.
+        // to match more triples is looked up; a wrong guess costs holding up
+        // to the limit's rows before the join hashes them.
         let left_estimate = estimate_operator_cardinality(&join.left, &self.store, &self.view);
         let right_estimate = estimate_operator_cardinality(&join.right, &self.store, &self.view);
         // A UNION of patterns with a variable the other side binds (an
@@ -5097,7 +5096,7 @@ fn lookup_limit_against(
     let limit = triple_lookup::lookup_limit(triples);
     #[expect(
         clippy::cast_precision_loss,
-        reason = "the limit is at most LOOKUP_ROWS, which an f64 holds exactly"
+        reason = "a row count, compared with an estimate: past 2^53 only its magnitude counts"
     )]
     let limit_rows = limit as f64;
     (!other_estimate.is_some_and(|rows| rows > limit_rows)).then_some(limit)

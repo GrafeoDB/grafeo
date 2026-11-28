@@ -167,6 +167,7 @@ mod tests {
             (
                 StorageError::CdcFeedTruncated {
                     first_available: 4_242,
+                    epoch: 19,
                 },
                 "GRAFEO-S006",
             ),

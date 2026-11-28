@@ -28,6 +28,8 @@ pub(crate) mod catalog_records;
 pub(crate) mod catalog_section;
 #[cfg(all(feature = "cdc", feature = "wal", feature = "grafeo-file"))]
 pub(crate) mod cdc_cursor;
+#[cfg(all(feature = "cdc", feature = "wal", feature = "grafeo-file"))]
+mod cdc_feed;
 #[cfg(feature = "grafeo-file")]
 mod checkpoint_timer;
 #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
@@ -262,6 +264,10 @@ pub(crate) struct Open {
     /// Whether this database is open in read-only mode.
     /// When true, sessions automatically enforce read-only transactions.
     read_only: bool,
+    /// Held by an acknowledgement of the durable change feed while it moves
+    /// the cursor: acknowledgements are serialized, and the highest wins.
+    #[cfg(all(feature = "cdc", feature = "wal", feature = "grafeo-file"))]
+    cdc_ack: parking_lot::Mutex<()>,
     /// The recorder of the direct calls that commit at once (while no
     /// transaction is open), made on the first one.
     immediate_writes: std::sync::OnceLock<Arc<direct::ImmediateRecorder>>,
@@ -581,6 +587,9 @@ impl Open {
         // commits).
         #[cfg(feature = "wal")]
         let mut retire_sidecar_wal: Option<bool> = None;
+        // The last timestamp the replayed groups reserved for change events.
+        #[cfg(all(feature = "wal", feature = "grafeo-file", feature = "cdc"))]
+        let mut replayed_clock = None;
         // Whether that WAL holds damage a salvaging open stopped at: it is
         // then moved aside instead of removed.
         #[cfg(feature = "wal")]
@@ -722,7 +731,7 @@ impl Open {
                                 loaded_sections.unbuilt_mut(),
                             )?;
                         } else {
-                            replay::replay(
+                            let replayed = replay::replay(
                                 &fm.sidecar_wal_path(),
                                 Self::scan_options(&fm, &keys, config.wal_salvage()),
                                 &mut replay::Targets {
@@ -734,6 +743,12 @@ impl Open {
                                     history: Some(&transaction_manager),
                                 },
                             )?;
+                            #[cfg(feature = "cdc")]
+                            {
+                                replayed_clock = replayed.clock;
+                            }
+                            #[cfg(not(feature = "cdc"))]
+                            let _ = replayed;
                         }
                     }
                     Some(Arc::new(fm))
@@ -903,6 +918,10 @@ impl Open {
                     // Cut what no commit finished (a torn group) before the
                     // writer continues after the last complete group.
                     replayed.end.cut_torn_tail()?;
+                    #[cfg(feature = "cdc")]
+                    {
+                        replayed_clock = replayed.clock;
+                    }
                     wal_start_lsn = replayed.end.end_lsn.max(fm.active_header().checkpoint_lsn);
                     if !config.wal_enabled() {
                         retire_sidecar_wal = Some(replayed.groups > 0);
@@ -983,6 +1002,17 @@ impl Open {
                 config.cdc_retention_under(buffer_manager.hard_limit()),
             );
             log.attach_memory(Arc::clone(&buffer_manager));
+            // Its timestamps go on past what the checkpoint stored and what
+            // the replayed log reserved, so they rise across reopens.
+            if let Some(record) = catalog.cdc_config() {
+                log.clock()
+                    .update(grafeo_common::types::HlcTimestamp::from_u64(record.clock));
+            }
+            catalog.attach_cdc_clock(Arc::clone(log.clock()));
+            #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+            if let Some(floor) = replayed_clock {
+                log.clock().update(floor);
+            }
             Arc::new(log)
         };
 
@@ -1040,6 +1070,8 @@ impl Open {
             current_schema: RwLock::new(None),
             current_time_zone: RwLock::new(None),
             read_only: is_read_only,
+            #[cfg(all(feature = "cdc", feature = "wal", feature = "grafeo-file"))]
+            cdc_ack: parking_lot::Mutex::new(()),
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             immediate_writes: std::sync::OnceLock::new(),
             open_warnings: Vec::new(),
@@ -1271,6 +1303,8 @@ impl Open {
             current_schema: RwLock::new(None),
             current_time_zone: RwLock::new(None),
             read_only: false,
+            #[cfg(all(feature = "cdc", feature = "wal", feature = "grafeo-file"))]
+            cdc_ack: parking_lot::Mutex::new(()),
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             immediate_writes: std::sync::OnceLock::new(),
             open_warnings: memory_warning.into_iter().collect(),
@@ -1382,6 +1416,8 @@ impl Open {
             current_schema: RwLock::new(None),
             current_time_zone: RwLock::new(None),
             read_only: true,
+            #[cfg(all(feature = "cdc", feature = "wal", feature = "grafeo-file"))]
+            cdc_ack: parking_lot::Mutex::new(()),
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             immediate_writes: std::sync::OnceLock::new(),
             open_warnings: memory_warning.into_iter().collect(),
@@ -2478,6 +2514,8 @@ impl Open {
 
     #[must_use]
     pub(crate) fn list_graphs(&self) -> Vec<String> {
+        // A snapshot restore waits for it, or it for the restore.
+        let _read = self.transaction_manager.hold_direct_read();
         let mut names = self
             .root_store()
             .map_or_default(|store| store.graph_names());

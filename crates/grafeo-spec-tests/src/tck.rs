@@ -984,6 +984,36 @@ tests:
     }
 
     #[test]
+    fn a_config_sets_the_database_a_case_opens() {
+        let text = FILE.replace(
+            "    query:",
+            "    config: {path_search_budget: 1048576}\n    query:",
+        );
+        let file = crate::gtest::parse_gtest_text("x.gtest", &text).unwrap();
+        assert_eq!(
+            file.tests[0].config,
+            [crate::gtest::Setting::PathSearchBudget(1_048_576)]
+        );
+        let file = crate::gtest::parse_gtest_text("x.gtest", FILE).unwrap();
+        assert!(file.tests[0].config.is_empty(), "no config: the defaults");
+        for wrong in [
+            "{path_budget: 1048576}",
+            "{path_search_budget: 0}",
+            "{path_search_budget: big}",
+            "{path_search_budget: +1048576}",
+            "{path_search_budget: 1048576, path_search_budget: 2}",
+            "path_search_budget: 1048576",
+            "{}",
+        ] {
+            let text = FILE.replace("    query:", &format!("    config: {wrong}\n    query:"));
+            assert!(
+                crate::gtest::parse_gtest_text("x.gtest", &text).is_err(),
+                "config: {wrong} was accepted"
+            );
+        }
+    }
+
+    #[test]
     fn wrong_tck_keys_are_refused() {
         for (from, to) in [
             ("+nodes: 2", "+edges: 2"),

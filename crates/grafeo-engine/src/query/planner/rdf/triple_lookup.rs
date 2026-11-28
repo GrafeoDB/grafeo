@@ -3,8 +3,11 @@
 //! of such patterns (an alternative path `?s (v:KNOWS|^v:KNOWS) ?f` is one):
 //! each row looks its triples up through the store's indexes, in each
 //! pattern, instead of a scan of every triple of the patterns joined with the
-//! rows after. Past a limit of rows (see [`lookup_limit`]) the rows read so
-//! far and the rest go to the hash join a plan without lookups runs.
+//! rows after. The join holds the rows until it knows whether there are more
+//! than a limit (see [`lookup_limit`]) and chooses once: within it each row
+//! looks up, past it the rows held and the rest go to the hash join a plan
+//! without lookups runs. The rows held count against the statement's memory,
+//! and PROFILE shows which way the join went and how many rows it held.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -18,24 +21,24 @@ use super::RdfTripleScanOperator;
 use super::intern_value;
 use super::term_ids::{QueryTermIds, id_of};
 
-/// The most rows that look their triples up one by one.
+/// How many rows look their triples up in patterns with no estimate.
 pub(super) const LOOKUP_ROWS: usize = 1024;
 
-/// How many rows look their triples up before the join hashes the scan
-/// instead, for patterns estimated to match `triples` each: a lookup costs
-/// about as much as hashing 8 triples of the scan (1.3 against 0.18
+/// How many rows look their triples up, at most, before the join hashes the
+/// scan instead, for patterns estimated to match `triples` each: a lookup
+/// costs about as much as hashing 8 triples of the scan (1.3 against 0.18
 /// microseconds, measured), so a lookup per row and pattern pays while the
-/// rows are fewer than an eighth of a pattern's triples, and never more than
-/// [`LOOKUP_ROWS`].
+/// rows are fewer than an eighth of a pattern's triples; [`LOOKUP_ROWS`] for
+/// a pattern with no estimate, and at least 1 (an estimate of 0). A wrong
+/// guess of the side to look up costs holding that many rows before the join
+/// hashes them, fewer than the triples the hash join reads.
 pub(super) fn lookup_limit(triples: Option<f64>) -> usize {
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
-        reason = "clamped to 1..=LOOKUP_ROWS before the cast"
+        reason = "at least 1 before the cast, and a float-to-integer cast saturates"
     )]
-    let limit = triples
-        .map_or(LOOKUP_ROWS as f64, |triples| triples / 8.0)
-        .clamp(1.0, LOOKUP_ROWS as f64) as usize;
+    let limit = triples.map_or(LOOKUP_ROWS as f64, |triples| (triples / 8.0).max(1.0)) as usize;
     limit
 }
 
@@ -82,11 +85,11 @@ pub(super) struct HashJoinInputs {
 
 /// How the operator joins.
 enum Mode {
-    /// Reading the first rows, up to the limit.
+    /// Holding the rows read, up to the limit.
     Reading,
-    /// Each row looks its triples up.
+    /// The input ended within the limit: each row held looks its triples up.
     Lookup,
-    /// The hash join of the rows with the scan.
+    /// Past the limit: the hash join of the rows with the scan.
     Hashed(Box<dyn Operator>),
 }
 
@@ -107,9 +110,14 @@ pub(super) struct TripleLookupOperator {
     terms: Arc<QueryTermIds>,
     chunk_size: usize,
     mode: Mode,
-    /// The chunks read before choosing, and how many rows they hold.
-    buffered: Vec<DataChunk>,
-    buffered_rows: usize,
+    /// How many rows were read, and the chunks held but not looked up yet.
+    read: usize,
+    buffered: VecDeque<DataChunk>,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](grafeo_core::execution::memory::capture)): the chunks
+    /// held, as a hash join's build side counts them. Past the query memory
+    /// limit or the memory limit it fails with `GRAFEO-S001`.
+    memory: grafeo_core::execution::OperatorMemory,
     /// The output rows not handed out yet (lookups).
     pending: VecDeque<Vec<Value>>,
 }
@@ -134,8 +142,9 @@ impl TripleLookupOperator {
             terms,
             chunk_size: chunk_size.max(1),
             mode: Mode::Reading,
-            buffered: Vec::new(),
-            buffered_rows: 0,
+            read: 0,
+            buffered: VecDeque::new(),
+            memory: grafeo_core::execution::memory::capture(),
             pending: VecDeque::new(),
         }
     }
@@ -217,13 +226,14 @@ impl TripleLookupOperator {
         Ok(())
     }
 
-    /// Hands the rows read so far and the rest of the input to the hash
-    /// join of a plan without lookups.
+    /// Hands the chunks held and the rest of the input to the hash join of a
+    /// plan without lookups, which counts what it keeps of them.
     fn hash(&mut self) -> Box<dyn Operator> {
         let input: Box<dyn Operator> = Box::new(Prepended {
-            buffered: std::mem::take(&mut self.buffered).into(),
+            buffered: std::mem::take(&mut self.buffered),
             rest: self.input.take().expect("the input until the join hashes"),
         });
+        self.memory.release();
         let full = self
             .full
             .take()
@@ -252,6 +262,16 @@ impl TripleLookupOperator {
         join
     }
 
+    /// The input's next chunk, `None` at its end.
+    fn read_chunk(&mut self) -> Result<Option<DataChunk>, OperatorError> {
+        Ok(self
+            .input
+            .as_mut()
+            .map(|input| input.next())
+            .transpose()?
+            .flatten())
+    }
+
     /// The next chunk of looked-up rows.
     fn emit(&mut self) -> DataChunk {
         let count = self.pending.len().min(self.chunk_size);
@@ -275,44 +295,31 @@ impl Operator for TripleLookupOperator {
         loop {
             match &mut self.mode {
                 Mode::Hashed(join) => return join.next(),
+                Mode::Reading => {
+                    let Some(chunk) = self.read_chunk()? else {
+                        // The input ended within the limit: each row looks
+                        // up, in the order it came.
+                        self.mode = Mode::Lookup;
+                        continue;
+                    };
+                    self.memory
+                        .add_with(|| grafeo_core::execution::memory::chunk_bytes(&chunk))?;
+                    self.read += chunk.selected_indices().count();
+                    self.buffered.push_back(chunk);
+                    if self.read > self.limit {
+                        let join = self.hash();
+                        self.mode = Mode::Hashed(join);
+                    }
+                }
                 Mode::Lookup => {
                     if !self.pending.is_empty() {
                         return Ok(Some(self.emit()));
                     }
-                    let chunk = match self.buffered.pop() {
-                        Some(chunk) => Some(chunk),
-                        None => self
-                            .input
-                            .as_mut()
-                            .map(|input| input.next())
-                            .transpose()?
-                            .flatten(),
-                    };
-                    let Some(chunk) = chunk else {
+                    let Some(chunk) = self.buffered.pop_front() else {
+                        self.memory.release();
                         return Ok(None);
                     };
                     self.look_up(&chunk)?;
-                }
-                Mode::Reading => {
-                    let chunk = self
-                        .input
-                        .as_mut()
-                        .map(|input| input.next())
-                        .transpose()?
-                        .flatten();
-                    let Some(chunk) = chunk else {
-                        // The input ended within the limit: each row looks
-                        // up, in the order it came.
-                        self.buffered.reverse();
-                        self.mode = Mode::Lookup;
-                        continue;
-                    };
-                    self.buffered_rows += chunk.selected_indices().count();
-                    self.buffered.push(chunk);
-                    if self.buffered_rows > self.limit {
-                        let join = self.hash();
-                        self.mode = Mode::Hashed(join);
-                    }
                 }
             }
         }
@@ -325,8 +332,9 @@ impl Operator for TripleLookupOperator {
                 if let Some(input) = self.input.as_mut() {
                     input.reset();
                 }
+                self.read = 0;
                 self.buffered.clear();
-                self.buffered_rows = 0;
+                self.memory.clear();
                 self.pending.clear();
                 self.mode = Mode::Reading;
             }
@@ -337,14 +345,22 @@ impl Operator for TripleLookupOperator {
         "RdfTripleLookup"
     }
 
+    fn profile_note(&self) -> Option<String> {
+        match self.mode {
+            Mode::Reading => None,
+            Mode::Lookup => Some(format!("{} rows looked up", self.read)),
+            Mode::Hashed(_) => Some(format!("hashed after {} rows", self.read)),
+        }
+    }
+
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
         self
     }
 }
 
-/// The chunks read before the join chose to hash, then the rest of the
-/// input. A reset reads the input again from its start, which gives those
-/// chunks again.
+/// The chunks read but not looked up before the join chose to hash, then the
+/// rest of the input. A reset reads the input again from its start, which
+/// gives those chunks again.
 struct Prepended {
     buffered: VecDeque<DataChunk>,
     rest: Box<dyn Operator>,

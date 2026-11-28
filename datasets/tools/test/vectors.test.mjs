@@ -177,7 +177,7 @@ test('without vectors.json the build skips the vectors file', (t) => {
   const r = spawnSync(process.execPath, [buildCli, '--source', path, '--out', out], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(existsSync(join(out, 'silicon-valley.vectors.gql')), false);
-  assert.match(r.stdout, /Built 5 file/);
+  assert.match(r.stdout, /Built 9 file/);
 });
 
 test('stored vectors are reused only when both model and dtype match', () => {

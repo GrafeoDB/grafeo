@@ -2613,4 +2613,258 @@ mod tests {
         let expected: Vec<i64> = (0..20).map(|i| i * 5).collect();
         assert_eq!(sums, expected);
     }
+
+    // ---------------------------------------------------------------
+    // Grouped-query memory (#674, scenarios from #649)
+    // ---------------------------------------------------------------
+    #[cfg(feature = "spill")]
+    mod grouped_query_memory {
+        use super::*;
+
+        /// A pipeline source of given chunks.
+        struct Given(std::vec::IntoIter<DataChunk>);
+
+        impl crate::execution::pipeline::Source for Given {
+            fn next_chunk(&mut self, _size: usize) -> Result<Option<DataChunk>, OperatorError> {
+                Ok(self.0.next())
+            }
+
+            fn reset(&mut self) {}
+
+            fn name(&self) -> &'static str {
+                "Given"
+            }
+        }
+
+        /// The (key, count) rows of `chunks`, sorted.
+        fn counted_groups(chunks: &[DataChunk]) -> Vec<(i64, i64)> {
+            let mut groups = Vec::new();
+            for chunk in chunks {
+                for row in chunk.selected_indices() {
+                    let value = |column: usize| chunk.column(column).unwrap().get_value(row);
+                    let (Some(Value::Int64(key)), Some(Value::Int64(count))) = (value(0), value(1))
+                    else {
+                        panic!("a key and its count: {:?}, {:?}", value(0), value(1));
+                    };
+                    groups.push((key, count));
+                }
+            }
+            groups.sort_unstable();
+            groups
+        }
+
+        /// A statement that times out while its grouping holds spilled groups
+        /// gives back every grant and leaves no spill file once it ends, and the
+        /// next statement on the same buffer manager answers in full.
+        #[test]
+        fn a_deadline_after_a_spill_frees_the_statement_and_the_next_one_answers() {
+            use crate::execution::memory::OperatorMemoryContext;
+            use crate::execution::pipeline::{ChunkCollector, Pipeline};
+            use grafeo_common::memory::buffer::BufferManager;
+
+            let directory = tempfile::tempdir().unwrap();
+            let buffers = BufferManager::with_budget(32 * 1024 * 1024);
+            // One statement's context, with its own spill manager under the spill
+            // path, as the session makes it.
+            let statement = |number: u32| {
+                let spill = Arc::new(
+                    SpillManager::new(directory.path().join(format!("query_{number}")))
+                        .unwrap()
+                        .with_owned_dir(),
+                );
+                let context = OperatorMemoryContext::new(Arc::clone(&buffers))
+                    .with_spill_manager(Some(Arc::clone(&spill)));
+                (spill, context)
+            };
+            let keys: Vec<i64> = (0..1024).collect();
+            let input = || create_two_column_chunk(&keys, &keys);
+            let files = || std::fs::read_dir(directory.path()).unwrap().count();
+
+            let (spill, context) = statement(0);
+            let mut aggregate = SpillableAggregatePushOperator::with_memory_context(
+                vec![0],
+                vec![AggregateExpr::count_star()],
+                context,
+            );
+            aggregate.push(input(), &mut CollectorSink::new()).unwrap();
+            let partitioned = aggregate.partitioned_groups.as_mut().unwrap();
+            for key in 0..64 {
+                let partition = partitioned.partition_for(&[Value::Int64(key)]);
+                partitioned.spill_partition(partition).unwrap();
+            }
+            assert!(spill.active_file_count() > 0, "the groups spilled");
+            assert!(buffers.allocated() > 0, "the groups hold a grant");
+            // The deadline has passed when the next chunk comes.
+            let mut pipeline = Pipeline::new(
+                Box::new(Given(vec![input()].into_iter())),
+                vec![Box::new(aggregate)],
+                Box::new(ChunkCollector::new()),
+            )
+            .with_deadline(Some(std::time::Instant::now()));
+            assert!(matches!(pipeline.execute(), Err(OperatorError::Timeout)));
+            // The statement ends: its operators, then its spill manager.
+            drop(pipeline);
+            drop(spill);
+            assert_eq!(
+                buffers.allocated(),
+                0,
+                "the timed-out statement holds nothing"
+            );
+            assert_eq!(files(), 0, "and leaves no spill file");
+
+            let (spill, context) = statement(1);
+            let mut fresh = Pipeline::new(
+                Box::new(Given(vec![input(), input()].into_iter())),
+                vec![Box::new(
+                    SpillableAggregatePushOperator::with_memory_context(
+                        vec![0],
+                        vec![AggregateExpr::count_star()],
+                        context,
+                    ),
+                )],
+                Box::new(ChunkCollector::new()),
+            );
+            fresh.execute().unwrap();
+            let chunks = fresh
+                .into_sink()
+                .into_any()
+                .downcast::<ChunkCollector>()
+                .unwrap()
+                .into_chunks();
+            let expected: Vec<(i64, i64)> = keys.iter().map(|&key| (key, 2)).collect();
+            assert_eq!(counted_groups(&chunks), expected);
+            drop(chunks);
+            drop(spill);
+            assert_eq!(buffers.allocated(), 0);
+            assert_eq!(files(), 0);
+        }
+
+        /// A grouping whose one group (key 7, a sum and a DISTINCT count) is
+        /// spilled, with its spill manager and the group's spill file.
+        fn spilled_seven(
+            directory: &std::path::Path,
+        ) -> (
+            SpillableAggregatePushOperator,
+            Arc<SpillManager>,
+            std::path::PathBuf,
+        ) {
+            let manager = Arc::new(SpillManager::new(directory).unwrap());
+            let mut aggregate = SpillableAggregatePushOperator::with_spilling(
+                vec![0],
+                vec![
+                    AggregateExpr::sum(1),
+                    AggregateExpr::count(1).with_distinct(),
+                ],
+                Arc::clone(&manager),
+                usize::MAX,
+            );
+            aggregate
+                .push(
+                    create_two_column_chunk(&[7, 7, 7], &[10, 20, 20]),
+                    &mut CollectorSink::new(),
+                )
+                .unwrap();
+            let partitioned = aggregate.partitioned_groups.as_mut().unwrap();
+            let partition = partitioned.partition_for(&[Value::Int64(7)]);
+            partitioned.spill_partition(partition).unwrap();
+            let mut files = std::fs::read_dir(directory).unwrap();
+            let path = files.next().unwrap().unwrap().path();
+            assert!(files.next().is_none(), "one spill file");
+            (aggregate, manager, path)
+        }
+
+        /// A spill file cut short fails the reload of its groups, wherever the
+        /// cut falls, without a panic; once the statement ends no file is left.
+        #[test]
+        fn a_cut_spill_file_fails_the_reload_and_leaves_no_file() {
+            let whole = {
+                let directory = tempfile::tempdir().unwrap();
+                let (_aggregate, _manager, path) = spilled_seven(directory.path());
+                std::fs::read(path).unwrap()
+            };
+            assert!(whole.len() > 16, "{} bytes", whole.len());
+            // In the count, in a key's length, in the key, in the state, and the
+            // last byte.
+            let mut cuts = vec![0, 4, 8, 12, 20, whole.len() / 2, whole.len() - 1];
+            cuts.sort_unstable();
+            cuts.dedup();
+            for cut in cuts {
+                let directory = tempfile::tempdir().unwrap();
+                let (mut aggregate, manager, path) = spilled_seven(directory.path());
+                std::fs::write(&path, &whole[..cut]).unwrap();
+                let reloaded = aggregate.push(
+                    create_two_column_chunk(&[7], &[30]),
+                    &mut CollectorSink::new(),
+                );
+                assert!(
+                    reloaded.is_err(),
+                    "a spill file cut at {cut} of {} bytes",
+                    whole.len()
+                );
+                drop(aggregate);
+                drop(manager);
+                assert_eq!(
+                    std::fs::read_dir(directory.path()).unwrap().count(),
+                    0,
+                    "cut at {cut}"
+                );
+            }
+        }
+
+        /// A spill file whose entry count claims more than it holds fails the
+        /// reload of its groups, without a panic: the count is checked against
+        /// the groups the partition spilled before anything is sized by it.
+        #[test]
+        fn a_spill_file_claiming_more_entries_than_it_holds_fails_the_reload() {
+            let directory = tempfile::tempdir().unwrap();
+            let (mut aggregate, _manager, path) = spilled_seven(directory.path());
+            let mut damaged = std::fs::read(&path).unwrap();
+            damaged[..8].copy_from_slice(&u64::MAX.to_le_bytes());
+            std::fs::write(&path, damaged).unwrap();
+            let reloaded = aggregate.push(
+                create_two_column_chunk(&[7], &[30]),
+                &mut CollectorSink::new(),
+            );
+            assert!(reloaded.is_err(), "a reload of a damaged count");
+        }
+
+        /// A SPARQL SUM or AVG, DISTINCT or not, that saw only unbound values
+        /// spills and comes back as it was, and goes on from its next numbers as
+        /// the unspilled one does.
+        #[test]
+        fn spill_empty_sparql_sums_and_averages_resume() {
+            for base in [AggregateExpr::sum(0), AggregateExpr::avg(0)] {
+                for distinct in [false, true] {
+                    let mut expr = if distinct {
+                        base.clone().with_distinct()
+                    } else {
+                        base.clone()
+                    };
+                    expr.rdf_literals = true;
+                    let mut state = AggregateState::for_expr(&expr);
+                    state.update(Some(Value::Null));
+                    let mut restored = restore_spilled_accumulator(&state);
+                    assert_eq!(
+                        restored.finalize().unwrap(),
+                        state.finalize().unwrap(),
+                        "{expr:?}"
+                    );
+                    for value in [
+                        Value::Int64(4),
+                        Value::Null,
+                        Value::Int64(4),
+                        Value::Int64(6),
+                    ] {
+                        state.update(Some(value.clone()));
+                        restored.update(Some(value));
+                        assert_eq!(
+                            restored.finalize().unwrap(),
+                            state.finalize().unwrap(),
+                            "{expr:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

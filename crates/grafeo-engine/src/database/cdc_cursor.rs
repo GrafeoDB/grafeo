@@ -24,6 +24,13 @@ pub(crate) struct CdcCursor {
     pub lsn: u64,
     /// The epoch of the last acknowledged group (0 before any).
     pub epoch: EpochId,
+    /// Written by an open that found the setting stored on but no cursor:
+    /// the WAL directory was removed from outside, and the commits not
+    /// acknowledged before went with it. The first read reports it as
+    /// `GRAFEO-S006` until its position is acknowledged. Left out of the
+    /// file when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restarted: bool,
 }
 
 /// The path of the default consumer's cursor in `wal_dir`.
@@ -35,6 +42,57 @@ fn default_path(wal_dir: &Path) -> PathBuf {
 /// be looked at counts as there: it is never written over.
 pub(super) fn default_exists(wal_dir: &Path) -> bool {
     default_path(wal_dir).try_exists().unwrap_or(true)
+}
+
+/// The default consumer's cursor in `wal_dir`.
+///
+/// # Errors
+///
+/// As [`read`]; a missing cursor is an error too.
+pub(super) fn read_default(wal_dir: &Path) -> Result<CdcCursor> {
+    read(&default_path(wal_dir))
+}
+
+/// Moves the default consumer's cursor to `cursor`: written to a temporary
+/// file, synced, then renamed into place and the directory synced, so a
+/// crash leaves the old cursor or the new one. The crash points name each
+/// step.
+///
+/// # Errors
+///
+/// The cursor cannot be written, synced or renamed.
+pub(super) fn move_default(wal_dir: &Path, cursor: CdcCursor) -> Result<()> {
+    use grafeo_common::testing::crash::{maybe_crash, maybe_fail};
+    use std::io::Write as _;
+
+    let data = serde_json::to_vec_pretty(&cursor)
+        .map_err(|e| Error::Internal(format!("failed to serialize the CDC cursor: {e}")))?;
+    let path = default_path(wal_dir);
+    let mut temp = path.as_os_str().to_owned();
+    temp.push(".tmp");
+    let temp = PathBuf::from(temp);
+    let io = |step: &str, shown: &Path, e: std::io::Error| {
+        Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("failed to {step} the CDC cursor {}: {e}", shown.display()),
+        ))
+    };
+    maybe_crash("cdc:before_cursor_write");
+    let written = (|| {
+        let mut file = std::fs::File::create(&temp).map_err(|e| io("create", &temp, e))?;
+        file.write_all(&data).map_err(|e| io("write", &temp, e))?;
+        maybe_fail("cdc:cursor_sync")?;
+        file.sync_all().map_err(|e| io("sync", &temp, e))?;
+        drop(file);
+        maybe_crash("cdc:after_cursor_sync");
+        std::fs::rename(&temp, &path).map_err(|e| io("finalize", &path, e))
+    })();
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
+    maybe_crash("cdc:after_cursor_rename");
+    super::backup::sync_backup_entry(&path, "cdc:cursor_directory_sync")
 }
 
 /// The cursor in the file `path`.
@@ -99,10 +157,11 @@ pub(super) fn any_in(wal_dir: &Path) -> bool {
 /// # Errors
 ///
 /// The cursor cannot be written or synced.
-pub(super) fn write_default(wal_dir: &Path, lsn: u64) -> Result<()> {
+pub(super) fn write_default(wal_dir: &Path, lsn: u64, restarted: bool) -> Result<()> {
     let cursor = CdcCursor {
         lsn,
         epoch: EpochId::new(0),
+        restarted,
     };
     let data = serde_json::to_vec_pretty(&cursor)
         .map_err(|e| Error::Internal(format!("failed to serialize the CDC cursor: {e}")))?;
@@ -139,16 +198,18 @@ pub(super) fn remove_default(wal_dir: &Path) -> Result<()> {
 
 /// Brings the default cursor of `wal_dir` in line with the stored setting
 /// at an open: with change data capture `on`, a missing cursor is written at
-/// `checkpoint_lsn`, the image's; off, a cursor left behind goes. One that
-/// cannot be removed only warns: with the setting off it keeps no log, and
-/// a later open or `set_cdc(false)` removes it.
+/// `checkpoint_lsn`, the image's, marked restarted; off, a cursor left
+/// behind goes. One that cannot be removed only warns: with the setting off
+/// it keeps no log, and a later open or `set_cdc(false)` removes it.
 ///
 /// # Errors
 ///
 /// The cursor cannot be written.
 pub(super) fn follow_setting(wal_dir: &Path, on: bool, checkpoint_lsn: u64) -> Result<()> {
     match (on, default_exists(wal_dir)) {
-        (true, false) => write_default(wal_dir, checkpoint_lsn),
+        // Stored on with no cursor: the WAL directory went while the
+        // database was closed (`set_cdc(true)` writes the cursor first).
+        (true, false) => write_default(wal_dir, checkpoint_lsn, true),
         (false, true) => {
             if let Err(error) = remove_default(wal_dir) {
                 grafeo_common::grafeo_warn!(

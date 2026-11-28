@@ -50,6 +50,8 @@ mod inner {
         static BEFORE_BACKUP_WAIT: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static DURING_CHECKPOINT: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static DURING_CHECKPOINT_WRITE: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        static DURING_RESTORE_WINDOW: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        static DURING_RESTORE_REFILL: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static DURING_HELD_CHANGE: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static DURING_CHECKPOINT_ARM: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static BEFORE_FIRST_COMMIT_ARMING: RefCell<Option<Hook>> = const { RefCell::new(None) };
@@ -292,6 +294,38 @@ mod inner {
         }
     }
 
+    /// Arms `hook` to run once, inside the next snapshot restore on this
+    /// thread, after its first count of the open work and before it holds
+    /// commits: the window a copy can still start in.
+    pub fn during_next_restore_window(hook: impl FnOnce() + 'static) {
+        DURING_RESTORE_WINDOW.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// Runs the [`during_next_restore_window`] hook armed on this thread, if
+    /// any. Called by a restore between its two counts of the open work.
+    #[inline]
+    pub fn run_during_restore_window() {
+        if let Some(hook) = DURING_RESTORE_WINDOW.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+    }
+
+    /// Arms `hook` to run once, inside the next snapshot restore on this
+    /// thread, once it holds the direct reads off and before it replaces
+    /// anything.
+    pub fn during_next_restore_refill(hook: impl FnOnce() + 'static) {
+        DURING_RESTORE_REFILL.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// Runs the [`during_next_restore_refill`] hook armed on this thread, if
+    /// any. Called by a restore before its refill.
+    #[inline]
+    pub fn run_during_restore_refill() {
+        if let Some(hook) = DURING_RESTORE_REFILL.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+    }
+
     /// Runs the [`after_next_commit_epoch`] hook armed on this thread, if
     /// any. Called by the engine's commit.
     #[inline]
@@ -481,6 +515,20 @@ mod inner {
     /// No-op when injection is disabled.
     #[inline]
     pub fn run_during_checkpoint_write() {}
+
+    /// No-op when injection is disabled.
+    pub fn during_next_restore_window(_hook: impl FnOnce() + 'static) {}
+
+    /// No-op when injection is disabled.
+    #[inline]
+    pub fn run_during_restore_window() {}
+
+    /// No-op when injection is disabled.
+    pub fn during_next_restore_refill(_hook: impl FnOnce() + 'static) {}
+
+    /// No-op when injection is disabled.
+    #[inline]
+    pub fn run_during_restore_refill() {}
 
     /// No-op when injection is disabled.
     #[inline]

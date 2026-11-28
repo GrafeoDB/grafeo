@@ -1,4 +1,4 @@
-# GraphQL filter operators on RDF-like data
+# GraphQL filter operators on Resource nodes (property graph)
 #
 # Covers: equality, comparison operators (_gt, _gte, _lt, _lte, _ne),
 # string operators (_contains, _starts_with, _ends_with),
@@ -6,10 +6,10 @@
 
 meta:
   language: graphql
-  model: rdf
+  model: lpg
   section: filters
-  title: GraphQL filter operators on RDF data
-  dataset: rdf_social
+  title: GraphQL filter operators on Resource nodes
+  dataset: resource_social
   requires: [graphql]
 
 tests:

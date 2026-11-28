@@ -646,6 +646,41 @@ def rdf_path_budget(grafeo):
     return db
 
 
+def cycle_triples():
+    """30 persons with an id each and up to four KNOWS links out of each, for the
+    cycles of graph-bench's SPARQL twins, where each KNOWS step is `(v:KNOWS|^v:KNOWS)`."""
+    triples = []
+    for i in range(30):
+        triples.append(f'v:p{i} a v:Person ; v:id "p{i}" .')
+        for k in range(4):
+            j = (i * 7 + k * 13 + 3) % 30
+            if j != i:
+                triples.append(f"v:p{i} v:KNOWS v:p{j} .")
+    return " ".join(triples)
+
+
+def rdf_cycles(grafeo):
+    """The cycle triples (see `cycle_triples`) in the default graph."""
+    db = grafeo.GrafeoDB()
+    db.execute_sparql(
+        "PREFIX v: <http://graph-bench.example/v/> INSERT DATA { "
+        + cycle_triples()
+        + " }"
+    )
+    return db
+
+
+def rdf_cycles_in_a_graph(grafeo):
+    """The cycle triples (see `cycle_triples`) in the named graph `<urn:g>` only."""
+    db = grafeo.GrafeoDB()
+    db.execute_sparql(
+        "PREFIX v: <http://graph-bench.example/v/> INSERT DATA { GRAPH <urn:g> { "
+        + cycle_triples()
+        + " } }"
+    )
+    return db
+
+
 def rdf_sort_limit(grafeo):
     """20,000 subjects with one integer each, in descending order, under a per-query memory
     limit of 1 MiB: the pattern fits, a full sort of it does not. Loaded in statements of
@@ -763,6 +798,8 @@ FIXTURES = {
     "path_budget": path_budget,
     "rdf_path_budget": rdf_path_budget,
     "rdf_sort_limit": rdf_sort_limit,
+    "rdf_cycles": rdf_cycles,
+    "rdf_cycles_in_a_graph": rdf_cycles_in_a_graph,
     "index_graphs": index_graphs,
     "listed_type": listed_type,
     "string_id_square": string_id_square,
@@ -3859,5 +3896,30 @@ case("FD2", "MATCH p = ALL SHORTEST (a:Person)-[:KNOWS]->{1,2}(b)-[l:LIVES_IN]->
 #     `b.id < d.id` under the intersection met 'x' and raised (0.6.4 development builds).
 case("FE1", "SELECT * FROM GRAPH_TABLE (MATCH (a:Person {n: 3})-[:KNOWS]-(b:Person)-[:FOLLOWS]-(c:Person)-[:FOLLOWS]-(d:Person)-[:KNOWS]-(a) WHERE b.id < d.id AND c.n <> 3 COLUMNS (b.id AS b, c.id AS c, d.id AS d))", SQL, "string_id_square")
 case("FE2", "MATCH (a:Person {n: 3})-[:KNOWS]-(b:Person)-[:FOLLOWS]-(c:Person)-[:FOLLOWS]-(d:Person)-[:KNOWS]-(a) WHERE b.id < d.id AND c.n <> 3 RETURN b.id AS b, c.id AS c, d.id AS d", GQL, "string_id_square")
+
+# FF: SPARQL triangles and 4-cycles through a person, in graph-bench's text: an alternative path
+#     with both ends bound is ordered as the patterns it is made of (0.6.4: it was costed as every
+#     KNOWS triple and joined last), with the same rows
+for case_id, query in [
+    ("FF1", "SELECT ?bid ?cid WHERE { VALUES ?personId { \"p0\" } ?a a v:Person ; v:id ?personId ; (v:KNOWS|^v:KNOWS) ?b . ?b a v:Person ; v:id ?bid ; (v:KNOWS|^v:KNOWS) ?c . ?c a v:Person ; v:id ?cid ; (v:KNOWS|^v:KNOWS) ?a . FILTER(?bid < ?cid) }"),
+    ("FF2", "SELECT (COUNT(*) AS ?triangles) WHERE { VALUES ?personId { \"p3\" } ?a a v:Person ; v:id ?personId ; (v:KNOWS|^v:KNOWS) ?b . ?b a v:Person ; v:id ?bid ; (v:KNOWS|^v:KNOWS) ?c . ?c a v:Person ; v:id ?cid ; (v:KNOWS|^v:KNOWS) ?a . FILTER(?bid < ?cid) }"),
+    ("FF3", "SELECT (COUNT(*) AS ?cycles) WHERE { VALUES ?personId { \"p0\" } ?a a v:Person ; v:id ?personId ; (v:KNOWS|^v:KNOWS) ?b . ?b a v:Person ; v:id ?bid ; (v:KNOWS|^v:KNOWS) ?c . ?c a v:Person ; v:id ?cid ; (v:KNOWS|^v:KNOWS) ?d . ?d a v:Person ; v:id ?did ; (v:KNOWS|^v:KNOWS) ?a . FILTER(?bid < ?did && ?cid != ?personId) }"),
+]:
+    case(case_id, "PREFIX v: <http://graph-bench.example/v/> " + query, SPARQL, "rdf_cycles")
+
+# FF4, FF5: the 4-cycle split in two halves at the person opposite the bound one (0.6.4): a
+#     repeated VALUES row multiplies its rows once, and a cycle in a named graph splits there too
+case(
+    "FF4",
+    "PREFIX v: <http://graph-bench.example/v/> SELECT ?b ?c ?d WHERE { VALUES ?personId { \"p0\" \"p0\" } ?a a v:Person ; v:id ?personId ; (v:KNOWS|^v:KNOWS) ?b . ?b a v:Person ; v:id ?bid ; (v:KNOWS|^v:KNOWS) ?c . ?c a v:Person ; v:id ?cid ; (v:KNOWS|^v:KNOWS) ?d . ?d a v:Person ; v:id ?did ; (v:KNOWS|^v:KNOWS) ?a . } ORDER BY ?b ?c ?d",
+    SPARQL,
+    "rdf_cycles",
+)
+case(
+    "FF5",
+    "PREFIX v: <http://graph-bench.example/v/> SELECT (COUNT(*) AS ?cycles) WHERE { GRAPH <urn:g> { VALUES ?personId { \"p3\" } ?a a v:Person ; v:id ?personId ; (v:KNOWS|^v:KNOWS) ?b . ?b a v:Person ; v:id ?bid ; (v:KNOWS|^v:KNOWS) ?c . ?c a v:Person ; v:id ?cid ; (v:KNOWS|^v:KNOWS) ?d . ?d a v:Person ; v:id ?did ; (v:KNOWS|^v:KNOWS) ?a . FILTER(?bid < ?did && ?cid != ?personId) } }",
+    SPARQL,
+    "rdf_cycles_in_a_graph",
+)
 
 # fmt: on

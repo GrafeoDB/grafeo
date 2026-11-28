@@ -8,7 +8,7 @@ use grafeo_common::types::{EdgeId, EpochId, HashableValue, NodeId, Timestamp, Tr
 use grafeo_common::utils::error::{Error, ExpiredSnapshot, Result, TransactionError};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::execution::operators::WriteInProgress;
-use parking_lot::{Condvar, Mutex, MutexGuard, RwLock, RwLockWriteGuard};
+use parking_lot::{Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::changes::TransactionChanges;
 use super::history::{History, HistoryImage};
@@ -1040,6 +1040,10 @@ pub struct TransactionManager {
     /// Lock order: the idle gate before the commit lock (such a call takes
     /// both, in that order; `begin` takes only the idle gate).
     idle_gate: Mutex<()>,
+    /// Held shared by each direct read of what a snapshot restore replaces,
+    /// for its call, and exclusive by the restore through its refill (see
+    /// [`hold_direct_read`](Self::hold_direct_read)).
+    replace_gate: RwLock<()>,
     /// Held by a commit from its epoch until it is complete (see
     /// [`CommitGuard`]), by a change outside a commit (a schema statement, a
     /// graph command, a direct call that commits at once) while it runs, by
@@ -1154,6 +1158,9 @@ struct ReadPins {
     /// What runs once a reader ends, its pin or its transaction (see
     /// [`TransactionManager::on_reader_end`]), with no lock held.
     reader_end: std::sync::OnceLock<ReaderEnd>,
+    /// Woken when a change that replaces the stores ends (see
+    /// [`TransactionManager::hold_idle`]): the reads that waited for it pin.
+    replaced_whole: Condvar,
 }
 
 /// The readers by epoch (see [`ReadPins`]), and the ledger the snapshot
@@ -1172,6 +1179,12 @@ struct Readers {
     /// commit (`PinnedEpoch::committable` above 0): the horizon the
     /// committed-claims index trims to; `None` with none.
     committable_from: Option<u64>,
+    /// The pinned reads outside a transaction (each [`ReadPin`]), which a
+    /// change that replaces the stores whole waits for no one of.
+    reads: usize,
+    /// A change that replaces the stores whole is in progress (see
+    /// [`TransactionManager::hold_idle`]): a read waits to pin until it ends.
+    replacing: bool,
 }
 
 #[cfg(test)]
@@ -1230,6 +1243,11 @@ impl ReadPins {
     /// that can still commit too.
     fn hold_published(&self, published: &AtomicU64, committable: bool) -> EpochId {
         let mut readers = self.epochs.lock();
+        // A transaction begins behind the idle gate the replacing change holds.
+        if !committable {
+            self.wait_for_replacement(&mut readers);
+            readers.reads += 1;
+        }
         let epoch = published.load(Ordering::Acquire);
         let replaced = readers.replaced;
         match readers.pinned.back_mut() {
@@ -1301,9 +1319,24 @@ impl ReadPins {
         }
     }
 
+    /// Waits, with the lock held, while a change that replaces the stores
+    /// whole is in progress: the read then pins the replaced stores.
+    fn wait_for_replacement(&self, readers: &mut MutexGuard<'_, Readers>) {
+        while readers.replacing {
+            self.replaced_whole.wait(readers);
+        }
+    }
+
     /// Releases one reader at `epoch`.
     fn release(&self, epoch: EpochId) {
         Self::release_in(&mut self.epochs.lock(), epoch);
+    }
+
+    /// Releases the pinned read at `epoch` (a [`ReadPin`]).
+    fn release_read(&self, epoch: EpochId) {
+        let mut readers = self.epochs.lock();
+        Self::release_in(&mut readers, epoch);
+        readers.reads -= 1;
     }
 
     /// Releases one reader at `epoch`, with the lock held.
@@ -1615,6 +1648,7 @@ impl ReadPin {
     pub(crate) fn again(&self) -> ReadPin {
         let mut readers = self.pins.epochs.lock();
         ReadPins::hold_at(&mut readers, self.epoch.as_u64());
+        readers.reads += 1;
         ReadPin {
             pins: Arc::clone(&self.pins),
             epoch: self.epoch,
@@ -1632,9 +1666,67 @@ impl std::fmt::Debug for ReadPin {
 
 impl Drop for ReadPin {
     fn drop(&mut self) {
-        self.pins.release(self.epoch);
+        self.pins.release_read(self.epoch);
         self.pins.reader_ended();
     }
+}
+
+/// A direct read held for its call (see
+/// [`TransactionManager::hold_direct_read`]).
+pub(crate) struct DirectRead<'a> {
+    _gate: RwLockReadGuard<'a, ()>,
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    /// The direct reads this thread holds: at most one.
+    static DIRECT_READ_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(debug_assertions)]
+impl Drop for DirectRead<'_> {
+    fn drop(&mut self) {
+        DIRECT_READ_DEPTH.with(|depth| depth.set(depth.get() - 1));
+    }
+}
+
+/// Every other piece of work held off for a change that replaces the stores
+/// whole (see [`TransactionManager::hold_idle`]). Its drop lets the reads
+/// that waited pin, and the transactions that waited begin.
+#[must_use = "other work is held off only while the guard lives"]
+pub(crate) struct IdleHold<'a> {
+    reads: &'a ReadPins,
+    _gate: MutexGuard<'a, ()>,
+}
+
+impl Drop for IdleHold<'_> {
+    fn drop(&mut self) {
+        self.reads.epochs.lock().replacing = false;
+        self.reads.replaced_whole.notify_all();
+    }
+}
+
+/// Refuses `doing` while `transactions` or `reads` are open (`GRAFEO-T004`),
+/// with what is open: "cannot restore a snapshot while 2 transactions and 1
+/// read are open: end them first". Both counts of a change that replaces the
+/// stores whole go through it (see [`TransactionManager::hold_idle`]).
+fn refuse_open_work(doing: &str, transactions: usize, reads: usize) -> Result<()> {
+    if transactions == 0 && reads == 0 {
+        return Ok(());
+    }
+    let count = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
+    let open: Vec<String> = [(transactions, "transaction"), (reads, "read")]
+        .into_iter()
+        .filter(|&(n, _)| n > 0)
+        .map(|(n, what)| count(n, what))
+        .collect();
+    let one = transactions + reads == 1;
+    Err(Error::Transaction(TransactionError::InvalidState(format!(
+        "cannot {doing} while {} {} open: end {} first",
+        open.join(" and "),
+        if one { "is" } else { "are" },
+        if one { "it" } else { "them" }
+    ))))
 }
 
 /// Commits held off (see [`TransactionManager::hold_commits`]): while this
@@ -2112,6 +2204,7 @@ impl TransactionManager {
             active_count: AtomicU64::new(0),
             transactions: RwLock::new(registry),
             idle_gate: Mutex::new(()),
+            replace_gate: RwLock::new(()),
             commit_lock: Mutex::new(()),
             write_freeze: RwLock::new(()),
             poisoned: AtomicBool::new(false),
@@ -2258,6 +2351,88 @@ impl TransactionManager {
         // Acquire pairs with the release of a commit's completion: the call
         // sees everything the last commit wrote.
         (self.active_count.load(Ordering::Acquire) == 0).then_some(gate)
+    }
+
+    /// Holds every other piece of work off for a change that replaces the
+    /// stores whole (a snapshot restore), while the returned guard lives:
+    /// no transaction can begin and no read can pin, and each waits until
+    /// the guard drops, then sees the replaced stores whole. Taken before
+    /// commits are held (lock order: the idle gate, the transactions, the
+    /// readers, as in `begin`).
+    ///
+    /// # Errors
+    ///
+    /// [`TransactionError::InvalidState`] (`GRAFEO-T004`) while any other
+    /// work is open: a transaction (read-only too) or a pinned read (a
+    /// running query, a stream, an iterator, a snapshot or a view), the
+    /// caller's own included, which `doing` names ("restore a snapshot").
+    /// Nothing waits for it: the open work reads the stores it started on.
+    pub(crate) fn hold_idle(&self, doing: &str) -> Result<IdleHold<'_>> {
+        let gate = self.idle_gate.lock();
+        let transactions = self.transactions.read().open.len();
+        let mut readers = self.reads.epochs.lock();
+        // An early exit: open work refuses before reads are held off.
+        refuse_open_work(doing, transactions, readers.reads)?;
+        readers.replacing = true;
+        Ok(IdleHold {
+            reads: &self.reads,
+            _gate: gate,
+        })
+    }
+
+    /// Counts the pinned reads again once the change that holds `_idle` holds
+    /// `_commits` too. A copy pins with commits held (see
+    /// [`pin_checkpoint_at`](Self::pin_checkpoint_at)) and goes on reading
+    /// after it lets them go, so one that took commits between the count of
+    /// [`hold_idle`](Self::hold_idle) and the change's own hold may still be
+    /// reading. With both held the count is final: no transaction begins, a
+    /// read waits to pin, and a copy needs commits.
+    ///
+    /// # Errors
+    ///
+    /// As [`hold_idle`](Self::hold_idle), while such a read is open.
+    pub(crate) fn check_still_idle(
+        &self,
+        _idle: &IdleHold<'_>,
+        _commits: &CommitsHeld<'_>,
+        doing: &str,
+    ) -> Result<()> {
+        // The idle gate is held: no transaction is open.
+        refuse_open_work(doing, 0, self.reads.epochs.lock().reads)
+    }
+
+    /// Holds a direct read of what a change that replaces the stores whole
+    /// replaces (`get_node`, `list_graphs`, ...) for its call: the change
+    /// waits for it, and it waits for the change, then reads the replaced
+    /// stores whole. A direct read ends within its call, so it is waited for,
+    /// not counted as open work. A direct read never holds another on the same
+    /// thread: the gate prefers a waiting writer, so a nested read would wait
+    /// behind the restore that waits for the outer one. Debug builds check it.
+    pub(crate) fn hold_direct_read(&self) -> DirectRead<'_> {
+        #[cfg(debug_assertions)]
+        DIRECT_READ_DEPTH.with(|depth| {
+            debug_assert_eq!(
+                depth.get(),
+                0,
+                "a direct read inside a direct read: the replace gate is not reentrant"
+            );
+            depth.set(depth.get() + 1);
+        });
+        DirectRead {
+            _gate: self.replace_gate.read(),
+        }
+    }
+
+    /// Holds the direct reads off for the refill of a change that holds
+    /// `_idle` and `_commits` and passed its final count (see
+    /// [`check_still_idle`](Self::check_still_idle)): waits for the direct
+    /// reads in progress, and the new ones wait until the guard drops.
+    pub(crate) fn hold_replacement(
+        &self,
+        _idle: &IdleHold<'_>,
+        _commits: &CommitsHeld<'_>,
+    ) -> RwLockWriteGuard<'_, ()> {
+        self.replace_gate.write()
     }
 
     /// Begins a private transaction: one without a session, for a direct
@@ -3797,11 +3972,36 @@ impl TransactionManager {
     /// it under, so a read pinned here is never collected past.
     pub(crate) fn pin_read_at(&self, epoch: EpochId) -> Result<ReadPin> {
         let mut readers = self.reads.epochs.lock();
+        self.reads.wait_for_replacement(&mut readers);
+        self.pin_at_in(&mut readers, epoch)
+    }
+
+    /// Pins the read of a checkpoint or a copy at `epoch`, as [`pin_read_at`](Self::pin_read_at),
+    /// with commits held: it never waits for a change that replaces the stores whole (see
+    /// [`hold_idle`](Self::hold_idle)). Such a change replaces them only while it holds commits
+    /// itself, so with commits held none is halfway, and the restore's own checkpoint pins here.
+    ///
+    /// # Errors
+    ///
+    /// As [`pin_read_at`](Self::pin_read_at).
+    #[cfg(feature = "grafeo-file")]
+    pub(crate) fn pin_checkpoint_at(
+        &self,
+        epoch: EpochId,
+        _commits: &CommitsHeld<'_>,
+    ) -> Result<ReadPin> {
+        self.pin_at_in(&mut self.reads.epochs.lock(), epoch)
+    }
+
+    /// Pins a read at `epoch` (see [`pin_read_at`](Self::pin_read_at)), with the readers' lock
+    /// held.
+    fn pin_at_in(&self, readers: &mut Readers, epoch: EpochId) -> Result<ReadPin> {
         if epoch < self.history.floor() {
             return Err(self.history.before_floor(epoch));
         }
         let epoch = self.readable_epoch(epoch);
-        ReadPins::hold_at(&mut readers, epoch.as_u64());
+        ReadPins::hold_at(readers, epoch.as_u64());
+        readers.reads += 1;
         Ok(ReadPin {
             pins: Arc::clone(&self.reads),
             epoch,
@@ -3955,6 +4155,7 @@ impl TransactionManager {
         let mut readers = self.reads.epochs.lock();
         let floor = self.collect_horizon_in(&readers).max(self.history.floor());
         ReadPins::hold_at(&mut readers, floor.as_u64());
+        readers.reads += 1;
         Some(ReadPin {
             pins: Arc::clone(&self.reads),
             epoch: floor,
@@ -4082,6 +4283,31 @@ mod claim_trim_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A direct read inside a direct read on one thread fails the debug check:
+    /// the replace gate prefers a waiting writer, so it would hang a restore.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "a direct read inside a direct read")]
+    fn a_nested_direct_read_fails_the_debug_check() {
+        let mgr = TransactionManager::new();
+        let _outer = mgr.hold_direct_read();
+        let _inner = mgr.hold_direct_read();
+    }
+
+    /// Direct reads one after another on one thread, and side by side on two,
+    /// pass the debug check.
+    #[test]
+    fn direct_reads_in_turn_and_on_two_threads_pass() {
+        let mgr = Arc::new(TransactionManager::new());
+        drop(mgr.hold_direct_read());
+        let held = mgr.hold_direct_read();
+        let other = Arc::clone(&mgr);
+        std::thread::spawn(move || drop(other.hold_direct_read()))
+            .join()
+            .unwrap();
+        drop(held);
+    }
 
     /// Commits a transaction of its own that replaced `rdf` bytes of RDF state.
     fn commit_replacing(mgr: &TransactionManager, rdf: u64) {

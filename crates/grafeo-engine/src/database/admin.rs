@@ -29,6 +29,8 @@ impl super::Open {
     }
 
     pub(crate) fn property_key_count(&self) -> Result<usize> {
+        // A snapshot restore waits for it, or it for the restore.
+        let _read = self.transaction_manager.hold_direct_read();
         Ok(self.graph_store().all_property_keys()?.len())
     }
 
@@ -285,6 +287,8 @@ impl super::Open {
 
     #[must_use]
     pub(crate) fn list_indexes(&self) -> Vec<crate::admin::IndexInfo> {
+        // A snapshot restore waits for it, or it for the restore.
+        let _read = self.transaction_manager.hold_direct_read();
         let store = self.current_lpg_store().ok();
         super::index::listed_indexes(&self.catalog, store.as_deref(), |target| {
             store
@@ -306,6 +310,8 @@ impl super::Open {
     #[doc(hidden)]
     #[must_use]
     pub(crate) fn graph_type_scope_warnings(&self) -> Vec<crate::admin::ValidationWarning> {
+        // A snapshot restore waits for it, or it for the restore.
+        let _read = self.transaction_manager.hold_direct_read();
         type Listed<'a> = &'a dyn Fn(&crate::catalog::GraphTypeDefinition) -> bool;
         type Held<'a> = &'a dyn Fn(&grafeo_core::graph::rowgroup::RowGroupStore) -> bool;
 
@@ -821,12 +827,14 @@ impl super::Open {
                             .is_some_and(|record| record.enabled)
                             && super::cdc_cursor::default_exists(wal.dir())) =>
                 {
-                    super::cdc_cursor::write_default(wal.dir(), wal.end_lsn())?;
+                    super::cdc_cursor::write_default(wal.dir(), wal.end_lsn(), false)?;
                     true
                 }
                 _ => false,
             };
-            let record = grafeo_common::storage::catalog_record::CdcConfigRecord { enabled };
+            // The clock is filled in when the record is read (`cdc_config`).
+            let record =
+                grafeo_common::storage::catalog_record::CdcConfigRecord { enabled, clock: 0 };
             let previous_record = self.catalog.set_cdc_config(Some(record));
             // Capture goes on at once, and off only once the setting is
             // stored: the commits the checkpoint lets go on while it writes
@@ -1187,8 +1195,8 @@ impl super::GrafeoDB {
     ///
     /// A database opened read-only refuses the change. A database on a store
     /// of its own ([`with_store`](Self::with_store)) has no file to store it
-    /// in, and an open without the WAL cannot keep the WAL from the cursor
-    /// (below): both refuse it
+    /// in, and an open without the WAL keeps no durable feed (below): both
+    /// refuse it
     /// (turning capture on, for the second) with a configuration error
     /// (`GRAFEO-V001`) that names the remedy. While capture is stored on, a
     /// writable open without the WAL is refused the same way. A checkpoint
@@ -1199,11 +1207,12 @@ impl super::GrafeoDB {
     /// find it, and the call is refused until a reopen. The database-closed
     /// error after `close()`.
     ///
-    /// While the setting is stored on, the database keeps a cursor in its
+    /// While the setting is stored on, the database keeps the cursor of its
+    /// durable change feed ([`read_cdc_feed`](Self::read_cdc_feed)) in its
     /// WAL directory, and checkpoints and `close()` keep the WAL from it, up
     /// to [`Config::with_wal_retention_limit`](crate::Config::with_wal_retention_limit):
-    /// `<path>.wal` stays after `close()`. Turning it off removes the cursor
-    /// once the setting is stored:
+    /// `<path>.wal` stays after `close()`. Turning it off removes the feed's
+    /// cursor once the setting is stored:
     /// when that removal fails, the error is `GRAFEO-S007`
     /// ([`StorageError::CdcCursorPending`](grafeo_common::utils::error::StorageError::CdcCursorPending)).
     /// The setting is then stored off and the cursor keeps no log; the next

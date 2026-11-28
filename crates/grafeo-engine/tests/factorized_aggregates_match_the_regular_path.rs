@@ -425,20 +425,17 @@ fn profile_shows_an_ungrouped_degree_count_in_place_of_the_expand_and_the_aggreg
         .iter()
         .filter_map(|line| line.split_whitespace().next())
         .collect();
-    // The RETURN and the aggregate (with the label check the count does)
-    // show the count they pass on, and the expand the count in its place,
-    // over the scan of the start: one row, no row of each edge.
-    assert_eq!(
-        names,
-        ["EdgeCount", "EdgeCount", "EdgeCount", "Scan"],
-        "{text}"
-    );
-    for line in &lines[..3] {
+    // The aggregate (with the label check the count does) shows the count it
+    // passes on, and the expand the count in its place, over the scan of the
+    // start: one row, no row of each edge. Its RETURN gives the count as it is,
+    // so there is no line for it.
+    assert_eq!(names, ["EdgeCount", "EdgeCount", "Scan"], "{text}");
+    for line in &lines[..2] {
         assert!(line.contains("rows=1 "), "{text}");
     }
-    assert!(lines[1].contains("group: []"), "{text}");
-    assert!(lines[1].contains("hasLabel"), "{text}");
-    assert!(lines[2].contains("(a)->[:R]->"), "{text}");
+    assert!(lines[0].contains("group: []"), "{text}");
+    assert!(lines[0].contains("hasLabel"), "{text}");
+    assert!(lines[1].contains("(a)->[:R]->"), "{text}");
 }
 
 #[test]

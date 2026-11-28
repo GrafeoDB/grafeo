@@ -629,7 +629,24 @@ impl SparqlTranslator {
         let mut projected_after_sort = None;
         if !has_aggregates {
             let mut projections = self.translate_projection(&select.projection)?;
-            if !projections.is_empty() {
+            // `SELECT *` gives the query's variables, never a name the translation adds
+            // (`_:`: a blank node, a path's middle node, a negated set's predicate).
+            let mut star_hides = false;
+            if matches!(select.projection, ast::Projection::Wildcard) {
+                let variables = Self::collect_operator_variables(&plan);
+                star_hides = variables.iter().any(|name| name.starts_with("_:"));
+                if star_hides {
+                    projections = variables
+                        .into_iter()
+                        .filter(|name| !name.starts_with("_:"))
+                        .map(|name| Projection {
+                            expression: LogicalExpression::Variable(name),
+                            alias: None,
+                        })
+                        .collect();
+                }
+            }
+            if !projections.is_empty() || star_hides {
                 let names: Vec<String> = projections
                     .iter()
                     .map(|projection| {

@@ -5,7 +5,7 @@ description: The Silicon Valley demo dataset and the namespaces of its RDF form.
 
 # Silicon Valley dataset
 
-The Silicon Valley demo dataset follows Pied Piper from its founding in March 2014: people, companies, products, AIs, places, cities and events, with dated employment, moves, funding rounds and events. It ships in the `grafeo-datasets` packages for Python and npm, as GQL, Cypher and Turtle. Its Turtle form names its terms and resources with the IRIs below; each one opens the page that describes it.
+The Silicon Valley demo dataset follows Pied Piper from its founding in March 2014: people, companies, products, AIs, places, cities and events, with dated employment, moves, funding rounds and events. It ships in the `grafeo-datasets` packages for Python and npm, as GQL, Cypher and Turtle, the Turtle also with its vocabulary in RDFS or OWL, and as the JSON that `importLpg` and `importRdf` in `@grafeo-db/wasm` take. Its Turtle form names its terms and resources with the IRIs below; each one opens the page that describes it.
 
 An homage to the HBO series Silicon Valley; not affiliated with or endorsed by HBO. All descriptions are original.
 

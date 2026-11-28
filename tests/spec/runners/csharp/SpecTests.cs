@@ -79,9 +79,24 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
         string? variantQuery,
         string? skipReason)
     {
+        try
+        {
+            RunMarked(filePath, testName, variantLang, variantQuery, skipReason);
+        }
+        catch (Xunit.SkipException)
+        {
+            // Every skip counts in the summary, whichever check skips the case
+            Interlocked.Increment(ref GtestSummary.Skipped);
+            throw;
+        }
+    }
+
+    /// <summary>One case with its marks: <c>skip:</c>, a runner gap, <c>xfail:</c>.</summary>
+    private void RunMarked(
+        string filePath, string testName, string? variantLang, string? variantQuery, string? skipReason)
+    {
         if (skipReason is not null)
         {
-            Interlocked.Increment(ref GtestSummary.Skipped);
             Skip.If(true, skipReason);
             return;
         }
@@ -93,7 +108,6 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
         // A gap of this binding (`runner_gap:`) skips the case here, as `skip:` does
         if (tc.RunnerGap is { } gap && gap.Runners.Contains("csharp"))
         {
-            Interlocked.Increment(ref GtestSummary.Skipped);
             Skip.If(true, $"runner gap: {gap.Reason} ({gap.Issue})");
             return;
         }
@@ -171,8 +185,8 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
             }
         }
 
-        // Create fresh database
-        _db = GrafeoDB.Memory();
+        // Create fresh database, with the case's settings (config:)
+        _db = tc.Config.Count == 0 ? GrafeoDB.Memory() : GrafeoDB.Open(null, Options(tc.Config));
 
         try
         {
@@ -502,10 +516,21 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
     // Dataset loading
     // =========================================================================
 
-    /// <summary>Load a .setup dataset file, executing each line as GQL.</summary>
+    /// <summary>
+    /// Load a dataset, one statement per line: GQL from a <c>.setup</c> file, SPARQL Update from
+    /// a <c>.ru</c> file.
+    /// </summary>
     private static void LoadDataset(GrafeoDB db, string datasetName)
     {
         var setupPath = Path.Combine(DatasetsDir, $"{datasetName}.setup");
+        var updatePath = Path.Combine(DatasetsDir, $"{datasetName}.ru");
+        var language = "gql";
+        if (File.Exists(updatePath))
+        {
+            if (File.Exists(setupPath))
+                throw new RunnerFault($"Dataset '{datasetName}' is both {setupPath} and {updatePath}");
+            (setupPath, language) = (updatePath, "sparql");
+        }
         if (!File.Exists(setupPath))
             throw new RunnerFault($"Dataset file not found: {setupPath}");
 
@@ -515,7 +540,7 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
             var trimmed = line.Trim();
             if (string.IsNullOrEmpty(trimmed) || trimmed.StartsWith('#'))
                 continue;
-            db.Execute(trimmed);
+            ExecuteQuery(db, language, trimmed);
         }
     }
 
@@ -1035,6 +1060,21 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
     // Setup helpers
     // =========================================================================
 
+    /// <summary>The binding options of a case's parsed <c>config:</c>.</summary>
+    private static GrafeoOptions Options(Dictionary<string, long> config)
+    {
+        var options = new GrafeoOptions();
+        foreach (var (key, value) in config)
+        {
+            switch (key)
+            {
+                case "path_search_budget": options.SetPathSearchBudget(value); break;
+                default: throw new FormatException($"unknown config key '{key}'");
+            }
+        }
+        return options;
+    }
+
     private static HashSet<string> LoadCompiledFeatures()
     {
         // A native library that does not load throws here and fails the test: it
@@ -1072,6 +1112,29 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
         return Path.GetFullPath(Path.Combine(
             AppContext.BaseDirectory, "..", "..", "..", "..", "..", "..", ".."));
     }
+}
+
+/// <summary>A case's <c>config:</c>, by the rule every runner applies: an unknown or repeated
+/// key is refused, never ignored.</summary>
+public class ConfigTests
+{
+    [Fact]
+    public void AConfigNamesTheSettingsTheCaseOpensWith()
+    {
+        Assert.Equal(new Dictionary<string, long> { ["path_search_budget"] = 1048576 },
+            GtestParser.ParseConfig("{path_search_budget: 1048576}"));
+    }
+
+    [Theory]
+    [InlineData("{path_budget: 1048576}")]
+    [InlineData("{path_search_budget: 0}")]
+    [InlineData("{path_search_budget: big}")]
+    [InlineData("{path_search_budget: +1048576}")]
+    [InlineData("{path_search_budget: 1048576, path_search_budget: 2}")]
+    [InlineData("path_search_budget: 1048576")]
+    [InlineData("{}")]
+    public void AConfigTheRunnersCannotApplyIsRefused(string text) =>
+        Assert.Throws<FormatException>(() => GtestParser.ParseConfig(text));
 }
 
 /// <summary>

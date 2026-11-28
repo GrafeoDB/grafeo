@@ -181,6 +181,17 @@ pub struct KeyColumnGroup {
     pub ids_given: u64,
 }
 
+/// Where a paged read of node ids stands (see
+/// [`GraphStore::node_ids_after`]): the default starts before the first id.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IdCursor {
+    /// The last id handed out; `None`: none yet.
+    pub after: Option<NodeId>,
+    /// Where the read ends, set by the store at its first call: no id at or
+    /// past it is listed; `None`: not yet called.
+    pub end: Option<NodeId>,
+}
+
 /// The reads of one graph, each at an explicit [`ReadView`].
 ///
 /// Every read names who reads: a transaction at its snapshot, which sees
@@ -696,6 +707,54 @@ pub trait GraphStore: Send + Sync {
         ids.sort_unstable();
         ids.dedup();
         Ok(ids)
+    }
+
+    /// Appends to `into` the next nodes after `cursor` that `view` sees with
+    /// at least one of `labels` (every node for none), by ascending id and
+    /// each once: a scan's read of its ids a page at a time.
+    ///
+    /// At the first call (`cursor.end` is `None`) the store sets `cursor.end`
+    /// past every node it holds and never appends an id at or past it, so a
+    /// statement never scans the nodes it creates itself. Each call appends
+    /// a non-empty prefix of the ids left above `cursor.after`, about `want`
+    /// of them (a store may append more), and nothing only when none are
+    /// left; it moves `cursor.after` past what it appended. Together the
+    /// calls with one cursor list what one call of
+    /// [`nodes_with_any_label`](Self::nodes_with_any_label) (or
+    /// [`node_ids`](Self::node_ids) for no label) lists at that view.
+    ///
+    /// The default lists once, at the first call, through those calls, and
+    /// appends every id above `cursor.after`; the next call appends nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn node_ids_after(
+        &self,
+        labels: &[&str],
+        view: ReadView,
+        cursor: &mut IdCursor,
+        _want: usize,
+        into: &mut Vec<NodeId>,
+    ) -> Result<()> {
+        if cursor.end.is_some() {
+            return Ok(());
+        }
+        let ids = match labels {
+            [] => self.node_ids(view)?,
+            [label] => self.nodes_by_label(label, view)?,
+            labels => self.nodes_with_any_label(labels, view)?,
+        };
+        let from = into.len();
+        let after = cursor.after;
+        into.extend(
+            ids.into_iter()
+                .filter(|id| after.is_none_or(|after| *id > after)),
+        );
+        // All of it is listed: the end is just past the last id.
+        cursor.after = into[from..].last().copied().or(after);
+        cursor.end = Some(NodeId::new(cursor.after.map_or(0, |id| id.as_u64() + 1)));
+        Ok(())
     }
 
     /// How many nodes with `label` `view` sees.
@@ -1772,6 +1831,60 @@ mod tests {
         fn committed_epoch(&self) -> EpochId {
             EpochId::INITIAL
         }
+    }
+
+    /// The default paged read lists once, what the one calls list above the
+    /// cursor, and its next call appends nothing, a node made since too.
+    #[test]
+    fn the_default_paged_read_lists_once() {
+        let mut store = Required::new();
+        let (alix, gus, mia, amsterdam) = (NodeId(1), NodeId(2), NodeId(3), NodeId(4));
+        let shapes: [(&[&str], Vec<NodeId>); 5] = [
+            (&["Person"], vec![alix, gus, mia]),
+            (&["City", "Person"], vec![alix, gus, mia, amsterdam]),
+            (&[], vec![alix, gus, mia, amsterdam]),
+            (&["Missing"], vec![]),
+            (&["Missing", "City"], vec![amsterdam]),
+        ];
+        for (labels, listed) in shapes {
+            let mut cursor = IdCursor::default();
+            let mut page = Vec::new();
+            store
+                .node_ids_after(labels, NOW, &mut cursor, 1, &mut page)
+                .unwrap();
+            assert_eq!(page, listed, "{labels:?}");
+            assert!(cursor.end.is_some(), "{labels:?}: the end is set");
+            page.clear();
+            store
+                .node_ids_after(labels, NOW, &mut cursor, 1, &mut page)
+                .unwrap();
+            assert!(page.is_empty(), "{labels:?}: listed once");
+        }
+
+        let mut cursor = IdCursor {
+            after: Some(gus),
+            end: None,
+        };
+        let mut page = vec![NodeId(99)];
+        store
+            .node_ids_after(&["Person"], NOW, &mut cursor, 1, &mut page)
+            .unwrap();
+        assert_eq!(page, [NodeId(99), mia], "above the cursor, appended");
+        assert_eq!(cursor.after, Some(mia));
+
+        let mut cursor = IdCursor::default();
+        let mut page = Vec::new();
+        store
+            .node_ids_after(&["City"], NOW, &mut cursor, 1, &mut page)
+            .unwrap();
+        let mut rotterdam = Node::new(NodeId(5));
+        rotterdam.add_label("City");
+        store.nodes.push(rotterdam);
+        page.clear();
+        store
+            .node_ids_after(&["City"], NOW, &mut cursor, 1, &mut page)
+            .unwrap();
+        assert!(page.is_empty(), "a node made after the first call");
     }
 
     #[test]

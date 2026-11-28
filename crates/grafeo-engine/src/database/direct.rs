@@ -493,29 +493,51 @@ impl Open {
         // While the database keeps history, the time of the call: its WAL
         // group carries it, and the time index records it once published.
         let at = self.transaction_manager.commit_time();
+        // Whether the call reports to change data capture, read once: its
+        // group carries the clock exactly when it reports events.
+        #[cfg(feature = "cdc")]
+        let capture = self.cdc_active();
 
         #[cfg(feature = "wal")]
-        if let Some(wal) = &self.wal
-            && !changes.is_empty()
-            && let Err(error) = Self::log_immediate(wal, &changes, epoch, at)
-        {
-            self.transaction_manager.poison(&format!(
-                "a direct write at epoch {epoch:?} is applied but not in the WAL: {error}"
-            ));
-            return Err(Error::Transaction(
-                grafeo_common::utils::error::TransactionError::CommitOutcomeUnknown(
-                    error.to_string(),
-                ),
-            ));
-        }
+        let first = match &self.wal {
+            Some(wal) if !changes.is_empty() => {
+                #[cfg(feature = "cdc")]
+                let clock = capture.then(|| self.cdc_log.clock().as_ref());
+                #[cfg(not(feature = "cdc"))]
+                let clock = None;
+                match Self::log_immediate(wal, &changes, epoch, at, clock) {
+                    Ok(first) => first,
+                    Err(error) => {
+                        self.transaction_manager.poison(&format!(
+                            "a direct write at epoch {epoch:?} is applied but not in the WAL: \
+                             {error}"
+                        ));
+                        return Err(Error::Transaction(
+                            grafeo_common::utils::error::TransactionError::CommitOutcomeUnknown(
+                                error.to_string(),
+                            ),
+                        ));
+                    }
+                }
+            }
+            _ => None,
+        };
         // Reported before the epoch is published, while commits are held
         // off: in epoch order, as a commit reports its changes.
         #[cfg(feature = "cdc")]
-        if self.cdc_active()
-            && let Some(stamps) = self.cdc_log.reserve_for(&changes)
-        {
-            self.cdc_log.record_commit(&changes, epoch, stamps);
+        if capture {
+            #[cfg(not(feature = "wal"))]
+            let first: Option<(
+                grafeo_common::types::HlcTimestamp,
+                Vec<(usize, grafeo_common::storage::log_record::ImageLogged)>,
+            )> = None;
+            let logged = first
+                .as_ref()
+                .map(|(first, refused)| (*first, refused.as_slice()));
+            self.cdc_log.record_commit_at(&changes, epoch, logged);
         }
+        #[cfg(all(feature = "wal", not(feature = "cdc")))]
+        let _ = first;
         // What it replaced, in the ledger before its epoch is published, as a commit's is.
         let replaced = changes.superseded_bytes() as u64;
         self.transaction_manager.add_replaced(replaced);
@@ -533,7 +555,10 @@ impl Open {
     }
 
     /// Writes the WAL group of a direct call that committed at once at
-    /// `epoch`, which wrote `changes`.
+    /// `epoch`, which wrote `changes`. With `clock` (the call reports to
+    /// change data capture) it reserves the call's timestamps under its
+    /// commit hold and writes a clocked group with before-images; the first
+    /// timestamp it reserved.
     ///
     /// # Errors
     ///
@@ -544,20 +569,34 @@ impl Open {
         changes: &grafeo_common::change::ChangeSet,
         epoch: EpochId,
         at: Option<u64>,
-    ) -> Result<()> {
+        clock: Option<&grafeo_common::types::HlcClock>,
+    ) -> Result<
+        Option<(
+            grafeo_common::types::HlcTimestamp,
+            Vec<(usize, grafeo_common::storage::log_record::ImageLogged)>,
+        )>,
+    > {
         let mut group = wal
             .begin_group(TransactionId::SYSTEM)
             .map_err(crate::database::wal_log::commit_error)?;
+        let first = crate::database::wal_log::reserve_clock(clock, changes);
+        // The image rule's verdicts, once per write, for the log and the events.
+        let refused = if first.is_some() {
+            changes.refused_images()
+        } else {
+            Vec::new()
+        };
         crate::database::wal_log::write_group_at(
             &mut group,
             changes,
             epoch,
             grafeo_common::storage::log_record::Origin::Direct,
             at,
+            first.map(|first| (first, refused.as_slice())),
         )?;
         group
             .finish()
-            .map(|_| ())
+            .map(|_| first.map(|first| (first, refused)))
             .map_err(crate::database::wal_log::commit_error)
     }
 
@@ -741,6 +780,14 @@ impl Open {
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_during_held_change();
 
+        // Whether the call reports to change data capture, read once, before
+        // its group is written.
+        #[cfg(feature = "cdc")]
+        let capture = self.cdc_active();
+        #[cfg(all(feature = "wal", feature = "cdc"))]
+        let clock = capture.then(|| self.cdc_log.clock().as_ref());
+        #[cfg(all(feature = "wal", not(feature = "cdc")))]
+        let clock = None;
         // The group is in the log before anything of the commit is stamped
         // (#498): one that is not written takes the commit back, and the
         // call is rolled back.
@@ -753,6 +800,7 @@ impl Open {
                 changes,
                 &[],
                 grafeo_common::storage::log_record::Origin::Direct,
+                clock,
             ) {
                 Ok(written) => written,
                 Err(error) => {
@@ -771,7 +819,7 @@ impl Open {
         // written, the sync comes after it, then the ordered publish.
         let publish = commit.written();
         #[cfg(feature = "wal")]
-        if let (Some(wal), Some(logged)) = (&self.wal, logged) {
+        if let (Some(wal), Some(logged)) = (&self.wal, &logged) {
             crate::database::wal_log::sync_commit(wal, logged)?;
         }
 
@@ -785,14 +833,17 @@ impl Open {
                 ))
             })?;
 
-            // Reported in epoch order, before the epoch is published.
+            // Reported in epoch order, before the epoch is published, with
+            // the timestamps reserved with its group.
             #[cfg(feature = "cdc")]
-            if self.cdc_active() {
-                changes.read(|set| {
-                    if let Some(stamps) = self.cdc_log.reserve_for(set) {
-                        self.cdc_log.record_commit(set, epoch, stamps);
-                    }
+            if capture {
+                #[cfg(feature = "wal")]
+                let logged = logged.as_ref().and_then(|logged| {
+                    logged.clock.map(|first| (first, logged.refused.as_slice()))
                 });
+                #[cfg(not(feature = "wal"))]
+                let logged = None;
+                changes.read(|set| self.cdc_log.record_commit_at(set, epoch, logged));
             }
 
             // The database has one epoch: the root store follows every

@@ -12,7 +12,12 @@
 //! [`DataOp`], and the storage key of its graph; a standalone record
 //! ([`LogRecord::Standalone`]) holds a [`StandaloneOp`]. A change set encodes
 //! its entries without copying them ([`ChangeSet::log_records`] and
-//! [`LogRecordRef`]); entries' before-images are never logged.
+//! [`LogRecordRef`]). While change data capture is on, a commit logs each
+//! write that replaced something with what it replaced
+//! ([`LogRecord::DataWithBefore`], kind 26, from
+//! [`ChangeSet::log_records_with_before`]), and its group begins with the
+//! first timestamp of its change events (kind 2): a reader rebuilds the
+//! commit's events from the log alone.
 //!
 //! Every record is framed as a catalog record is
 //! ([`catalog_record`](super::catalog_record)), with its own kinds and
@@ -27,7 +32,8 @@
 //!
 //! | Kind | Record | Payload |
 //! | --- | --- | --- |
-//! | 1 | [`GroupBegin`](LogRecord::GroupBegin) | epoch, timestamp in milliseconds, [`Origin`] |
+//! | 1 | [`GroupBegin`](LogRecord::GroupBegin) without a clock | epoch, timestamp in milliseconds, [`Origin`] |
+//! | 2 | [`GroupBegin`](LogRecord::GroupBegin) with a clock | kind 1's fields, then the group's first change timestamp (the raw `u64` of an [`HlcTimestamp`]) |
 //! | 16 | [`CreateNode`](DataOp::CreateNode) | graph, id, labels, properties |
 //! | 17 | [`DeleteNode`](DataOp::DeleteNode) | graph, id |
 //! | 18 | [`CreateEdge`](DataOp::CreateEdge) | graph, id, source node, target node, edge type, properties |
@@ -38,6 +44,7 @@
 //! | 23 | [`RemoveEdgeProperty`](DataOp::RemoveEdgeProperty) | graph, id, key |
 //! | 24 | [`AddNodeLabel`](DataOp::AddNodeLabel) | graph, id, label |
 //! | 25 | [`RemoveNodeLabel`](DataOp::RemoveNodeLabel) | graph, id, label |
+//! | 26 | [`DataWithBefore`](LogRecord::DataWithBefore) | the inner write's kind (u8: 17, 19 to 25), its payload as that kind writes it, then the [`BeforeImage`] |
 //! | 32 | [`CreateGraph`](StandaloneOp::CreateGraph) | name |
 //! | 33 | [`DropGraph`](StandaloneOp::DropGraph) | name |
 //! | 34 | reserved, unused (a graph copy logs a create record per copied entity) | |
@@ -104,7 +111,13 @@
 //! may claim up to the catalog's decode limit (16 MiB, see
 //! [`catalog_record`](super::catalog_record)).
 //!
+//! A [`BeforeImage`] is an enum: 0 a property's old value (an option of a
+//! value), 1 the old labels, 2 a deleted node (labels, properties), 3 a
+//! deleted edge (edge type, source node, target node, properties, and an
+//! option of the node whose detach delete removed it).
+//!
 //! [`ChangeSet::log_records`]: crate::change::ChangeSet::log_records
+//! [`ChangeSet::log_records_with_before`]: crate::change::ChangeSet::log_records_with_before
 
 use std::fmt;
 use std::io;
@@ -121,8 +134,10 @@ use super::catalog_record::{
     encode_framed_record, optional_text, read_framed_records, text,
 };
 use super::value_codec::{decode_value, encode_value, encoded_len, nests_too_deep};
-use crate::change::{DataOp, GraphRef, Labels, Properties, RdfGraphOp, StandaloneOp};
-use crate::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, Value};
+use crate::change::{
+    Before, DataOp, EdgeImage, GraphRef, Labels, NodeImage, Properties, RdfGraphOp, StandaloneOp,
+};
+use crate::types::{ArcStr, EdgeId, EpochId, HlcTimestamp, NodeId, PropertyKey, Value};
 use crate::utils::error::{Error, Result};
 
 /// The most bytes one framed log record may take, its header included:
@@ -154,6 +169,7 @@ const LOG_FRAMING: RecordFraming = RecordFraming {
 };
 
 const KIND_GROUP_BEGIN: u8 = 1;
+const KIND_GROUP_BEGIN_WITH_CLOCK: u8 = 2;
 const KIND_CREATE_NODE: u8 = 16;
 const KIND_DELETE_NODE: u8 = 17;
 const KIND_CREATE_EDGE: u8 = 18;
@@ -164,6 +180,7 @@ const KIND_SET_EDGE_PROPERTY: u8 = 22;
 const KIND_REMOVE_EDGE_PROPERTY: u8 = 23;
 const KIND_ADD_NODE_LABEL: u8 = 24;
 const KIND_REMOVE_NODE_LABEL: u8 = 25;
+const KIND_DATA_WITH_BEFORE: u8 = 26;
 const KIND_CREATE_GRAPH: u8 = 32;
 const KIND_DROP_GRAPH: u8 = 33;
 const KIND_PUT_CATALOG: u8 = 40;
@@ -204,6 +221,344 @@ pub struct GroupBegin {
     pub timestamp_ms: u64,
     /// What wrote the group.
     pub origin: Origin,
+    /// The first timestamp of the group's change events, present while the
+    /// commit reports to change data capture: its writes take it and the
+    /// ones after it, one each. Written as kind 2; without it, kind 1.
+    pub clock: Option<HlcTimestamp>,
+}
+
+/// What a write replaced, as a [`LogRecord::DataWithBefore`] holds it.
+/// Variants are only appended.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BeforeImage {
+    /// The value a property set or removal replaced: `None` when the
+    /// property was not there.
+    Property {
+        /// The old value.
+        old: Option<Value>,
+    },
+    /// The node's labels before a label was added or removed.
+    Labels {
+        /// The old labels.
+        old: Labels,
+    },
+    /// The node a delete removed.
+    Node {
+        /// Its labels.
+        labels: Labels,
+        /// Its properties.
+        properties: Properties,
+    },
+    /// The edge a delete removed.
+    Edge {
+        /// Its type.
+        edge_type: ArcStr,
+        /// The node it left.
+        src: NodeId,
+        /// The node it entered.
+        dst: NodeId,
+        /// Its properties.
+        properties: Properties,
+        /// The node whose detach delete removed it, if one did.
+        deleted_with: Option<NodeId>,
+    },
+    /// The node a delete removed, its properties left out: with them the
+    /// record would pass its limits (see [`logs_before_image`]).
+    NodeIdentity {
+        /// Its labels.
+        labels: Labels,
+    },
+    /// The edge a delete removed, its properties left out, as for
+    /// [`NodeIdentity`](Self::NodeIdentity).
+    EdgeIdentity {
+        /// Its type.
+        edge_type: ArcStr,
+        /// The node it left.
+        src: NodeId,
+        /// The node it entered.
+        dst: NodeId,
+        /// The node whose detach delete removed it, if one did.
+        deleted_with: Option<NodeId>,
+    },
+}
+
+impl BeforeImage {
+    /// What the write replaced, as a change set holds it, with what of it
+    /// the record kept: [`ImageLogged::Whole`] for every image but a
+    /// delete's identity alone (`NodeIdentity`, `EdgeIdentity`), which gives
+    /// the node or edge with no properties and [`ImageLogged::Identity`]:
+    /// its properties were left out, not empty.
+    #[must_use]
+    pub fn into_logged(self) -> (Before, ImageLogged) {
+        match self {
+            Self::Property { old } => (Before::Value(old), ImageLogged::Whole),
+            Self::Labels { old } => (Before::Labels(old), ImageLogged::Whole),
+            Self::Node { labels, properties } => (
+                Before::Node(Box::new(NodeImage { labels, properties })),
+                ImageLogged::Whole,
+            ),
+            Self::Edge {
+                edge_type,
+                src,
+                dst,
+                properties,
+                deleted_with,
+            } => (
+                Before::Edge(Box::new(EdgeImage {
+                    src,
+                    dst,
+                    edge_type,
+                    properties,
+                    deleted_with,
+                })),
+                ImageLogged::Whole,
+            ),
+            Self::NodeIdentity { labels } => (
+                Before::Node(Box::new(NodeImage {
+                    labels,
+                    properties: Properties::new(),
+                })),
+                ImageLogged::Identity,
+            ),
+            Self::EdgeIdentity {
+                edge_type,
+                src,
+                dst,
+                deleted_with,
+            } => (
+                Before::Edge(Box::new(EdgeImage {
+                    src,
+                    dst,
+                    edge_type,
+                    properties: Properties::new(),
+                    deleted_with,
+                })),
+                ImageLogged::Identity,
+            ),
+        }
+    }
+}
+
+/// What a write replaced, borrowed for its record: a change set's
+/// before-image, its identity alone, or a record's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ImageRef<'a> {
+    /// A change set entry's before-image.
+    Change(&'a Before),
+    /// A change set entry's before-image without its properties: a deleted
+    /// node's labels, a deleted edge's type and endpoints
+    /// ([`BeforeImage::NodeIdentity`], [`BeforeImage::EdgeIdentity`]).
+    Identity(&'a Before),
+    /// A read record's image.
+    Record(&'a BeforeImage),
+}
+
+/// What of a write's before-image its record holds, as
+/// [`logs_before_image`] decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageLogged {
+    /// The whole image.
+    Whole,
+    /// A delete's identity, its properties left out.
+    Identity,
+    /// Nothing: the write logs as its plain kind.
+    Nothing,
+}
+
+/// The fields of a before-image, borrowed, as kind 26 writes them.
+enum ImageFields<'a> {
+    Property(Option<&'a Value>),
+    Labels(&'a [ArcStr]),
+    Node(&'a [ArcStr], &'a [(PropertyKey, Value)]),
+    Edge {
+        edge_type: &'a str,
+        src: NodeId,
+        dst: NodeId,
+        properties: &'a [(PropertyKey, Value)],
+        deleted_with: Option<NodeId>,
+    },
+    NodeIdentity(&'a [ArcStr]),
+    EdgeIdentity {
+        edge_type: &'a str,
+        src: NodeId,
+        dst: NodeId,
+        deleted_with: Option<NodeId>,
+    },
+}
+
+impl ImageRef<'_> {
+    /// Whether the image is what `op` replaced, by the change set's rule
+    /// ([`Before::fits`]).
+    fn fits(&self, op: &DataOp) -> bool {
+        match self {
+            Self::Change(before) | Self::Identity(before) => before.fits(op),
+            Self::Record(image) => (*image).clone().into_logged().0.fits(op),
+        }
+    }
+
+    /// The image's fields; `None` for [`Before::Absent`], which no record
+    /// holds, and for the identity of an image that is no delete's.
+    fn fields(&self) -> Option<ImageFields<'_>> {
+        Some(match *self {
+            Self::Change(Before::Absent)
+            | Self::Identity(Before::Absent | Before::Value(_) | Before::Labels(_)) => {
+                return None;
+            }
+            Self::Identity(Before::Node(image)) => ImageFields::NodeIdentity(&image.labels),
+            Self::Record(BeforeImage::NodeIdentity { labels }) => ImageFields::NodeIdentity(labels),
+            Self::Identity(Before::Edge(image)) => ImageFields::EdgeIdentity {
+                edge_type: image.edge_type.as_str(),
+                src: image.src,
+                dst: image.dst,
+                deleted_with: image.deleted_with,
+            },
+            Self::Record(BeforeImage::EdgeIdentity {
+                edge_type,
+                src,
+                dst,
+                deleted_with,
+            }) => ImageFields::EdgeIdentity {
+                edge_type: edge_type.as_str(),
+                src: *src,
+                dst: *dst,
+                deleted_with: *deleted_with,
+            },
+            Self::Change(Before::Value(old)) | Self::Record(BeforeImage::Property { old }) => {
+                ImageFields::Property(old.as_ref())
+            }
+            Self::Change(Before::Labels(old)) | Self::Record(BeforeImage::Labels { old }) => {
+                ImageFields::Labels(old)
+            }
+            Self::Change(Before::Node(image)) => {
+                ImageFields::Node(&image.labels, &image.properties)
+            }
+            Self::Record(BeforeImage::Node { labels, properties }) => {
+                ImageFields::Node(labels, properties)
+            }
+            Self::Change(Before::Edge(image)) => ImageFields::Edge {
+                edge_type: image.edge_type.as_str(),
+                src: image.src,
+                dst: image.dst,
+                properties: &image.properties,
+                deleted_with: image.deleted_with,
+            },
+            Self::Record(BeforeImage::Edge {
+                edge_type,
+                src,
+                dst,
+                properties,
+                deleted_with,
+            }) => ImageFields::Edge {
+                edge_type: edge_type.as_str(),
+                src: *src,
+                dst: *dst,
+                properties,
+                deleted_with: *deleted_with,
+            },
+        })
+    }
+}
+
+impl ImageFields<'_> {
+    /// The bytes the value codec writes for the image's values.
+    fn value_bytes(&self, counted: impl Fn(&Value) -> usize) -> usize {
+        let of = |properties: &[(PropertyKey, Value)]| {
+            properties
+                .iter()
+                .map(|(_, value)| counted(value))
+                .fold(0, usize::saturating_add)
+        };
+        match self {
+            Self::Property(old) => old.map_or(0, &counted),
+            Self::Labels(_) | Self::NodeIdentity(_) | Self::EdgeIdentity { .. } => 0,
+            Self::Node(_, properties) | Self::Edge { properties, .. } => of(properties),
+        }
+    }
+
+    /// Writes the image: its variant, then its fields.
+    fn encode(&self, out: &mut PayloadWriter<'_>) -> Result<()> {
+        match *self {
+            Self::Property(old) => encode_bincode_payload(&(0_u32, old.map(ValueRef)), out),
+            Self::Labels(old) => encode_bincode_payload(&(1_u32, NamesRef(old)), out),
+            Self::Node(labels, properties) => {
+                encode_bincode_payload(&(2_u32, NamesRef(labels), PropertiesRef(properties)), out)
+            }
+            Self::Edge {
+                edge_type,
+                src,
+                dst,
+                properties,
+                deleted_with,
+            } => encode_bincode_payload(
+                &(
+                    3_u32,
+                    edge_type,
+                    src.as_u64(),
+                    dst.as_u64(),
+                    PropertiesRef(properties),
+                    deleted_with.map(|node| node.as_u64()),
+                ),
+                out,
+            ),
+            Self::NodeIdentity(labels) => encode_bincode_payload(&(4_u32, NamesRef(labels)), out),
+            Self::EdgeIdentity {
+                edge_type,
+                src,
+                dst,
+                deleted_with,
+            } => encode_bincode_payload(
+                &(
+                    5_u32,
+                    edge_type,
+                    src.as_u64(),
+                    dst.as_u64(),
+                    deleted_with.map(|node| node.as_u64()),
+                ),
+                out,
+            ),
+        }
+    }
+}
+
+/// A before-image read as [`ImageFields::encode`] writes it.
+#[derive(Deserialize)]
+enum ImageRecord {
+    Property(Option<OwnedValue>),
+    Labels(OwnedLabels),
+    Node(OwnedLabels, OwnedProperties),
+    Edge(Name, u64, u64, OwnedProperties, Option<u64>),
+    NodeIdentity(OwnedLabels),
+    EdgeIdentity(Name, u64, u64, Option<u64>),
+}
+
+impl From<ImageRecord> for BeforeImage {
+    fn from(image: ImageRecord) -> Self {
+        match image {
+            ImageRecord::Property(old) => Self::Property {
+                old: old.map(|OwnedValue(value)| value),
+            },
+            ImageRecord::Labels(OwnedLabels(old)) => Self::Labels { old },
+            ImageRecord::Node(OwnedLabels(labels), OwnedProperties(properties)) => {
+                Self::Node { labels, properties }
+            }
+            ImageRecord::Edge(Name(edge_type), src, dst, OwnedProperties(properties), with) => {
+                Self::Edge {
+                    edge_type,
+                    src: NodeId::new(src),
+                    dst: NodeId::new(dst),
+                    properties,
+                    deleted_with: with.map(NodeId::new),
+                }
+            }
+            ImageRecord::NodeIdentity(OwnedLabels(labels)) => Self::NodeIdentity { labels },
+            ImageRecord::EdgeIdentity(Name(edge_type), src, dst, with) => Self::EdgeIdentity {
+                edge_type,
+                src: NodeId::new(src),
+                dst: NodeId::new(dst),
+                deleted_with: with.map(NodeId::new),
+            },
+        }
+    }
 }
 
 /// An RDF term, as a log record stores it: typed, so replay parses nothing.
@@ -266,6 +621,17 @@ pub enum LogRecord {
         /// What was applied.
         op: DataOp,
     },
+    /// A write with what it replaced (kind 26), logged while change data
+    /// capture is on; replay applies `op` as for [`Data`](Self::Data).
+    DataWithBefore {
+        /// The graph's storage key; `None` for the default graph.
+        graph: Option<String>,
+        /// What was applied: a write that replaced something (kinds 17 and
+        /// 19 to 25).
+        op: DataOp,
+        /// What it replaced.
+        before: BeforeImage,
+    },
     /// A change applied on its own: a graph, catalog or RDF graph operation
     /// (kinds 32, 33, 40, 41 and 66 to 71).
     Standalone(StandaloneOp),
@@ -285,6 +651,15 @@ pub enum LogRecordRef<'a> {
         graph: Option<&'a str>,
         /// What was applied.
         op: &'a DataOp,
+    },
+    /// A write with what it replaced (kind 26).
+    DataWithBefore {
+        /// The graph's storage key; `None` for the default graph.
+        graph: Option<&'a str>,
+        /// What was applied.
+        op: &'a DataOp,
+        /// What it replaced.
+        before: ImageRef<'a>,
     },
     /// A change applied on its own.
     Standalone(&'a StandaloneOp),
@@ -354,8 +729,9 @@ impl LogRecord {
     #[must_use]
     pub const fn kind(&self) -> u8 {
         match self {
-            Self::GroupBegin(_) => KIND_GROUP_BEGIN,
+            Self::GroupBegin(group) => group.kind(),
             Self::Data { op, .. } => op.kind(),
+            Self::DataWithBefore { .. } => KIND_DATA_WITH_BEFORE,
             Self::Standalone(op) => op.kind(),
         }
     }
@@ -365,7 +741,7 @@ impl LogRecord {
     #[must_use]
     pub fn graph(&self) -> Option<GraphRef> {
         match self {
-            Self::Data { graph, op } => Some(GraphRef {
+            Self::Data { graph, op } | Self::DataWithBefore { graph, op, .. } => Some(GraphRef {
                 model: op.model(),
                 key: graph.as_deref().map(ArcStr::from),
             }),
@@ -381,6 +757,11 @@ impl LogRecord {
             Self::Data { graph, op } => LogRecordRef::Data {
                 graph: graph.as_deref(),
                 op,
+            },
+            Self::DataWithBefore { graph, op, before } => LogRecordRef::DataWithBefore {
+                graph: graph.as_deref(),
+                op,
+                before: ImageRef::Record(before),
             },
             Self::Standalone(op) => LogRecordRef::Standalone(op),
         }
@@ -409,8 +790,20 @@ impl LogRecord {
                     epoch: EpochId::new(epoch),
                     timestamp_ms,
                     origin,
+                    clock: None,
                 })
             }
+            KIND_GROUP_BEGIN_WITH_CLOCK => {
+                let (epoch, timestamp_ms, origin, clock): (u64, u64, Origin, u64) =
+                    decode(payload)?;
+                Self::GroupBegin(GroupBegin {
+                    epoch: EpochId::new(epoch),
+                    timestamp_ms,
+                    origin,
+                    clock: Some(HlcTimestamp::from_u64(clock)),
+                })
+            }
+            KIND_DATA_WITH_BEFORE => decode_with_before(payload)?,
             KIND_CREATE_NODE => {
                 let (Graph(graph), id, OwnedLabels(labels), OwnedProperties(properties)) =
                     decode(payload)?;
@@ -584,8 +977,9 @@ impl LogRecordRef<'_> {
     #[must_use]
     pub const fn kind(&self) -> u8 {
         match self {
-            Self::GroupBegin(_) => KIND_GROUP_BEGIN,
+            Self::GroupBegin(group) => group.kind(),
             Self::Data { op, .. } => op.kind(),
+            Self::DataWithBefore { .. } => KIND_DATA_WITH_BEFORE,
             Self::Standalone(op) => op.kind(),
             Self::RdfGraph(op) => op.kind(),
         }
@@ -620,13 +1014,44 @@ impl LogRecordRef<'_> {
             // takes it: refuse them from their sizes first.
             out.check_room(self.value_bytes())?;
             match *self {
-                Self::GroupBegin(group) => encode_bincode_payload(
-                    &(group.epoch.as_u64(), group.timestamp_ms, group.origin),
-                    out,
-                ),
+                Self::GroupBegin(group) => match group.clock {
+                    None => encode_bincode_payload(
+                        &(group.epoch.as_u64(), group.timestamp_ms, group.origin),
+                        out,
+                    ),
+                    Some(clock) => encode_bincode_payload(
+                        &(
+                            group.epoch.as_u64(),
+                            group.timestamp_ms,
+                            group.origin,
+                            clock.as_u64(),
+                        ),
+                        out,
+                    ),
+                },
                 Self::Data { graph, op } => {
                     check_list_slots(op)?;
                     encode_data(graph, op, out)
+                }
+                Self::DataWithBefore { graph, op, before } => {
+                    let Some(image) = before.fields() else {
+                        return Err(Error::Internal(format!(
+                            "a kind 26 record of a write of kind {} without a before-image",
+                            op.kind()
+                        )));
+                    };
+                    if !before.fits(op) {
+                        return Err(Error::Serialization(format!(
+                            "refused to write a kind 26 record whose before-image does not fit \
+                             its write of kind {}",
+                            op.kind()
+                        )));
+                    }
+                    check_list_slots(op)?;
+                    check_image_slots(&image)?;
+                    io::Write::write_all(out, &[op.kind()])?;
+                    encode_data(graph, op, out)?;
+                    image.encode(out)
                 }
                 Self::Standalone(op) => encode_standalone(op, out),
                 Self::RdfGraph(op) => encode_rdf_graph(op, out),
@@ -647,10 +1072,17 @@ impl LogRecordRef<'_> {
                 encoded_len(value)
             }
         };
-        let Self::Data { op, .. } = self else {
-            return 0;
+        let (op, image) = match self {
+            Self::Data { op, .. } => (op, 0),
+            Self::DataWithBefore { op, before, .. } => (
+                op,
+                before
+                    .fields()
+                    .map_or(0, |image| image.value_bytes(counted)),
+            ),
+            _ => return 0,
         };
-        match op {
+        image.saturating_add(match op {
             DataOp::CreateNode { properties, .. } | DataOp::CreateEdge { properties, .. } => {
                 properties
                     .iter()
@@ -668,8 +1100,207 @@ impl LogRecordRef<'_> {
             | DataOp::RemoveNodeLabel { .. }
             | DataOp::InsertTriple { .. }
             | DataOp::DeleteTriple { .. } => 0,
+        })
+    }
+}
+
+/// What of a write's before-image is logged with it (kind 26). The whole
+/// image when it fits the write (the change set's rule for what a write
+/// replaced) and the record with it keeps the record limits
+/// ([`MAX_RECORD_BYTES`] and the list rule), counted from the sizes before
+/// anything is encoded. A delete whose whole image passes them keeps its
+/// identity: a node's labels, an edge's type and endpoints, its properties
+/// left out. Otherwise the write is logged as its plain kind. Change data
+/// capture reports what the record holds, so the live events equal the ones
+/// the log gives back: one rule for both.
+#[must_use]
+pub fn logs_before_image(graph: Option<&str>, op: &DataOp, before: &Before) -> ImageLogged {
+    let logs = |image: ImageRef<'_>| {
+        image.fields().is_some_and(|fields| {
+            check_image_slots(&fields).is_ok()
+                && LogRecordRef::DataWithBefore {
+                    graph,
+                    op,
+                    before: image,
+                }
+                .payload_bound(&fields)
+                    <= MAX_RECORD_PAYLOAD as usize
+        })
+    };
+    if !before.fits(op) || check_list_slots(op).is_err() {
+        ImageLogged::Nothing
+    } else if logs(ImageRef::Change(before)) {
+        ImageLogged::Whole
+    } else if logs(ImageRef::Identity(before)) {
+        ImageLogged::Identity
+    } else {
+        ImageLogged::Nothing
+    }
+}
+
+impl LogRecordRef<'_> {
+    /// An upper bound of a kind 26 record's payload: its values as the value
+    /// codec writes them, its strings, and for every number, length or tag
+    /// the most bytes bincode writes for one.
+    fn payload_bound(&self, image: &ImageFields<'_>) -> usize {
+        /// A number, a length or a tag: at most 9 bytes, and a value's
+        /// length prefix besides.
+        const ITEM: usize = 19;
+        let text = |text: &str| text.len().saturating_add(ITEM);
+        let Self::DataWithBefore { graph, op, .. } = self else {
+            return usize::MAX;
+        };
+        let op_text = match op {
+            DataOp::SetNodeProperty { key, .. }
+            | DataOp::SetEdgeProperty { key, .. }
+            | DataOp::RemoveNodeProperty { key, .. }
+            | DataOp::RemoveEdgeProperty { key, .. } => text(key.as_str()),
+            DataOp::AddNodeLabel { label, .. } | DataOp::RemoveNodeLabel { label, .. } => {
+                text(label.as_str())
+            }
+            _ => 0,
+        };
+        let properties = |properties: &[(PropertyKey, Value)]| {
+            properties
+                .iter()
+                .map(|(key, _)| text(key.as_str()).saturating_add(ITEM))
+                .fold(ITEM, usize::saturating_add)
+        };
+        let labels = |labels: &[ArcStr]| {
+            labels
+                .iter()
+                .map(|label| text(label.as_str()))
+                .fold(ITEM, usize::saturating_add)
+        };
+        let image_text = match image {
+            ImageFields::Property(_) => ITEM,
+            ImageFields::Labels(old) => labels(old),
+            ImageFields::Node(old, props) => labels(old).saturating_add(properties(props)),
+            ImageFields::Edge {
+                edge_type,
+                properties: props,
+                ..
+            } => text(edge_type)
+                .saturating_add(properties(props))
+                .saturating_add(4 * ITEM),
+            ImageFields::NodeIdentity(old) => labels(old),
+            ImageFields::EdgeIdentity { edge_type, .. } => text(edge_type).saturating_add(4 * ITEM),
+        };
+        [
+            graph.map_or(ITEM, text),
+            4 * ITEM,
+            op_text,
+            image_text,
+            self.value_bytes(),
+        ]
+        .into_iter()
+        .fold(0, usize::saturating_add)
+    }
+}
+
+impl GroupBegin {
+    /// The begin's kind: 2 with a clock, 1 without.
+    #[must_use]
+    pub const fn kind(&self) -> u8 {
+        if self.clock.is_some() {
+            KIND_GROUP_BEGIN_WITH_CLOCK
+        } else {
+            KIND_GROUP_BEGIN
         }
     }
+}
+
+/// Reads a kind 26 record: the inner write's kind, its fields as that kind
+/// writes them, then the image, which must fit the write.
+fn decode_with_before(payload: &[u8]) -> Result<LogRecord> {
+    let Some((&inner, rest)) = payload.split_first() else {
+        return Err(Error::corruption(
+            "a kind 26 record whose payload is empty: it holds no inner kind",
+        ));
+    };
+    let refused =
+        |what: String| Error::corruption(format!("a kind 26 record of inner kind {inner}: {what}"));
+    let inner_decode = |error: Error| refused(error.to_string());
+    let (graph, op, image): (Option<String>, DataOp, ImageRecord) = match inner {
+        KIND_DELETE_NODE | KIND_DELETE_EDGE => {
+            let (Graph(graph), id, image): (Graph, u64, ImageRecord) =
+                decode(rest).map_err(inner_decode)?;
+            let op = if inner == KIND_DELETE_NODE {
+                DataOp::DeleteNode {
+                    id: NodeId::new(id),
+                }
+            } else {
+                DataOp::DeleteEdge {
+                    id: EdgeId::new(id),
+                }
+            };
+            (graph, op, image)
+        }
+        KIND_SET_NODE_PROPERTY | KIND_SET_EDGE_PROPERTY => {
+            let (Graph(graph), id, Name(key), OwnedValue(value), image): (
+                Graph,
+                u64,
+                Name,
+                OwnedValue,
+                ImageRecord,
+            ) = decode(rest).map_err(inner_decode)?;
+            let key = PropertyKey::new(key);
+            let op = if inner == KIND_SET_NODE_PROPERTY {
+                DataOp::SetNodeProperty {
+                    id: NodeId::new(id),
+                    key,
+                    value,
+                }
+            } else {
+                DataOp::SetEdgeProperty {
+                    id: EdgeId::new(id),
+                    key,
+                    value,
+                }
+            };
+            (graph, op, image)
+        }
+        KIND_REMOVE_NODE_PROPERTY
+        | KIND_REMOVE_EDGE_PROPERTY
+        | KIND_ADD_NODE_LABEL
+        | KIND_REMOVE_NODE_LABEL => {
+            let (Graph(graph), id, Name(name), image): (Graph, u64, Name, ImageRecord) =
+                decode(rest).map_err(inner_decode)?;
+            let op = match inner {
+                KIND_REMOVE_NODE_PROPERTY => DataOp::RemoveNodeProperty {
+                    id: NodeId::new(id),
+                    key: PropertyKey::new(name),
+                },
+                KIND_REMOVE_EDGE_PROPERTY => DataOp::RemoveEdgeProperty {
+                    id: EdgeId::new(id),
+                    key: PropertyKey::new(name),
+                },
+                KIND_ADD_NODE_LABEL => DataOp::AddNodeLabel {
+                    id: NodeId::new(id),
+                    label: name,
+                },
+                _ => DataOp::RemoveNodeLabel {
+                    id: NodeId::new(id),
+                    label: name,
+                },
+            };
+            (graph, op, image)
+        }
+        _ => {
+            return Err(refused(
+                "only a write that replaced something (kinds 17 and 19 to 25) is logged with \
+                 its before-image"
+                    .to_string(),
+            ));
+        }
+    };
+    let before = BeforeImage::from(image);
+    if !ImageRef::Record(&before).fits(&op) {
+        return Err(refused(
+            "its before-image does not fit its write".to_string(),
+        ));
+    }
+    Ok(LogRecord::DataWithBefore { graph, op, before })
 }
 
 /// Writes the payload of a data record: its graph, then the op's fields.
@@ -1182,6 +1813,42 @@ fn check_list_slots(op: &DataOp) -> Result<()> {
     }
 }
 
+/// Refuses an image whose labels or properties break the list rule, as
+/// [`check_list_slots`] refuses an op's.
+fn check_image_slots(image: &ImageFields<'_>) -> Result<()> {
+    let refused = |reason: String| Error::Serialization(format!("refused to write {reason}"));
+    let fits = |count: usize, slot: usize| count.saturating_mul(slot) <= LIST_ALLOWANCE_BYTES;
+    let labels_of = |labels: &[ArcStr]| -> Result<()> {
+        if !fits(labels.len(), LABEL_SLOT_BYTES) {
+            let mut slots = ListSlots::new(Name::WHAT, LABEL_SLOT_BYTES);
+            for label in labels {
+                slots.add(string_bytes(label.len())).map_err(refused)?;
+            }
+        }
+        Ok(())
+    };
+    let properties_of = |properties: &[(PropertyKey, Value)]| -> Result<()> {
+        if !fits(properties.len(), PROPERTY_SLOT_BYTES) {
+            let mut slots = ListSlots::new(<(Name, OwnedValue)>::WHAT, PROPERTY_SLOT_BYTES);
+            for (key, value) in properties {
+                slots
+                    .add(property_bytes(key.as_str(), value))
+                    .map_err(refused)?;
+            }
+        }
+        Ok(())
+    };
+    match image {
+        ImageFields::Property(_) | ImageFields::EdgeIdentity { .. } => Ok(()),
+        ImageFields::Labels(labels) | ImageFields::NodeIdentity(labels) => labels_of(labels),
+        ImageFields::Node(labels, properties) => {
+            labels_of(labels)?;
+            properties_of(properties)
+        }
+        ImageFields::Edge { properties, .. } => properties_of(properties),
+    }
+}
+
 /// An element of a list read with [`Grown`]: its slot and the bytes it
 /// takes in the payload, for the list rule.
 trait ListElement {
@@ -1370,6 +2037,10 @@ impl Visitor<'_> for NameVisitor {
 }
 
 #[cfg(test)]
+#[path = "log_record_cdc_tests.rs"]
+mod cdc_tests;
+
+#[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -1470,6 +2141,7 @@ mod tests {
                 epoch: EpochId::new(88),
                 timestamp_ms: 1_696_500_000_123,
                 origin: Origin::Transaction,
+                clock: None,
             }),
             data(
                 None,
@@ -1619,6 +2291,7 @@ mod tests {
                 epoch: EpochId::new(u64::MAX),
                 timestamp_ms: 3,
                 origin,
+                clock: None,
             })
         })
         .collect();
@@ -2138,6 +2811,7 @@ mod tests {
                 epoch: EpochId::new(3),
                 timestamp_ms: 19,
                 origin,
+                clock: None,
             }))
             .last()
             .unwrap()
@@ -2331,7 +3005,7 @@ mod tests {
     #[test]
     fn unknown_kinds_are_skipped_when_optional_and_refused_when_required() {
         let group = framed(&one_of_each()[0]);
-        for kind in [2u8, 26, 34, 42, 72, 99, 255] {
+        for kind in [3u8, 27, 34, 42, 72, 99, 255] {
             let optional = [&[kind, 0, 3, 0, 0, 0, 3, 19, 88][..], &group].concat();
             assert_eq!(
                 read_all(&optional).unwrap(),

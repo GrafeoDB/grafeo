@@ -21,9 +21,6 @@ tests:
 
   # (pp01) Simple path
   - name: pp01
-    xfail:
-      spec: "W3C SPARQL 1.1 property-path/pp01"
-      issue: fix in 0.6.4
     setup:
       - |
         INSERT DATA {
@@ -65,9 +62,6 @@ tests:
 
   # (pp03) Simple path with loop
   - name: pp03
-    xfail:
-      spec: "W3C SPARQL 1.1 property-path/pp03"
-      issue: fix in 0.6.4
     setup:
       - |
         INSERT DATA {
@@ -107,9 +101,6 @@ tests:
 
   # (pp09) Reverse sequence path
   - name: pp09
-    xfail:
-      spec: "W3C SPARQL 1.1 property-path/pp09"
-      issue: fix in 0.6.4
     setup:
       - |
         INSERT DATA {
@@ -129,9 +120,6 @@ tests:
 
   # (pp10) Path with negation
   - name: pp10
-    xfail:
-      spec: "W3C SPARQL 1.1 property-path/pp10"
-      issue: fix in 0.6.4
     setup:
       - |
         INSERT DATA {
@@ -152,9 +140,6 @@ tests:
 
   # (pp11) Simple path and two paths to same target node
   - name: pp11
-    xfail:
-      spec: "W3C SPARQL 1.1 property-path/pp11"
-      issue: fix in 0.6.4
     setup:
       - |
         INSERT DATA {

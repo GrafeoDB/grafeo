@@ -75,6 +75,9 @@ public sealed class TestCase
     public Xfail? Xfail { get; set; }
     /// <summary>Runners that skip the case for a gap of their binding (<c>runner_gap:</c>).</summary>
     public RunnerGap? RunnerGap { get; set; }
+    /// <summary>The settings the case's database opens with (<c>config:</c>), by their gtest key;
+    /// the defaults when empty.</summary>
+    public Dictionary<string, long> Config { get; set; } = new();
     /// <summary>A runner probe (<c>probe:</c>), only in a file under a spec-probes directory.</summary>
     public string? Probe { get; set; }
     public string? Language { get; set; }

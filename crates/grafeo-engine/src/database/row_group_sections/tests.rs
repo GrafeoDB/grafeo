@@ -129,10 +129,11 @@ impl Database {
                     &changes,
                     &[],
                     grafeo_common::storage::log_record::Origin::Transaction,
+                    None,
                 )
                 .unwrap();
                 if let Some(logged) = logged {
-                    super::super::wal_log::sync_commit(wal, logged).unwrap();
+                    super::super::wal_log::sync_commit(wal, &logged).unwrap();
                 }
                 commit
             }
@@ -366,7 +367,7 @@ fn travels(database: &Database) -> Travellers {
             Some("cosine"),
             None,
             None,
-            None,
+            grafeo_core::index::vector::QuantizationType::None,
         )
         .unwrap();
         trips.add_vector_index("Doc", "embedding", Arc::new(index));

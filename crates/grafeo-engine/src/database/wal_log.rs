@@ -3,7 +3,11 @@
 //!
 //! A commit logs one group: a [`GroupBegin`] that names its epoch, then one
 //! record per write of its change set, in the order the writes were applied
-//! ([`ChangeSet::log_records`]); a change outside any commit logs its
+//! ([`ChangeSet::log_records`]). A commit that reports to change data capture
+//! reserves its writes' timestamps here, under the commit lock, so they follow
+//! the epochs: its begin holds the first one (kind 2) and each write that
+//! replaced something its before-image (kind 26,
+//! [`ChangeSet::log_records_with_before`]). A change outside any commit logs its
 //! standalone ops the same way. Each record is encoded into one scratch buffer
 //! and handed to the group, which packs records into frames as they come, so
 //! no list of records or of their bytes is built, however large the set.
@@ -16,8 +20,8 @@
 
 use grafeo_common::change::ChangeSet;
 use grafeo_common::storage::LogRecordRef;
-use grafeo_common::storage::log_record::{GroupBegin, Origin};
-use grafeo_common::types::{EpochId, TransactionId};
+use grafeo_common::storage::log_record::{GroupBegin, ImageLogged, Origin};
+use grafeo_common::types::{EpochId, HlcClock, HlcTimestamp, TransactionId};
 use grafeo_common::utils::error::{Error, Result, TransactionError};
 use grafeo_storage::wal::{GroupError, GroupWriter};
 
@@ -54,13 +58,57 @@ impl<'group, 'wal> Encoder<'group, 'wal> {
 
     /// The group's first record: the epoch its changes take, when it was
     /// written (the commit's time `at` while the database keeps history,
-    /// now otherwise), and what wrote it.
-    fn begin(&mut self, epoch: EpochId, origin: Origin, at: Option<u64>) -> Result<()> {
+    /// now otherwise), what wrote it, and the first timestamp of its change
+    /// events (`clock`) when it reports to change data capture.
+    fn begin(
+        &mut self,
+        epoch: EpochId,
+        origin: Origin,
+        at: Option<u64>,
+        clock: Option<HlcTimestamp>,
+    ) -> Result<()> {
         self.push(&LogRecordRef::GroupBegin(GroupBegin {
             epoch,
             timestamp_ms: at.unwrap_or_else(now_ms),
             origin,
+            clock,
         }))
+    }
+
+    /// Pushes the records of `set`'s writes: with their before-images when
+    /// the group has a clock (it reports to change data capture), else as
+    /// today's log holds them; `schema`'s ops among them at the places they
+    /// ran.
+    fn push_writes(
+        &mut self,
+        set: &ChangeSet,
+        schema: &[crate::transaction::QueuedSchemaOp],
+        images: Option<&[(usize, ImageLogged)]>,
+    ) -> Result<()> {
+        if let Some(refused) = images {
+            self.push_records(set.log_records_with_before(refused), schema)
+        } else {
+            self.push_records(set.log_records(), schema)
+        }
+    }
+
+    /// Pushes `records`, with `schema`'s ops at the places they ran.
+    fn push_records<'r>(
+        &mut self,
+        records: impl Iterator<Item = LogRecordRef<'r>>,
+        schema: &[crate::transaction::QueuedSchemaOp],
+    ) -> Result<()> {
+        let mut queued = schema.iter().peekable();
+        for (position, record) in records.enumerate() {
+            while let Some(op) = queued.next_if(|op| op.position <= position) {
+                self.push(&LogRecordRef::Standalone(&op.op))?;
+            }
+            self.push(&record)?;
+        }
+        for op in queued {
+            self.push(&LogRecordRef::Standalone(&op.op))?;
+        }
+        Ok(())
     }
 }
 
@@ -80,13 +128,15 @@ pub(crate) fn write_group(
     epoch: EpochId,
     origin: Origin,
 ) -> Result<()> {
-    write_group_at(group, set, epoch, origin, None)
+    write_group_at(group, set, epoch, origin, None, None)
 }
 
 /// [`write_group`] of a commit that took the time `at` (milliseconds since
 /// the Unix epoch, see `TransactionManager::commit_time`): its group carries
 /// that time, so a replay records the time the live commit recorded. `None`
-/// writes the time of now.
+/// writes the time of now. `capture`, the first timestamp the commit reserved
+/// for its change events and the entries whose image the log leaves out,
+/// makes it a clocked group with before-images.
 ///
 /// # Errors
 ///
@@ -97,13 +147,21 @@ pub(crate) fn write_group_at(
     epoch: EpochId,
     origin: Origin,
     at: Option<u64>,
+    capture: Option<(HlcTimestamp, &[(usize, ImageLogged)])>,
 ) -> Result<()> {
     let mut encoder = Encoder::new(group);
-    encoder.begin(epoch, origin, at)?;
-    for record in set.log_records() {
-        encoder.push(&record)?;
-    }
-    Ok(())
+    encoder.begin(epoch, origin, at, capture.map(|(first, _)| first))?;
+    encoder.push_writes(set, &[], capture.map(|(_, refused)| refused))
+}
+
+/// The first of the timestamps `clock` reserves for `set`'s writes, one each
+/// (as [`CdcLog::reserve_for`](crate::cdc::CdcLog) counts them); `None`
+/// without a clock or without writes.
+pub(crate) fn reserve_clock(clock: Option<&HlcClock>, set: &ChangeSet) -> Option<HlcTimestamp> {
+    // A commit without a clock counts nothing under the commit lock.
+    let clock = clock?;
+    let writes = std::num::NonZeroU64::new(u64::try_from(set.ops().count()).ok()?)?;
+    Some(clock.reserve(writes))
 }
 
 /// [`write_group_at`] with `schema`, the ops of the transaction's schema statements,
@@ -120,20 +178,11 @@ fn write_group_with_schema(
     epoch: EpochId,
     origin: Origin,
     at: Option<u64>,
+    capture: Option<(HlcTimestamp, &[(usize, ImageLogged)])>,
 ) -> Result<()> {
     let mut encoder = Encoder::new(group);
-    encoder.begin(epoch, origin, at)?;
-    let mut queued = schema.iter().peekable();
-    for (position, record) in set.log_records().enumerate() {
-        while let Some(op) = queued.next_if(|op| op.position <= position) {
-            encoder.push(&LogRecordRef::Standalone(&op.op))?;
-        }
-        encoder.push(&record)?;
-    }
-    for op in queued {
-        encoder.push(&LogRecordRef::Standalone(&op.op))?;
-    }
-    Ok(())
+    encoder.begin(epoch, origin, at, capture.map(|(first, _)| first))?;
+    encoder.push_writes(set, schema, capture.map(|(_, refused)| refused))
 }
 
 /// Writes the records of a change outside any commit into `group`: its
@@ -150,7 +199,7 @@ pub(crate) fn write_standalone(
     origin: Origin,
 ) -> Result<()> {
     let mut encoder = Encoder::new(group);
-    encoder.begin(epoch, origin, None)?;
+    encoder.begin(epoch, origin, None, None)?;
     for op in change.ops() {
         encoder.push(&LogRecordRef::Standalone(op))?;
     }
@@ -175,7 +224,7 @@ pub(crate) fn write_copy(
     copied: impl Iterator<Item = grafeo_common::change::DataOp>,
 ) -> Result<()> {
     let mut encoder = Encoder::new(group);
-    encoder.begin(epoch, Origin::Schema, None)?;
+    encoder.begin(epoch, Origin::Schema, None, None)?;
     for op in change.ops() {
         encoder.push(&LogRecordRef::Standalone(op))?;
     }
@@ -190,12 +239,27 @@ pub(crate) fn write_copy(
 
 /// Where a commit's group ends in the log, and whether the durability mode
 /// asks for a sync up to there (see [`sync_commit`]).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub(crate) struct Logged {
     /// The log position right after the group's LAST frame.
     end_lsn: u64,
     /// Whether the commit syncs the log up to `end_lsn` before it publishes.
     sync_due: bool,
+    /// The first timestamp the commit reserved for its change events, when
+    /// it reports to change data capture: its publish records them with it.
+    #[cfg_attr(
+        not(feature = "cdc"),
+        expect(dead_code, reason = "only change data capture reads the clock")
+    )]
+    pub(crate) clock: Option<HlcTimestamp>,
+    /// The entries whose whole before-image the group left out, with what it
+    /// kept of each (`ChangeSet::refused_images`): its change events keep the
+    /// same.
+    #[cfg_attr(
+        not(feature = "cdc"),
+        expect(dead_code, reason = "only change data capture reads the verdicts")
+    )]
+    pub(crate) refused: Vec<(usize, ImageLogged)>,
 }
 
 /// Writes the group of the commit `commit` of `transaction_id` to `wal` from
@@ -204,7 +268,10 @@ pub(crate) struct Logged {
 /// changed nothing writes nothing (`None`). Returns the commit to go on with:
 /// the caller releases the commit lock ([`CommitGuard::written`]), then
 /// syncs ([`sync_commit`]) and publishes, so the next commit writes its group
-/// meanwhile and one fsync covers both.
+/// meanwhile and one fsync covers both. With `clock` (the commit reports to
+/// change data capture) it reserves the commit's timestamps under the commit
+/// lock and writes a clocked group with before-images; [`Logged::clock`]
+/// gives the first.
 ///
 /// # Errors
 ///
@@ -220,6 +287,7 @@ pub(crate) fn write_commit<'a>(
     changes: &TransactionChanges,
     schema: &[crate::transaction::QueuedSchemaOp],
     origin: Origin,
+    clock: Option<&HlcClock>,
 ) -> Result<(CommitGuard<'a>, Option<Logged>)> {
     if !TransactionChanges::records_a_change(Some(changes), schema) {
         return Ok((commit, None));
@@ -233,20 +301,35 @@ pub(crate) fn write_commit<'a>(
     };
     let epoch = commit.epoch();
     let at = commit.commit_time();
-    if let Err(error) =
-        changes.read(|set| write_group_with_schema(&mut group, set, schema, epoch, origin, at))
-    {
-        // The group is cut back as it is dropped.
-        drop(group);
-        commit.abort();
-        return Err(error);
-    }
+    let written = changes.read(|set| {
+        let first = reserve_clock(clock, set);
+        // The image rule's verdicts, once per write, for the log and the events.
+        let refused = if first.is_some() {
+            set.refused_images()
+        } else {
+            Vec::new()
+        };
+        let capture = first.map(|first| (first, refused.as_slice()));
+        write_group_with_schema(&mut group, set, schema, epoch, origin, at, capture)
+            .map(|()| (first, refused))
+    });
+    let (first, refused) = match written {
+        Ok(written) => written,
+        Err(error) => {
+            // The group is cut back as it is dropped.
+            drop(group);
+            commit.abort();
+            return Err(error);
+        }
+    };
     match group.finish_unsynced() {
         Ok(end) => Ok((
             commit,
             Some(Logged {
                 end_lsn: end.end_lsn,
                 sync_due: wal.sync_due(),
+                clock: first,
+                refused,
             }),
         )),
         Err(error) => {
@@ -268,7 +351,7 @@ pub(crate) fn write_commit<'a>(
 /// which poisons the database until a reopen decides from the log.
 ///
 /// [`Wal::sync_due`]: grafeo_storage::wal::Wal::sync_due
-pub(crate) fn sync_commit(wal: &grafeo_storage::wal::Wal, logged: Logged) -> Result<()> {
+pub(crate) fn sync_commit(wal: &grafeo_storage::wal::Wal, logged: &Logged) -> Result<()> {
     if !logged.sync_due {
         return Ok(());
     }
@@ -567,6 +650,7 @@ mod tests {
                 epoch,
                 origin: Origin::Transaction,
                 timestamp_ms,
+                clock: None,
             } if *epoch == EpochId::new(3) && *timestamp_ms > 0
         ));
         let decoded: Vec<(Option<String>, DataOp)> = data

@@ -117,6 +117,9 @@ type TestCase struct {
 	Xfail *Xfail
 	// RunnerGap names runners that skip the case for a gap of their binding (`runner_gap:`).
 	RunnerGap *RunnerGap
+	// Config holds the settings the case's database opens with (`config:`), by their gtest key;
+	// the defaults when empty.
+	Config map[string]uint64
 	// Probe is a runner probe (`probe:`), only in a file under a spec-probes directory.
 	Probe    string
 	Language string
@@ -296,6 +299,24 @@ func checkJSONNumbers(text string) error {
 // TestSpecParamValues checks the typing of parameter values that no .gtest
 // file can hold: a number past the float64 range fails the Rust runner's
 // build. (Named TestSpec... so CI's -run TestSpec runs it.)
+// TestSpecConfig checks a case's `config:` by the rule every runner applies: an unknown or
+// repeated key is refused, never ignored.
+func TestSpecConfig(t *testing.T) {
+	config, err := parseConfig("{path_search_budget: 1048576}")
+	if err != nil || len(config) != 1 || config["path_search_budget"] != 1048576 {
+		t.Fatalf("parseConfig = %v, %v", config, err)
+	}
+	for _, text := range []string{
+		"{path_budget: 1048576}", "{path_search_budget: 0}", "{path_search_budget: big}",
+		"{path_search_budget: 1048576, path_search_budget: 2}", "path_search_budget: 1048576", "{}",
+		"{path_search_budget: +5}",
+	} {
+		if _, err := parseConfig(text); err == nil {
+			t.Errorf("config: %s was accepted", text)
+		}
+	}
+}
+
 func TestSpecParamValues(t *testing.T) {
 	for _, text := range []string{"[1e400]", `{"tiny": [-1e400]}`, "[1" + strings.Repeat("0", 400) + ".0]", "1e999"} {
 		if _, err := paramValue(text); err == nil || !strings.Contains(err.Error(), "out of the f64 range") {
@@ -682,9 +703,21 @@ func sortRows(rows [][]string) {
 // Dataset loading
 // ---------------------------------------------------------------------------
 
+// loadDataset loads a dataset, one statement per line: GQL from a `.setup` file, SPARQL
+// Update from a `.ru` file.
 func loadDataset(t specT, db *grafeo.Database, datasetName string, datasetsDir string) {
 	t.Helper()
 	setupPath := filepath.Join(datasetsDir, datasetName+".setup")
+	updatePath := filepath.Join(datasetsDir, datasetName+".ru")
+	_, setupErr := os.Stat(setupPath)
+	_, updateErr := os.Stat(updatePath)
+	language := "gql"
+	if updateErr == nil {
+		if setupErr == nil {
+			fault(t, "Dataset '%s' is both %s and %s", datasetName, setupPath, updatePath)
+		}
+		setupPath, language = updatePath, "sparql"
+	}
 	f, err := os.Open(setupPath)
 	if err != nil {
 		fault(t, "Dataset file not found: %s", setupPath)
@@ -697,7 +730,7 @@ func loadDataset(t specT, db *grafeo.Database, datasetName string, datasetsDir s
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if _, err := db.Execute(line); err != nil {
+		if _, err := executeQuery(db, language, line); err != nil {
 			t.Fatalf("Failed to load dataset line %q: %v", line, err)
 		}
 	}
@@ -791,8 +824,23 @@ func parseGtestFile(path string) (*GtestFile, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing tests in %s: %w", path, err)
 	}
+	if meta.Model == "rdf" {
+		for _, tc := range tests {
+			language := tc.Language
+			if language == "" {
+				language = meta.Language
+			}
+			if _, variant := tc.Variants["graphql"]; language == "graphql" || variant {
+				return nil, fmt.Errorf("parsing tests in %s: test '%s': %s", path, tc.Name, graphqlOnRDF)
+			}
+		}
+	}
 	return &GtestFile{Meta: meta, Tests: tests}, nil
 }
+
+// Why a `graphql` case in a `model: rdf` file is refused: `graphql` reads the property graph.
+// Every runner says the same.
+const graphqlOnRDF = "`language: graphql` reads the property graph; on `model: rdf` write `language: graphql-rdf`"
 
 // ---------------------------------------------------------------------------
 // Meta block
@@ -944,6 +992,13 @@ func parseSingleTest(ctx *parseContext) (TestCase, error) {
 		case "setup_gql":
 			ctx.idx++
 			tc.SetupGql = parseStringList(ctx)
+		case "config":
+			config, err := parseConfig(value)
+			if err != nil {
+				return tc, fmt.Errorf("test '%s': %w", tc.Name, err)
+			}
+			tc.Config = config
+			ctx.idx++
 		case "runner_gap":
 			gap, err := parseRunnerGap(ctx)
 			if err != nil {
@@ -1080,6 +1135,70 @@ func nestedPairs(ctx *parseContext) ([][2]string, error) {
 		ctx.idx++
 	}
 	return pairs, nil
+}
+
+// configKeys are the keys a `config:` may set: Config settings every binding exposes.
+var configKeys = []string{"path_search_budget"}
+
+// parseConfig reads a `config:` value as the file writes it: an inline map of configKeys to
+// positive integers (`{path_search_budget: 1048576}`). An unknown or repeated key is refused,
+// never ignored.
+func parseConfig(text string) (map[string]uint64, error) {
+	inner := strings.TrimSpace(text)
+	if !strings.HasPrefix(inner, "{") || !strings.HasSuffix(inner, "}") || strings.TrimSpace(inner[1:len(inner)-1]) == "" {
+		return nil, fmt.Errorf("config must be an inline map of settings, got '%s'", text)
+	}
+	settings := map[string]uint64{}
+	for _, entry := range strings.Split(inner[1:len(inner)-1], ",") {
+		key, value, found := strings.Cut(entry, ":")
+		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+		if !found || key == "" {
+			return nil, fmt.Errorf("config entry '%s' is not 'key: value'", strings.TrimSpace(entry))
+		}
+		if _, twice := settings[key]; twice {
+			return nil, fmt.Errorf("config sets '%s' twice", key)
+		}
+		known := false
+		for _, k := range configKeys {
+			known = known || k == key
+		}
+		if !known {
+			return nil, fmt.Errorf("unknown config key '%s' (known: %s)", key, strings.Join(configKeys, ", "))
+		}
+		number, err := strconv.ParseUint(value, 10, 64)
+		if err != nil || number == 0 || strings.ContainsAny(value, "+-") {
+			return nil, fmt.Errorf("config '%s' needs a positive integer, got '%s'", key, value)
+		}
+		settings[key] = number
+	}
+	return settings, nil
+}
+
+// configOptions gives the binding options of a case's parsed `config:`.
+func configOptions(config map[string]uint64) (*grafeo.Options, error) {
+	options := &grafeo.Options{}
+	for key, value := range config {
+		switch key {
+		case "path_search_budget":
+			bytes := value
+			options.PathSearchBudget = &bytes
+		default:
+			return nil, fmt.Errorf("unknown config key '%s'", key)
+		}
+	}
+	return options, nil
+}
+
+// openCase opens a case's fresh in-memory database, with its `config:` settings when it has any.
+func openCase(config map[string]uint64) (*grafeo.Database, error) {
+	if len(config) == 0 {
+		return grafeo.OpenInMemory()
+	}
+	options, err := configOptions(config)
+	if err != nil {
+		return nil, err
+	}
+	return grafeo.OpenWithOptions("", options)
 }
 
 // parseRunnerGap reads a `runner_gap:` at ctx.lines[ctx.idx]: its runners, issue and reason.
@@ -1719,8 +1838,8 @@ func runCase(t specT, gf *GtestFile, tc TestCase, variantLang, variantQuery stri
 		}
 	}
 
-	// Fresh database per test
-	db, err := grafeo.OpenInMemory()
+	// Fresh database per test, with the case's settings (`config:`)
+	db, err := openCase(tc.Config)
 	if err != nil {
 		t.Fatalf("Failed to open in-memory database: %v", err)
 	}

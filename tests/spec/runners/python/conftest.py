@@ -89,8 +89,8 @@ class RunnerFault(Exception):
     fault of the gtest or the runner, which fails the case even when it is marked ``xfail:``."""
 
 
-#: The run's counts for the ``gtest summary`` line: the cases skipped by ``skip:`` and the
-#: ones that failed as expected.
+#: The run's counts for the ``gtest summary`` line: every skipped case (``skip:``, a runner
+#: gap, a language or feature the build lacks) and the ones that failed as expected.
 SUMMARY_KEY = pytest.StashKey[dict]()
 
 
@@ -186,12 +186,19 @@ class GtestItem(pytest.Item):
         self.variant_query = variant_query
 
     def runtest(self):
+        try:
+            self._run_marked()
+        except pytest.skip.Exception:
+            # Every skip counts in the summary, whichever check skips the case
+            summary_of(self.config)["skipped"] += 1
+            raise
+
+    def _run_marked(self):
         tc = self.test_case
         summary = summary_of(self.config)
 
         # Skip if test has a skip field
         if tc.skip is not None:
-            summary["skipped"] += 1
             pytest.skip(f"skipped in .gtest: {tc.skip}")
 
         # An xfail that names this runner in `passes_in` does not hold here: the case runs
@@ -243,8 +250,8 @@ class GtestItem(pytest.Item):
         if tc.runner_gap is not None and "python" in tc.runner_gap.runners:
             pytest.skip(f"runner gap: {tc.runner_gap.reason} ({tc.runner_gap.issue})")
 
-        # Fresh database per test
-        db = grafeo.GrafeoDB()
+        # Fresh database per test, with the case's settings (``config:``)
+        db = grafeo.GrafeoDB(**tc.config)
 
         # Load dataset (per-test override takes priority over file-level)
         effective_dataset = tc.dataset or meta.dataset
@@ -381,8 +388,15 @@ class GtestItem(pytest.Item):
 
 
 def _load_dataset(db, dataset_name: str) -> None:
-    """Load a .setup dataset file into the database using GQL."""
-    dataset_path = _REPO_ROOT / "tests" / "spec" / "datasets" / f"{dataset_name}.setup"
+    """Load a dataset into the database, one statement per line: GQL from a ``.setup``
+    file, SPARQL Update from a ``.ru`` file."""
+    datasets = _REPO_ROOT / "tests" / "spec" / "datasets"
+    setup, update = datasets / f"{dataset_name}.setup", datasets / f"{dataset_name}.ru"
+    if setup.exists() and update.exists():
+        raise RunnerFault(f"Dataset '{dataset_name}' is both {setup} and {update}")
+    dataset_path, execute = (
+        (update, db.execute_sparql) if update.exists() else (setup, db.execute)
+    )
     if not dataset_path.exists():
         raise RunnerFault(f"Dataset file not found: {dataset_path}")
 
@@ -391,7 +405,7 @@ def _load_dataset(db, dataset_name: str) -> None:
         trimmed = line.strip()
         if not trimmed or trimmed.startswith("#"):
             continue
-        db.execute(trimmed)
+        execute(trimmed)
 
 
 def _describe(expected_substr: str | None, expected_status: str | None) -> str:

@@ -18,23 +18,25 @@ a reopen has it as it was (an in-memory database keeps it while it is open).
 The call checkpoints, and fails on a read-only open or when the checkpoint
 fails, leaving the setting as it was. A database on a store of its own
 (`GrafeoDB::with_store`) has no file to store it in, so the call is refused
-there. While the setting is stored on, the database keeps its write-ahead log
-from a cursor (see below), so turning CDC on for an open without the WAL is
-refused, and while it is stored on, a writable open without the WAL is refused
-too (open it with the WAL, open it read-only, or turn CDC off from an open with
+there. A stored setting keeps a durable change feed, which the WAL holds (see
+[The durable change feed](#the-durable-change-feed)): turning CDC on for an open
+without the WAL is refused, and while it is stored on, a writable open without
+the WAL is refused too (open it with the WAL, open it read-only, or turn CDC off from an open with
 the WAL). Both refusals are configuration errors
 (`GRAFEO-V001`). `Config::with_cdc()` (Python `GrafeoDB(cdc=True)`) turns CDC
 on for that open only and stores nothing; the open logs a warning when the
 file's stored setting is off.
 
-With the setting stored on, the database keeps a cursor in its write-ahead log
-directory (`cdc_cursor_default.json`), and every checkpoint, and `close()`,
-keeps the log from that cursor on, as they keep it for a backup cursor: at most
-`Config::with_wal_retention_limit` beyond the last checkpoint (1 GiB by
-default). Past the limit a checkpoint removes the oldest part and logs a warning
-once. So while the setting is stored on, `<path>.wal` stays after `close()`.
-Turning the setting on while it is on leaves the cursor where it is (and writes
-it if it is missing). Turning the setting off removes the cursor, and the next
+With the setting stored on, the database keeps a cursor for the durable change
+feed in its write-ahead log directory (`cdc_cursor_default.json`), and every
+checkpoint, and `close()`, keeps the log from that cursor on, as they keep it
+for a backup cursor: at most `Config::with_wal_retention_limit` beyond the last
+checkpoint (1 GiB by default). Past the limit a checkpoint removes the oldest
+part and logs a warning once, and the feed then fails with
+[`GRAFEO-S006`](error-codes.md#storage-s). So while the setting is stored on,
+`<path>.wal` stays after `close()`. Turning the setting on while it is on leaves
+the cursor where it is (and writes it if it is missing), so calling it at every
+start skips nothing. Turning the setting off removes the cursor, and the next
 checkpoint releases the log it kept. When the setting is stored off but
 the cursor cannot be removed, the call fails with
 [`GRAFEO-S007`](error-codes.md#storage-s): the cursor then keeps no log, and
@@ -65,7 +67,7 @@ from grafeo import GrafeoDB
 # Enable at construction
 db = GrafeoDB(cdc=True)
 
-# Or toggle at runtime
+# Or toggle at runtime, stored with the file (cdc=True is for this open only)
 db.enable_cdc()
 db.disable_cdc()
 
@@ -83,6 +85,10 @@ db.enableCdc();
 console.log(db.isCdcEnabled); // true
 db.disableCdc();
 ```
+
+In Python, Node.js and C, as in Rust, the stored setting keeps the WAL for
+the durable change feed up to the retention limit, and turning it off releases
+that WAL at the next checkpoint. Only the Rust API reads the feed in 0.6.4.
 
 ### C
 
@@ -104,8 +110,8 @@ Once CDC is enabled, every mutation records a `ChangeEvent` with:
 | `graph`         | The graph the entity is in: its name (`schema/name` inside a schema, and `schema/__default__` for a schema's default graph); `None` for the default graph |
 | `kind`          | `Create`, `Update`, or `Delete`                                             |
 | `epoch`         | Commit epoch (monotonically increasing)                                     |
-| `timestamp`     | HLC timestamp (hybrid logical clock)                                        |
-| `before`        | Properties before the change; on a delete, the last properties              |
+| `timestamp`     | HLC timestamp (hybrid logical clock): rising across commits and across reopens, with or without a WAL left to replay |
+| `before`        | Properties before the change; on a delete, the properties it had at the last commit (an empty map for none). `None` when the write's before-image is too large to log with it (past a WAL record's 1 GiB, or a list of very many tiny properties): the delete or update still succeeds, and only the properties are left out, so a delete's event keeps its labels, or its edge type and endpoints. Only when those alone pass the limits (labels of about 1 GiB together) does a delete's event have neither |
 | `after`         | Properties after the change                                                 |
 | `labels`        | Nodes: the labels on create and delete, the labels after a label change     |
 | `before_labels` | Nodes: the labels before a label change                                     |
@@ -121,9 +127,20 @@ or removing a label is an `Update` event with `labels` and `before_labels`.
 Events gain fields only: a patch release can add a field (a key in Python and
 Node.js), never remove or rename one.
 
-A node or edge created in a transaction has one `Create` event that shows it as
-the transaction left it: property and label changes made later in the same
-transaction are part of that event rather than events of their own.
+A transaction reports its net changes:
+
+- A node or edge created in a transaction has one `Create` event that shows it
+  as the transaction left it: property and label changes made later in the same
+  transaction are part of that event rather than events of their own.
+- A node, edge or RDF triple created and deleted in the same transaction reports
+  no events, nor do the edges a `DETACH DELETE` removes with such a node.
+- A node or edge that existed before the transaction, changed and then deleted
+  in it, reports its `Delete` alone, with the properties and labels it had
+  before the transaction.
+- An RDF triple deleted and inserted again in the same transaction reports no
+  events.
+- Updates to a node or edge that exists before and after the transaction are not
+  folded: each write reports its own `Update`.
 
 A batch call (`batch_create_nodes`, `batch_create_nodes_with_props`,
 `batch_create_nodes_with_labels`, `batch_create_edges`) reports one `Create`
@@ -131,6 +148,14 @@ event per node or edge it creates. The bulk loads report none: the imports
 (`import_tsv`, `import_tsv_str`, `import_mmio`, `import_tsv_rdf`) and
 `batch_insert_rdf` write their rows to the store and the WAL as they go,
 without events.
+
+SPARQL graph operations (`CREATE`, `DROP`, `CLEAR`, `COPY`, `MOVE`, `ADD`)
+report no events on their own: a consumer does not see the triples a `CLEAR` or
+`DROP` removes. Inside a transaction, `COPY`, `MOVE` and `ADD` record each
+triple they copy as an insert, so each reports a `Create` in the target graph;
+the clear of the target and the drop of a moved source report nothing. A
+triple's net changes come from its own writes: an `INSERT DATA` followed by a
+`CLEAR` of its graph in one transaction still reports the `Create`.
 
 Node and edge IDs repeat across named graphs, so an ID names an entity only
 together with its graph. `history` on the database reads the default graph, and
@@ -183,6 +208,69 @@ const history = await db.edgeHistory(edgeId);
 const history = await db.nodeHistorySince(nodeId, 42);
 const changes = await db.changesBetween(10, 50);
 ```
+
+## The durable change feed
+
+With the setting stored on (`set_cdc(true)` on a database file), every commit
+that reports events also logs them in the WAL: the group of its writes begins
+with the first timestamp of its events, and each update and delete is logged
+with what it replaced. The WAL grows with the changed values; with change data
+capture off it is unchanged. The feed reads the events back from the log, after
+a close or a crash too, and they equal the events the live log reported for the
+same commits, field for field (ids, graphs, kinds, epochs, timestamps, before and
+after, labels, edge types and endpoints).
+
+```rust
+use std::num::NonZeroUsize;
+
+let limit = NonZeroUsize::new(1_000).unwrap();
+for batch in db.read_cdc_feed(limit)? {
+    for event in &batch.events {
+        // handle the event
+    }
+    // Moves the feed past the commit: the next read starts after it.
+    db.acknowledge_cdc_feed(batch.position)?;
+}
+```
+
+- `read_cdc_feed(limit)` gives the commits since the last acknowledged one, a
+  `CdcBatch` per commit, in commit order, up to `limit` events. It never splits
+  a commit: the first one comes whole even when it alone holds more. A read does
+  not move the feed.
+- `acknowledge_cdc_feed(position)` moves the feed past the commit at `position`,
+  a position a read gave. A position at or behind the cursor is acknowledged
+  already, so a retry changes nothing; acknowledgements are serialized, and the
+  highest wins. A crash during one leaves the old cursor or the new one. A
+  position the feed did not give is refused with GQLSTATUS `22023` (an invalid
+  parameter value), and the cursor stays. A database opened read-only reads the
+  feed and refuses an acknowledgement.
+- A position's token, `CdcPosition::to_token()` (`<lsn>:<epoch>`), is what a
+  consumer keeps between runs; `CdcPosition::from_token` reads it back.
+- When a checkpoint removed the log at the cursor (past
+  `Config::with_wal_retention_limit`), a read fails with
+  [`GRAFEO-S006`](error-codes.md#storage-s). The error names the position of the
+  first commit still in the log: acknowledging that position goes on from it.
+- Both calls need a database file with the setting stored on.
+  `Config::with_cdc()` captures for one open only and keeps no feed. Turning the
+  setting off and on again starts a fresh feed.
+
+A delete whose whole before-image is too large to log keeps its identity in the
+feed as in the live log: its labels, or its edge type and endpoints, without
+its properties (`before` is `None`).
+
+The feed is experimental: new in 0.6.4, its calls and the position's token may
+change in a patch release until it is stable.
+
+While change data capture is on, the WAL holds records that 0.6.3 does not
+read. After a clean close, 0.6.3 opens the database, since the closing
+checkpoint holds every commit; it then removes the WAL the feed kept. After a
+crash, or any stop without a clean close, 0.6.3 refuses the WAL: open and close
+the database once with 0.6.4 first. When the WAL is gone at an open (0.6.3
+removed it, or something outside did) while the setting is stored on, the feed
+starts again at the file's checkpoint, and the commits not yet acknowledged
+before are not in it. The first read then fails with
+[`GRAFEO-S006`](error-codes.md#storage-s), naming the first commit still in the
+log; acknowledging that position goes on from it.
 
 ## Transaction semantics
 

@@ -86,6 +86,10 @@ const _runnerCapabilities = {'int64-safe'};
 bool _isAvailable(String requirement) {
   final key = _normaliseLanguage(requirement).replaceAll('_', '-');
   if (key == 'gql' || key.isEmpty) return true;
+  // Compound language key: "graphql-rdf" requires both "graphql" and "rdf"
+  if (key == 'graphql-rdf') {
+    return _getCompiledFeatures().containsAll(['graphql', 'rdf']);
+  }
   return _getCompiledFeatures().contains(key) || _runnerCapabilities.contains(key);
 }
 
@@ -210,9 +214,20 @@ Map<String, dynamic>? _coerceParams(Map<String, String>? raw) {
   return raw.map((key, text) => MapEntry(key, _paramValue(text)));
 }
 
-/// Load a .setup dataset file into [db] using GQL.
+/// Load a dataset, one statement per line: GQL from a `.setup` file, SPARQL Update from a
+/// `.ru` file.
 void _loadDataset(GrafeoDB db, String datasetName) {
-  final setupFile = File('${_datasetsDir.path}/$datasetName.setup');
+  var setupFile = File('${_datasetsDir.path}/$datasetName.setup');
+  final updateFile = File('${_datasetsDir.path}/$datasetName.ru');
+  var language = 'gql';
+  if (updateFile.existsSync()) {
+    if (setupFile.existsSync()) {
+      throw _RunnerFault(
+          "Dataset '$datasetName' is both ${setupFile.path} and ${updateFile.path}");
+    }
+    setupFile = updateFile;
+    language = 'sparql';
+  }
   if (!setupFile.existsSync()) {
     throw _RunnerFault('Dataset file not found: ${setupFile.path}');
   }
@@ -220,7 +235,7 @@ void _loadDataset(GrafeoDB db, String datasetName) {
   for (final line in content.split(RegExp(r'\r?\n'))) {
     final trimmed = line.trim();
     if (trimmed.isEmpty || trimmed.startsWith('#')) continue;
-    db.execute(trimmed);
+    _executeQuery(db, language, trimmed);
   }
 }
 
@@ -611,6 +626,9 @@ class _Meta {
   /// temporal by its Cypher toString().
   String valuesDialect = 'strict';
 
+  /// The data model, `lpg` or `rdf`.
+  String model = '';
+
   _Meta({
     this.language = 'gql',
     this.dataset = 'empty',
@@ -682,6 +700,10 @@ class _TestCase {
   /// Runners that skip the case for a gap of their binding (`runner_gap:`).
   _RunnerGap? runnerGap;
 
+  /// The settings the case's database opens with (`config:`), by their gtest
+  /// key; the defaults when empty.
+  Map<String, int> config = {};
+
   /// The spec and the issue of a case expected to fail (`xfail:`), null otherwise.
   _Xfail? xfail;
 
@@ -741,6 +763,59 @@ class _RunnerGap {
 
 /// The runners a `runner_gap:` or `passes_in:` may name.
 const _knownRunners = {'rust', 'python', 'node', 'wasm', 'go', 'csharp', 'dart'};
+
+/// The keys a `config:` may set: Config settings every binding exposes.
+const _configKeys = ['path_search_budget'];
+
+/// A `config:` value as the file writes it: an inline map of [_configKeys] to
+/// positive integers (`{path_search_budget: 1048576}`). An unknown or repeated
+/// key is refused, never ignored.
+Map<String, int> _parseConfig(String text) {
+  final inner = text.trim();
+  if (!inner.startsWith('{') ||
+      !inner.endsWith('}') ||
+      inner.substring(1, inner.length - 1).trim().isEmpty) {
+    throw FormatException("config must be an inline map of settings, got '$text'");
+  }
+  final settings = <String, int>{};
+  for (final entry in inner.substring(1, inner.length - 1).split(',')) {
+    final colon = entry.indexOf(':');
+    final key = colon < 0 ? '' : entry.substring(0, colon).trim();
+    final value = colon < 0 ? '' : entry.substring(colon + 1).trim();
+    if (key.isEmpty) {
+      throw FormatException("config entry '${entry.trim()}' is not 'key: value'");
+    }
+    if (settings.containsKey(key)) {
+      throw FormatException("config sets '$key' twice");
+    }
+    if (!_configKeys.contains(key)) {
+      throw FormatException("unknown config key '$key' (known: ${_configKeys.join(', ')})");
+    }
+    final number = RegExp(r'^[0-9]+$').hasMatch(value) ? int.tryParse(value) : null;
+    if (number == null || number == 0) {
+      throw FormatException("config '$key' needs a positive integer, got '$value'");
+    }
+    settings[key] = number;
+  }
+  return settings;
+}
+
+/// A case's fresh in-memory database, with its `config:` settings when it has
+/// any.
+GrafeoDB _openCase(Map<String, int> config) {
+  if (config.isEmpty) return GrafeoDB.memory();
+  int? pathSearchBudget;
+  for (final MapEntry(:key, :value) in config.entries) {
+    switch (key) {
+      case 'path_search_budget':
+        pathSearchBudget = value;
+      default:
+        throw FormatException("unknown config key '$key'");
+    }
+  }
+  return GrafeoDB.openWithOptions(
+      null, GrafeoOptions(pathSearchBudget: pathSearchBudget));
+}
 
 /// The keys of `side_effects:`, as the openCypher TCK names them.
 const _sideEffectKeys = {
@@ -847,8 +922,20 @@ _GtestFile _parseGtestFile(File file) {
   for (final tc in tests) {
     _checkMarks(tc, file.path);
   }
+  if (meta.model == 'rdf') {
+    for (final tc in tests) {
+      if ((tc.language ?? meta.language) == 'graphql' || tc.variants.containsKey('graphql')) {
+        throw FormatException("test '${tc.name}': $_graphqlOnRdf");
+      }
+    }
+  }
   return _GtestFile(meta, tests);
 }
+
+/// Why a `graphql` case in a `model: rdf` file is refused: `graphql` reads the property graph.
+/// Every runner says the same.
+const _graphqlOnRdf =
+    '`language: graphql` reads the property graph; on `model: rdf` write `language: graphql-rdf`';
 
 /// The rules of the marks, as every runner checks them: an `xfail:` names its spec and its
 /// issue, a case is never both `skip:` and `xfail:`, and `probe:` is for the runner probes
@@ -931,6 +1018,8 @@ _Meta _parseMeta(_ParseContext ctx) {
     switch (key) {
       case 'language':
         meta.language = value;
+      case 'model':
+        meta.model = value;
       case 'dataset':
         meta.dataset = value;
       case 'requires':
@@ -1027,6 +1116,9 @@ _TestCase _parseSingleTest(_ParseContext ctx) {
         tc.setupGql = _parseStringList(ctx);
       case 'runner_gap':
         tc.runnerGap = _parseRunnerGap(ctx);
+      case 'config':
+        tc.config = _parseConfig(value);
+        ctx.idx++;
       case 'statements':
         ctx.idx++;
         tc.statements = _parseStringList(ctx);
@@ -1420,6 +1512,14 @@ List<File> _findGtestFiles(Directory dir) {
 var _skipped = 0;
 var _xfailed = 0;
 
+/// Skips the running case for [reason], counting it in the summary: every skip counts,
+/// whichever check skips the case (`skip:`, a runner gap, a language or feature the build
+/// lacks), so a runner that skips a whole language shows it.
+void _skipCase(String reason) {
+  _skipped++;
+  markTestSkipped(reason);
+}
+
 /// Whether [failure] is a spec case's failure, the only one an `xfail:` absorbs: a check that
 /// does not hold, or an error the binding raises. Any other error, a fault of the runner, goes
 /// on.
@@ -1613,6 +1713,27 @@ void _runErrorTest(
 
 void main() {
   _sharedValueCases();
+  // A case's `config:`, by the rule every runner applies: an unknown or
+  // repeated key is refused, never ignored.
+  group('config:', () {
+    test('names the settings the case opens with', () {
+      expect(_parseConfig('{path_search_budget: 1048576}'),
+          {'path_search_budget': 1048576});
+    });
+    for (final text in [
+      '{path_budget: 1048576}',
+      '{path_search_budget: 0}',
+      '{path_search_budget: big}',
+      '{path_search_budget: +1048576}',
+      '{path_search_budget: 1048576, path_search_budget: 2}',
+      'path_search_budget: 1048576',
+      '{}',
+    ]) {
+      test('refuses $text', () {
+        expect(() => _parseConfig(text), throwsFormatException);
+      });
+    }
+  });
   // The typing of parameter values that no .gtest file can hold: a number
   // past the f64 range fails the Rust runner's build, so it is tested here.
   group('parameter values', () {
@@ -1682,21 +1803,19 @@ void main() {
             final variantQuery = entry.value;
             test('${tc.name}_$lang', () {
               if (tc.skip != null) {
-                _skipped++;
-                markTestSkipped('skipped in .gtest: ${tc.skip}');
+                _skipCase('skipped in .gtest: ${tc.skip}');
                 return;
               }
               final gap = tc.runnerGap;
               if (gap != null && gap.runners.contains('dart')) {
-                _skipped++;
-                markTestSkipped('runner gap: ${gap.reason} (${gap.issue})');
+                _skipCase('runner gap: ${gap.reason} (${gap.issue})');
                 return;
               }
               if (!_isAvailable(lang)) {
-                markTestSkipped('Language "$lang" not available');
+                _skipCase('Language "$lang" not available');
                 return;
               }
-              final db = GrafeoDB.memory();
+              final db = _openCase(tc.config);
               try {
                 final effectiveDataset = tc.dataset ?? meta.dataset;
                 if (effectiveDataset.isNotEmpty && effectiveDataset != 'empty') {
@@ -1724,27 +1843,25 @@ void main() {
         test(tc.name, () {
           // Skip if test has a skip field
           if (tc.skip != null) {
-            _skipped++;
-            markTestSkipped('skipped in .gtest: ${tc.skip}');
+            _skipCase('skipped in .gtest: ${tc.skip}');
             return;
           }
           // A gap of this binding (`runner_gap:`) skips the case here, as `skip:` does
           final gap = tc.runnerGap;
           if (gap != null && gap.runners.contains('dart')) {
-            _skipped++;
-            markTestSkipped('runner gap: ${gap.reason} (${gap.issue})');
+            _skipCase('runner gap: ${gap.reason} (${gap.issue})');
             return;
           }
 
           // Check language availability (file-level and per-test)
           if (!_isAvailable(meta.language)) {
-            markTestSkipped(
+            _skipCase(
               'Language "${meta.language}" not available',
             );
             return;
           }
           if (tc.language != null && !_isAvailable(tc.language!)) {
-            markTestSkipped(
+            _skipCase(
               'Language "${tc.language}" not available',
             );
             return;
@@ -1753,7 +1870,7 @@ void main() {
           // Check requires
           for (final req in meta.requires) {
             if (!_isAvailable(req)) {
-              markTestSkipped(
+              _skipCase(
                 'Required capability "$req" not available',
               );
               return;
@@ -1761,14 +1878,14 @@ void main() {
           }
           for (final req in tc.requires) {
             if (!_isAvailable(req)) {
-              markTestSkipped(
+              _skipCase(
                 'Required capability "$req" not available',
               );
               return;
             }
           }
 
-          final db = GrafeoDB.memory();
+          final db = _openCase(tc.config);
           try {
             // Load dataset (per-test override takes priority)
             final effectiveDataset = tc.dataset ?? meta.dataset;

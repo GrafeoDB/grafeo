@@ -109,8 +109,9 @@ impl SectionType {
     }
 
     /// Whether a reader that does not know this section type may skip it (and
-    /// its next checkpoint drop it). `false` for every type of this release:
-    /// they are all required.
+    /// its next checkpoint drop it): `true` for the saved vector indexes
+    /// (`VectorStore`), which an open builds from the data when it lacks
+    /// them; `false` for every other type of this release.
     ///
     /// The container writes this into the directory entry of every chunk of
     /// the section, so a reader that does not know the type decides from the
@@ -126,10 +127,10 @@ impl SectionType {
             | Self::CompactStore
             | Self::OverlayDeletions
             | Self::TimeIndex
-            | Self::VectorStore
             | Self::TextIndex
             | Self::RdfRing
             | Self::PropertyIndex => false,
+            Self::VectorStore => true,
         }
     }
 
@@ -975,9 +976,13 @@ mod tests {
     }
 
     #[test]
-    fn every_current_section_type_and_chunk_kind_is_required() {
+    fn every_current_section_type_but_the_saved_vector_indexes_and_every_chunk_kind_is_required() {
         for section_type in EVERY_SECTION_TYPE {
-            assert!(!section_type.is_optional(), "{section_type:?}");
+            assert_eq!(
+                section_type.is_optional(),
+                section_type == SectionType::VectorStore,
+                "{section_type:?}"
+            );
         }
         for kind in [
             ChunkKind::Raw,

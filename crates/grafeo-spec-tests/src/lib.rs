@@ -150,7 +150,8 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Load a dataset .setup file into the database.
+/// Load a dataset into the database, one statement per line: GQL from a `.setup` file,
+/// SPARQL Update from a `.ru` file.
 ///
 /// # Panics
 ///
@@ -159,13 +160,18 @@ pub fn load_dataset(db: &GrafeoDB, relative_path: &str) {
     let path = repo_root().join(relative_path);
     let content = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("Failed to read dataset {}: {e}", path.display()));
+    let language = if path.extension().is_some_and(|e| e == "ru") {
+        "sparql"
+    } else {
+        "gql"
+    };
 
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        db.execute(trimmed)
+        execute_query_result(db, language, "", trimmed)
             .unwrap_or_else(|e| panic!("Dataset query failed: {trimmed}\nError: {e}"));
     }
 }

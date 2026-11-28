@@ -127,7 +127,10 @@ def run_case(db, language: str, query: str, params: dict | None = None) -> dict:
         if getattr(result, "kind", None) == "boolean":
             return {"boolean": result.boolean}
         records = [dict(row) for row in result]
-    except Exception as error:  # noqa: BLE001 (a failing query is a result too)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    # A failing query is a result too; a Rust panic raises pyo3's PanicException, a BaseException.
+    except BaseException as error:  # noqa: BLE001
         return {"error": error_text(error)}
     columns = list(getattr(result, "columns", None) or (records[0] if records else []))
     rows = [[normalize(value) for value in record.values()] for record in records]

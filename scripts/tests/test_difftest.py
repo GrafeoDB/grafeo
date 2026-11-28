@@ -260,6 +260,49 @@ def test_compare_without_a_reviewed_list_only_reports(tmp_path, capsys):
     assert "REVIEW" not in out
 
 
+# --- running a case ------------------------------------------------------------
+
+
+class PanicException(BaseException):
+    """Stands in for pyo3's PanicException, which a Rust panic raises: a BaseException."""
+
+
+class Database:
+    """Answers `execute` from a list: an exception is raised, anything else returned."""
+
+    def __init__(self, *answers):
+        self.answers = list(answers)
+
+    def execute(self, query, params=None):
+        answer = self.answers.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+    execute_cypher = execute_sql = execute_sparql = execute
+
+
+def test_a_query_that_panics_is_an_error_result_and_the_run_goes_on():
+    db = Database(
+        PanicException("assertion failed: count <= Self::MAX_CAPACITY"), [{"n": 1}]
+    )
+    assert difftest.run_case(db, "gql", "q") == {
+        "error": "assertion failed: count <= Self::MAX_CAPACITY"
+    }
+    assert difftest.run_case(db, "gql", "q") == {"columns": ["n"], "rows": [[1]]}
+
+
+def test_a_query_that_fails_is_an_error_result():
+    db = Database(ValueError("GRAFEO-Q001: syntax error\n  --> query:1:1"))
+    assert difftest.run_case(db, "gql", "q") == {"error": "GRAFEO-Q001: syntax error"}
+
+
+@pytest.mark.parametrize("stop", [KeyboardInterrupt(), SystemExit(1)])
+def test_an_interrupt_or_exit_stops_the_run(stop):
+    with pytest.raises(type(stop)):
+        difftest.run_case(Database(stop), "gql", "q")
+
+
 # --- parity --------------------------------------------------------------------
 
 

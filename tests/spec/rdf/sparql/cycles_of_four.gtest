@@ -1,0 +1,226 @@
+# Cycles of four through a bound person, and the forms around them: self-loops, a variable
+# named in two places or by both sides, a repeated or empty anchor, and UNION steps with an
+# empty branch. Every answer is the bag of walks over the knows triples, whatever the plan.
+
+meta:
+  language: sparql
+  model: rdf
+  section: join
+  title: Cycles of four through a bound node
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  - name: a_cycle_through_a_self_loop_counts_each_walk
+    # Alix, Vincent, Jules and Butch know themselves: a walk may stay put at any step, and each walk is one row.
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/mia> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/mia> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/django> <http://ex.org/knows> <http://ex.org/hans> . <http://ex.org/gus> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/vincent> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/mia> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/butch> <http://ex.org/likes> <http://ex.org/boxing> . <http://ex.org/jules> <http://ex.org/likes> <http://ex.org/boxing> . }"
+    query: "PREFIX ex: <http://ex.org/> SELECT ?b ?c ?d WHERE { VALUES ?a { ex:alix } ?a ex:knows ?b . ?b ex:knows ?c . ?c ex:knows ?d . ?d ex:knows ?a . }"
+    expect:
+      rows:
+        - ["http://ex.org/alix", "http://ex.org/alix", "http://ex.org/alix"]
+        - ["http://ex.org/alix", "http://ex.org/alix", "http://ex.org/gus"]
+        - ["http://ex.org/alix", "http://ex.org/gus", "http://ex.org/alix"]
+        - ["http://ex.org/gus", "http://ex.org/alix", "http://ex.org/alix"]
+        - ["http://ex.org/gus", "http://ex.org/alix", "http://ex.org/gus"]
+        - ["http://ex.org/gus", "http://ex.org/jules", "http://ex.org/butch"]
+        - ["http://ex.org/gus", "http://ex.org/jules", "http://ex.org/mia"]
+        - ["http://ex.org/vincent", "http://ex.org/jules", "http://ex.org/butch"]
+        - ["http://ex.org/vincent", "http://ex.org/jules", "http://ex.org/mia"]
+
+  - name: a_far_node_that_must_know_itself
+    # A pattern naming the far node twice keeps the walks whose third person knows themselves.
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/mia> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/mia> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/django> <http://ex.org/knows> <http://ex.org/hans> . <http://ex.org/gus> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/vincent> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/mia> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/butch> <http://ex.org/likes> <http://ex.org/boxing> . <http://ex.org/jules> <http://ex.org/likes> <http://ex.org/boxing> . }"
+    query: "PREFIX ex: <http://ex.org/> SELECT ?b ?c ?d WHERE { VALUES ?a { ex:alix } ?a ex:knows ?b . ?b ex:knows ?c . ?c ex:knows ?d . ?d ex:knows ?a . ?c ex:knows ?c . }"
+    expect:
+      rows:
+        - ["http://ex.org/alix", "http://ex.org/alix", "http://ex.org/alix"]
+        - ["http://ex.org/alix", "http://ex.org/alix", "http://ex.org/gus"]
+        - ["http://ex.org/gus", "http://ex.org/alix", "http://ex.org/alix"]
+        - ["http://ex.org/gus", "http://ex.org/alix", "http://ex.org/gus"]
+        - ["http://ex.org/gus", "http://ex.org/jules", "http://ex.org/butch"]
+        - ["http://ex.org/gus", "http://ex.org/jules", "http://ex.org/mia"]
+        - ["http://ex.org/vincent", "http://ex.org/jules", "http://ex.org/butch"]
+        - ["http://ex.org/vincent", "http://ex.org/jules", "http://ex.org/mia"]
+
+  - name: the_far_node_named_as_the_anchor
+    # Naming the far node ?a: two two-step loops through Alix, each side read alone.
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/mia> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/mia> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/django> <http://ex.org/knows> <http://ex.org/hans> . <http://ex.org/gus> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/vincent> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/mia> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/butch> <http://ex.org/likes> <http://ex.org/boxing> . <http://ex.org/jules> <http://ex.org/likes> <http://ex.org/boxing> . }"
+    query: "PREFIX ex: <http://ex.org/> SELECT ?b ?d WHERE { VALUES ?a { ex:alix } ?a ex:knows ?b . ?b ex:knows ?a . ?a ex:knows ?d . ?d ex:knows ?a . }"
+    expect:
+      rows:
+        - ["http://ex.org/alix", "http://ex.org/alix"]
+        - ["http://ex.org/alix", "http://ex.org/gus"]
+        - ["http://ex.org/gus", "http://ex.org/alix"]
+        - ["http://ex.org/gus", "http://ex.org/gus"]
+
+  - name: both_sides_named_alike
+    # Naming the fourth person ?b: a walk Alix, b, c, b, Alix.
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/mia> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/mia> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/django> <http://ex.org/knows> <http://ex.org/hans> . <http://ex.org/gus> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/vincent> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/mia> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/butch> <http://ex.org/likes> <http://ex.org/boxing> . <http://ex.org/jules> <http://ex.org/likes> <http://ex.org/boxing> . }"
+    query: "PREFIX ex: <http://ex.org/> SELECT ?b ?c WHERE { VALUES ?a { ex:alix } ?a ex:knows ?b . ?b ex:knows ?c . ?c ex:knows ?b . ?b ex:knows ?a . }"
+    expect:
+      rows:
+        - ["http://ex.org/alix", "http://ex.org/alix"]
+        - ["http://ex.org/alix", "http://ex.org/gus"]
+        - ["http://ex.org/gus", "http://ex.org/alix"]
+
+  - name: the_two_sides_share_a_liked_item
+    # The second and fourth persons like the same thing: a variable both sides name.
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/mia> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/mia> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/django> <http://ex.org/knows> <http://ex.org/hans> . <http://ex.org/gus> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/vincent> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/mia> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/butch> <http://ex.org/likes> <http://ex.org/boxing> . <http://ex.org/jules> <http://ex.org/likes> <http://ex.org/boxing> . }"
+    query: "PREFIX ex: <http://ex.org/> SELECT ?b ?c ?d ?x WHERE { VALUES ?a { ex:alix } ?a ex:knows ?b . ?b ex:knows ?c . ?c ex:knows ?d . ?d ex:knows ?a . ?b ex:likes ?x . ?d ex:likes ?x . }"
+    expect:
+      rows:
+        - ["http://ex.org/gus", "http://ex.org/alix", "http://ex.org/gus", "http://ex.org/film"]
+        - ["http://ex.org/gus", "http://ex.org/jules", "http://ex.org/mia", "http://ex.org/film"]
+        - ["http://ex.org/vincent", "http://ex.org/jules", "http://ex.org/mia", "http://ex.org/film"]
+
+  - name: a_repeated_anchor_row_doubles_every_walk
+    # Alix twice in VALUES: each walk comes twice, self-loops included.
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/mia> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/mia> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/django> <http://ex.org/knows> <http://ex.org/hans> . <http://ex.org/gus> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/vincent> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/mia> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/butch> <http://ex.org/likes> <http://ex.org/boxing> . <http://ex.org/jules> <http://ex.org/likes> <http://ex.org/boxing> . }"
+    query: "PREFIX ex: <http://ex.org/> SELECT ?b ?c ?d WHERE { VALUES ?a { ex:alix ex:alix } ?a ex:knows ?b . ?b ex:knows ?c . ?c ex:knows ?d . ?d ex:knows ?a . }"
+    expect:
+      rows:
+        - ["http://ex.org/alix", "http://ex.org/alix", "http://ex.org/alix"]
+        - ["http://ex.org/alix", "http://ex.org/alix", "http://ex.org/alix"]
+        - ["http://ex.org/alix", "http://ex.org/alix", "http://ex.org/gus"]
+        - ["http://ex.org/alix", "http://ex.org/alix", "http://ex.org/gus"]
+        - ["http://ex.org/alix", "http://ex.org/gus", "http://ex.org/alix"]
+        - ["http://ex.org/alix", "http://ex.org/gus", "http://ex.org/alix"]
+        - ["http://ex.org/gus", "http://ex.org/alix", "http://ex.org/alix"]
+        - ["http://ex.org/gus", "http://ex.org/alix", "http://ex.org/alix"]
+        - ["http://ex.org/gus", "http://ex.org/alix", "http://ex.org/gus"]
+        - ["http://ex.org/gus", "http://ex.org/alix", "http://ex.org/gus"]
+        - ["http://ex.org/gus", "http://ex.org/jules", "http://ex.org/butch"]
+        - ["http://ex.org/gus", "http://ex.org/jules", "http://ex.org/butch"]
+        - ["http://ex.org/gus", "http://ex.org/jules", "http://ex.org/mia"]
+        - ["http://ex.org/gus", "http://ex.org/jules", "http://ex.org/mia"]
+        - ["http://ex.org/vincent", "http://ex.org/jules", "http://ex.org/butch"]
+        - ["http://ex.org/vincent", "http://ex.org/jules", "http://ex.org/butch"]
+        - ["http://ex.org/vincent", "http://ex.org/jules", "http://ex.org/mia"]
+        - ["http://ex.org/vincent", "http://ex.org/jules", "http://ex.org/mia"]
+
+  - name: a_self_loop_steps_once_per_branch_of_an_alternative
+    # Each step as (ex:knows|^ex:knows): a self-loop matches both branches, so it is two steps.
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/mia> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/mia> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/django> <http://ex.org/knows> <http://ex.org/hans> . <http://ex.org/gus> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/vincent> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/mia> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/butch> <http://ex.org/likes> <http://ex.org/boxing> . <http://ex.org/jules> <http://ex.org/likes> <http://ex.org/boxing> . }"
+    query: "PREFIX ex: <http://ex.org/> SELECT ?b ?c ?d WHERE { VALUES ?a { ex:mia } ?a (ex:knows|^ex:knows) ?b . ?b (ex:knows|^ex:knows) ?c . ?c (ex:knows|^ex:knows) ?d . ?d (ex:knows|^ex:knows) ?a . }"
+    expect:
+      rows:
+        - ["http://ex.org/alix", "http://ex.org/alix", "http://ex.org/alix"]
+        - ["http://ex.org/alix", "http://ex.org/alix", "http://ex.org/alix"]
+        - ["http://ex.org/alix", "http://ex.org/alix", "http://ex.org/alix"]
+        - ["http://ex.org/alix", "http://ex.org/alix", "http://ex.org/alix"]
+        - ["http://ex.org/alix", "http://ex.org/butch", "http://ex.org/alix"]
+        - ["http://ex.org/alix", "http://ex.org/butch", "http://ex.org/jules"]
+        - ["http://ex.org/alix", "http://ex.org/gus", "http://ex.org/alix"]
+        - ["http://ex.org/alix", "http://ex.org/gus", "http://ex.org/alix"]
+        - ["http://ex.org/alix", "http://ex.org/gus", "http://ex.org/alix"]
+        - ["http://ex.org/alix", "http://ex.org/gus", "http://ex.org/alix"]
+        - ["http://ex.org/alix", "http://ex.org/gus", "http://ex.org/jules"]
+        - ["http://ex.org/alix", "http://ex.org/gus", "http://ex.org/jules"]
+        - ["http://ex.org/alix", "http://ex.org/mia", "http://ex.org/alix"]
+        - ["http://ex.org/alix", "http://ex.org/mia", "http://ex.org/jules"]
+        - ["http://ex.org/alix", "http://ex.org/vincent", "http://ex.org/alix"]
+        - ["http://ex.org/alix", "http://ex.org/vincent", "http://ex.org/jules"]
+        - ["http://ex.org/jules", "http://ex.org/butch", "http://ex.org/alix"]
+        - ["http://ex.org/jules", "http://ex.org/butch", "http://ex.org/jules"]
+        - ["http://ex.org/jules", "http://ex.org/gus", "http://ex.org/alix"]
+        - ["http://ex.org/jules", "http://ex.org/gus", "http://ex.org/alix"]
+        - ["http://ex.org/jules", "http://ex.org/gus", "http://ex.org/jules"]
+        - ["http://ex.org/jules", "http://ex.org/jules", "http://ex.org/jules"]
+        - ["http://ex.org/jules", "http://ex.org/jules", "http://ex.org/jules"]
+        - ["http://ex.org/jules", "http://ex.org/jules", "http://ex.org/jules"]
+        - ["http://ex.org/jules", "http://ex.org/jules", "http://ex.org/jules"]
+        - ["http://ex.org/jules", "http://ex.org/mia", "http://ex.org/alix"]
+        - ["http://ex.org/jules", "http://ex.org/mia", "http://ex.org/jules"]
+        - ["http://ex.org/jules", "http://ex.org/vincent", "http://ex.org/alix"]
+        - ["http://ex.org/jules", "http://ex.org/vincent", "http://ex.org/jules"]
+
+  - name: an_empty_branch_closes_the_cycle
+    # The closing step is a UNION whose second branch matches nothing: the rows of the plain cycle.
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/mia> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/mia> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/django> <http://ex.org/knows> <http://ex.org/hans> . <http://ex.org/gus> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/vincent> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/mia> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/butch> <http://ex.org/likes> <http://ex.org/boxing> . <http://ex.org/jules> <http://ex.org/likes> <http://ex.org/boxing> . }"
+    query: "PREFIX ex: <http://ex.org/> SELECT ?b ?c ?d WHERE { VALUES ?a { ex:alix } ?a ex:knows ?b . ?b ex:knows ?c . ?c ex:knows ?d . { ?d ex:knows ?a } UNION { ?d ex:blocks ?a } }"
+    expect:
+      rows:
+        - ["http://ex.org/alix", "http://ex.org/alix", "http://ex.org/alix"]
+        - ["http://ex.org/alix", "http://ex.org/alix", "http://ex.org/gus"]
+        - ["http://ex.org/alix", "http://ex.org/gus", "http://ex.org/alix"]
+        - ["http://ex.org/gus", "http://ex.org/alix", "http://ex.org/alix"]
+        - ["http://ex.org/gus", "http://ex.org/alix", "http://ex.org/gus"]
+        - ["http://ex.org/gus", "http://ex.org/jules", "http://ex.org/butch"]
+        - ["http://ex.org/gus", "http://ex.org/jules", "http://ex.org/mia"]
+        - ["http://ex.org/vincent", "http://ex.org/jules", "http://ex.org/butch"]
+        - ["http://ex.org/vincent", "http://ex.org/jules", "http://ex.org/mia"]
+
+  - name: an_empty_branch_in_the_middle
+    # The step from the second person to the third is a UNION with an empty branch.
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/mia> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/mia> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/django> <http://ex.org/knows> <http://ex.org/hans> . <http://ex.org/gus> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/vincent> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/mia> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/butch> <http://ex.org/likes> <http://ex.org/boxing> . <http://ex.org/jules> <http://ex.org/likes> <http://ex.org/boxing> . }"
+    query: "PREFIX ex: <http://ex.org/> SELECT ?b ?c ?d WHERE { VALUES ?a { ex:alix } ?a ex:knows ?b . { ?b ex:knows ?c } UNION { ?b ex:blocks ?c } ?c ex:knows ?d . ?d ex:knows ?a . }"
+    expect:
+      rows:
+        - ["http://ex.org/alix", "http://ex.org/alix", "http://ex.org/alix"]
+        - ["http://ex.org/alix", "http://ex.org/alix", "http://ex.org/gus"]
+        - ["http://ex.org/alix", "http://ex.org/gus", "http://ex.org/alix"]
+        - ["http://ex.org/gus", "http://ex.org/alix", "http://ex.org/alix"]
+        - ["http://ex.org/gus", "http://ex.org/alix", "http://ex.org/gus"]
+        - ["http://ex.org/gus", "http://ex.org/jules", "http://ex.org/butch"]
+        - ["http://ex.org/gus", "http://ex.org/jules", "http://ex.org/mia"]
+        - ["http://ex.org/vincent", "http://ex.org/jules", "http://ex.org/butch"]
+        - ["http://ex.org/vincent", "http://ex.org/jules", "http://ex.org/mia"]
+
+  - name: both_closing_branches_empty
+    # Neither branch of the closing step matches: no rows.
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/mia> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/mia> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/django> <http://ex.org/knows> <http://ex.org/hans> . <http://ex.org/gus> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/vincent> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/mia> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/butch> <http://ex.org/likes> <http://ex.org/boxing> . <http://ex.org/jules> <http://ex.org/likes> <http://ex.org/boxing> . }"
+    query: "PREFIX ex: <http://ex.org/> SELECT ?b ?c ?d WHERE { VALUES ?a { ex:alix } ?a ex:knows ?b . ?b ex:knows ?c . ?c ex:knows ?d . { ?d ex:blocks ?a } UNION { ?d ex:follows ?a } }"
+    expect:
+      empty: true
+
+  - name: an_anchor_with_no_way_back
+    # Django knows Hans, who knows nobody: no rows.
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/mia> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/mia> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/django> <http://ex.org/knows> <http://ex.org/hans> . <http://ex.org/gus> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/vincent> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/mia> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/butch> <http://ex.org/likes> <http://ex.org/boxing> . <http://ex.org/jules> <http://ex.org/likes> <http://ex.org/boxing> . }"
+    query: "PREFIX ex: <http://ex.org/> SELECT ?b ?c ?d WHERE { VALUES ?a { ex:django } ?a ex:knows ?b . ?b ex:knows ?c . ?c ex:knows ?d . ?d ex:knows ?a . }"
+    expect:
+      empty: true
+
+  - name: an_anchor_not_in_the_data
+    # A person the data does not hold: no rows.
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/mia> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/mia> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/django> <http://ex.org/knows> <http://ex.org/hans> . <http://ex.org/gus> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/vincent> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/mia> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/butch> <http://ex.org/likes> <http://ex.org/boxing> . <http://ex.org/jules> <http://ex.org/likes> <http://ex.org/boxing> . }"
+    query: "PREFIX ex: <http://ex.org/> SELECT ?b ?c ?d WHERE { VALUES ?a { ex:nobody } ?a ex:knows ?b . ?b ex:knows ?c . ?c ex:knows ?d . ?d ex:knows ?a . }"
+    expect:
+      empty: true
+
+  - name: no_anchor_rows
+    # An empty VALUES block: no rows.
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/mia> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/mia> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/django> <http://ex.org/knows> <http://ex.org/hans> . <http://ex.org/gus> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/vincent> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/mia> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/butch> <http://ex.org/likes> <http://ex.org/boxing> . <http://ex.org/jules> <http://ex.org/likes> <http://ex.org/boxing> . }"
+    query: "PREFIX ex: <http://ex.org/> SELECT ?b ?c ?d WHERE { VALUES ?a {  } ?a ex:knows ?b . ?b ex:knows ?c . ?c ex:knows ?d . ?d ex:knows ?a . }"
+    expect:
+      empty: true
+
+  - name: an_anchor_without_cycles_beside_one_with
+    # Django and Alix: only Alix's walks.
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/gus> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/vincent> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/mia> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/jules> <http://ex.org/knows> <http://ex.org/jules> . <http://ex.org/mia> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/alix> . <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/butch> . <http://ex.org/django> <http://ex.org/knows> <http://ex.org/hans> . <http://ex.org/gus> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/vincent> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/mia> <http://ex.org/likes> <http://ex.org/film> . <http://ex.org/butch> <http://ex.org/likes> <http://ex.org/boxing> . <http://ex.org/jules> <http://ex.org/likes> <http://ex.org/boxing> . }"
+    query: "PREFIX ex: <http://ex.org/> SELECT ?b ?c ?d WHERE { VALUES ?a { ex:django ex:alix } ?a ex:knows ?b . ?b ex:knows ?c . ?c ex:knows ?d . ?d ex:knows ?a . }"
+    expect:
+      rows:
+        - ["http://ex.org/alix", "http://ex.org/alix", "http://ex.org/alix"]
+        - ["http://ex.org/alix", "http://ex.org/alix", "http://ex.org/gus"]
+        - ["http://ex.org/alix", "http://ex.org/gus", "http://ex.org/alix"]
+        - ["http://ex.org/gus", "http://ex.org/alix", "http://ex.org/alix"]
+        - ["http://ex.org/gus", "http://ex.org/alix", "http://ex.org/gus"]
+        - ["http://ex.org/gus", "http://ex.org/jules", "http://ex.org/butch"]
+        - ["http://ex.org/gus", "http://ex.org/jules", "http://ex.org/mia"]
+        - ["http://ex.org/vincent", "http://ex.org/jules", "http://ex.org/butch"]
+        - ["http://ex.org/vincent", "http://ex.org/jules", "http://ex.org/mia"]

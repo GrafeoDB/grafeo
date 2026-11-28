@@ -446,6 +446,7 @@ mod sparql_initial_bindings;
 mod sparql_iri_escapes;
 mod sparql_join_results;
 mod sparql_leapfrog_profile;
+mod sparql_lookup_rows;
 mod sparql_named_graph_statistics;
 mod sparql_native_paths;
 mod sparql_nested_groups;

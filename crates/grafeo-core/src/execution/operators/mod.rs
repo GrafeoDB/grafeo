@@ -624,6 +624,13 @@ pub trait Operator: Send + Sync {
     /// Returns a name for debugging/explain output.
     fn name(&self) -> &'static str;
 
+    /// What PROFILE shows of a choice the operator made while it ran (a join
+    /// that chose to hash, and after how many rows); `None` for an operator
+    /// that makes none.
+    fn profile_note(&self) -> Option<String> {
+        None
+    }
+
     /// Converts this boxed operator into `Box<dyn Any>` for type-based dispatch.
     ///
     /// Used by the pipeline converter to decompose pull-based operator trees

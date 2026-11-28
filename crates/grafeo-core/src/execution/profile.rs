@@ -23,6 +23,9 @@ pub struct ProfileStats {
     /// The work its own code counted, without its children's (#794); empty in a build without
     /// `--cfg grafeo_work_counters`.
     pub work: grafeo_common::work::WorkCounts,
+    /// The operator's note on a choice it made while it ran (see
+    /// [`Operator::profile_note`]), as of its last call.
+    pub note: Option<String>,
 }
 
 /// Shared handle to profile stats, written by `ProfiledOperator` during
@@ -85,6 +88,7 @@ impl Operator for ProfiledOperator {
         if let Ok(Some(ref chunk)) = result {
             stats.rows_out += chunk.row_count() as u64;
         }
+        stats.note = self.inner.profile_note();
         drop(stats);
 
         result
@@ -96,6 +100,10 @@ impl Operator for ProfiledOperator {
 
     fn name(&self) -> &'static str {
         self.inner.name()
+    }
+
+    fn profile_note(&self) -> Option<String> {
+        self.inner.profile_note()
     }
 
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
